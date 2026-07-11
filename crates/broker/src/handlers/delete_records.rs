@@ -213,7 +213,7 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::owned::delete_records_request::{
         DeleteRecordsPartition, DeleteRecordsTopic,
     };
@@ -279,7 +279,7 @@ mod tests {
         let denied = denied_topic_names(&acl_results);
 
         let expected = std::collections::HashSet::from(["denied".to_string()]);
-        assert!(denied == expected);
+        assert2::assert!(denied == expected);
     }
 
     #[test]
@@ -303,7 +303,7 @@ mod tests {
             error_code: codes::TOPIC_AUTHORIZATION_FAILED,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(denied == expected_denied);
+        assert2::assert!(denied == expected_denied);
 
         let ok = partition_result(3, 44, codes::NONE);
         let expected_ok = DeleteRecordsPartitionResult {
@@ -312,7 +312,7 @@ mod tests {
             error_code: codes::NONE,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(ok == expected_ok);
+        assert2::assert!(ok == expected_ok);
 
         let topic = topic_result("orders".into(), vec![denied]);
         let expected_topic = DeleteRecordsTopicResult {
@@ -320,7 +320,7 @@ mod tests {
             partitions: vec![expected_denied],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(topic == expected_topic);
+        assert2::assert!(topic == expected_topic);
 
         let resp = delete_records_response(vec![topic]);
         let expected_resp = DeleteRecordsResponse {
@@ -328,7 +328,7 @@ mod tests {
             topics: vec![expected_topic],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected_resp);
+        assert2::assert!(resp == expected_resp);
     }
 
     #[tokio::test]
@@ -363,7 +363,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -392,7 +392,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

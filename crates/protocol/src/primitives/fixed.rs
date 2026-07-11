@@ -83,7 +83,7 @@ pub fn get_f64<B: Buf>(buf: &mut B) -> Result<f64, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -96,8 +96,8 @@ mod tests {
                     let mut buf = BytesMut::new();
                     $put(&mut buf, v);
                     let mut cur = &buf[..];
-                    assert!($get(&mut cur).unwrap() == v);
-                    assert!(cur.is_empty(), "decoder did not consume all bytes");
+                    assert2::assert!($get(&mut cur).unwrap() == v);
+                    assert2::assert!(cur.is_empty());
                 }
             }
         };
@@ -129,7 +129,7 @@ mod tests {
             let mut buf = BytesMut::new();
             put_bool(&mut buf, v);
             let mut cur = &buf[..];
-            assert!(get_bool(&mut cur).unwrap() == v);
+            assert2::assert!(get_bool(&mut cur).unwrap() == v);
         }
     }
 
@@ -137,14 +137,14 @@ mod tests {
     fn bool_rejects_invalid() {
         let bytes = [2u8];
         let mut cur = &bytes[..];
-        assert!(get_bool(&mut cur).is_err());
+        assert2::assert!(get_bool(&mut cur).is_err());
     }
 
     #[test]
     fn eof_is_reported() {
         let empty: &[u8] = &[];
         let mut cur = empty;
-        assert!(matches!(
+        assert2::assert!(matches!(
             get_i32(&mut cur),
             Err(ProtocolError::UnexpectedEof { needed: 4 })
         ));
@@ -154,6 +154,6 @@ mod tests {
     fn big_endian_layout_i32() {
         let mut buf = BytesMut::new();
         put_i32(&mut buf, 0x0102_0304);
-        assert!(&buf[..] == &[0x01, 0x02, 0x03, 0x04]);
+        assert2::assert!(&buf[..] == &[0x01, 0x02, 0x03, 0x04]);
     }
 }

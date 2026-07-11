@@ -226,8 +226,6 @@ impl FlowSupervisor {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::{assert, check};
-
     use super::*;
     use crate::config::{
         ClusterConfig, Delivery, FlowConfig, NamingPolicy, ReplicatorConfig, Selectors,
@@ -244,7 +242,7 @@ mod tests {
             ("orders", false),
             ("telemetry.cpu", false),
         ] {
-            check!(is_internal(topic) == want, "topic={topic:?}");
+            assert2::assert!(is_internal(topic) == want);
         }
     }
 
@@ -317,9 +315,9 @@ mod tests {
         )
         .await;
         sup.shutdown().await;
-        assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);
+        assert2::assert!(crate::test_util::topic_record_count(&tb, "us-east.orders").await >= 1);
         // `noise` was excluded by the selector, so it must never have been
         // replicated to the target.
-        assert!(crate::test_util::topic_record_count(&tb, "us-east.noise").await == 0);
+        assert2::assert!(crate::test_util::topic_record_count(&tb, "us-east.noise").await == 0);
     }
 }

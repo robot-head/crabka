@@ -55,7 +55,6 @@ pub fn plan_consume(
 
 #[cfg(test)]
 mod plan_tests {
-    use assert2::assert;
 
     use super::{
         AvailableTokens, BurstCapacity, GrantedTokens, NewAvailable, RefillTokens, RequestedTokens,
@@ -71,14 +70,13 @@ mod plan_tests {
             ((0, 0, 1000, 100), (0, 0)),
             ((u64::MAX, u64::MAX, 1000, 1000), (1000, 0)),
         ] {
-            assert!(
+            assert2::assert!(
                 plan_consume(
                     AvailableTokens(available),
                     RefillTokens(refill),
                     BurstCapacity(burst),
                     RequestedTokens(requested)
-                ) == (GrantedTokens(grant), NewAvailable(new_available)),
-                "plan_consume({available}, {refill}, {burst}, {requested})"
+                ) == (GrantedTokens(grant), NewAvailable(new_available))
             );
         }
     }

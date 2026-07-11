@@ -955,7 +955,7 @@ pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::tempdir;
 
     use super::*;
@@ -1120,7 +1120,7 @@ mod tests {
         let md = render_markdown(dir.path(), true).unwrap();
         // "1.50×" is the ratio 600k / 400k.
         for needle in ["small-msg-saturate", "producer msgs/s", "1.50×"] {
-            assert!(md.contains(needle), "missing {needle:?} in:\n{md}");
+            assert2::assert!(md.contains(needle));
         }
     }
 
@@ -1147,7 +1147,7 @@ mod tests {
         let md = render_markdown(dir.path(), true).unwrap();
         // Multi-run cells carry a coefficient-of-variation marker ("±").
         for needle in ["1.75×", "Runs averaged: crabka=3, kafka=3", "±"] {
-            assert!(md.contains(needle), "missing {needle:?} in:\n{md}");
+            assert2::assert!(md.contains(needle));
         }
     }
 
@@ -1155,7 +1155,7 @@ mod tests {
     fn handles_empty_dir() {
         let dir = tempdir().unwrap();
         let md = render_markdown(dir.path(), false).unwrap();
-        assert!(md.contains("no `RunOutput` JSON files found"));
+        assert2::assert!(md.contains("no `RunOutput` JSON files found"));
     }
 
     #[test]
@@ -1181,7 +1181,7 @@ mod tests {
             "| crabka | 2000 | 10100 | 8000 | 2000 | 9850 | 7200 | 2000 |",
             "| kafka | 3000 | 10100 | 6000 | 2000 | 9850 | 5400 | 2000 |",
         ] {
-            assert!(md.contains(needle), "missing {needle:?} in:\n{md}");
+            assert2::assert!(md.contains(needle));
         }
     }
 
@@ -1201,10 +1201,7 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
-            violations.is_empty(),
-            "unexpected violations: {violations:?}"
-        );
+        assert2::assert!(violations.is_empty());
     }
 
     #[test]
@@ -1225,11 +1222,10 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
+        assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("missing failover results")),
-            "missing no-failover violation: {violations:?}"
+                .any(|v| v.contains("missing failover results"))
         );
     }
 
@@ -1255,18 +1251,12 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
-            violations
+        assert2::assert!(violations.iter().any(|v| v.contains(
+            "failover @ 3 broker(s), 12 partitions, RF=3: missing kafka failover disturbance result"
+        )));
+        assert2::assert!(violations
                 .iter()
-                .any(|v| v.contains("failover @ 3 broker(s), 12 partitions, RF=3: missing kafka failover disturbance result")),
-            "missing crabka-topology violation: {violations:?}"
-        );
-        assert!(
-            violations
-                .iter()
-                .any(|v| v.contains("failover @ 3 broker(s), 24 partitions, RF=3: missing Crabka failover disturbance result")),
-            "missing kafka-topology violation: {violations:?}"
-        );
+                .any(|v| v.contains("failover @ 3 broker(s), 24 partitions, RF=3: missing Crabka failover disturbance result")));
     }
 
     #[test]
@@ -1287,17 +1277,15 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
+        assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("Crabka recovery 4000 ms is slower than kafka 2000 ms")),
-            "missing slower-recovery violation: {violations:?}"
+                .any(|v| v.contains("Crabka recovery 4000 ms is slower than kafka 2000 ms"))
         );
-        assert!(
+        assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("kafka failover run is missing message-rate samples")),
-            "missing rate-sample violation: {violations:?}"
+                .any(|v| v.contains("kafka failover run is missing message-rate samples"))
         );
     }
 
@@ -1325,11 +1313,9 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
-            violations.iter().any(|v| v
-                .contains("Crabka producer rate recovery 4000 ms is slower than kafka 2000 ms")),
-            "missing rate-recovery violation: {violations:?}"
-        );
+        assert2::assert!(violations.iter().any(|v| {
+            v.contains("Crabka producer rate recovery 4000 ms is slower than kafka 2000 ms")
+        }));
     }
 
     #[test]
@@ -1364,11 +1350,10 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
+        assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("Crabka producer rate did not recover")),
-            "missing unrecovered-rate violation: {violations:?}"
+                .any(|v| v.contains("Crabka producer rate did not recover"))
         );
     }
 
@@ -1396,11 +1381,9 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
-            violations.iter().any(|v| v
-                .contains("Crabka consumer rate recovery 4000 ms is slower than kafka 2000 ms")),
-            "missing consumer-rate violation: {violations:?}"
-        );
+        assert2::assert!(violations.iter().any(|v| {
+            v.contains("Crabka consumer rate recovery 4000 ms is slower than kafka 2000 ms")
+        }));
     }
 
     #[test]
@@ -1421,11 +1404,10 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
+        assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("Crabka dropped 5 messages vs kafka 0")),
-            "missing dropped-message violation: {violations:?}"
+                .any(|v| v.contains("Crabka dropped 5 messages vs kafka 0"))
         );
     }
 
@@ -1447,11 +1429,10 @@ mod tests {
 
         let violations = failover_gate_violations(dir.path(), true).unwrap();
 
-        assert!(
+        assert2::assert!(
             violations
                 .iter()
-                .any(|v| v.contains("Crabka latency spike 90.0 ms is higher than kafka 42.0 ms")),
-            "missing latency-spike violation: {violations:?}"
+                .any(|v| v.contains("Crabka latency spike 90.0 ms is higher than kafka 42.0 ms"))
         );
     }
 
@@ -1478,7 +1459,7 @@ mod tests {
             "small-msg-saturate",
             "Producer throughput",
         ] {
-            assert!(html.contains(needle), "missing {needle:?} in:\n{html}");
+            assert2::assert!(html.contains(needle));
         }
     }
 
@@ -1505,7 +1486,7 @@ mod tests {
             ("Per run", true),
             ("small-msg-saturate", true),
         ] {
-            assert!(frag.contains(needle) == want, "{needle:?} in:\n{frag}");
+            assert2::assert!(frag.contains(needle) == want);
         }
     }
 
@@ -1520,7 +1501,7 @@ mod tests {
         .unwrap();
         let csv = render_csv(dir.path(), true).unwrap();
         let lines: Vec<&str> = csv.lines().collect();
-        assert!(lines.len() == 2); // header + 1 run (index guard)
+        assert2::assert!(lines.len() == 2); // header + 1 run (index guard)
         check!(lines[0].starts_with("scenario,stack,run_tag,"));
         // run_tag parsed from the filename
         check!(lines[1].contains(",run01,"));
@@ -1561,20 +1542,20 @@ mod tests {
         )
         .unwrap();
         let csv = render_timeseries_csv(dir.path(), true).unwrap();
-        assert!(
+        assert2::assert!(
             csv.lines()
                 .next()
                 .unwrap()
                 .ends_with("t_offset_ms,metric,value")
         );
         // 2 samples × 5 client metrics + 1 broker sample × 2 metrics = 12 rows.
-        assert!(csv.lines().count() == 1 + 12);
+        assert2::assert!(csv.lines().count() == 1 + 12);
         for needle in [
             ",run03,0,producer_msgs_per_sec,1000.000",
             ",run03,0,broker_cpu_cores,2.5000",
             ",run03,2000,producer_p99_ms,4.500",
         ] {
-            assert!(csv.contains(needle), "missing {needle:?} in:\n{csv}");
+            assert2::assert!(csv.contains(needle));
         }
     }
 }

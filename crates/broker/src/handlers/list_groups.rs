@@ -253,8 +253,6 @@ fn state_to_str(s: GroupState) -> &'static str {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
-    use assert2::assert;
-
     use super::*;
     use crate::test_support::{peer, principal};
 
@@ -297,7 +295,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -344,9 +342,9 @@ mod tests {
                 unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
             },
         ];
-        assert!(groups == expected_groups, "{groups:?}");
+        assert2::assert!(groups == expected_groups);
         // "denied" was rejected by the authorizer; only "share-a" was added.
-        assert!(emitted == HashSet::from(["already".to_string(), "share-a".to_string()]));
+        assert2::assert!(emitted == HashSet::from(["already".to_string(), "share-a".to_string()]));
     }
 
     #[test]
@@ -367,7 +365,7 @@ mod tests {
             true,
             &|_| true,
         );
-        assert!(groups.is_empty());
+        assert2::assert!(groups.is_empty());
 
         let matched = ListGroupsRequest {
             types_filter: vec!["consumer".into()],
@@ -390,7 +388,7 @@ mod tests {
             group_type: "consumer".into(),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         }];
-        assert!(groups == expected, "{groups:?}");
+        assert2::assert!(groups == expected);
     }
 
     #[test]
@@ -403,7 +401,7 @@ mod tests {
             (GroupState::Dead, "Dead"),
         ];
         for (state, want) in cases {
-            assert!(state_to_str(state) == want, "{state:?}");
+            assert2::assert!(state_to_str(state) == want);
         }
     }
 }

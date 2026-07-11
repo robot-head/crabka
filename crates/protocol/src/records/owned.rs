@@ -289,7 +289,7 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
 
 #[cfg(test)]
 mod record_tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -336,26 +336,25 @@ mod record_tests {
         }
     }
 
-    macro_rules! roundtrip {
-        ($name:ident, $fixture:ident) => {
-            #[test]
-            fn $name() {
-                let r = $fixture();
-                let mut buf = BytesMut::new();
-                r.encode(&mut buf).unwrap();
-                assert!(buf.len() == r.encoded_len(), "predicted len mismatch");
+    #[test]
+    fn record_roundtrip_cases() {
+        type TestCase1<'a> = (&'a str, fn() -> Record);
+        let cases: [TestCase1<'_>; 3] = [
+            ("minimal", fixture_minimal_record),
+            ("keyed with headers", fixture_keyed_record),
+            ("large payload", fixture_large_payload_record),
+        ];
+        for (_case, fixture) in cases {
+            let record = fixture();
+            let mut buf = BytesMut::new();
+            record.encode(&mut buf).unwrap();
+            assert2::assert!(buf.len() == record.encoded_len());
 
-                let mut cur: &[u8] = &buf[..];
-                let decoded = Record::decode(&mut cur).unwrap();
-                assert!(decoded == r);
-                assert!(cur.is_empty(), "trailing bytes after decode");
-            }
-        };
+            let mut cur: &[u8] = &buf[..];
+            let decoded = Record::decode(&mut cur).unwrap();
+            assert2::assert!((decoded, cur.is_empty()) == (record, true));
+        }
     }
-
-    roundtrip!(minimal, fixture_minimal_record);
-    roundtrip!(keyed_with_headers, fixture_keyed_record);
-    roundtrip!(large_payload, fixture_large_payload_record);
 
     #[test]
     fn decode_rejects_negative_header_count() {
@@ -373,7 +372,7 @@ mod record_tests {
         let mut cur: &[u8] = &buf[..];
         match Record::decode(&mut cur) {
             Err(RecordsError::RecordParse(msg)) => {
-                assert!(msg.contains("negative header count"), "got: {msg}");
+                assert2::assert!(msg.contains("negative header count"));
             }
             other => panic!("expected RecordParse, got {other:?}"),
         }
@@ -399,7 +398,7 @@ mod record_tests {
 
         let mut cur: &[u8] = &buf[..];
         // Must return an Err (EOF reading the first header), not OOM.
-        assert!(Record::decode(&mut cur).is_err());
+        assert2::assert!(Record::decode(&mut cur).is_err());
     }
 }
 
@@ -633,7 +632,7 @@ impl RecordBatch {
 
 #[cfg(test)]
 mod batch_tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_compression::CompressionType;
 
     use super::*;
@@ -694,28 +693,25 @@ mod batch_tests {
         }
     }
 
-    macro_rules! roundtrip_uncompressed {
-        ($name:ident, $fixture:ident) => {
-            #[test]
-            fn $name() {
-                let mut b = $fixture();
-                b.attributes = b.attributes.with_compression(CompressionType::None);
-
-                let mut buf = BytesMut::new();
-                b.encode(&mut buf).unwrap();
-                assert!(buf.len() == b.encoded_len());
-
-                let mut cur: &[u8] = &buf[..];
-                let decoded = RecordBatch::decode(&mut cur).unwrap();
-                assert!(decoded == b);
-                assert!(cur.is_empty());
-            }
-        };
+    #[test]
+    fn uncompressed_roundtrip_cases() {
+        type TestCase2 = (&'static str, fn() -> RecordBatch);
+        let cases: [TestCase2; 3] = [
+            ("empty", fixture_empty_batch),
+            ("single", fixture_single_record_batch),
+            ("multiple", fixture_multi_record_batch),
+        ];
+        for (_case, fixture) in cases {
+            let mut batch = fixture();
+            batch.attributes = batch.attributes.with_compression(CompressionType::None);
+            let mut buf = BytesMut::new();
+            batch.encode(&mut buf).unwrap();
+            assert2::assert!(buf.len() == batch.encoded_len());
+            let mut cur: &[u8] = &buf[..];
+            let decoded = RecordBatch::decode(&mut cur).unwrap();
+            assert2::assert!((decoded, cur.is_empty()) == (batch, true));
+        }
     }
-
-    roundtrip_uncompressed!(uncompressed_empty, fixture_empty_batch);
-    roundtrip_uncompressed!(uncompressed_single, fixture_single_record_batch);
-    roundtrip_uncompressed!(uncompressed_multi, fixture_multi_record_batch);
 
     #[test]
     fn rejects_pre_v2_magic() {
@@ -729,7 +725,7 @@ mod batch_tests {
             buf.put_u8(0);
         }
         let mut cur: &[u8] = &buf[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             RecordBatch::decode(&mut cur),
             Err(RecordsError::UnsupportedMagic { found: 1 })
         ));
@@ -743,33 +739,29 @@ mod batch_tests {
         // Corrupt the CRC bytes (offsets 17..21).
         buf[17] ^= 0xFF;
         let mut cur: &[u8] = &buf[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             RecordBatch::decode(&mut cur),
             Err(RecordsError::CrcMismatch { .. })
         ));
     }
 
-    macro_rules! roundtrip_compressed {
-        ($name:ident, $codec:expr) => {
-            #[test]
-            fn $name() {
-                let mut b = fixture_multi_record_batch();
-                b.attributes = b.attributes.with_compression($codec);
-
-                let mut buf = BytesMut::new();
-                b.encode(&mut buf).unwrap();
-                let mut cur: &[u8] = &buf[..];
-                let decoded = RecordBatch::decode(&mut cur).unwrap();
-                assert!(decoded == b);
-                assert!(cur.is_empty());
-            }
-        };
+    #[test]
+    fn compressed_roundtrip_cases() {
+        for (_case, codec) in [
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
+            ("zstd", CompressionType::Zstd),
+        ] {
+            let mut batch = fixture_multi_record_batch();
+            batch.attributes = batch.attributes.with_compression(codec);
+            let mut buf = BytesMut::new();
+            batch.encode(&mut buf).unwrap();
+            let mut cur: &[u8] = &buf[..];
+            let decoded = RecordBatch::decode(&mut cur).unwrap();
+            assert2::assert!((decoded, cur.is_empty()) == (batch, true));
+        }
     }
-
-    roundtrip_compressed!(compressed_gzip, CompressionType::Gzip);
-    roundtrip_compressed!(compressed_snappy, CompressionType::Snappy);
-    roundtrip_compressed!(compressed_lz4, CompressionType::Lz4);
-    roundtrip_compressed!(compressed_zstd, CompressionType::Zstd);
 
     #[test]
     fn with_delete_horizon_stamps_and_preserves_record_timestamps() {
@@ -801,7 +793,7 @@ mod batch_tests {
             .iter()
             .map(|r| stamped.base_timestamp + r.timestamp_delta)
             .collect();
-        assert!(absolutes == vec![1000, 1005]);
+        assert2::assert!(absolutes == vec![1000, 1005]);
     }
 
     #[test]
@@ -835,16 +827,16 @@ mod batch_tests {
 
         let mut cur: &[u8] = &buf[..];
         let decoded = RecordBatch::decode(&mut cur).unwrap();
-        assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty());
 
-        assert!(decoded.delete_horizon_ms() == Some(9999));
+        assert2::assert!(decoded.delete_horizon_ms() == Some(9999));
 
         let absolutes: Vec<i64> = decoded
             .records
             .iter()
             .map(|r| decoded.base_timestamp + r.timestamp_delta)
             .collect();
-        assert!(absolutes == vec![1000, 1005]);
+        assert2::assert!(absolutes == vec![1000, 1005]);
     }
 
     #[test]
@@ -870,7 +862,7 @@ mod batch_tests {
 
         let mut cur: &[u8] = &buf[..];
         // Must return an Err (EOF reading the first record), not OOM.
-        assert!(RecordBatch::decode(&mut cur).is_err());
+        assert2::assert!(RecordBatch::decode(&mut cur).is_err());
     }
 }
 

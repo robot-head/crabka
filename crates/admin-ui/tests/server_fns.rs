@@ -22,7 +22,7 @@ use crabka_admin_ui::{
     error::UiError,
     server::AppState,
     server_fns::{
-        AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, QuotaRow,
+        AclRow, AdminMutationSeam, AdminReadSeam, AdminSeamFactory, CurrentSession, QuotaRow,
         ServerFunctionContext, UserRow,
     },
     session::{SessionCredentials, SessionRecord, SessionStore, SessionUser},
@@ -46,7 +46,7 @@ async fn health_router_returns_ok() {
         .await
         .expect("health route responds");
 
-    assert_eq!(response.status(), axum::http::StatusCode::OK);
+    assert2::assert!(response.status() == axum::http::StatusCode::OK);
 }
 
 #[test]
@@ -61,15 +61,14 @@ fn app_state_carries_config_and_sessions() {
 
     let state = AppState::new(cfg.clone());
 
-    assert_eq!(state.cfg.cluster_name, "task-six-cluster");
-    assert_eq!(state.cfg.bootstrap_addrs, ["127.0.0.1:9092"]);
-    assert_eq!(state.sessions_ttl_seconds(), 37);
+    assert2::assert!(state.cfg.as_ref() == &cfg);
+    assert2::assert!(state.sessions_ttl_seconds() == 37);
 
     let sessions = Arc::new(SessionStore::new(Duration::from_secs(5)));
-    let state = AppState::from_parts(Arc::new(cfg), sessions);
+    let state = AppState::from_parts(Arc::new(cfg.clone()), sessions);
 
-    assert_eq!(state.cfg.cluster_name, "task-six-cluster");
-    assert_eq!(state.sessions_ttl_seconds(), 5);
+    assert2::assert!(state.cfg.as_ref() == &cfg);
+    assert2::assert!(state.sessions_ttl_seconds() == 5);
 }
 
 #[tokio::test]
@@ -87,7 +86,7 @@ async fn app_state_login_rejects_without_exposing_password() {
     )
     .await;
 
-    assert!(result.is_err());
+    assert2::assert!(result.is_err());
     assert_debug_does_not_contain_secret(
         &format_result_debug(&result),
         LOGIN_PASSWORD_SENTINEL,
@@ -120,8 +119,14 @@ async fn app_state_login_stores_session_in_protected_route_store() {
     )
     .expect("session is stored in app state's protected-route store");
 
-    assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(current_session.username, "alice");
+    assert2::assert!(broker.calls.load(Ordering::SeqCst) == 1);
+    assert2::assert!(
+        current_session
+            == CurrentSession {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+    );
 }
 
 #[tokio::test]
@@ -145,15 +150,21 @@ async fn login_with_context_calls_broker_and_stores_session() {
     .await
     .expect("login succeeds through injected broker");
 
-    assert_eq!(broker.calls.load(Ordering::SeqCst), 1);
-    assert_eq!(success.username, "alice");
-    assert_eq!(success.principal, "User:alice");
+    assert2::assert!(broker.calls.load(Ordering::SeqCst) == 1);
+    assert2::assert!(success.username.as_str() == "alice");
+    assert2::assert!(success.principal.as_str() == "User:alice");
     let current_session = crabka_admin_ui::server_fns::current_session_with_store(
         &sessions,
         Some(&success.session_id),
     )
     .expect("session exists after successful login");
-    assert_eq!(current_session.username, "alice");
+    assert2::assert!(
+        current_session
+            == CurrentSession {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+    );
     assert_debug_does_not_contain_secret(
         &format_result_debug(&Ok::<_, UiError>(success)),
         LOGIN_PASSWORD_SENTINEL,
@@ -172,8 +183,8 @@ async fn session_seams_reject_without_exposing_session_values() {
     let current_session_result =
         crabka_admin_ui::server_fns::current_session_with_context(&context);
 
-    assert!(matches!(logout_result, Err(UiError::NotAuthenticated)));
-    assert!(matches!(
+    assert2::assert!(matches!(logout_result, Err(UiError::NotAuthenticated)));
+    assert2::assert!(matches!(
         current_session_result,
         Err(UiError::NotAuthenticated)
     ));
@@ -197,22 +208,27 @@ fn current_session_with_store_rejects_missing_invalid_and_expired_sessions() {
     )
     .expect("valid session resolves");
 
-    assert_eq!(valid_session.username, "alice");
-    assert!(matches!(
-        crabka_admin_ui::server_fns::current_session_with_store(&valid_store, None),
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::current_session_with_store(&valid_store, Some("not-a-uuid")),
-        Err(UiError::NotAuthenticated)
-    ));
-    assert!(matches!(
-        crabka_admin_ui::server_fns::current_session_with_store(
+    assert2::assert!(
+        valid_session
+            == CurrentSession {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+    );
+    for (_name, store, cookie) in [
+        ("missing cookie", &valid_store, None),
+        ("invalid cookie", &valid_store, Some("not-a-uuid")),
+        (
+            "expired cookie",
             &expired_store,
             Some(expired_id.expose_for_cookie()),
         ),
-        Err(UiError::NotAuthenticated)
-    ));
+    ] {
+        assert2::assert!(matches!(
+            crabka_admin_ui::server_fns::current_session_with_store(store, cookie),
+            Err(UiError::NotAuthenticated)
+        ));
+    }
 }
 
 #[tokio::test]
@@ -264,19 +280,23 @@ async fn authenticated_read_seams_validate_session_and_call_admin_reader() {
     .await
     .expect("log dirs read succeeds");
 
-    assert_eq!(topics[0].name, "orders");
-    assert_eq!(groups[0].group_id, "consumer-a");
-    assert_eq!(acls[0].principal, "User:alice");
-    assert_eq!(users[0].username, "scram-alice");
-    assert_eq!(quotas[0].quota_type, "producer_byte_rate");
-    assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
-    assert_eq!(reader.topics.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.groups.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.acls.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.users.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.quotas.load(Ordering::SeqCst), 1);
-    assert_eq!(reader.log_dirs.load(Ordering::SeqCst), 1);
-    assert!(matches!(
+    assert2::assert!(topics[0].name.as_str() == "orders");
+    assert2::assert!(groups[0].group_id.as_str() == "consumer-a");
+    assert2::assert!(acls[0].principal.as_str() == "User:alice");
+    assert2::assert!(users[0].username.as_str() == "scram-alice");
+    assert2::assert!(quotas[0].quota_type.as_str() == "producer_byte_rate");
+    assert2::assert!(log_dirs[0].log_dir.as_str() == "/var/lib/crabka");
+    assert2::assert!(
+        [
+            reader.topics.load(Ordering::SeqCst),
+            reader.groups.load(Ordering::SeqCst),
+            reader.acls.load(Ordering::SeqCst),
+            reader.users.load(Ordering::SeqCst),
+            reader.quotas.load(Ordering::SeqCst),
+            reader.log_dirs.load(Ordering::SeqCst),
+        ] == [1; 6]
+    );
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_topics_with_reader(&sessions, None, &reader).await,
         Err(UiError::NotAuthenticated)
     ));
@@ -314,19 +334,23 @@ async fn public_context_reads_validate_session_and_call_admin_reader() {
         .await
         .expect("log dirs public context read succeeds");
 
-    assert_eq!(topics[0].name, "orders");
-    assert_eq!(groups[0].group_id, "consumer-a");
-    assert_eq!(acls[0].principal, "User:alice");
-    assert_eq!(users[0].username, "scram-alice");
-    assert_eq!(quotas[0].quota_type, "producer_byte_rate");
-    assert_eq!(log_dirs[0].log_dir, "/var/lib/crabka");
-    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 6);
-    assert_eq!(factory.reader.topics.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.groups.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.acls.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.users.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.quotas.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.reader.log_dirs.load(Ordering::SeqCst), 1);
+    assert2::assert!(topics[0].name.as_str() == "orders");
+    assert2::assert!(groups[0].group_id.as_str() == "consumer-a");
+    assert2::assert!(acls[0].principal.as_str() == "User:alice");
+    assert2::assert!(users[0].username.as_str() == "scram-alice");
+    assert2::assert!(quotas[0].quota_type.as_str() == "producer_byte_rate");
+    assert2::assert!(log_dirs[0].log_dir.as_str() == "/var/lib/crabka");
+    assert2::assert!(
+        [
+            factory.read_seam_calls.load(Ordering::SeqCst),
+            factory.reader.topics.load(Ordering::SeqCst),
+            factory.reader.groups.load(Ordering::SeqCst),
+            factory.reader.acls.load(Ordering::SeqCst),
+            factory.reader.users.load(Ordering::SeqCst),
+            factory.reader.quotas.load(Ordering::SeqCst),
+            factory.reader.log_dirs.load(Ordering::SeqCst),
+        ] == [6, 1, 1, 1, 1, 1, 1]
+    );
 }
 
 #[tokio::test]
@@ -345,9 +369,14 @@ async fn public_context_current_session_uses_exported_context_path() {
     let current_session = crabka_admin_ui::server_fns::current_session_with_context(&context)
         .expect("public context current session resolves");
 
-    assert_eq!(current_session.username, "alice");
-    assert_eq!(current_session.principal, "User:alice");
-    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
+    assert2::assert!(
+        current_session
+            == CurrentSession {
+                username: "alice".to_string(),
+                principal: "User:alice".to_string(),
+            }
+    );
+    assert2::assert!(factory.read_seam_calls.load(Ordering::SeqCst) == 0);
 }
 
 #[tokio::test]
@@ -357,31 +386,31 @@ async fn public_context_reads_reject_unauthenticated_sessions() {
     let factory = RecordingAdminSeamFactory::default();
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_topics_with_context(&context).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_groups_with_context(&context).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_acls(&context).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_users(&context).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_quotas(&context).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::list_log_dirs_with_context(&context).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert_eq!(factory.read_seam_calls.load(Ordering::SeqCst), 0);
+    assert2::assert!(factory.read_seam_calls.load(Ordering::SeqCst) == 0);
 }
 
 #[tokio::test]
@@ -399,13 +428,13 @@ async fn mutation_seams_require_authentication_before_validating_requests() {
     )
     .await;
 
-    assert!(matches!(invalid_topic, Err(UiError::NotAuthenticated)));
-    assert!(matches!(invalid_scram, Err(UiError::NotAuthenticated)));
-    assert!(matches!(
+    assert2::assert!(matches!(invalid_topic, Err(UiError::NotAuthenticated)));
+    assert2::assert!(matches!(invalid_scram, Err(UiError::NotAuthenticated)));
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_topic(&context, invalid_delete_topic_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_partitions(
             &context,
             invalid_create_partitions_request()
@@ -413,36 +442,36 @@ async fn mutation_seams_require_authentication_before_validating_requests() {
         .await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::alter_configs(&context, invalid_alter_config_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_acl(&context, invalid_create_acl_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_acl(&context, invalid_delete_acl_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_scram_user(&context, invalid_scram_delete_request())
             .await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::upsert_quota(&context, invalid_quota_upsert_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_quota(&context, invalid_quota_delete_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::move_log_dir(&context, invalid_log_dir_move_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
 }
 
 #[tokio::test]
@@ -473,9 +502,9 @@ async fn mutation_seams_require_authentication_without_leaking_password() {
     )
     .await;
 
-    assert!(matches!(create_topic, Err(UiError::NotAuthenticated)));
-    assert!(matches!(upsert_scram, Err(UiError::NotAuthenticated)));
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+    assert2::assert!(matches!(create_topic, Err(UiError::NotAuthenticated)));
+    assert2::assert!(matches!(upsert_scram, Err(UiError::NotAuthenticated)));
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
     assert_debug_does_not_contain_secret(
         &format!("{upsert_scram:?}"),
         password_sentinel,
@@ -503,9 +532,9 @@ async fn authenticated_mutation_seam_validates_then_calls_admin_mutation() {
     .await
     .expect("authenticated mutation succeeds");
 
-    assert_eq!(outcomes, vec![ResourceOutcome::ok("orders")]);
-    assert_eq!(mutations.create_topic.load(Ordering::SeqCst), 1);
-    assert!(matches!(
+    assert2::assert!(outcomes == vec![ResourceOutcome::ok("orders")]);
+    assert2::assert!(mutations.create_topic.load(Ordering::SeqCst) == 1);
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_topic_with_mutations(
             &sessions,
             None,
@@ -547,53 +576,33 @@ async fn public_create_topic_validates_session_and_calls_admin_mutation() {
     .await
     .expect("public context mutation succeeds");
 
-    assert_eq!(outcomes, vec![ResourceOutcome::ok("orders")]);
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.create_topic.load(Ordering::SeqCst), 1);
+    assert2::assert!(outcomes == vec![ResourceOutcome::ok("orders")]);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 1);
+    assert2::assert!(factory.mutations.create_topic.load(Ordering::SeqCst) == 1);
 }
 
 #[tokio::test]
-async fn public_create_topic_rejects_unauthenticated_before_mutation() {
-    let sessions = SessionStore::new(Duration::from_secs(60));
-    let cfg = AdminUiConfig::default();
-    let factory = RecordingAdminSeamFactory::default();
-    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
+async fn public_create_topic_authentication_precedes_validation_cases() {
+    for (_name, partitions) in [("valid request", 3), ("invalid partition count", 0)] {
+        let sessions = SessionStore::new(Duration::from_secs(60));
+        let cfg = AdminUiConfig::default();
+        let factory = RecordingAdminSeamFactory::default();
+        let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    let result = crabka_admin_ui::server_fns::create_topic(
-        &context,
-        CreateTopicRequestDto {
-            name: "orders".to_string(),
-            partitions: 3,
-            replicas: 1,
-            configs: Vec::new(),
-        },
-    )
-    .await;
+        let result = crabka_admin_ui::server_fns::create_topic(
+            &context,
+            CreateTopicRequestDto {
+                name: "orders".to_string(),
+                partitions,
+                replicas: 1,
+                configs: Vec::new(),
+            },
+        )
+        .await;
 
-    assert!(matches!(result, Err(UiError::NotAuthenticated)));
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-}
-
-#[tokio::test]
-async fn public_create_topic_requires_authentication_before_validation() {
-    let sessions = SessionStore::new(Duration::from_secs(60));
-    let cfg = AdminUiConfig::default();
-    let factory = RecordingAdminSeamFactory::default();
-    let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
-
-    let result = crabka_admin_ui::server_fns::create_topic(
-        &context,
-        CreateTopicRequestDto {
-            name: "orders".to_string(),
-            partitions: 0,
-            replicas: 1,
-            configs: Vec::new(),
-        },
-    )
-    .await;
-
-    assert!(matches!(result, Err(UiError::NotAuthenticated)));
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
+        assert2::assert!(matches!(result, Err(UiError::NotAuthenticated)));
+        assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    }
 }
 
 #[tokio::test]
@@ -609,15 +618,15 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
         &factory,
     );
 
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_topic(&context, invalid_create_topic_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_topic(&context, invalid_delete_topic_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_partitions(
             &context,
             invalid_create_partitions_request()
@@ -625,19 +634,19 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
         .await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::alter_configs(&context, invalid_alter_config_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_acl(&context, invalid_create_acl_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_acl(&context, invalid_delete_acl_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::upsert_scram_sha512_user(
             &context,
             invalid_scram_upsert_request()
@@ -645,26 +654,26 @@ async fn authenticated_public_context_mutations_still_return_validation_errors()
         .await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_scram_user(&context, invalid_scram_delete_request())
             .await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::upsert_quota(&context, invalid_quota_upsert_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_quota(&context, invalid_quota_delete_request()).await,
         Err(UiError::Admin(_))
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::move_log_dir(&context, invalid_log_dir_move_request()).await,
         Err(UiError::Admin(_))
     ));
 
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.mutations.total_calls(), 0);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(factory.mutations.total_calls() == 0);
 }
 
 #[tokio::test]
@@ -684,8 +693,8 @@ async fn public_logout_removes_authenticated_session() {
         .await
         .expect("authenticated logout succeeds");
 
-    assert!(sessions.get(&session_id).is_none());
-    assert!(matches!(
+    assert2::assert!(sessions.get(&session_id).is_none());
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::current_session_with_store(
             &sessions,
             Some(session_id.expose_for_cookie())
@@ -738,20 +747,21 @@ async fn public_context_mutations_validate_session_and_call_admin_mutation() {
         .await
         .expect("log-dir move mutation succeeds");
 
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 10);
-    assert_eq!(factory.mutations.delete_topic.load(Ordering::SeqCst), 1);
-    assert_eq!(
-        factory.mutations.create_partitions.load(Ordering::SeqCst),
-        1
+    assert2::assert!(
+        [
+            factory.mutation_seam_calls.load(Ordering::SeqCst),
+            factory.mutations.delete_topic.load(Ordering::SeqCst),
+            factory.mutations.create_partitions.load(Ordering::SeqCst),
+            factory.mutations.alter_configs.load(Ordering::SeqCst),
+            factory.mutations.create_acl.load(Ordering::SeqCst),
+            factory.mutations.delete_acl.load(Ordering::SeqCst),
+            factory.mutations.upsert_scram.load(Ordering::SeqCst),
+            factory.mutations.delete_scram.load(Ordering::SeqCst),
+            factory.mutations.upsert_quota.load(Ordering::SeqCst),
+            factory.mutations.delete_quota.load(Ordering::SeqCst),
+            factory.mutations.move_log_dir.load(Ordering::SeqCst),
+        ] == [10, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1]
     );
-    assert_eq!(factory.mutations.alter_configs.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.create_acl.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.delete_acl.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.upsert_scram.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.delete_scram.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.upsert_quota.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.delete_quota.load(Ordering::SeqCst), 1);
-    assert_eq!(factory.mutations.move_log_dir.load(Ordering::SeqCst), 1);
 }
 
 #[tokio::test]
@@ -761,50 +771,50 @@ async fn public_context_mutations_reject_unauthenticated_without_calling_admin_m
     let factory = RecordingAdminSeamFactory::default();
     let context = ServerFunctionContext::new(&cfg, &sessions, None, &factory);
 
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_topic(&context, delete_topic_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_partitions(&context, create_partitions_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::alter_configs(&context, alter_config_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::create_acl(&context, acl_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_acl(&context, acl_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::upsert_scram_sha512_user(&context, scram_upsert_request())
             .await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_scram_user(&context, scram_delete_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::upsert_quota(&context, quota_upsert_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::delete_quota(&context, quota_delete_request()).await,
         Err(UiError::NotAuthenticated)
     ));
-    assert!(matches!(
+    assert2::assert!(matches!(
         crabka_admin_ui::server_fns::move_log_dir(&context, log_dir_move_request()).await,
         Err(UiError::NotAuthenticated)
     ));
 
-    assert_eq!(factory.mutation_seam_calls.load(Ordering::SeqCst), 0);
-    assert_eq!(factory.mutations.total_calls(), 0);
+    assert2::assert!(factory.mutation_seam_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(factory.mutations.total_calls() == 0);
 }
 
 #[derive(Default)]
@@ -820,8 +830,8 @@ impl LoginBroker for RecordingLoginBroker {
         password: &'a str,
     ) -> Pin<Box<dyn Future<Output = Result<(), UiError>> + Send + 'a>> {
         Box::pin(async move {
-            assert_eq!(username, "alice");
-            assert_eq!(password, LOGIN_PASSWORD_SENTINEL);
+            assert2::assert!(username == "alice");
+            assert2::assert!(password == LOGIN_PASSWORD_SENTINEL);
             self.calls.fetch_add(1, Ordering::SeqCst);
             Ok(())
         })
@@ -984,7 +994,13 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Reader<'a>, UiError> {
-        assert_eq!(record.user.username, "alice");
+        assert2::assert!(
+            record.user
+                == SessionUser {
+                    username: "alice".to_string(),
+                    principal: "User:alice".to_string(),
+                }
+        );
         self.read_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(&self.reader)
     }
@@ -994,7 +1010,13 @@ impl AdminSeamFactory for RecordingAdminSeamFactory {
         _cfg: &AdminUiConfig,
         record: &SessionRecord,
     ) -> Result<Self::Mutations<'a>, UiError> {
-        assert_eq!(record.user.username, "alice");
+        assert2::assert!(
+            record.user
+                == SessionUser {
+                    username: "alice".to_string(),
+                    principal: "User:alice".to_string(),
+                }
+        );
         self.mutation_seam_calls.fetch_add(1, Ordering::SeqCst);
         Ok(&self.mutations)
     }
@@ -1397,6 +1419,6 @@ fn format_result_debug<T: std::fmt::Debug>(result: &Result<T, UiError>) -> Strin
     format!("{result:?}")
 }
 
-fn assert_debug_does_not_contain_secret(debug: &str, secret: &str, label: &str) {
-    assert!(!debug.contains(secret), "debug output leaked {label}");
+fn assert_debug_does_not_contain_secret(debug: &str, secret: &str, _label: &str) {
+    assert2::assert!(!debug.contains(secret));
 }

@@ -25,7 +25,7 @@ impl From<prost::DecodeError> for ProfileError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use prost::Message;
 
     use super::*;
@@ -33,7 +33,7 @@ mod tests {
     #[test]
     fn error_display_includes_message() {
         let error = ProfileError::Decode("bad pprof".to_string());
-        assert!(format!("{error}").contains("bad pprof"));
+        assert2::assert!(format!("{error}").contains("bad pprof"));
     }
 
     #[test]
@@ -41,6 +41,6 @@ mod tests {
         let error = crate::proto::Profile::decode(&[0xff][..])
             .unwrap_err()
             .into();
-        assert!(matches!(error, ProfileError::Decode(_)));
+        assert2::assert!(matches!(error, ProfileError::Decode(_)));
     }
 }

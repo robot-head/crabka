@@ -51,7 +51,7 @@ fn relays_and_records() {
     let n = i32::from_be_bytes(len) as usize;
     let mut resp = vec![0u8; n];
     c.read_exact(&mut resp).unwrap();
-    assert_eq!(resp, vec![0, 0, 0, 42, 0x99]);
+    assert2::assert!(resp == vec![0, 0, 0, 42, 0x99]);
 
     let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
     loop {
@@ -72,12 +72,12 @@ fn relays_and_records() {
         std::thread::sleep(std::time::Duration::from_millis(10));
     }
     let frames = recorder.lock().unwrap().clone();
-    assert!(
+    assert2::assert!(
         frames
             .iter()
             .any(|f| f.is_request && f.api_key == 3 && f.version == 12)
     );
-    assert!(
+    assert2::assert!(
         frames
             .iter()
             .any(|f| !f.is_request && f.api_key == 3 && f.version == 12)

@@ -144,15 +144,14 @@ fn fires_at_current_stream_time_on_boundaries() {
     for ts in [0, 5, 9, 10, 11, 100] {
         pipe_at(&mut driver, ts);
     }
-    assert_eq!(
-        *fired.lock().unwrap(),
-        vec![0, 10, 100],
+    assert2::assert!(
+        *fired.lock().unwrap() == vec![0, 10, 100],
         "fired-log must equal the captured JVM sequence (current stream-time per fire)"
     );
 
     // The punctuator forwards each fired ts downstream; confirm the same {0,10,100}
     // surface via read_output (pass-through records carry PASS_THROUGH and are filtered).
-    assert_eq!(drain_fires(&mut driver), vec![0, 10, 100]);
+    assert2::assert!(drain_fires(&mut driver) == vec![0, 10, 100]);
 }
 
 #[test]
@@ -162,7 +161,7 @@ fn catch_up_jump_fires_once() {
     let (mut driver, fired, _handle) = build_driver(10);
     pipe_at(&mut driver, 0); // fire 0
     pipe_at(&mut driver, 100); // single catch-up fire at 100
-    assert_eq!(*fired.lock().unwrap(), vec![0, 100]);
+    assert2::assert!(*fired.lock().unwrap() == vec![0, 100]);
 }
 
 #[test]
@@ -171,7 +170,7 @@ fn cancel_stops_firing() {
     // later record at ts=50 must NOT fire.
     let (mut driver, fired, handle) = build_driver(10);
     pipe_at(&mut driver, 0); // fire 0
-    assert_eq!(*fired.lock().unwrap(), vec![0]);
+    assert2::assert!(*fired.lock().unwrap() == vec![0]);
 
     handle
         .lock()
@@ -181,7 +180,7 @@ fn cancel_stops_firing() {
         .cancel();
 
     pipe_at(&mut driver, 50); // would fire at 50 if not cancelled
-    assert_eq!(*fired.lock().unwrap(), vec![0], "no fires after cancel()");
+    assert2::assert!(*fired.lock().unwrap() == vec![0], "no fires after cancel()");
 }
 
 #[test]
@@ -226,9 +225,8 @@ fn punctuator_reads_and_writes_store() {
     for ts in [0, 5, 10, 100] {
         pipe_at(&mut driver, ts);
     }
-    assert_eq!(
-        driver.store_get::<String, i64>("fires", &"n".to_string()),
-        Some(3),
+    assert2::assert!(
+        driver.store_get::<String, i64>("fires", &"n".to_string()) == Some(3),
         "store counter equals the number of stream-time fires"
     );
 }
@@ -312,15 +310,14 @@ fn wall_clock_fires_on_boundary_at_clock_value() {
     driver.advance_wall_clock_time(Duration::from_millis(4)); // clock 10 — fire 10
     driver.advance_wall_clock_time(Duration::from_millis(100)); // clock 110 — fire 110
 
-    assert_eq!(
-        *fired.lock().unwrap(),
-        vec![10, 110],
+    assert2::assert!(
+        *fired.lock().unwrap() == vec![10, 110],
         "wall fired-log must equal the captured JVM sequence (first-fire at interval; +100 fires once)"
     );
 
     // The punctuator forwards each fired ts downstream; confirm {10, 110} surface
     // via read_output (no pass-through records were piped here).
-    assert_eq!(drain_fires(&mut driver), vec![10, 110]);
+    assert2::assert!(drain_fires(&mut driver) == vec![10, 110]);
 }
 
 #[test]
@@ -332,7 +329,7 @@ fn wall_clock_catch_up_fires_once() {
     driver.advance_wall_clock_time(Duration::from_millis(10)); // clock 10 — fire 10
     driver.advance_wall_clock_time(Duration::from_millis(55)); // clock 65 — single catch-up fire at 65
 
-    assert_eq!(*fired.lock().unwrap(), vec![10, 65]);
+    assert2::assert!(*fired.lock().unwrap() == vec![10, 65]);
 }
 
 #[test]
@@ -394,19 +391,17 @@ fn stream_and_wall_fire_independently() {
     // (piping doesn't advance the wall clock).
     pipe_at(&mut driver, 0);
     pipe_at(&mut driver, 10);
-    assert_eq!(*stream_log.lock().unwrap(), vec![0, 10]);
-    assert_eq!(
-        *wall_log.lock().unwrap(),
-        Vec::<i64>::new(),
+    assert2::assert!(*stream_log.lock().unwrap() == vec![0, 10]);
+    assert2::assert!(
+        *wall_log.lock().unwrap() == Vec::<i64>::new(),
         "piping advances stream-time only — wall clock untouched"
     );
 
     // Advance the wall clock by 10: WALL fires {10}; STREAM unchanged.
     driver.advance_wall_clock_time(Duration::from_millis(10));
-    assert_eq!(*wall_log.lock().unwrap(), vec![10]);
-    assert_eq!(
-        *stream_log.lock().unwrap(),
-        vec![0, 10],
+    assert2::assert!(*wall_log.lock().unwrap() == vec![10]);
+    assert2::assert!(
+        *stream_log.lock().unwrap() == vec![0, 10],
         "advancing the wall clock doesn't fire stream-time punctuators"
     );
 }

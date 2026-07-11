@@ -33,7 +33,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_metadata::{
@@ -264,12 +263,7 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics({topic}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Await until `handle` sees `(topic, partition)` present in its image.
@@ -527,15 +521,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
         false,
     )
     .await;
-    assert!(
-        alter_resp.len() == 1,
-        "one entry in AlterClientQuotas response"
-    );
-    assert!(
-        alter_resp[0].1 == 0,
-        "AlterClientQuotas must succeed; error_code={}",
-        alter_resp[0].1
-    );
+    assert2::assert!((alter_resp.len(), alter_resp[0].1) == (1, 0));
 
     // Await until the quota appears in the metadata image (absorb raft latency).
     //
@@ -580,27 +566,14 @@ async fn tuple_quota_throttles_only_matching_client_id() {
             // Not TOPIC_AUTHORIZATION_FAILED — use this response.
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "ACL still not applied after 15s; error_code=29"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     let part = &matching_resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "produce (alice, app-x) must succeed; error_code={}",
-        part.error_code
-    );
-    assert!(
-        matching_resp.throttle_time_ms > 0,
-        "expected throttle_time_ms > 0 for (alice, app-x) with producer_byte_rate=1024 \
-         and 4 KB payload; got {} — T3 may not have merged yet (T3 wires ctx.client_id \
-         into the quota call site)",
-        matching_resp.throttle_time_ms
-    );
+    assert2::assert!(part.error_code == 0);
+    assert2::assert!(matching_resp.throttle_time_ms > 0);
 
     // ── Case 2: (alice, other) — no quota match, must NOT throttle ────────────
     //
@@ -628,26 +601,14 @@ async fn tuple_quota_throttles_only_matching_client_id() {
         if ec != 29 {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "ACL still not applied after 15s; error_code=29"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     let part = &non_matching_resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "produce (alice, other) must succeed; error_code={}",
-        part.error_code
-    );
-    assert!(
-        non_matching_resp.throttle_time_ms == 0,
-        "expected throttle_time_ms == 0 for (alice, other) — no tuple or user-only \
-         quota is set for this client_id; got {}",
-        non_matching_resp.throttle_time_ms
-    );
+    assert2::assert!(part.error_code == 0);
+    assert2::assert!(non_matching_resp.throttle_time_ms == 0);
 
     handle.shutdown().await;
 }

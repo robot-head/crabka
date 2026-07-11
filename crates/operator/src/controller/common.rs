@@ -850,25 +850,17 @@ pub(crate) fn parse_quantity(s: &str) -> Result<i128, &'static str> {
 
 #[cfg(test)]
 mod config_hash_tests {
-    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
-    fn config_hash_is_truncated_sha256_hex() {
-        // First 16 hex chars (8 bytes) of sha256("hello"):
-        //   2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
-        //   ^^^^^^^^^^^^^^^^
-        let h = config_hash("hello");
-        assert!(h == "2cf24dba5fb0a30e");
-        assert!(h.len() == 16, "must fit within K8s 63-char label limit");
-    }
-
-    #[test]
-    fn config_hash_empty_string() {
-        // First 16 hex chars of sha256("").
-        let h = config_hash("");
-        assert!(h == "e3b0c44298fc1c14");
+    fn config_hash_known_vectors() {
+        for (_name, input, expected) in [
+            ("hello", "hello", "2cf24dba5fb0a30e"),
+            ("empty string", "", "e3b0c44298fc1c14"),
+        ] {
+            assert2::assert!(config_hash(input) == expected);
+        }
     }
 
     #[test]
@@ -876,7 +868,7 @@ mod config_hash_tests {
         // K8s label values are limited to 63 characters. Our truncated
         // hash must always fit; this test guards against future widening.
         let h = config_hash("any content at all");
-        assert!(h.len() <= 63, "hash {h} exceeds K8s label limit");
+        assert2::assert!(h.len() <= 63);
     }
 
     #[test]
@@ -907,7 +899,6 @@ mod config_hash_tests {
         };
         let h = combined_config_hash(&spec_a, None, None, None);
         let h_again = combined_config_hash(&spec_a, None, None, None);
-        assert!(h == h_again);
 
         // Hash-collapse compat: the hash for empty listeners + no metrics MUST
         // equal `config_hash(serialized broker-properties)`. That's what
@@ -915,19 +906,13 @@ mod config_hash_tests {
         // hash-driven roll (the e2e job `kind-upgrade` asserts this
         // against a real config-only cluster).
         let config_only_form = "log.retention.hours=24\n";
-        assert!(
-            h == config_hash(config_only_form),
-            "combined hash for empty listeners must equal config_hash(spec.config)"
-        );
-
         let mut spec_b = spec_a.clone();
         spec_b.listeners = vec![crate::controller::listeners::synthesized_default_listener()];
         spec_b.inter_broker_listener_name = Some("PLAIN".into());
         let h_with_listener = combined_config_hash(&spec_b, None, None, None);
-        assert!(
-            h != h_with_listener,
-            "non-empty listener intent must change hash"
-        );
+        assert2::assert!(h == h_again);
+        assert2::assert!(h == config_hash(config_only_form));
+        assert2::assert!(h != h_with_listener);
     }
 
     #[test]
@@ -960,11 +945,6 @@ mod config_hash_tests {
             ..Default::default()
         });
         let h_on = combined_config_hash(&spec_on, None, None, None);
-        assert!(
-            h_off != h_on,
-            "enabling metrics_config must bump the hash (triggers pool reconcile + StatefulSet re-render)"
-        );
-
         // Toggling sub-fields (interval, labels) does NOT change the
         // hash — those only affect the PodMonitor/ServiceMonitor body,
         // not the broker pod template, so they must not trigger a roll.
@@ -975,10 +955,8 @@ mod config_hash_tests {
                 ..Default::default()
             });
         }
-        assert!(
-            h_on == combined_config_hash(&spec_on_diff_interval, None, None, None),
-            "PodMonitor interval change must NOT roll the broker pod"
-        );
+        assert2::assert!(h_off != h_on);
+        assert2::assert!(h_on == combined_config_hash(&spec_on_diff_interval, None, None, None));
     }
 
     #[test]
@@ -1014,8 +992,8 @@ mod config_hash_tests {
             None,
             None,
         );
-        assert!(h_none != h_a, "absent vs present CA must differ");
-        assert!(h_a != h_b, "different CA PEM must differ");
+        assert2::assert!(h_none != h_a);
+        assert2::assert!(h_a != h_b);
     }
 
     #[test]
@@ -1044,7 +1022,7 @@ mod config_hash_tests {
         };
         let h1 = combined_config_hash(&spec, Some("ca-pem"), None, None);
         let h2 = combined_config_hash(&spec, Some("ca-pem"), None, None);
-        assert!(h1 == h2);
+        assert2::assert!(h1 == h2);
     }
 
     #[test]
@@ -1104,9 +1082,9 @@ mod config_hash_tests {
         // Exactly one toml key per broker; the old broker.env /
         // broker.properties keys are dropped.
         let keys: Vec<&str> = data.keys().map(String::as_str).collect();
-        assert!(keys == ["broker-0.toml", "broker-1.toml"]);
-        check!(data["broker-0.toml"].contains("demo-0.svc"));
-        check!(data["broker-1.toml"].contains("demo-1.svc"));
+        assert2::assert!(keys == vec!["broker-0.toml", "broker-1.toml"]);
+        assert2::assert!(data["broker-0.toml"].contains("demo-0.svc"));
+        assert2::assert!(data["broker-1.toml"].contains("demo-1.svc"));
     }
 
     #[test]
@@ -1134,14 +1112,14 @@ mod config_hash_tests {
         // No explicit pin => hash collapse preserved (== config_hash of
         // the empty config part).
         let h_default = combined_config_hash(&spec, None, None, None);
-        assert!(h_default == config_hash(""));
 
         // An explicit pin enters the hash and changes it.
         let h_pin = combined_config_hash(&spec, None, Some("3.6"), None);
-        assert!(h_default != h_pin, "explicit metadata pin must change hash");
         // A different pin differs again.
         let h_pin2 = combined_config_hash(&spec, None, Some("3.7"), None);
-        assert!(h_pin != h_pin2, "different metadata pin must differ");
+        assert2::assert!(h_default.clone() == config_hash(""));
+        assert2::assert!(h_default != h_pin);
+        assert2::assert!(h_pin != h_pin2);
     }
 
     #[test]
@@ -1192,17 +1170,12 @@ mod config_hash_tests {
 
         let cm = render_configmap(&k, &listeners, &per_broker, "PLAIN", None, None, None).unwrap();
         let toml = &cm.data.unwrap()["broker-0.toml"];
-        assert!(
-            !toml.contains("metadata.version"),
-            "metadata.version must never be injected into broker config, got:\n{toml}"
-        );
+        assert2::assert!(!toml.contains("metadata.version"));
     }
 }
 
 #[cfg(test)]
 mod rollout_tests {
-    use assert2::assert;
-
     use super::{PoolRolloutState, plan_rollout};
 
     fn st(name: &str, hash: Option<&str>, ready: bool) -> PoolRolloutState {
@@ -1218,143 +1191,111 @@ mod rollout_tests {
     }
 
     #[test]
-    fn bring_up_all_get_desired_when_no_hash() {
-        // Initial creation: no pool has a hash yet -> all get `desired`
-        // (parallel) so a KRaft controller quorum can form.
-        let pools = vec![
-            st("a", None, false),
-            st("b", None, false),
-            st("c", None, false),
-        ];
-        let plan = plan_rollout(&pools, "H1");
-        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H1"), ("c", "H1")]);
-    }
-
-    #[test]
-    fn single_pool_first_reconcile_gets_desired() {
-        let pools = vec![st("only", None, false)];
-        assert!(targets(&plan_rollout(&pools, "H1")) == vec![("only", "H1")]);
-    }
-
-    #[test]
-    fn single_pool_roll_advances() {
-        // Established single pool moving to a new hash.
-        let pools = vec![st("only", Some("H0"), true)];
-        assert!(targets(&plan_rollout(&pools, "H1")) == vec![("only", "H1")]);
-    }
-
-    #[test]
-    fn steady_state_all_desired_is_noop() {
-        let pools = vec![st("a", Some("H1"), true), st("b", Some("H1"), true)];
-        assert!(targets(&plan_rollout(&pools, "H1")) == vec![("a", "H1"), ("b", "H1")]);
-    }
-
-    #[test]
-    fn established_roll_advances_first_pool_only() {
-        // Uniform on H0; first reconcile after the change advances only
-        // pool `a`, holding `b` and `c` at H0.
-        let pools = vec![
-            st("a", Some("H0"), true),
-            st("b", Some("H0"), true),
-            st("c", Some("H0"), true),
-        ];
-        let plan = plan_rollout(&pools, "H1");
-        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
-    }
-
-    #[test]
-    fn established_roll_holds_later_pools_until_first_ready() {
-        // `a` already moved to H1 but is not Ready yet -> `b`, `c` wait.
-        let pools = vec![
-            st("a", Some("H1"), false),
-            st("b", Some("H0"), true),
-            st("c", Some("H0"), true),
-        ];
-        let plan = plan_rollout(&pools, "H1");
-        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H0"), ("c", "H0")]);
-    }
-
-    #[test]
-    fn established_roll_advances_next_after_prefix_converges() {
-        // `a` converged (H1 + ready); advance `b`, hold `c`.
-        let pools = vec![
-            st("a", Some("H1"), true),
-            st("b", Some("H0"), true),
-            st("c", Some("H0"), true),
-        ];
-        let plan = plan_rollout(&pools, "H1");
-        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H1"), ("c", "H0")]);
-    }
-
-    #[test]
-    fn messy_multiple_old_hashes_falls_back_to_all_desired() {
-        // More than one distinct non-desired hash -> not a clean ordered
-        // roll; apply `desired` to all (recovery).
-        let pools = vec![st("a", Some("H0"), true), st("b", Some("HX"), true)];
-        let plan = plan_rollout(&pools, "H1");
-        assert!(targets(&plan) == vec![("a", "H1"), ("b", "H1")]);
+    fn rollout_plan_cases() {
+        for (_name, pools, expected) in [
+            (
+                "initial quorum",
+                vec![
+                    st("a", None, false),
+                    st("b", None, false),
+                    st("c", None, false),
+                ],
+                vec![("a", "H1"), ("b", "H1"), ("c", "H1")],
+            ),
+            (
+                "single pool initial",
+                vec![st("only", None, false)],
+                vec![("only", "H1")],
+            ),
+            (
+                "single pool rollout",
+                vec![st("only", Some("H0"), true)],
+                vec![("only", "H1")],
+            ),
+            (
+                "steady state",
+                vec![st("a", Some("H1"), true), st("b", Some("H1"), true)],
+                vec![("a", "H1"), ("b", "H1")],
+            ),
+            (
+                "advance first pool",
+                vec![
+                    st("a", Some("H0"), true),
+                    st("b", Some("H0"), true),
+                    st("c", Some("H0"), true),
+                ],
+                vec![("a", "H1"), ("b", "H0"), ("c", "H0")],
+            ),
+            (
+                "wait for first pool",
+                vec![
+                    st("a", Some("H1"), false),
+                    st("b", Some("H0"), true),
+                    st("c", Some("H0"), true),
+                ],
+                vec![("a", "H1"), ("b", "H0"), ("c", "H0")],
+            ),
+            (
+                "advance next pool",
+                vec![
+                    st("a", Some("H1"), true),
+                    st("b", Some("H0"), true),
+                    st("c", Some("H0"), true),
+                ],
+                vec![("a", "H1"), ("b", "H1"), ("c", "H0")],
+            ),
+            (
+                "recover mixed old hashes",
+                vec![st("a", Some("H0"), true), st("b", Some("HX"), true)],
+                vec![("a", "H1"), ("b", "H1")],
+            ),
+        ] {
+            let plan = plan_rollout(&pools, "H1");
+            assert2::assert!(targets(&plan) == expected);
+        }
     }
 }
 
 #[cfg(test)]
 mod parse_quantity_tests {
-    use assert2::assert;
 
     use super::parse_quantity;
 
     #[test]
-    fn quantity_parse_binary_suffixes() {
-        for (input, want) in [
-            ("1Ki", 1024),
-            ("512Mi", 512 * 1024 * 1024),
-            ("10Gi", 10 * 1024 * 1024 * 1024),
+    fn quantity_parse_success_cases() {
+        for (_name, input, expected) in [
+            ("binary kibibytes", "1Ki", 1024),
+            ("binary mebibytes", "512Mi", 512 * 1024 * 1024),
+            ("binary gibibytes", "10Gi", 10 * 1024 * 1024 * 1024),
+            ("decimal kilobytes", "1K", 1_000),
+            ("decimal megabytes", "500M", 500_000_000),
+            ("decimal gigabytes", "10G", 10_000_000_000),
+            ("decimal mantissa", "1.5Gi", 1_610_612_736),
+            ("bare bytes", "1024", 1024),
         ] {
-            assert!(parse_quantity(input).unwrap() == want, "case {input:?}");
+            assert2::assert!(parse_quantity(input).unwrap() == expected);
         }
     }
 
     #[test]
-    fn quantity_parse_decimal_suffixes() {
-        for (input, want) in [
-            ("1K", 1_000),
-            ("500M", 500_000_000),
-            ("10G", 10_000_000_000),
+    fn quantity_parse_error_cases() {
+        for (_name, input) in [
+            ("empty", ""),
+            ("non-numeric", "banana"),
+            ("invalid suffix", "1.5x"),
+            ("missing magnitude", "Gi"),
+            ("scientific notation", "1e3"),
+            ("zero bytes", "0"),
+            ("zero gibibytes", "0Gi"),
+            ("negative", "-10Gi"),
         ] {
-            assert!(parse_quantity(input).unwrap() == want, "case {input:?}");
-        }
-    }
-
-    #[test]
-    fn quantity_parse_decimal_mantissa() {
-        // 1.5Gi = 1.5 * 1024^3 = 1,610,612,736
-        assert!(parse_quantity("1.5Gi").unwrap() == 1_610_612_736);
-    }
-
-    #[test]
-    fn quantity_parse_no_suffix_is_bytes() {
-        assert!(parse_quantity("1024").unwrap() == 1024);
-    }
-
-    #[test]
-    fn quantity_parse_rejects_garbage() {
-        // "1e3" pins that scientific notation is rejected.
-        for input in ["", "banana", "1.5x", "Gi", "1e3"] {
-            assert!(parse_quantity(input).is_err(), "case {input:?}");
-        }
-    }
-
-    #[test]
-    fn quantity_parse_zero_and_negative_are_errors() {
-        for input in ["0", "0Gi", "-10Gi"] {
-            assert!(parse_quantity(input).is_err(), "case {input:?}");
+            assert2::assert!(parse_quantity(input).is_err());
         }
     }
 }
 
 #[cfg(test)]
 mod cluster_object_tests {
-    use assert2::{assert, check};
-
     use super::*;
     use crate::{
         controller::listeners::AdvertisedAddress,
@@ -1393,20 +1334,20 @@ mod cluster_object_tests {
         let svc = render_service(&test_kafka()).expect("render_service");
         let spec = svc.spec.expect("service spec");
 
-        // KRaft peers must resolve each other's DNS before readiness.
-        assert!(spec.publish_not_ready_addresses == Some(true));
-        // Still a headless Service.
-        assert!(spec.cluster_ip.as_deref() == Some("None"));
-
         let ports = spec.ports.expect("service ports");
-        let controller = ports
+        let actual_ports = ports
             .iter()
-            .find(|p| p.name.as_deref() == Some("controller"))
-            .expect("controller port must be present");
-        check!(controller.port == CONTROLLER_PORT);
-        check!(controller.port == 9093);
-        // Original broker port is preserved.
-        check!(ports.iter().any(|p| p.port == BROKER_PORT));
+            .map(|port| (port.name.as_deref(), port.port))
+            .collect::<Vec<_>>();
+        assert2::assert!(spec.publish_not_ready_addresses == Some(true));
+        assert2::assert!(spec.cluster_ip.as_deref() == Some("None"));
+        assert2::assert!(
+            actual_ports
+                == vec![
+                    (Some("kafka-internal"), BROKER_PORT),
+                    (Some("controller"), CONTROLLER_PORT),
+                ]
+        );
     }
 
     fn internal_listener(name: &str, port: i32) -> Listener {
@@ -1462,21 +1403,15 @@ mod cluster_object_tests {
             let toml = data
                 .get(&format!("broker-{id}.toml"))
                 .unwrap_or_else(|| panic!("broker-{id}.toml missing"));
-            assert!(
-                toml.contains(expected),
-                "broker-{id}.toml must carry the full voter set, got:\n{toml}"
-            );
-            assert!(
-                toml.contains(expected_server_name),
-                "broker-{id}.toml must carry the controller server name, got:\n{toml}"
-            );
             // Voters must precede the first [[listeners]] header.
             let key_pos = toml.find("controller_quorum_voters").unwrap();
             let listeners_pos = toml.find("[[listeners]]").unwrap();
-            assert!(key_pos < listeners_pos);
             // The server-name top-level scalar must also precede [[listeners]].
             let server_name_pos = toml.find("controller_server_name").unwrap();
-            assert!(server_name_pos < listeners_pos);
+            assert2::assert!(toml.contains(expected));
+            assert2::assert!(toml.contains(expected_server_name));
+            assert2::assert!(key_pos < listeners_pos);
+            assert2::assert!(server_name_pos < listeners_pos);
         }
     }
 }

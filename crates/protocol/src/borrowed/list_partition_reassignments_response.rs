@@ -23,40 +23,37 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use bytes::BytesMut;
 
     use super::*;
     use crate::{DecodeBorrow, Encode};
-    fn check(msg_bytes: &bytes::Bytes, v: i16) {
+    fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
         let mut cur: &[u8] = msg_bytes;
         let decoded = ListPartitionReassignmentsResponse::decode_borrow(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
-        assert!(decoded.encoded_len(v) == msg_bytes.len());
+        assert2::assert!(cur.is_empty(), "case {case}, version {v}");
+        assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &msg_bytes[..]);
+        assert2::assert!(&reencoded[..] == &msg_bytes[..]);
         let owned = decoded.to_owned();
         let mut owned_buf = BytesMut::new();
         owned.encode(&mut owned_buf, v).unwrap();
-        assert!(&owned_buf[..] == &msg_bytes[..]);
+        assert2::assert!(&owned_buf[..] == &msg_bytes[..]);
     }
     #[test]
-    fn default_roundtrips_all_versions() {
+    fn roundtrip_cases_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
-            let msg = ListPartitionReassignmentsResponse::default();
-            let mut buf = BytesMut::new();
-            msg.encode(&mut buf, v).unwrap();
-            check(&buf.freeze(), v);
-        }
-    }
-    #[test]
-    fn populated_roundtrips_all_versions() {
-        for v in MIN_VERSION..=MAX_VERSION {
-            let msg = ListPartitionReassignmentsResponse::populated(v);
-            let mut buf = BytesMut::new();
-            msg.encode(&mut buf, v).unwrap();
-            check(&buf.freeze(), v);
+            for (case, msg) in [
+                ("default", ListPartitionReassignmentsResponse::default()),
+                (
+                    "populated",
+                    ListPartitionReassignmentsResponse::populated(v),
+                ),
+            ] {
+                let mut buf = BytesMut::new();
+                msg.encode(&mut buf, v).unwrap();
+                check(case, &buf.freeze(), v);
+            }
         }
     }
 }

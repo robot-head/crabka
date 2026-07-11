@@ -71,7 +71,7 @@ fn page<K: CustomResourceExt>() -> CrdPage {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     #[test]
@@ -81,7 +81,7 @@ mod tests {
             .iter()
             .find(|p| p.slug == "kafka")
             .expect("kafka page");
-        check!(kafka.title == "Kafka");
+        assert2::assert!(kafka.title == "Kafka");
         check!(
             kafka
                 .body
@@ -94,7 +94,7 @@ mod tests {
             "expected kafkaVersion field in kafka spec table:\n{}",
             kafka.body
         );
-        check!(pages.len() == 6);
+        assert2::assert!(pages.len() == 6);
         let slugs: Vec<&str> = pages.iter().map(|p| p.slug.as_str()).collect();
         for e in [
             "kafka",
@@ -104,7 +104,7 @@ mod tests {
             "kafkarebalance",
             "schemaregistry",
         ] {
-            assert!(slugs.contains(&e), "missing {e}");
+            assert2::assert!(slugs.contains(&e));
         }
     }
 }

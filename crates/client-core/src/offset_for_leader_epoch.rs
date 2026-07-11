@@ -92,7 +92,7 @@ fn parse_single(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::offset_for_leader_epoch_response::{
@@ -120,7 +120,7 @@ mod tests {
             ..Default::default()
         };
         let got = parse_single(&resp, "t", 0).unwrap();
-        assert!(
+        assert2::assert!(
             got == EpochEndOffset {
                 partition: 0,
                 leader_epoch: 2,
@@ -134,7 +134,7 @@ mod tests {
     fn build_request_preserves_partition_epoch_query() {
         let req = build_request("orders", 2, 17, 11);
 
-        assert!(
+        assert2::assert!(
             req == OffsetForLeaderEpochRequest {
                 replica_id: -1,
                 topics: vec![OffsetForLeaderTopic {
@@ -156,6 +156,6 @@ mod tests {
     fn parse_single_missing_partition_is_error() {
         let resp = OffsetForLeaderEpochResponse::default();
         let err = parse_single(&resp, "t", 0).unwrap_err();
-        assert!(matches!(err, ClientError::Server { error_code: -1 }));
+        assert2::assert!(matches!(err, ClientError::Server { error_code: -1 }));
     }
 }

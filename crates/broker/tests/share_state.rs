@@ -15,7 +15,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -230,14 +230,8 @@ async fn find_coordinator_share_returns_broker() {
     let tid = uuid::Uuid::from_bytes([3u8; 16]);
     let (error_code, node_id) = find_share(&client, &format!("g1:{tid}:0")).await;
 
-    assert!(
-        error_code == 0,
-        "FindCoordinator(SHARE) error: {error_code}"
-    );
-    assert!(
-        node_id == i32::try_from(broker.node_id()).unwrap(),
-        "coordinator must be this broker, got {node_id}"
-    );
+    assert2::assert!(error_code == 0);
+    assert2::assert!(node_id == i32::try_from(broker.node_id()).unwrap());
 }
 
 /// Initialize -> Write -> Read -> `ReadSummary` -> Delete round-trips over the wire.
@@ -249,9 +243,9 @@ async fn persister_round_trip() {
 
     // Bootstrap __share_group_state, then initialize (retrying until led).
     let (fc, _) = find_share(&client, &format!("g1:{tid}:0")).await;
-    assert!(fc == 0, "FindCoordinator(SHARE) error: {fc}");
+    assert2::assert!(fc == 0);
     let init = initialize_ready(&client, "g1", tid, 0, 0, 0).await;
-    assert!(init == 0, "initialize error: {init}");
+    assert2::assert!(init == 0);
 
     // Write an in-flight batch above the new SPSO (5).
     let w = write_state(
@@ -272,41 +266,31 @@ async fn persister_round_trip() {
         }],
     )
     .await;
-    assert!(w == 0, "write error: {w}");
+    assert2::assert!(w == 0);
 
     // Read full state.
     let r = read_state(&client, "g1", tid, 0).await;
-    check!(r.error_code == 0, "read error: {}", r.error_code);
     check!(
-        r.start_offset == 5,
-        "SPSO must be 5, got {}",
-        r.start_offset
-    );
-    check!(
-        r.state_batches
-            .iter()
-            .any(|b| b.first_offset == 5 && b.last_offset == 9),
+        (
+            r.error_code,
+            r.start_offset,
+            r.state_batches
+                .iter()
+                .any(|b| b.first_offset == 5 && b.last_offset == 9)
+        ) == (0, 5, true),
         "written batch must be present: {:?}",
         r.state_batches
     );
 
     // Summary matches.
     let s = read_summary(&client, "g1", tid, 0).await;
-    check!(s.error_code == 0, "summary error: {}", s.error_code);
     check!(
-        s.start_offset == 5,
-        "summary SPSO 5, got {}",
-        s.start_offset
-    );
-    check!(
-        s.state_epoch == 0,
-        "summary state_epoch 0, got {}",
-        s.state_epoch
-    );
-    check!(
-        s.delivery_complete_count == 2,
-        "summary DCC 2, got {}",
-        s.delivery_complete_count
+        (
+            s.error_code,
+            s.start_offset,
+            s.state_epoch,
+            s.delivery_complete_count
+        ) == (0, 5, 0, 2)
     );
 
     // Delete, then a fresh read returns the missing/initial sentinel.
@@ -325,23 +309,15 @@ async fn persister_round_trip() {
         })
         .await
         .expect("DeleteShareGroupState");
-    assert!(
-        del.results[0].partitions[0].error_code == 0,
-        "delete error: {}",
-        del.results[0].partitions[0].error_code
-    );
+    assert2::assert!(del.results[0].partitions[0].error_code == 0);
 
     let after = read_state(&client, "g1", tid, 0).await;
-    assert!(
-        after.error_code == 0,
-        "read-after-delete error: {}",
-        after.error_code
-    );
-    assert!(
-        after.start_offset == -1 && after.state_batches.is_empty(),
-        "deleted key must read as missing/initial, got start_offset {} batches {:?}",
-        after.start_offset,
-        after.state_batches
+    assert2::assert!(
+        (
+            after.error_code,
+            after.start_offset,
+            after.state_batches.is_empty()
+        ) == (0, -1, true)
     );
 }
 
@@ -353,16 +329,13 @@ async fn write_fences_stale_state_epoch() {
     let tid = uuid::Uuid::from_bytes([11u8; 16]);
 
     let (fc, _) = find_share(&client, &format!("g1:{tid}:0")).await;
-    assert!(fc == 0);
+    assert2::assert!(fc == 0);
     let init = initialize_ready(&client, "g1", tid, 0, 5, 0).await; // state_epoch 5
-    assert!(init == 0, "initialize error: {init}");
+    assert2::assert!(init == 0);
 
     // Write at state_epoch 0 (< durable 5) -> fenced.
     let w = write_state(&client, "g1", tid, 0, 0, 0, 0, 0, vec![]).await;
-    assert!(
-        w == FENCED_STATE_EPOCH,
-        "stale state_epoch must fence with 124, got {w}"
-    );
+    assert2::assert!(w == FENCED_STATE_EPOCH);
 }
 
 /// Persisted share state survives a broker restart (recover replays
@@ -380,11 +353,11 @@ async fn state_survives_restart() {
         let client = connect(&broker.listen_addr().to_string()).await;
 
         let (fc, _) = find_share(&client, &format!("g1:{tid}:0")).await;
-        assert!(fc == 0);
+        assert2::assert!(fc == 0);
         let init = initialize_ready(&client, "g1", tid, 0, 0, 0).await;
-        assert!(init == 0, "initialize error: {init}");
+        assert2::assert!(init == 0);
         let w = write_state(&client, "g1", tid, 0, 0, 0, 7, 3, vec![]).await;
-        assert!(w == 0, "write error: {w}");
+        assert2::assert!(w == 0);
 
         broker.wait_until_share_spso("g1", tid, 0, 7).await;
         broker.shutdown().await;
@@ -400,9 +373,6 @@ async fn state_survives_restart() {
         // await until the persisted SPSO is visible, then assert the wire value.
         broker.wait_until_share_spso("g1", tid, 0, 7).await;
         let start_offset = read_summary(&client, "g1", tid, 0).await.start_offset;
-        assert!(
-            start_offset == 7,
-            "recovered SPSO must be 7, got {start_offset}"
-        );
+        assert2::assert!(start_offset == 7);
     }
 }

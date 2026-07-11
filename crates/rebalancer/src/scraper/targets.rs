@@ -46,20 +46,20 @@ pub fn parse_targets(spec: &str) -> Result<Vec<ScrapeTarget>, TargetParseError> 
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn empty_input_returns_empty_vec() {
-        assert!(parse_targets("").unwrap().is_empty());
-        assert!(parse_targets("   ").unwrap().is_empty());
+        for (_name, input) in [("empty", ""), ("whitespace", "   ")] {
+            assert2::assert!(parse_targets(input).unwrap().is_empty());
+        }
     }
 
     #[test]
     fn well_formed_entries_parse() {
         let out = parse_targets("1:broker1:9100,2:broker2:9100,3:broker3:9100").unwrap();
-        assert!(
+        assert2::assert!(
             out == vec![
                 ScrapeTarget {
                     broker_id: 1,
@@ -80,11 +80,11 @@ mod tests {
     #[test]
     fn malformed_entry_errors() {
         let err = parse_targets("nope").unwrap_err();
-        assert!(matches!(err, TargetParseError::Malformed(_)));
+        assert2::assert!(matches!(err, TargetParseError::Malformed(_)));
         let err = parse_targets("1:host_without_port").unwrap_err();
-        assert!(matches!(err, TargetParseError::Malformed(_)));
+        assert2::assert!(matches!(err, TargetParseError::Malformed(_)));
         let err = parse_targets("abc:host:9100").unwrap_err();
-        assert!(matches!(err, TargetParseError::BadId(_)));
+        assert2::assert!(matches!(err, TargetParseError::BadId(_)));
     }
 }
 
@@ -163,7 +163,6 @@ fn should_warn_empty_host(broker_id: i32) -> bool {
 
 #[cfg(test)]
 mod target_source_tests {
-    use assert2::assert;
 
     use super::*;
     use crate::model::{BrokerView, ClusterState, InFlightReassignment, PartitionView};
@@ -191,7 +190,7 @@ mod target_source_tests {
             },
         ];
         let src = TargetSource::Static(targets.clone());
-        assert!(src.current() == targets);
+        assert2::assert!(src.current() == targets);
     }
 
     #[test]
@@ -201,7 +200,7 @@ mod target_source_tests {
             snapshot,
             metrics_port: 9404,
         };
-        assert!(src.current().is_empty());
+        assert2::assert!(src.current().is_empty());
     }
 
     #[test]
@@ -233,7 +232,7 @@ mod target_source_tests {
         };
         let mut out = src.current();
         out.sort_by_key(|t| t.broker_id);
-        assert!(
+        assert2::assert!(
             out == vec![
                 ScrapeTarget {
                     broker_id: 1,
@@ -280,14 +279,18 @@ mod target_source_tests {
         };
         let mut out = src.current();
         out.sort_by_key(|t| t.broker_id);
-        assert!(out.len() == 2);
-        assert!(out.iter().map(|t| t.broker_id).collect::<Vec<_>>() == vec![1, 3]);
+        assert2::assert!(out.len() == 2);
+        assert2::assert!(out.iter().map(|t| t.broker_id).collect::<Vec<_>>() == vec![1, 3]);
     }
 
     #[test]
     fn empty_host_warning_is_emitted_once_per_broker_id() {
-        for (broker_id, want) in [(1_000_002, true), (1_000_002, false), (1_000_003, true)] {
-            assert!(should_warn_empty_host(broker_id) == want);
+        for (_case, broker_id, want) in [
+            ("first warning for broker", 1_000_002, true),
+            ("duplicate warning suppressed", 1_000_002, false),
+            ("first warning for another broker", 1_000_003, true),
+        ] {
+            assert2::assert!(should_warn_empty_host(broker_id) == want);
         }
     }
 
@@ -298,7 +301,7 @@ mod target_source_tests {
             snapshot: snapshot.clone(),
             metrics_port: 9404,
         };
-        assert!(src.current().is_empty());
+        assert2::assert!(src.current().is_empty());
 
         // Now publish a snapshot.
         let state = cluster_state_with(vec![BrokerView {
@@ -310,7 +313,7 @@ mod target_source_tests {
         snapshot.store(Arc::new(Some(state)));
 
         let out = src.current();
-        assert!(
+        assert2::assert!(
             out == vec![ScrapeTarget {
                 broker_id: 7,
                 addr: "newbie:9404".into()

@@ -22,7 +22,6 @@
 
 use std::{io, net::SocketAddr, process::Command};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
 use crabka_protocol::{
@@ -69,12 +68,7 @@ fn run_crabka_format(log_dir: &std::path::Path, add_scram: &str) {
         ])
         .output()
         .expect("spawn crabka format");
-    assert!(
-        out.status.success(),
-        "crabka format failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -113,10 +107,7 @@ async fn bootstrap_records_provisions_scram_user() {
 
     let result = drive_sasl_scram_session(addr, "alice", "wonderland").await;
     handle.shutdown().await;
-    assert!(
-        result.is_ok(),
-        "alice/wonderland should authenticate via SCRAM: {result:?}"
-    );
+    assert2::assert!(result.is_ok());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

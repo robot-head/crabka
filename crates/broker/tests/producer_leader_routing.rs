@@ -27,7 +27,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
@@ -94,7 +93,7 @@ async fn producer_routes_to_non_bootstrap_leaders() {
         })
         .await
         .unwrap();
-    assert!(cr.topics[0].error_code == 0, "create_topic: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
 
     // Wait for all partitions to materialize in the cluster metadata. Partition
     // records are raft-replicated into every broker's controller image, so once
@@ -126,11 +125,7 @@ async fn producer_routes_to_non_bootstrap_leaders() {
                 .is_some_and(|l| l != bootstrap_node)
         })
         .collect();
-    assert!(
-        !non_bootstrap_partitions.is_empty(),
-        "all {n_partitions} partitions are led by the bootstrap node — \
-         no cross-broker routing to exercise; test would be vacuous"
-    );
+    assert2::assert!(!non_bootstrap_partitions.is_empty());
     eprintln!(
         "partitions led by non-bootstrap brokers: {non_bootstrap_partitions:?} \
          (bootstrap = node {bootstrap_node})"
@@ -182,7 +177,7 @@ async fn producer_routes_to_non_bootstrap_leaders() {
             .await
             .expect("oneshot")
             .unwrap_or_else(|e| panic!("record for partition {p} failed: {e:?}"));
-        assert!(meta.partition == p, "ack partition mismatch: {meta:?}");
+        assert2::assert!(meta.partition == p);
     }
 
     // Durability check: consume every record back through a native consumer
@@ -213,23 +208,13 @@ async fn producer_routes_to_non_bootstrap_leaders() {
             seen_partitions.insert(r.partition, v);
         }
     }
-    assert!(
-        seen == expected,
-        "consumer must read back every produced record (incl. those on non-bootstrap leaders);\n\
-         missing: {:?}\n\
-         non-bootstrap partitions: {non_bootstrap_partitions:?}",
-        expected.difference(&seen).collect::<Vec<_>>()
-    );
+    assert2::assert!(seen == expected);
 
     // Explicit: every non-bootstrap partition's record was stored and read back
     // from its correct leader. This is the load-bearing assertion — it can only
     // hold if the producer routed those Produces off the bootstrap connection.
     for &p in &non_bootstrap_partitions {
-        assert!(
-            seen_partitions.get(&p) == Some(&format!("p{p}")),
-            "partition {p} (led by a non-bootstrap broker) was not durably stored on its leader; \
-             seen_partitions = {seen_partitions:?}"
-        );
+        assert2::assert!(seen_partitions.get(&p) == Some(&format!("p{p}")));
     }
 
     consumer.close().await.unwrap();

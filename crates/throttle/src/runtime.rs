@@ -226,7 +226,7 @@ mod tests {
         time::Duration,
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use qubit_clock::MockTime;
 
     use super::*;
@@ -280,32 +280,30 @@ mod tests {
     #[test]
     fn zero_rate_grants_full_request() {
         let b = TokenBucket::new();
-        assert!(b.try_consume(1024) == 1024);
+        assert2::assert!(b.try_consume(1024) == 1024);
     }
 
     #[test]
     fn first_consume_under_rate_succeeds() {
         let b = Arc::new(TokenBucket::new());
         b.set_rate(1024);
-        assert!(try_consume_with_timeout(&b, 512) == 512);
+        assert2::assert!(try_consume_with_timeout(&b, 512) == 512);
     }
 
     #[test]
     fn independent_burst_can_exceed_rate() {
         let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(100, 1000);
-        check!(b.rate() == 100);
-        check!(b.burst() == 1000);
-        check!(try_consume_with_timeout(&b, 500) == 500);
+        check!((b.rate(), b.burst(), try_consume_with_timeout(&b, 500)) == (100, 1000, 500));
     }
 
     #[test]
     fn consume_drains_bucket() {
         let b = Arc::new(TokenBucket::new());
         b.set_rate(1024);
-        assert!(try_consume_with_timeout(&b, 1024) == 1024);
+        assert2::assert!(try_consume_with_timeout(&b, 1024) == 1024);
         let g = try_consume_with_timeout(&b, 1024);
-        assert!(g < 100, "expected near-zero grant, got {g}");
+        assert2::assert!(g < 100);
     }
 
     #[test]
@@ -317,7 +315,7 @@ mod tests {
         // where a real 500ms sleep only gets "roughly" 512 under scheduler jitter.
         mock.advance(Duration::from_millis(500));
         let g = try_consume_with_timeout(&b, 1024);
-        assert!(g == 512, "expected exactly 512 after 500ms, got {g}");
+        assert2::assert!(g == 512);
     }
 
     #[test]
@@ -329,7 +327,7 @@ mod tests {
         // clamps it; advancing logical time makes this exact and instant.
         mock.advance(Duration::from_millis(2500));
         let g = try_consume_with_timeout(&b, 4096);
-        assert!(g == 2048, "expected exactly 2048 capped at burst, got {g}");
+        assert2::assert!(g == 2048);
     }
 
     #[test]
@@ -338,7 +336,7 @@ mod tests {
         b.set_rate(1024);
         try_consume_with_timeout(&b, 1024);
         b.set_rate(2048);
-        assert!(try_consume_with_timeout(&b, 2048) == 2048);
+        assert2::assert!(try_consume_with_timeout(&b, 2048) == 2048);
     }
 
     #[test]
@@ -346,7 +344,7 @@ mod tests {
         let b = Arc::new(TokenBucket::new());
         b.set_rate_with_burst(1024, 0);
 
-        assert!(try_consume_with_timeout(&b, 1) == 0);
+        assert2::assert!(try_consume_with_timeout(&b, 1) == 0);
     }
 
     #[test]
@@ -376,7 +374,7 @@ mod tests {
             .recv_timeout(TRY_CONSUME_TIMEOUT)
             .expect("try_consume should complete after generation becomes even");
         handle.join().expect("try_consume worker panicked");
-        assert!(granted == 1);
+        assert2::assert!(granted == 1);
     }
 
     // Stress the seqlock: many consumers racing a stream of set_rate resets must
@@ -445,12 +443,12 @@ mod tests {
         if let Some(g) = over_grant {
             panic!("over-grant past burst: {g}");
         }
-        assert!(!timed_out, "consumer did not complete within 5s");
+        assert2::assert!(!timed_out);
         for h in consumer_handles {
             h.join().unwrap();
         }
 
         // Invariant after the storm: available is within the burst cap.
-        assert!(try_consume_with_timeout(&b, 0) == 0);
+        assert2::assert!(try_consume_with_timeout(&b, 0) == 0);
     }
 }

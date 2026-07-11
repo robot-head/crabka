@@ -63,7 +63,6 @@ impl Selector {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
 
     use super::*;
 
@@ -80,14 +79,14 @@ mod tests {
             ("payments", false),
             ("telemetry.internal", false), // excluded wins
         ] {
-            check!(s.matches(name) == want, "name={name:?}");
+            assert2::assert!(s.matches(name) == want);
         }
     }
 
     #[test]
     fn empty_include_matches_nothing() {
         let s = Selector::compile(&[], &[]).unwrap();
-        assert!(!s.matches("anything"));
+        assert2::assert!(!s.matches("anything"));
     }
 
     #[test]
@@ -96,7 +95,7 @@ mod tests {
         // arbitrary character. If the metachar-escape guard is disabled, `a.b`
         // compiles to the regex `^a.b$` and would wrongly match `axb`.
         let s = Selector::compile(&["a.b".into()], &[]).unwrap();
-        assert!(s.matches("a.b"));
-        assert!(!s.matches("axb"));
+        assert2::assert!(s.matches("a.b"));
+        assert2::assert!(!s.matches("axb"));
     }
 }

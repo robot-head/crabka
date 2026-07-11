@@ -427,14 +427,14 @@ mod tests {
         // gap=20 around ts=15 → earliest_end=15-20=-5, latest_start=15+20=35 →
         // only [0,10] qualifies (end 10 >= -5, start 0 <= 35); [50,60] start 50 > 35.
         let found = s.find_sessions(&"k".to_string(), -5, 35).await;
-        assert_eq!(found, vec![(0, 10, 1)]);
+        assert2::assert!(found == vec![(0, 10, 1)]);
         // remove [0,10]
         s.remove(&"k".to_string(), 0, 10).await;
-        assert_eq!(s.find_sessions(&"k".to_string(), -5, 35).await, vec![]);
+        assert2::assert!(s.find_sessions(&"k".to_string(), -5, 35).await == vec![]);
         // changelog: put, put, remove → 3 entries (last is a tombstone)
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 3);
-        assert!(cl[2].1.is_none());
+        assert2::assert!(cl.len() == 3);
+        assert2::assert!(cl[2].1.is_none());
     }
 
     #[tokio::test]
@@ -444,7 +444,7 @@ mod tests {
         s.put("k".to_string(), 0, 10, 2).await;
         // both qualify for earliest_end=0, latest_start=100; store order = end asc.
         let found = s.find_sessions(&"k".to_string(), 0, 100).await;
-        assert_eq!(found, vec![(0, 10, 2), (0, 30, 1)]);
+        assert2::assert!(found == vec![(0, 10, 2), (0, 30, 1)]);
     }
 
     #[tokio::test]
@@ -453,7 +453,7 @@ mod tests {
         s.put("k".to_string(), 0, 10, 1).await;
         s.put("kk".to_string(), 0, 10, 9).await; // longer key sharing the "k" prefix
         let found = s.find_sessions(&"k".to_string(), 0, 100).await;
-        assert_eq!(found, vec![(0, 10, 1)]);
+        assert2::assert!(found == vec![(0, 10, 1)]);
     }
 
     #[tokio::test]
@@ -472,12 +472,9 @@ mod tests {
         // end <= 8 → the first two (sort to make order-independent).
         let mut got = s.find_closed_sessions(8).await;
         got.sort();
-        assert_eq!(
-            got,
-            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]
-        );
+        assert2::assert!(got == vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]);
         // end <= 4 → none.
-        assert!(s.find_closed_sessions(4).await.is_empty());
+        assert2::assert!(s.find_closed_sessions(4).await.is_empty());
     }
 
     #[tokio::test]
@@ -493,10 +490,7 @@ mod tests {
             s2.apply_changelog(k, v).await;
         }
         // [0,10] was removed; only [50,60] survives.
-        assert_eq!(
-            s2.find_sessions(&"k".to_string(), 0, 100).await,
-            vec![(50, 60, 2)]
-        );
+        assert2::assert!(s2.find_sessions(&"k".to_string(), 0, 100).await == vec![(50, 60, 2)]);
     }
 
     // ── Record-cache tests (mirror kv.rs) ───────────────────────────────────
@@ -524,12 +518,9 @@ mod tests {
         s.put("a".into(), 0, 10, 1).await;
         s.put("a".into(), 0, 10, 2).await;
         // Cache-first read sees the latest staged write (value 2).
-        assert_eq!(
-            s.find_sessions(&"a".to_string(), 0, 100).await,
-            vec![(0, 10, 2)]
-        );
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await == vec![(0, 10, 2)]);
         // No changelog buffered while writes only touch the cache.
-        assert!(s.take_changelog().is_empty());
+        assert2::assert!(s.take_changelog().is_empty());
     }
 
     #[tokio::test]
@@ -553,10 +544,7 @@ mod tests {
 
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[7]).await;
-        assert_eq!(buffer.len(), 1);
         let (child, rec) = &buffer[0];
-        assert_eq!(*child, 7);
-        assert_eq!(rec.timestamp, 7);
         // Key downcasts to Windowed<String> carrying the encoded start/end.
         let key = rec
             .key
@@ -564,31 +552,40 @@ mod tests {
             .unwrap()
             .downcast_ref::<Windowed<String>>()
             .unwrap();
-        assert_eq!(key.key, "a");
-        assert_eq!(key.window, Window { start: 0, end: 10 });
         // Value downcasts to Change<i64> { old = committed (1), new = latest (3) }.
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.old, Some(1));
-        assert_eq!(change.new, Some(3));
+        assert2::assert!(buffer.len() == 1);
+        assert2::assert!(*child == 7);
+        assert2::assert!(rec.timestamp == 7);
+        assert2::assert!(
+            key == &Windowed {
+                key: "a".into(),
+                window: Window { start: 0, end: 10 },
+            }
+        );
+        assert2::assert!(
+            change
+                == &Change {
+                    old: Some(1),
+                    new: Some(3)
+                }
+        );
 
         // Changelog buffered the RAW session store-key + the latest value.
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 1);
-        assert_eq!(
-            cl[0].0,
-            session_key(
-                &StringSerde.serialize("app-s-changelog", &"a".to_string()),
-                0,
-                10
-            )
+        assert2::assert!(
+            cl == vec![(
+                session_key(
+                    &StringSerde.serialize("app-s-changelog", &"a".to_string()),
+                    0,
+                    10
+                ),
+                Some(I64Serde.serialize("app-s-changelog", &3)),
+            )]
         );
-        assert_eq!(cl[0].1, Some(I64Serde.serialize("app-s-changelog", &3)));
 
         // Inner store now holds the write-through value.
-        assert_eq!(
-            s.find_sessions(&"a".to_string(), 0, 100).await,
-            vec![(0, 10, 3)]
-        );
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await == vec![(0, 10, 3)]);
     }
 
     /// Cached `find_closed_sessions` routes through `Backing::Cached::scan_all`,
@@ -603,13 +600,10 @@ mod tests {
 
         let mut got = s.find_closed_sessions(8).await;
         got.sort();
-        assert_eq!(
-            got,
-            vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]
-        );
-        assert!(s.find_closed_sessions(4).await.is_empty());
+        assert2::assert!(got == vec![("a".to_string(), 0, 5, 1), ("b".to_string(), 2, 8, 2)]);
+        assert2::assert!(s.find_closed_sessions(4).await.is_empty());
         // Reads only touched the cache; no changelog buffered yet.
-        assert!(s.take_changelog().is_empty());
+        assert2::assert!(s.take_changelog().is_empty());
     }
 
     /// On a cached store, `remove` stages a write-back tombstone (deferring its
@@ -629,18 +623,23 @@ mod tests {
         // remove stages a tombstone (cached → no immediate changelog).
         s.set_record_context(ctx_at(7));
         s.remove(&"a".to_string(), 0, 10).await;
-        assert!(s.take_changelog().is_empty());
-        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+        assert2::assert!(s.take_changelog().is_empty());
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
 
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert_eq!(buffer.len(), 1);
         let change = buffer[0].1.value.downcast_ref::<Change<i64>>().unwrap();
-        assert_eq!(change.old, Some(1)); // committed value
-        assert_eq!(change.new, None); // tombstone
+        assert2::assert!(buffer.len() == 1);
+        assert2::assert!(
+            change
+                == &Change {
+                    old: Some(1),
+                    new: None
+                }
+        );
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 1);
-        assert!(cl[0].1.is_none()); // changelog tombstone
+        assert2::assert!(cl.len() == 1);
+        assert2::assert!(cl[0].1.is_none()); // changelog tombstone
     }
 
     /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
@@ -655,18 +654,15 @@ mod tests {
         );
         s.apply_changelog(sk.clone(), Some(I64Serde.serialize("app-s-changelog", &9)))
             .await;
-        assert_eq!(
-            s.find_sessions(&"a".to_string(), 0, 100).await,
-            vec![(0, 10, 9)]
-        );
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await == vec![(0, 10, 9)]);
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert!(buffer.is_empty());
-        assert!(s.take_changelog().is_empty());
+        assert2::assert!(buffer.is_empty());
+        assert2::assert!(s.take_changelog().is_empty());
 
         // None apply deletes through.
         s.apply_changelog(sk, None).await;
-        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
     }
 
     /// `clear` on a cached store empties both the cache layer and inner store.
@@ -676,11 +672,11 @@ mod tests {
         s.set_record_context(ctx_at(0));
         s.put("a".into(), 0, 10, 1).await;
         StateStore::clear(&mut s).await;
-        assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
-        assert!(s.find_closed_sessions(i64::MAX).await.is_empty());
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await.is_empty());
+        assert2::assert!(s.find_closed_sessions(i64::MAX).await.is_empty());
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert!(buffer.is_empty());
+        assert2::assert!(buffer.is_empty());
     }
 
     /// `enable_cache` is idempotent: re-wrapping an already-cached store is a
@@ -688,11 +684,11 @@ mod tests {
     #[tokio::test]
     async fn enable_cache_is_idempotent() {
         let mut s = store();
-        assert!(!s.is_cached());
+        assert2::assert!(!s.is_cached());
         s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
-        assert!(s.is_cached());
+        assert2::assert!(s.is_cached());
         s.enable_cache(Arc::new(Mutex::new(NamedCache::new("s".into()))));
-        assert!(s.is_cached());
+        assert2::assert!(s.is_cached());
     }
 
     /// Plain-store lifecycle: `set_logging(false)` suppresses the changelog,
@@ -703,15 +699,9 @@ mod tests {
         let mut s = store();
         s.set_logging(false);
         s.put("a".into(), 0, 10, 1).await;
-        assert!(
-            s.take_changelog().is_empty(),
-            "logging off suppresses the changelog"
-        );
+        assert2::assert!(s.take_changelog().is_empty());
         // Read still works; flush/close are no-ops.
-        assert_eq!(
-            s.find_sessions(&"a".to_string(), 0, 100).await,
-            vec![(0, 10, 1)]
-        );
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await == vec![(0, 10, 1)]);
         s.flush().await;
         s.close();
 
@@ -719,22 +709,19 @@ mod tests {
         s.set_logging(true);
         s.put("b".into(), 0, 10, 2).await;
         StateStore::clear(&mut s).await;
-        assert!(s.find_sessions(&"b".to_string(), 0, 100).await.is_empty());
-        assert!(s.take_changelog().is_empty());
+        assert2::assert!(s.find_sessions(&"b".to_string(), 0, 100).await.is_empty());
+        assert2::assert!(s.take_changelog().is_empty());
     }
 
     #[tokio::test]
     async fn plain_session_store_unchanged() {
         let mut s = store();
         s.put("a".into(), 0, 10, 1).await;
-        assert_eq!(
-            s.find_sessions(&"a".to_string(), 0, 100).await,
-            vec![(0, 10, 1)]
-        );
+        assert2::assert!(s.find_sessions(&"a".to_string(), 0, 100).await == vec![(0, 10, 1)]);
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 1);
+        assert2::assert!(cl.len() == 1);
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert!(buffer.is_empty());
+        assert2::assert!(buffer.is_empty());
     }
 }

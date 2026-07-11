@@ -33,6 +33,7 @@ name = "crabka-schema-compat-check"
 path = "src/bin/schema-compat-check.rs"
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-client-core = { version = "0.3.9", path = "../client-core" }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
@@ -75,7 +76,6 @@ reqwest = { version = "0.13", default-features = false, features = ["json", "rus
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
 crabka-client-consumer = { version = "0.3", path = "../client-consumer" }
 datatest-stable = { workspace = true }

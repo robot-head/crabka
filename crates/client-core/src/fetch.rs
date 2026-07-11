@@ -273,7 +273,7 @@ fn decode_fetch_response(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -331,7 +331,7 @@ mod tests {
             ..Default::default()
         };
         let got = decode_fetch_response(&resp, 0).unwrap();
-        assert!(
+        assert2::assert!(
             got == vec![
                 FetchedRecord {
                     offset: 5,
@@ -354,7 +354,7 @@ mod tests {
         let topic_id = WireUuid([7; 16]);
         let req = build_fetch_request("orders", topic_id, 3, 123, 250, 64 * 1024, 1);
 
-        assert!(
+        assert2::assert!(
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 250,
@@ -412,7 +412,7 @@ mod tests {
             ..Default::default()
         };
         let err = decode_fetch_response(&resp, 0).unwrap_err();
-        assert!(matches!(err, ClientError::Server { error_code: 1 }));
+        assert2::assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 
     // ── socket-free end-to-end drive via MockFetchTransport ──────────────────
@@ -463,7 +463,7 @@ mod tests {
         let got = super::fetch_partition_on(&transport, "t", topic_id, 2, 5, 250, 4096)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             got == vec![
                 FetchedRecord {
                     offset: 5,
@@ -495,7 +495,7 @@ mod tests {
             super::fetch_partition_with_isolation_on(&transport, "t", topic_id, 0, 0, 100, 1024, 1)
                 .await
                 .unwrap();
-        assert!(got.is_empty());
+        assert2::assert!(got.is_empty());
     }
 
     /// A transport error from the seam propagates unchanged.
@@ -509,7 +509,7 @@ mod tests {
         let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
             .await
             .unwrap_err();
-        assert!(matches!(err, ClientError::Disconnected));
+        assert2::assert!(matches!(err, ClientError::Disconnected));
     }
 
     /// A partition-level error code surfaces as `ClientError::Server` through the
@@ -535,6 +535,6 @@ mod tests {
         let err = super::fetch_partition_on(&transport, "t", WireUuid([0; 16]), 0, 0, 100, 1024)
             .await
             .unwrap_err();
-        assert!(matches!(err, ClientError::Server { error_code: 1 }));
+        assert2::assert!(matches!(err, ClientError::Server { error_code: 1 }));
     }
 }

@@ -11,7 +11,7 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -411,10 +411,7 @@ async fn real_tempo_and_crabka_match_traceql_metrics_by_labels() -> TestResult {
             metric_prom_labels_list(&tempo_metrics),
             metric_prom_labels_list(&crabka_metrics),
         );
-        assert!(
-            crabka_keys == tempo_keys,
-            "by({by}) series label keys differ: Tempo={tempo_keys:?}, Crabka={crabka_keys:?}"
-        );
+        assert2::assert!(crabka_keys == tempo_keys);
     }
     crabka.shutdown();
     Ok(())
@@ -436,7 +433,7 @@ async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResu
         Some("tenant-b"),
     )
     .await?;
-    assert!(tenant_b_trace_status == ReqwestStatusCode::NOT_FOUND);
+    assert2::assert!(tenant_b_trace_status == ReqwestStatusCode::NOT_FOUND);
 
     let tenant_b_search = get_json(
         &client,
@@ -519,13 +516,9 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .json()
         .await?;
 
-    assert_eq!(
-        fetched.get("type").and_then(JsonValue::as_str),
-        Some("tempo")
-    );
-    assert_eq!(
-        fetched.get("url").and_then(JsonValue::as_str),
-        Some(crabka.container_base_url.as_str())
+    assert2::assert!(fetched.get("type").and_then(JsonValue::as_str) == Some("tempo"));
+    assert2::assert!(
+        fetched.get("url").and_then(JsonValue::as_str) == Some(crabka.container_base_url.as_str())
     );
 
     let echo = client
@@ -538,7 +531,7 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .error_for_status()?
         .text()
         .await?;
-    assert_eq!(echo, "echo");
+    assert2::assert!(echo == "echo");
 
     let trace: JsonValue = client
         .get(format!(
@@ -550,7 +543,7 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .error_for_status()?
         .json()
         .await?;
-    assert!(
+    assert2::assert!(
         trace["trace"]["resourceSpans"]
             .as_array()
             .is_some_and(|spans| !spans.is_empty())
@@ -567,11 +560,10 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .error_for_status()?
         .json()
         .await?;
-    assert!(
+    assert2::assert!(
         search["traces"]
             .as_array()
-            .is_some_and(|traces| !traces.is_empty()),
-        "Grafana-proxied TraceQL search response was empty: {search}"
+            .is_some_and(|traces| !traces.is_empty())
     );
 
     // LEG 4 (error-span TraceQL): drive a status=error selector through the same
@@ -589,14 +581,11 @@ async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
         .error_for_status()?
         .json()
         .await?;
-    assert!(
-        error_search["traces"]
-            .as_array()
-            .is_some_and(|traces| traces
-                .iter()
-                .any(|trace| { trace["traceID"].as_str() == Some(TRACE_ID_HEX) })),
-        "Grafana-proxied error-status TraceQL search did not return the error trace: {error_search}"
-    );
+    assert2::assert!(error_search["traces"].as_array().is_some_and(|traces| {
+        traces
+            .iter()
+            .any(|trace| trace["traceID"].as_str() == Some(TRACE_ID_HEX))
+    }));
     assert_search_contains_span_id(&error_search, ERROR_SPAN_ID_HEX);
 
     crabka.shutdown();
@@ -678,10 +667,7 @@ async fn grafana_service_graph_prometheus_datasource_and_series() -> TestResult 
         .error_for_status()?
         .json()
         .await?;
-    assert_eq!(
-        fetched.get("type").and_then(JsonValue::as_str),
-        Some("prometheus")
-    );
+    assert2::assert!(fetched.get("type").and_then(JsonValue::as_str) == Some("prometheus"));
 
     // (2) Crabka-side production: the real metrics-generator EdgeStore pairs the
     // seed's client↔server pair into the Service-Graph series Grafana queries.
@@ -738,8 +724,8 @@ fn service_graph_series_for_seed_edge() -> Vec<Series> {
         MetricsStatusCode::Ok,
         8_000_000,
     );
-    assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
-    assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
+    assert2::assert!(store.record_span(&client, 0) == RecordOutcome::Recorded);
+    assert2::assert!(store.record_span(&server, 1) == RecordOutcome::Completed);
     store.drain(1_000)
 }
 
@@ -805,7 +791,7 @@ async fn start_crabka_pair_on(
                 .body(Body::from(otlp_body.to_vec()))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let _ = resp.into_body().collect().await?;
 
     let records = sink
@@ -980,7 +966,7 @@ async fn post_otlp(
         req = req.header("x-scope-orgid", tenant);
     }
     let status = req.send().await?.status();
-    assert!(status.is_success(), "OTLP push failed: {status}");
+    assert2::assert!(status.is_success());
     Ok(())
 }
 
@@ -1010,11 +996,7 @@ async fn get_json(
     let resp = req.send().await?;
     let status = resp.status();
     let body = resp.bytes().await?;
-    assert!(
-        status == ReqwestStatusCode::OK,
-        "GET {url} failed: {status} {}",
-        String::from_utf8_lossy(&body)
-    );
+    assert2::assert!(status == ReqwestStatusCode::OK);
     Ok(serde_json::from_slice(&body)?)
 }
 
@@ -1110,14 +1092,14 @@ async fn get_trace_by_id_until_found(
 
 fn assert_trace_shape_matches(tempo: &JsonValue, crabka: &JsonValue) {
     if !tempo["status"].is_null() {
-        assert!(tempo["status"] == crabka["status"]);
+        assert2::assert!(tempo["status"] == crabka["status"]);
     }
-    assert!(
+    assert2::assert!(
         tempo["trace"]["resourceSpans"]
             .as_array()
             .is_some_and(|spans| !spans.is_empty())
     );
-    assert!(
+    assert2::assert!(
         crabka["trace"]["resourceSpans"]
             .as_array()
             .is_some_and(|spans| !spans.is_empty())
@@ -1151,30 +1133,18 @@ fn assert_search_contains_span_id(search: &JsonValue, span_id: &str) {
         .flat_map(|trace| trace["spanSets"].as_array().into_iter().flatten())
         .flat_map(|span_set| span_set["spans"].as_array().into_iter().flatten())
         .any(|span| span["spanID"].as_str() == Some(span_id));
-    assert!(
-        found,
-        "search response did not contain span {span_id}: {search}"
-    );
+    assert2::assert!(found);
 }
 
 fn assert_search_empty(search: &JsonValue) {
-    assert!(
-        search["traces"].as_array().is_some_and(Vec::is_empty),
-        "expected empty search response: {search}"
-    );
+    assert2::assert!(search["traces"].as_array().is_some_and(Vec::is_empty));
 }
 
 fn assert_metric_totals_match(tempo: &JsonValue, crabka: &JsonValue) {
     let tempo_total = metric_points_total(tempo);
     let crabka_total = metric_points_total(crabka);
-    assert!(
-        tempo_total > 0.0,
-        "Tempo metrics response had no positive points: {tempo}"
-    );
-    assert!(
-        (tempo_total - crabka_total).abs() < f64::EPSILON,
-        "metric totals differed; Tempo={tempo_total}, Crabka={crabka_total}, Tempo response={tempo}, Crabka response={crabka}"
-    );
+    assert2::assert!(tempo_total > 0.0);
+    assert2::assert!((tempo_total - crabka_total).abs() < f64::EPSILON);
 }
 
 /// The set of `series[].labels[].key` strings across a TraceQL-metrics response
@@ -1235,32 +1205,26 @@ fn assert_required_tag_names_match(tempo: &JsonValue, crabka: &JsonValue) {
     let tempo_tags = tag_names(tempo);
     let crabka_tags = tag_names(crabka);
     for required in ["service.name", "http.method", "db.system"] {
-        assert!(tempo_tags.contains(required));
-        assert!(crabka_tags.contains(required));
+        assert2::assert!(tempo_tags.contains(required));
+        assert2::assert!(crabka_tags.contains(required));
     }
 }
 
 fn assert_required_tag_values_match(tempo: &JsonValue, crabka: &JsonValue, required: &str) {
     let tempo_values = tag_values(tempo);
     let crabka_values = tag_values(crabka);
-    assert!(tempo_values.contains(required));
-    assert!(crabka_values.contains(required));
+    assert2::assert!(tempo_values.contains(required));
+    assert2::assert!(crabka_values.contains(required));
 }
 
 fn assert_tag_names_do_not_contain(value: &JsonValue, forbidden: &str) {
     let names = tag_names(value);
-    assert!(
-        !names.contains(forbidden),
-        "tag names unexpectedly contained {forbidden}: {value}"
-    );
+    assert2::assert!(!names.contains(forbidden));
 }
 
 fn assert_tag_values_do_not_contain(value: &JsonValue, forbidden: &str) {
     let values = tag_values(value);
-    assert!(
-        !values.contains(forbidden),
-        "tag values unexpectedly contained {forbidden}: {value}"
-    );
+    assert2::assert!(!values.contains(forbidden));
 }
 
 fn tag_names(value: &JsonValue) -> BTreeSet<String> {

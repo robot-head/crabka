@@ -351,7 +351,7 @@ mod producer_state_model;
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -359,7 +359,7 @@ mod tests {
     async fn first_batch_appends() {
         let s = ProducerState::new();
         let d = s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await;
-        assert!(d == Decision::Append);
+        assert2::assert!(d == Decision::Append);
     }
 
     #[tokio::test]
@@ -377,7 +377,7 @@ mod tests {
         )
         .await;
         let d = s.check("t", PartitionIndex(0), 1000, 0, 5, 2).await;
-        assert!(d == Decision::Append);
+        assert2::assert!(d == Decision::Append);
     }
 
     #[tokio::test]
@@ -385,7 +385,7 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", PartitionIndex(0), 1000, 0, 0, 4, 0, 1).await;
         let d = s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await;
-        assert!(d == Decision::Duplicate { base_offset: 0 });
+        assert2::assert!(d == Decision::Duplicate { base_offset: 0 });
     }
 
     #[tokio::test]
@@ -408,17 +408,14 @@ mod tests {
             1,
         )
         .await;
-        assert!(
+        assert2::assert!(
             s.check("t", PartitionIndex(0), 1000, 0, 0, 13).await
                 == Decision::Duplicate {
                     base_offset: 1_471_686
                 }
         );
         s.truncate("t", PartitionIndex(0), 1_471_686).await;
-        assert!(
-            s.check("t", PartitionIndex(0), 1000, 0, 0, 13).await == Decision::Append,
-            "after truncation the retried batch must re-append, not dedup against the truncated offset"
-        );
+        assert2::assert!(s.check("t", PartitionIndex(0), 1000, 0, 0, 13).await == Decision::Append);
     }
 
     #[tokio::test]
@@ -438,7 +435,7 @@ mod tests {
         )
         .await; // last_offset 104
         s.truncate("t", PartitionIndex(0), 200).await;
-        assert!(
+        assert2::assert!(
             s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await
                 == Decision::Duplicate { base_offset: 100 }
         );
@@ -461,14 +458,14 @@ mod tests {
         )
         .await; // last_offset 104
         s.truncate("t", PartitionIndex(0), 104).await;
-        assert!(s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await == Decision::Append);
+        assert2::assert!(s.check("t", PartitionIndex(0), 1000, 0, 0, 4).await == Decision::Append);
     }
 
     #[tokio::test]
     async fn truncate_unknown_partition_is_noop() {
         let s = ProducerState::new();
         s.truncate("never-seen", PartitionIndex(7), 0).await; // must not panic or create state
-        assert!(s.snapshot("never-seen", PartitionIndex(7)).await.is_empty());
+        assert2::assert!(s.snapshot("never-seen", PartitionIndex(7)).await.is_empty());
     }
 
     #[tokio::test]
@@ -477,7 +474,7 @@ mod tests {
         s.commit("t", PartitionIndex(0), 1000, 0, 0, 4, 0, 1).await;
         // Last seq is 4; next valid base_seq is 5. Sending 10 → OutOfOrder.
         let d = s.check("t", PartitionIndex(0), 1000, 0, 10, 2).await;
-        assert!(d == Decision::OutOfOrder);
+        assert2::assert!(d == Decision::OutOfOrder);
     }
 
     #[tokio::test]
@@ -485,7 +482,7 @@ mod tests {
         let s = ProducerState::new();
         s.commit("t", PartitionIndex(0), 1000, 5, 0, 4, 0, 1).await;
         let d = s.check("t", PartitionIndex(0), 1000, 4, 5, 2).await;
-        assert!(d == Decision::Fenced);
+        assert2::assert!(d == Decision::Fenced);
     }
 
     /// A bumped producer epoch (same `producer_id`, higher epoch) establishes a
@@ -514,7 +511,7 @@ mod tests {
         .await;
         // Same pid, epoch 6, base_sequence 0 — a fresh write, NOT a duplicate.
         let d = s.check("t", PartitionIndex(0), 1000, 6, 0, 0).await;
-        assert!(d == Decision::Append);
+        assert2::assert!(d == Decision::Append);
     }
 
     /// A bumped epoch that CONTINUES the sequence (`base_sequence > 0`) also
@@ -529,7 +526,7 @@ mod tests {
         s.commit("t", PartitionIndex(0), 1000, 5, 0, 2, 0, 1).await;
         // Epoch 6 (KIP-890 bump), sequence continues at 3 — still a fresh append.
         let d = s.check("t", PartitionIndex(0), 1000, 6, 3, 0).await;
-        assert!(d == Decision::Append);
+        assert2::assert!(d == Decision::Append);
         // After committing the new epoch's batch, same-epoch dedup resumes.
         s.commit(
             "t",
@@ -543,7 +540,7 @@ mod tests {
         )
         .await;
         let dup = s.check("t", PartitionIndex(0), 1000, 6, 3, 0).await;
-        assert!(dup == Decision::Duplicate { base_offset: 10 });
+        assert2::assert!(dup == Decision::Duplicate { base_offset: 10 });
     }
 
     #[tokio::test]
@@ -564,13 +561,10 @@ mod tests {
                 last_activity_ms: snap[0].1.last_activity_ms,
             },
         )];
-        assert!(snap == expected);
+        assert2::assert!(snap == expected);
         // Untouched partition / topic report empty without panicking.
         for (topic, partition) in [("t", PartitionIndex(0)), ("other", PartitionIndex(3))] {
-            assert!(
-                s.snapshot(topic, partition).await == vec![],
-                "case: {topic}/{partition}"
-            );
+            assert2::assert!(s.snapshot(topic, partition).await == vec![]);
         }
     }
 
@@ -591,10 +585,9 @@ mod tests {
         // now = 10_000, ttl = 5_000 → pid 1 (age 9_000) expires, pid 2
         // (age 1_000) survives.
         let evicted = s.expire_older_than(10_000, 5_000).await;
-        assert!(evicted == 1);
+        assert2::assert!(evicted == 1);
         let snap = s.snapshot("t", PartitionIndex(0)).await;
-        assert!(snap.len() == 1);
-        assert!(snap[0].0 == 2, "only the recently-active producer survives");
+        assert2::assert!(snap.iter().map(|entry| entry.0).collect::<Vec<_>>() == vec![2]);
     }
 
     #[tokio::test]
@@ -612,8 +605,8 @@ mod tests {
         }
 
         let evicted = s.expire_older_than(10_000, 5_000).await;
-        assert!(evicted == 1);
-        assert!(s.snapshot("t", PartitionIndex(0)).await.is_empty());
+        assert2::assert!(evicted == 1);
+        assert2::assert!(s.snapshot("t", PartitionIndex(0)).await.is_empty());
     }
 
     #[tokio::test]
@@ -654,12 +647,11 @@ mod tests {
             .active_snapshot("t", PartitionIndex(0), 10_000, 5_000)
             .await;
         let expected: HashMap<i64, i64> = [(2, 20)].into_iter().collect();
-        assert!(snap == expected);
+        assert2::assert!(snap == expected);
         // Unknown partition / topic → empty without panicking.
         for (topic, partition) in [("t", PartitionIndex(99)), ("nope", PartitionIndex(0))] {
-            assert!(
-                s.active_snapshot(topic, partition, 10_000, 5_000).await == HashMap::new(),
-                "case: {topic}/{partition}"
+            assert2::assert!(
+                s.active_snapshot(topic, partition, 10_000, 5_000).await == HashMap::new()
             );
         }
     }

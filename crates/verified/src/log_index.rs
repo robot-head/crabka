@@ -39,7 +39,7 @@ pub fn offset_index_lookup(entries: &[(u32, u32)], target: u32) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use proptest::prelude::*;
 
     use super::*;
@@ -77,6 +77,6 @@ mod tests {
 
     #[test]
     fn empty_index_returns_zero() {
-        assert!(offset_index_lookup(&[], 42) == 0);
+        assert2::assert!(offset_index_lookup(&[], 42) == 0);
     }
 }

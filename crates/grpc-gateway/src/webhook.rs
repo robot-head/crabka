@@ -498,7 +498,7 @@ mod tests {
             .body(Body::from("body"))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        assert2::assert!(resp.status() == StatusCode::NOT_FOUND);
     }
 
     // -----------------------------------------------------------------------
@@ -515,7 +515,7 @@ mod tests {
             .body(Body::from(body))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+        assert2::assert!(resp.status() == StatusCode::PAYLOAD_TOO_LARGE);
     }
 
     // -----------------------------------------------------------------------
@@ -523,27 +523,17 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[tokio::test]
-    async fn missing_sig_header_returns_401() {
-        let state = state_with_webhooks(make_webhook("gh", signed_cfg("events"))).await;
-        let app = webhook_router(state);
-        // No X-Sig header.
-        let req = Request::post("/v1/webhooks/gh")
-            .body(Body::from("hello"))
-            .unwrap();
-        let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
-    }
-
-    #[tokio::test]
-    async fn bad_sig_returns_401() {
-        let state = state_with_webhooks(make_webhook("gh", signed_cfg("events"))).await;
-        let app = webhook_router(state);
-        let req = Request::post("/v1/webhooks/gh")
-            .header("X-Sig", "deadbeef")
-            .body(Body::from("hello"))
-            .unwrap();
-        let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    async fn invalid_signature_cases_return_401() {
+        for (_name, signature) in [("missing", None), ("invalid", Some("deadbeef"))] {
+            let state = state_with_webhooks(make_webhook("gh", signed_cfg("events"))).await;
+            let app = webhook_router(state);
+            let mut request = Request::post("/v1/webhooks/gh");
+            if let Some(signature) = signature {
+                request = request.header("X-Sig", signature);
+            }
+            let response = oneshot(app, request.body(Body::from("hello")).unwrap()).await;
+            assert2::assert!(response.status() == StatusCode::UNAUTHORIZED);
+        }
     }
 
     // NOTE: tests that pass the auth guard and reach the produce layer (e.g.
@@ -579,7 +569,7 @@ mod tests {
             .body(Body::from(body.as_slice()))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+        assert2::assert!(resp.status() == StatusCode::UNAUTHORIZED);
     }
 
     // NOTE: The "fresh timestamp passes replay guard → reaches produce" test is
@@ -610,7 +600,7 @@ mod tests {
             .body(Body::from(r#"{"type":"push"}"#))
             .unwrap();
         let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
+        assert2::assert!(resp.status() == StatusCode::BAD_REQUEST);
     }
 
     // -----------------------------------------------------------------------
@@ -638,11 +628,18 @@ mod tests {
             )
         });
 
-        let (json, sel) = body_structured.expect("schema_subject ⇒ structured body");
-        assert_eq!(json, body, "structured body carries the raw request bytes");
-        assert_eq!(sel.subject.as_deref(), Some("orders-value"));
-        assert_eq!(sel.id, None);
-        assert_eq!(sel.format, SchemaFormat::Avro);
+        let actual = body_structured.expect("schema_subject ⇒ structured body");
+        assert2::assert!(
+            actual
+                == (
+                    body,
+                    SchemaSelector {
+                        subject: Some("orders-value".to_string()),
+                        id: None,
+                        format: SchemaFormat::Avro,
+                    },
+                )
+        );
     }
 
     // NOTE: the RawCodec-passthrough-reaches-produce path needs a real broker
@@ -650,41 +647,36 @@ mod tests {
     // unit-tested here; the schema-gate behaviour is covered by the Validate→400
     // and Registry→503 tests below, and end-to-end produce by tests/.
 
-    /// A codec that rejects `encode` with `CodecError::Validate` (the
-    /// registry's response to a body that fails schema validation) maps to
-    /// HTTP 400.
+    /// Codec failures map to their complete HTTP response status table.
     #[tokio::test]
-    async fn schema_validation_failure_returns_400() {
-        let mut cfg = unsigned_cfg("orders");
-        cfg.max_body_bytes = 1024;
-        cfg.schema_subject = Some("orders-value".to_string());
-        let codec = Arc::new(FailingEncodeCodec(CodecError::Validate));
-        let state = state_with_webhooks_codec(make_webhook("orders", cfg), codec).await;
-        let app = webhook_router(state);
-        let req = Request::post("/v1/webhooks/orders")
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"id":"not-an-int"}"#))
-            .unwrap();
-        let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::BAD_REQUEST);
-    }
-
-    /// A codec that fails with `CodecError::Registry` (registry unreachable)
-    /// maps to HTTP 503 (retriable), distinct from a 400 validation failure.
-    #[tokio::test]
-    async fn schema_registry_unavailable_returns_503() {
-        let mut cfg = unsigned_cfg("orders");
-        cfg.max_body_bytes = 1024;
-        cfg.schema_subject = Some("orders-value".to_string());
-        let codec = Arc::new(FailingEncodeCodec(CodecError::Registry));
-        let state = state_with_webhooks_codec(make_webhook("orders", cfg), codec).await;
-        let app = webhook_router(state);
-        let req = Request::post("/v1/webhooks/orders")
-            .header("content-type", "application/json")
-            .body(Body::from(r#"{"id":1}"#))
-            .unwrap();
-        let resp = oneshot(app, req).await;
-        assert_eq!(resp.status(), StatusCode::SERVICE_UNAVAILABLE);
+    async fn schema_encode_failure_status_cases() {
+        for (_name, error, body, expected) in [
+            (
+                "schema validation",
+                CodecError::Validate as fn(String) -> CodecError,
+                r#"{"id":"not-an-int"}"#,
+                StatusCode::BAD_REQUEST,
+            ),
+            (
+                "registry unavailable",
+                CodecError::Registry as fn(String) -> CodecError,
+                r#"{"id":1}"#,
+                StatusCode::SERVICE_UNAVAILABLE,
+            ),
+        ] {
+            let mut cfg = unsigned_cfg("orders");
+            cfg.max_body_bytes = 1024;
+            cfg.schema_subject = Some("orders-value".to_string());
+            let codec = Arc::new(FailingEncodeCodec(error));
+            let state = state_with_webhooks_codec(make_webhook("orders", cfg), codec).await;
+            let app = webhook_router(state);
+            let req = Request::post("/v1/webhooks/orders")
+                .header("content-type", "application/json")
+                .body(Body::from(body))
+                .unwrap();
+            let resp = oneshot(app, req).await;
+            assert2::assert!(resp.status() == expected);
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -699,36 +691,37 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn needs_json_false_when_no_json_sources() {
-        use crate::webhook_config::Source;
-
-        let mut cfg = unsigned_cfg("t");
-        // header: source — does NOT require JSON parse.
-        cfg.idempotency_source = Some(Source::Header("X-Id".to_string()));
-        assert!(!needs_json(&cfg));
-    }
-
-    #[test]
-    fn needs_json_true_when_jsonpath_idempotency() {
+    fn needs_json_source_cases() {
         use jsonpath_rust::parser::parse_json_path;
 
         use crate::webhook_config::Source;
 
-        let mut cfg = unsigned_cfg("t");
-        let q = parse_json_path("$.id").unwrap();
-        cfg.idempotency_source = Some(Source::JsonPath(q));
-        assert!(needs_json(&cfg));
-    }
+        let cases = [
+            (
+                "header idempotency",
+                Some(Source::Header("X-Id".to_string())),
+                None,
+                false,
+            ),
+            (
+                "jsonpath idempotency",
+                Some(Source::JsonPath(parse_json_path("$.id").unwrap())),
+                None,
+                true,
+            ),
+            (
+                "jsonpath key",
+                None,
+                Some(Source::JsonPath(parse_json_path("$.key").unwrap())),
+                true,
+            ),
+        ];
 
-    #[test]
-    fn needs_json_true_when_jsonpath_key() {
-        use jsonpath_rust::parser::parse_json_path;
-
-        use crate::webhook_config::Source;
-
-        let mut cfg = unsigned_cfg("t");
-        let q = parse_json_path("$.key").unwrap();
-        cfg.key_source = Some(Source::JsonPath(q));
-        assert!(needs_json(&cfg));
+        for (_name, idempotency_source, key_source, expected) in cases {
+            let mut cfg = unsigned_cfg("t");
+            cfg.idempotency_source = idempotency_source;
+            cfg.key_source = key_source;
+            assert2::assert!(needs_json(&cfg) == expected);
+        }
     }
 }

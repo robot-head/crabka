@@ -20,6 +20,7 @@ workspace = true
 heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 [dependencies]
+assert2 = { workspace = true }
 async-trait = { workspace = true }
 axum = { workspace = true, features = ["json"] }
 bytes = { workspace = true }
@@ -47,7 +48,6 @@ url = { workspace = true }
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 prost = { workspace = true }
 snap = { workspace = true }
 testcontainers = { workspace = true }

@@ -227,10 +227,7 @@ mod tests {
         let bytes = request.encode_to_vec();
         let decoded = pb::push::v1::PushRequest::decode(bytes.as_slice()).unwrap();
 
-        assert_eq!(decoded.series.len(), 1);
-        assert_eq!(decoded.series[0].samples[0].raw_profile, vec![1, 2, 3]);
-        assert_eq!(decoded.series[0].samples[0].id, "abc");
-        assert_eq!(decoded.series[0].annotations[0].key, "source");
+        assert2::assert!(decoded == request);
     }
 
     #[test]
@@ -246,8 +243,7 @@ mod tests {
         let bytes = dictionary.encode_to_vec();
         let decoded = pb::otlp_profiles::ProfilesDictionary::decode(bytes.as_slice()).unwrap();
 
-        assert!(decoded.string_table[0].is_empty());
-        assert_eq!(decoded.stack_table[0].location_indices, vec![0, 1]);
+        assert2::assert!(decoded == dictionary);
 
         let sample = pb::otlp_profiles::Sample {
             stack_index: 0,
@@ -255,11 +251,11 @@ mod tests {
             ..Default::default()
         };
         let sample_bytes = sample.encode_to_vec();
-        assert_eq!(
+        assert2::assert!(
             pb::otlp_profiles::Sample::decode(sample_bytes.as_slice())
                 .unwrap()
-                .values,
-            vec![5]
+                .values
+                == vec![5]
         );
     }
 
@@ -274,12 +270,12 @@ mod tests {
 
         let bytes = point.encode_to_vec();
 
-        assert_eq!(
-            bytes,
-            vec![
-                0x09, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f, // value = 1.5, field 1
-                0x10, 42, // timestamp = 42, field 2
-            ]
+        assert2::assert!(
+            bytes
+                == vec![
+                    0x09, 0, 0, 0, 0, 0, 0, 0xf8, 0x3f, // value = 1.5, field 1
+                    0x10, 42, // timestamp = 42, field 2
+                ]
         );
     }
 
@@ -306,8 +302,8 @@ mod tests {
 
         let bytes = point.encode_to_vec();
 
-        assert!(bytes.contains(&0x1a)); // annotations, field 3
-        assert!(bytes.contains(&0x22)); // exemplars, field 4
+        assert2::assert!(bytes.contains(&0x1a)); // annotations, field 3
+        assert2::assert!(bytes.contains(&0x22)); // exemplars, field 4
     }
 
     #[test]
@@ -323,33 +319,28 @@ mod tests {
 
         let bytes = diff.encode_to_vec();
 
-        assert_eq!(
-            bytes,
-            vec![
-                0x18, 100, // total, field 3
-                0x20, 40, // max_self, field 4
-                0x28, 60, // leftTicks, field 5
-                0x30, 40, // rightTicks, field 6
-            ]
+        assert2::assert!(
+            bytes
+                == vec![
+                    0x18, 100, // total, field 3
+                    0x20, 40, // max_self, field 4
+                    0x28, 60, // leftTicks, field 5
+                    0x30, 40, // rightTicks, field 6
+                ]
         );
     }
 
     #[test]
     fn querier_enums_use_upstream_names_and_values() {
-        assert_eq!(pb::querier::v1::ProfileFormat::Flamegraph as i32, 1);
-        assert_eq!(
-            pb::querier::v1::ProfileFormat::Flamegraph.as_str_name(),
-            "PROFILE_FORMAT_FLAMEGRAPH"
+        assert2::assert!(pb::querier::v1::ProfileFormat::Flamegraph as i32 == 1);
+        assert2::assert!(
+            pb::querier::v1::ProfileFormat::Flamegraph.as_str_name() == "PROFILE_FORMAT_FLAMEGRAPH"
         );
-        assert_eq!(
-            pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeAverage as i32,
-            1
+        assert2::assert!(
+            pb::querier::v1::SeriesAggregationType::TimeSeriesAggregationTypeAverage as i32 == 1
         );
-        assert_eq!(pb::querier::v1::ExemplarType::None as i32, 1);
-        assert_eq!(
-            pb::querier::v1::ExemplarType::Span.as_str_name(),
-            "EXEMPLAR_TYPE_SPAN"
-        );
+        assert2::assert!(pb::querier::v1::ExemplarType::None as i32 == 1);
+        assert2::assert!(pb::querier::v1::ExemplarType::Span.as_str_name() == "EXEMPLAR_TYPE_SPAN");
     }
 
     #[test]
@@ -375,9 +366,9 @@ mod tests {
 
         let bytes = request.encode_to_vec();
 
-        assert!(bytes.contains(&0x42)); // stack_trace_selector, field 8
-        assert!(bytes.contains(&0x48)); // limit, field 9
-        assert!(bytes.contains(&0x50)); // exemplar_type, field 10
+        assert2::assert!(bytes.contains(&0x42)); // stack_trace_selector, field 8
+        assert2::assert!(bytes.contains(&0x48)); // limit, field 9
+        assert2::assert!(bytes.contains(&0x50)); // exemplar_type, field 10
     }
 
     #[test]
@@ -399,9 +390,9 @@ mod tests {
 
         let bytes = request.encode_to_vec();
 
-        assert!(bytes.contains(&0x28)); // max_nodes, field 5
-        assert!(bytes.contains(&0x32)); // stack_trace_selector, field 6
-        assert!(bytes.contains(&0x3a)); // profile_id_selector, field 7
+        assert2::assert!(bytes.contains(&0x28)); // max_nodes, field 5
+        assert2::assert!(bytes.contains(&0x32)); // stack_trace_selector, field 6
+        assert2::assert!(bytes.contains(&0x3a)); // profile_id_selector, field 7
     }
 
     #[test]
@@ -418,29 +409,29 @@ mod tests {
 
         let bytes = request.encode_to_vec();
 
-        assert_eq!(
-            bytes,
-            vec![
-                0x0a, 0x2b, b'p', b'r', b'o', b'c', b'e', b's', b's', b'_', b'c', b'p', b'u', b':',
-                b'c', b'p', b'u', b':', b'n', b'a', b'n', b'o', b's', b'e', b'c', b'o', b'n', b'd',
-                b's', b':', b'c', b'p', b'u', b':', b'n', b'a', b'n', b'o', b's', b'e', b'c', b'o',
-                b'n', b'd', b's', // profile_typeID, field 1
-                0x12, 0x02, b'{', b'}', // label_selector, field 2
-                0x1a, 0x10, b'9', b'a', b'5', b'1', b'7', b'1', b'8', b'3', b'f', b'2', b'6', b'a',
-                b'0', b'8', b'9', b'd', // span_selector, field 3
-                0x20, 10, // start, field 4
-                0x28, 20, // end, field 5
-                0x30, 30, // max_nodes, field 6
-                0x38, 1, // format, field 7
-            ]
+        assert2::assert!(
+            bytes
+                == vec![
+                    0x0a, 0x2b, b'p', b'r', b'o', b'c', b'e', b's', b's', b'_', b'c', b'p', b'u',
+                    b':', b'c', b'p', b'u', b':', b'n', b'a', b'n', b'o', b's', b'e', b'c', b'o',
+                    b'n', b'd', b's', b':', b'c', b'p', b'u', b':', b'n', b'a', b'n', b'o', b's',
+                    b'e', b'c', b'o', b'n', b'd', b's', // profile_typeID, field 1
+                    0x12, 0x02, b'{', b'}', // label_selector, field 2
+                    0x1a, 0x10, b'9', b'a', b'5', b'1', b'7', b'1', b'8', b'3', b'f', b'2', b'6',
+                    b'a', b'0', b'8', b'9', b'd', // span_selector, field 3
+                    0x20, 10, // start, field 4
+                    0x28, 20, // end, field 5
+                    0x30, 30, // max_nodes, field 6
+                    0x38, 1, // format, field 7
+                ]
         );
     }
 
     #[test]
     fn heatmap_messages_use_upstream_shape() {
-        assert_eq!(
-            pb::querier::v1::HeatmapQueryType::Individual.as_str_name(),
-            "HEATMAP_QUERY_TYPE_INDIVIDUAL"
+        assert2::assert!(
+            pb::querier::v1::HeatmapQueryType::Individual.as_str_name()
+                == "HEATMAP_QUERY_TYPE_INDIVIDUAL"
         );
         let request = pb::querier::v1::SelectHeatmapRequest {
             profile_type_id: "process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string(),
@@ -471,9 +462,9 @@ mod tests {
         let request_bytes = request.encode_to_vec();
         let response_bytes = response.encode_to_vec();
 
-        assert!(request_bytes.contains(&0x29)); // step, field 5, fixed64 wire type
-        assert!(!response_bytes.is_empty());
-        assert_eq!(response.series[0].slots[0].counts, vec![1, 2]);
+        assert2::assert!(request_bytes.contains(&0x29)); // step, field 5, fixed64 wire type
+        assert2::assert!(!response_bytes.is_empty());
+        assert2::assert!(response.series[0].slots[0].counts == vec![1, 2]);
     }
 
     #[test]
@@ -505,10 +496,10 @@ mod tests {
         let request_bytes = request.encode_to_vec();
         let response_bytes = response.encode_to_vec();
 
-        assert_eq!(request_bytes[0], 0x10); // start, field 2
-        assert_eq!(request_bytes[2], 0x18); // end, field 3
-        assert!(request_bytes.contains(&0x22)); // query, field 4
-        assert!(response_bytes.contains(&0x0a)); // query_scopes, field 1
-        assert!(response_bytes.contains(&0x12)); // query_impact, field 2
+        assert2::assert!(request_bytes[0] == 0x10); // start, field 2
+        assert2::assert!(request_bytes[2] == 0x18); // end, field 3
+        assert2::assert!(request_bytes.contains(&0x22)); // query, field 4
+        assert2::assert!(response_bytes.contains(&0x0a)); // query_scopes, field 1
+        assert2::assert!(response_bytes.contains(&0x12)); // query_impact, field 2
     }
 }

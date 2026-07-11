@@ -130,7 +130,7 @@ fn response(groups: Vec<DescribedGroup>) -> ConsumerGroupDescribeResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
     use crabka_protocol::Encode;
@@ -170,40 +170,45 @@ mod tests {
     #[test]
     fn ok_row_preserves_requested_group_id() {
         let row = ok_row("orders");
-        assert!(row.group_id == "orders");
-        assert!(row.error_code == codes::NONE);
+        let expected = DescribedGroup {
+            group_id: "orders".into(),
+            ..Default::default()
+        };
+        assert2::assert!(row == expected);
     }
 
     #[test]
     fn group_version_gate_distinguishes_disabled_and_enabled_images() {
         // (finalized group.version level; None = fresh image) → disabled?
-        let cases = [(None, true), (Some(1), false), (Some(0), true)];
-        for (level, want_disabled) in cases {
+        let cases = [
+            ("fresh image", None, true),
+            ("enabled level", Some(1), false),
+            ("explicitly disabled level", Some(0), true),
+        ];
+        for (_case, level, want_disabled) in cases {
             let image = match level {
                 None => MetadataImage::new(uuid::Uuid::nil()),
                 Some(level) => image_with_group_version(level),
             };
-            assert!(
-                group_version_disabled(&image) == want_disabled,
-                "level {level:?}"
-            );
+            assert2::assert!(group_version_disabled(&image) == want_disabled);
         }
     }
 
     #[test]
     fn next_gen_config_gate_inverts_enabled_flag() {
-        assert!(!next_gen_config_disabled(true));
-        assert!(next_gen_config_disabled(false));
+        assert2::assert!(!next_gen_config_disabled(true));
+        assert2::assert!(next_gen_config_disabled(false));
     }
 
     #[test]
     fn group_state_reflects_member_count() {
-        let cases = [(0, "EMPTY"), (1, "STABLE"), (3, "STABLE")];
-        for (members, want) in cases {
-            assert!(
-                group_state_for_member_count(members) == want,
-                "members {members}"
-            );
+        let cases = [
+            ("empty group", 0, "EMPTY"),
+            ("single member", 1, "STABLE"),
+            ("multiple members", 3, "STABLE"),
+        ];
+        for (_case, members, want) in cases {
+            assert2::assert!(group_state_for_member_count(members) == want);
         }
     }
 
@@ -246,7 +251,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -276,7 +281,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
 
         broker_handle.shutdown().await;
     }

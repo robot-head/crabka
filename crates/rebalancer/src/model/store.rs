@@ -154,7 +154,6 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::model::proposal::{Proposal, ProposalStatus, ProposalSummary};
@@ -178,8 +177,7 @@ mod tests {
     fn get_returns_inserted_proposal() {
         let s = ProposalStore::new(4);
         s.insert(p("a"));
-        assert!(s.get("a").is_some());
-        assert!(s.get("ghost").is_none());
+        assert2::assert!((s.get("a").is_some(), s.get("ghost").is_none()) == (true, true));
     }
 
     #[test]
@@ -189,7 +187,7 @@ mod tests {
         s.insert(p("b"));
         s.insert(p("c"));
         for (id, want_present) in [("a", false), ("b", true), ("c", true)] {
-            assert!(s.get(id).is_some() == want_present, "proposal {id:?}");
+            assert2::assert!(s.get(id).is_some() == want_present);
         }
     }
 
@@ -200,7 +198,7 @@ mod tests {
         s.insert(p("b"));
         s.insert(p("c"));
         let listed: Vec<String> = s.list(2).into_iter().map(|p| p.id).collect();
-        assert!(listed == vec!["c".to_string(), "b".to_string()]);
+        assert2::assert!(listed == vec!["c".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -210,7 +208,7 @@ mod tests {
         s.insert(p("b"));
         s.insert(p("c"));
         let listed: Vec<String> = s.list(0).into_iter().map(|p| p.id).collect();
-        assert!(listed == vec!["c".to_string(), "b".to_string()]);
+        assert2::assert!(listed == vec!["c".to_string(), "b".to_string()]);
     }
 
     #[test]
@@ -218,8 +216,7 @@ mod tests {
         let s = ProposalStore::new(0);
         s.insert(p("a"));
         s.insert(p("b"));
-        assert!(s.get("a").is_none());
-        assert!(s.get("b").is_some());
+        assert2::assert!((s.get("a").is_none(), s.get("b").is_some()) == (true, true));
     }
 
     #[test]
@@ -244,21 +241,21 @@ mod tests {
             failure_reason: None,
             throttle_bytes_per_sec: 0,
         };
-        assert!(updated == want);
-        assert!(s.get("a") == Some(want), "mutation must persist in store");
+        assert2::assert!(updated == want);
+        assert2::assert!(s.get("a") == Some(want));
     }
 
     #[test]
     fn mutate_returns_none_for_unknown_id() {
         let s = ProposalStore::new(4);
-        assert!(s.mutate("ghost", |_| {}).is_none());
+        assert2::assert!(s.mutate("ghost", |_| {}).is_none());
     }
 
     #[test]
     fn open_creates_empty_when_file_missing() {
         let dir = tempfile::tempdir().unwrap();
         let s = ProposalStore::open(dir.path(), 4).unwrap();
-        assert!(s.list(0).is_empty());
+        assert2::assert!(s.list(0).is_empty());
     }
 
     #[test]
@@ -268,7 +265,7 @@ mod tests {
 
         let err = ProposalStore::open(dir.path(), 4).unwrap_err();
 
-        assert!(matches!(err, StoreError::Io(_)));
+        assert2::assert!(matches!(err, StoreError::Io(_)));
     }
 
     #[test]
@@ -281,8 +278,10 @@ mod tests {
             s.mutate("a", |pp| pp.status = ProposalStatus::Executing);
         }
         let s2 = ProposalStore::open(dir.path(), 4).unwrap();
-        assert!(s2.get("a").unwrap().status == ProposalStatus::Executing);
-        assert!(s2.get("b").is_some());
+        assert2::assert!(
+            (s2.get("a").map(|p| p.status), s2.get("b").is_some())
+                == (Some(ProposalStatus::Executing), true)
+        );
     }
 
     #[test]
@@ -292,7 +291,7 @@ mod tests {
         let bogus = r#"{"version":999,"capacity":4,"proposals":[]}"#;
         fs::write(&path, bogus).unwrap();
         let err = ProposalStore::open(dir.path(), 4).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             StoreError::UnsupportedVersion {
                 found: 999,

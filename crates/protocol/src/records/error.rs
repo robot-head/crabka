@@ -43,7 +43,6 @@ impl From<RecordsError> for crate::ProtocolError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -79,16 +78,13 @@ mod tests {
             ),
         ];
         for (err, contains) in cases {
-            assert!(
-                err.to_string().contains(contains),
-                "{err} did not contain {contains:?}",
-            );
+            assert2::assert!(err.to_string().contains(contains));
         }
     }
 
     #[test]
     fn into_protocol_error_is_invalid_value() {
         let e: crate::ProtocolError = RecordsError::UnsupportedMagic { found: 0 }.into();
-        assert!(matches!(e, crate::ProtocolError::InvalidValue(_)));
+        assert2::assert!(matches!(e, crate::ProtocolError::InvalidValue(_)));
     }
 }

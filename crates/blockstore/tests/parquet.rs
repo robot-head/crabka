@@ -1,6 +1,6 @@
 use std::collections::{BTreeMap, BTreeSet};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::{
     BlockKey, LogRow, TimeRange, labels, log_block_object_path, read_log_block,
     read_log_block_from_object_store, series_fingerprint, write_log_block,
@@ -42,8 +42,8 @@ fn parquet_log_block_round_trips_rows_sorted_by_series_and_timestamp() {
     )
     .unwrap();
 
-    check!(descriptor.key == key);
-    check!(descriptor.fingerprints == BTreeSet::from([api, worker]));
+    assert2::assert!(descriptor.key == key.clone());
+    assert2::assert!(descriptor.fingerprints == BTreeSet::from([api, worker]));
     check!(descriptor.size_bytes > 0);
 
     let rows = read_log_block(dir.path(), &key).unwrap();
@@ -64,7 +64,7 @@ fn parquet_log_block_round_trips_rows_sorted_by_series_and_timestamp() {
     ];
     expected.sort_by_key(|row| (row.series_fingerprint, row.timestamp_ns));
 
-    assert!(rows == expected);
+    assert2::assert!(rows == expected);
 }
 
 #[test]
@@ -79,7 +79,7 @@ fn parquet_log_block_rejects_rows_outside_key_time_range() {
     )
     .unwrap_err();
 
-    assert!(error.to_string().contains("outside block time range"));
+    assert2::assert!(error.to_string().contains("outside block time range"));
 }
 
 #[test]
@@ -123,7 +123,7 @@ fn parquet_log_block_writes_structured_metadata_as_arrow_map() {
             entries.data_type()
         );
     };
-    assert!(
+    assert2::assert!(
         fields
             == &Fields::from(vec![
                 datafusion::arrow::datatypes::Field::new("key", DataType::Utf8, false),
@@ -137,7 +137,7 @@ fn parquet_log_block_object_path_is_prefix_and_block_key() {
     let prefix = ObjectPath::from("observability/logs");
     let key = BlockKey::new("tenant-a", 2, 42, 99, TimeRange::new(1_000, 2_000).unwrap());
 
-    assert!(
+    assert2::assert!(
         log_block_object_path(&prefix, &key).to_string()
             == "observability/logs/tenant=tenant-a/partition=2/offsets=42-99/time=1000-2000.parquet"
     );
@@ -175,8 +175,8 @@ async fn parquet_log_block_round_trips_through_object_store() {
     .await
     .unwrap();
 
-    check!(descriptor.key == key);
-    check!(descriptor.fingerprints == BTreeSet::from([api, worker]));
+    assert2::assert!(descriptor.key == key.clone());
+    assert2::assert!(descriptor.fingerprints == BTreeSet::from([api, worker]));
     check!(descriptor.size_bytes > 0);
 
     let rows = read_log_block_from_object_store(&store, &prefix, &key)
@@ -199,5 +199,5 @@ async fn parquet_log_block_round_trips_through_object_store() {
     ];
     expected.sort_by_key(|row| (row.series_fingerprint, row.timestamp_ns));
 
-    assert!(rows == expected);
+    assert2::assert!(rows == expected);
 }

@@ -241,7 +241,6 @@ pub fn encode_compressed_message_set<B: BufMut>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -279,53 +278,28 @@ mod tests {
     }
 
     #[test]
-    fn flat_v0_roundtrip() {
-        let recs = sample_records_v0();
-        let mut buf = BytesMut::new();
-        encode_flat_message_set(recs.clone(), Magic::V0, &mut buf);
-        let mut cur: &[u8] = &buf[..];
-        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded == recs);
-    }
+    fn message_set_roundtrips() {
+        for (_name, magic, codec) in [
+            ("flat v0", Magic::V0, None),
+            ("flat v1", Magic::V1, None),
+            ("gzip v0", Magic::V0, Some(CompressionType::Gzip)),
+            ("gzip v1", Magic::V1, Some(CompressionType::Gzip)),
+            ("snappy v1", Magic::V1, Some(CompressionType::Snappy)),
+        ] {
+            let records = match magic {
+                Magic::V0 => sample_records_v0(),
+                Magic::V1 => sample_records_v1(),
+            };
+            let mut buffer = BytesMut::new();
+            if let Some(codec) = codec {
+                encode_compressed_message_set(&records, magic, codec, &mut buffer).unwrap();
+            } else {
+                encode_flat_message_set(records.clone(), magic, &mut buffer);
+            }
 
-    #[test]
-    fn flat_v1_roundtrip() {
-        let recs = sample_records_v1();
-        let mut buf = BytesMut::new();
-        encode_flat_message_set(recs.clone(), Magic::V1, &mut buf);
-        let mut cur: &[u8] = &buf[..];
-        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded == recs);
-    }
-
-    #[test]
-    fn compressed_v1_gzip_roundtrip() {
-        let recs = sample_records_v1();
-        let mut buf = BytesMut::new();
-        encode_compressed_message_set(&recs, Magic::V1, CompressionType::Gzip, &mut buf).unwrap();
-        let mut cur: &[u8] = &buf[..];
-        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded == recs);
-    }
-
-    #[test]
-    fn compressed_v1_snappy_roundtrip() {
-        let recs = sample_records_v1();
-        let mut buf = BytesMut::new();
-        encode_compressed_message_set(&recs, Magic::V1, CompressionType::Snappy, &mut buf).unwrap();
-        let mut cur: &[u8] = &buf[..];
-        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded == recs);
-    }
-
-    #[test]
-    fn compressed_v0_gzip_roundtrip() {
-        let recs = sample_records_v0();
-        let mut buf = BytesMut::new();
-        encode_compressed_message_set(&recs, Magic::V0, CompressionType::Gzip, &mut buf).unwrap();
-        let mut cur: &[u8] = &buf[..];
-        let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded == recs);
+            let decoded = decode_message_set(&mut &buffer[..], buffer.len()).unwrap();
+            assert2::assert!(decoded == records);
+        }
     }
 
     #[test]
@@ -359,7 +333,7 @@ mod tests {
 
         let mut cur: &[u8] = &wire[..];
         let err = decode_message_set(&mut cur, wire.len()).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::NestedCompression));
+        assert2::assert!(matches!(err, LegacyRecordsError::NestedCompression));
     }
 
     // --- mutation-coverage tests --------------------------------------------
@@ -377,7 +351,7 @@ mod tests {
         let data = [0u8; 4];
         let mut cur: &[u8] = &data;
         let err = decode_message_set(&mut cur, 12).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 8 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 8 }));
     }
 
     #[test]
@@ -387,7 +361,7 @@ mod tests {
         let data = [0u8; 8];
         let mut cur: &[u8] = &data;
         let err = decode_message_set(&mut cur, 8).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
     }
 
     #[test]
@@ -401,7 +375,7 @@ mod tests {
         let n = data.len();
         let mut cur: &[u8] = &data[..];
         let err = decode_message_set(&mut cur, n).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Malformed(_)));
+        assert2::assert!(matches!(err, LegacyRecordsError::Malformed(_)));
     }
 
     #[test]
@@ -413,7 +387,7 @@ mod tests {
         let n = data.len();
         let mut cur: &[u8] = &data[..];
         let err = decode_message_set(&mut cur, n).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             LegacyRecordsError::NegativeLength {
                 label: "message_size",
@@ -433,7 +407,7 @@ mod tests {
         let n = data.len();
         let mut cur: &[u8] = &data[..];
         let err = decode_message_set(&mut cur, n).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 8 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 8 }));
     }
 
     #[test]
@@ -448,7 +422,15 @@ mod tests {
         encode_flat_message_set(recs, Magic::V1, &mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded[0].timestamp == Some(-1));
+        assert2::assert!(
+            decoded
+                == vec![ParsedRecord {
+                    offset: Offset(7),
+                    timestamp: Some(-1),
+                    key: None,
+                    value: Some(Bytes::from_static(b"v")),
+                }]
+        );
     }
 
     #[test]
@@ -469,12 +451,11 @@ mod tests {
         let _wrapper_offset = cur.get_i64();
         let wrapper_size = cur.get_i32() as usize;
         let wrapper = Message::decode_from(&mut cur, wrapper_size).unwrap();
-        assert!(wrapper.timestamp == Some(-1));
-
         // The inner record's timestamp survives the unwrap as -1.
         let mut c2: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut c2, buf.len()).unwrap();
-        assert!(decoded[0].timestamp == Some(-1));
+        assert2::assert!(wrapper.timestamp == Some(-1));
+        assert2::assert!(decoded[0].timestamp == Some(-1));
     }
 
     #[test]
@@ -493,8 +474,7 @@ mod tests {
         encode_compressed_message_set(&recs, Magic::V1, CompressionType::Gzip, &mut buf).unwrap();
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        assert!(decoded.len() == 1);
-        assert!(decoded[0].value.as_ref().unwrap().len() == big.len());
+        assert2::assert!(decoded == recs);
     }
 
     #[test]
@@ -504,16 +484,13 @@ mod tests {
         // 0). The inner-offset rewrite must use the inner count (out.len() -
         // start_len), not out.len() + start_len.
         let mut buf = BytesMut::new();
-        encode_flat_message_set(
-            vec![ParsedRecord {
-                offset: Offset(50),
-                timestamp: Some(1),
-                key: None,
-                value: Some(Bytes::from_static(b"flat")),
-            }],
-            Magic::V1,
-            &mut buf,
-        );
+        let flat = ParsedRecord {
+            offset: Offset(50),
+            timestamp: Some(1),
+            key: None,
+            value: Some(Bytes::from_static(b"flat")),
+        };
+        encode_flat_message_set(vec![flat.clone()], Magic::V1, &mut buf);
         let inner = vec![
             ParsedRecord {
                 offset: Offset(100),
@@ -532,7 +509,7 @@ mod tests {
 
         let mut cur: &[u8] = &buf[..];
         let decoded = decode_message_set(&mut cur, buf.len()).unwrap();
-        let offsets: Vec<i64> = decoded.iter().map(|r| r.offset.0).collect();
-        assert!(offsets == vec![50, 100, 101]);
+        let expected = std::iter::once(flat).chain(inner).collect::<Vec<_>>();
+        assert2::assert!(decoded == expected);
     }
 }

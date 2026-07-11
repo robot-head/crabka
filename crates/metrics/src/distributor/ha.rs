@@ -289,7 +289,7 @@ pub fn strip_replica_label(series: &mut [DecodedSeries]) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -315,7 +315,7 @@ mod tests {
         tracker.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r1")];
 
-        assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
+        assert2::assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
     }
 
     #[test]
@@ -324,7 +324,7 @@ mod tests {
         tracker.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r2")];
 
-        assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Drop);
+        assert2::assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Drop);
     }
 
     #[test]
@@ -344,7 +344,7 @@ mod tests {
         tracker.set_elected("tenant", "c1", "r1");
         let series = [series_with("c1", "r1")];
 
-        assert!(
+        assert2::assert!(
             ha_election_at(&tracker, "tenant", &series, 42_000)
                 == HaElection::Update(HaElectionRecord {
                     tenant: "tenant".to_string(),
@@ -366,7 +366,7 @@ mod tests {
         });
         let replacement = [series_with("c1", "r2")];
 
-        assert!(
+        assert2::assert!(
             ha_election_at_with_timeout(&tracker, "tenant", &replacement, 45_001, 30_000)
                 == HaElection::Elect(HaElectionRecord {
                     tenant: "tenant".to_string(),
@@ -390,7 +390,7 @@ mod tests {
             metadata: None,
         }];
 
-        assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
+        assert2::assert!(ha_decision(&tracker, "tenant", &series) == HaDecision::Accept);
     }
 
     #[test]
@@ -399,8 +399,8 @@ mod tests {
 
         strip_replica_label(&mut series);
 
-        assert!(series[0].labels.get("__replica__") == None);
-        assert!(series[0].labels.get("cluster") == Some("c1"));
+        assert2::assert!(series[0].labels.get("__replica__") == None);
+        assert2::assert!(series[0].labels.get("cluster") == Some("c1"));
     }
 
     #[test]
@@ -409,17 +409,17 @@ mod tests {
         let r1 = [series_with("c1", "r1")];
         let r2 = [series_with("c1", "r2")];
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             tracker.elect("tenant", &r1, 1_000, DEFAULT_HA_FAILOVER_TIMEOUT_MS),
             HaElection::Elect(_)
         ));
         // The first elect already committed the winner under the lock, so a
         // competing replica observes it and is dropped without a separate
         // persist step.
-        assert!(
+        assert2::assert!(
             tracker.elect("tenant", &r2, 1_001, DEFAULT_HA_FAILOVER_TIMEOUT_MS) == HaElection::Drop
         );
-        assert!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
+        assert2::assert!(tracker.elected_replica("tenant", "c1") == Some("r1".to_string()));
     }
 
     #[test]
@@ -448,6 +448,6 @@ mod tests {
             .filter(|decision| matches!(decision, HaElection::Elect(_)))
             .count();
 
-        assert!(elects == 1);
+        assert2::assert!(elects == 1);
     }
 }

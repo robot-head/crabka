@@ -280,7 +280,7 @@ struct HotTailDependency {
 }
 
 /// Parameters needed to connect a [`KafkaLogWalConsumer`] in the background.
-#[derive(Clone)]
+#[derive(Clone, Debug, PartialEq, Eq)]
 struct DeferredWalConsumerConnect {
     bootstrap: String,
     group_id: String,
@@ -3842,19 +3842,20 @@ fn validate_loki_json_push_stream_objects(
                 loki_json_push_stream_parse_error(body, stream),
             ));
         }
-        if let Some(labels) = stream.get("stream") {
-            if !labels.is_object() {
-                return Err(DistributorError::InvalidJsonPushValueSyntax(
-                    loki_json_push_labels_field_parse_error(body),
-                ));
-            }
+        if let Some(labels) = stream.get("stream")
+            && !labels.is_object()
+        {
+            return Err(DistributorError::InvalidJsonPushValueSyntax(
+                loki_json_push_labels_field_parse_error(body),
+            ));
         }
-        if let Some(values) = stream.get("values") {
-            if !values.is_array() && !values.is_null() {
-                return Err(DistributorError::InvalidJsonPushValueSyntax(
-                    loki_json_push_values_field_parse_error(body, values),
-                ));
-            }
+        if let Some(values) = stream.get("values")
+            && !values.is_array()
+            && !values.is_null()
+        {
+            return Err(DistributorError::InvalidJsonPushValueSyntax(
+                loki_json_push_values_field_parse_error(body, values),
+            ));
         }
         let stream = serde_json::from_value(stream.clone())
             .map_err(|_| DistributorError::InvalidPushPayload)?;
@@ -4238,7 +4239,7 @@ fn normalize_loki_push(
                 reject_old_samples_max_age,
                 creation_grace_period,
             )?;
-            let labels = loki_push_entry_labels(&stream_labels, &line);
+            let labels = loki_push_entry_labels(&stream_labels, line);
 
             records.push(WalLogRecord {
                 tenant: tenant.clone(),
@@ -6577,12 +6578,14 @@ struct CompactorDeleteRequestResponse {
     created_at: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct CreateDeleteRequestParams {
     query: String,
     start_time: i64,
     end_time: i64,
 }
 
+#[derive(Debug, PartialEq, Eq)]
 struct ListDeleteRequestsParams {
     start_time: Option<i64>,
     end_time: Option<i64>,
@@ -12010,10 +12013,10 @@ fn apply_metric_binary_comparison_to_sample_operands(
         }
         true
     } else {
-        if matches {
-            if let (Some(output), Some(left)) = (output_values.get_mut(1), left_values.get(1)) {
-                *output = left.clone();
-            }
+        if matches
+            && let (Some(output), Some(left)) = (output_values.get_mut(1), left_values.get(1))
+        {
+            *output = left.clone();
         }
         matches
     }
@@ -12092,7 +12095,7 @@ fn metric_series_labels(series: &Value) -> Option<Labels> {
 }
 
 fn sort_loki_metric_results_by_labels(results: &mut [Value]) {
-    results.sort_by(|left, right| metric_series_labels(left).cmp(&metric_series_labels(right)));
+    results.sort_by_key(metric_series_labels);
 }
 
 fn metric_vector_matching_key(labels: &Labels, matching: Option<&MetricVectorMatching>) -> Labels {
@@ -18404,10 +18407,10 @@ fn parse_decimal_sample_literal(value: &str) -> Option<(i128, u128)> {
         return None;
     }
 
-    let (mantissa, exponent) = match value.find(|ch| matches!(ch, 'e' | 'E')) {
+    let (mantissa, exponent) = match value.find(['e', 'E']) {
         Some(index) => {
             let exponent_text = &value[index + 1..];
-            if exponent_text.find(|ch| matches!(ch, 'e' | 'E')).is_some() {
+            if exponent_text.find(['e', 'E']).is_some() {
                 return None;
             }
             (
@@ -19109,10 +19112,10 @@ fn loki_parquet_metric_timestamp_ns(
     value: &Value,
     kind: LokiMetricParquetKind,
 ) -> Result<i64, HttpQueryError> {
-    if matches!(kind, LokiMetricParquetKind::Vector) {
-        if let Some(timestamp_ns) = value.as_i64() {
-            return Ok(timestamp_ns);
-        }
+    if matches!(kind, LokiMetricParquetKind::Vector)
+        && let Some(timestamp_ns) = value.as_i64()
+    {
+        return Ok(timestamp_ns);
     }
 
     if let Some(seconds) = value.as_i64() {
@@ -19171,7 +19174,7 @@ fn loki_parquet_batch_response(batch: &RecordBatch) -> Result<Response, HttpQuer
     let mut body = Vec::new();
     {
         let mut writer = ArrowWriter::try_new(&mut body, batch.schema(), None)?;
-        writer.write(&batch)?;
+        writer.write(batch)?;
         writer.close()?;
     }
     Ok((
@@ -20193,14 +20196,14 @@ mod tests {
     fn ingest_tenant_reads_header_or_falls_back() {
         let mut present = HeaderMap::new();
         present.insert("X-Scope-OrgID", "acme".parse().unwrap());
-        assert_eq!(ingest_tenant(&present), "acme");
+        assert2::assert!(ingest_tenant(&present) == "acme");
 
         let missing = HeaderMap::new();
-        assert_eq!(ingest_tenant(&missing), "unknown");
+        assert2::assert!(ingest_tenant(&missing) == "unknown");
 
         let mut empty = HeaderMap::new();
         empty.insert("X-Scope-OrgID", "".parse().unwrap());
-        assert_eq!(ingest_tenant(&empty), "unknown");
+        assert2::assert!(ingest_tenant(&empty) == "unknown");
     }
 
     #[derive(Clone)]
@@ -20411,10 +20414,7 @@ mod tests {
         let configured_store = build_compactor_configured_object_store(&config, None)
             .expect("valid object-store URL should configure a compactor store");
 
-        assert!(
-            configured_store.is_some(),
-            "compactor should build the configured object store when no store is injected"
-        );
+        assert2::assert!(configured_store.is_some());
     }
 
     /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`
@@ -20468,8 +20468,8 @@ mod tests {
         // Identity (no Content-Encoding) decodes to a single record.
         let identity = normalize_otlp_http_logs(&headers, &raw, None, None)
             .expect("uncompressed OTLP proto logs should decode");
-        assert_eq!(identity.len(), 1);
-        assert_eq!(identity[0].line, "hello world");
+        assert2::assert!(identity.len() == 1);
+        assert2::assert!(identity[0].line.as_str() == "hello world");
 
         // The gzip-compressed body must decode to exactly the same records.
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -20480,7 +20480,7 @@ mod tests {
         gz_headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
         let from_gzip = normalize_otlp_http_logs(&gz_headers, &gzipped, None, None)
             .expect("gzip-compressed OTLP proto logs should decode");
-        assert_eq!(from_gzip, identity);
+        assert2::assert!(from_gzip == identity);
     }
 
     fn hot_tail_test_record(timestamp_ns: i64, app: &str) -> WalLogRecord {
@@ -20547,7 +20547,7 @@ mod tests {
 
         // `records()` must still return the full append-ordered buffer (the tail path
         // depends on this).
-        assert_eq!(hot_tail.records(), records);
+        assert2::assert!(hot_tail.records() == records);
 
         // Probe a wide set of windows: exact bucket edges, sub-bucket slivers, windows
         // spanning many buckets, empty windows, and windows entirely outside the data.
@@ -20575,33 +20575,27 @@ mod tests {
         for (start, end) in probes {
             if start > end {
                 // Mirror the guard: an inverted window yields nothing.
-                assert!(hot_tail.records_in_range(start, end).is_empty());
+                assert2::assert!(hot_tail.records_in_range(start, end).is_empty());
                 continue;
             }
             let expected = brute_force_in_range(&records, start, end);
             let actual = hot_tail.records_in_range(start, end);
-            assert_eq!(
-                actual, expected,
-                "records_in_range({start}, {end}) diverged from full-scan oracle"
-            );
+            assert2::assert!(actual == expected);
 
             // The label sets a query would derive must be identical too (records are the
             // sole input to label/field extraction).
             let expected_labels: BTreeSet<Labels> =
                 expected.iter().map(|r| r.labels.clone()).collect();
             let actual_labels: BTreeSet<Labels> = actual.iter().map(|r| r.labels.clone()).collect();
-            assert_eq!(
-                actual_labels, expected_labels,
-                "label sets diverged at [{start}, {end}]"
-            );
+            assert2::assert!(actual_labels == expected_labels);
         }
 
         // The trait-object path the querier actually uses must agree with the inherent method.
         let dyn_tail: Arc<dyn LogHotTail> = Arc::new(hot_tail.clone());
         let window = (2 * BUCKET, 6 * BUCKET);
-        assert_eq!(
-            dyn_tail.records_in_range(window.0, window.1),
-            hot_tail.records_in_range(window.0, window.1),
+        assert2::assert!(
+            dyn_tail.records_in_range(window.0, window.1)
+                == hot_tail.records_in_range(window.0, window.1)
         );
 
         // The default trait impl (used by other LogHotTail implementors, e.g. the
@@ -20613,9 +20607,9 @@ mod tests {
                 .unwrap();
         }
         let in_memory_dyn: Arc<dyn LogHotTail> = Arc::new(in_memory);
-        assert_eq!(
-            in_memory_dyn.records_in_range(window.0, window.1),
-            brute_force_in_range(&records, window.0, window.1),
+        assert2::assert!(
+            in_memory_dyn.records_in_range(window.0, window.1)
+                == brute_force_in_range(&records, window.0, window.1)
         );
     }
 
@@ -20648,11 +20642,11 @@ mod tests {
         let frontier =
             CompactionFrontier::new(2 * BUCKET).with_partition_offset(PartitionIndex(0), Offset(7));
 
-        assert_eq!(hot_tail.prune_compacted(&frontier), 2);
-        assert_eq!(hot_tail.records(), expected);
-        assert_eq!(hot_tail.records_in_range(0, 6 * BUCKET), expected);
-        assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
-        assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
+        assert2::assert!(hot_tail.prune_compacted(&frontier) == 2);
+        assert2::assert!(hot_tail.records() == expected.clone());
+        assert2::assert!(hot_tail.records_in_range(0, 6 * BUCKET) == expected);
+        assert2::assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
+        assert2::assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
     }
 
     #[tokio::test]
@@ -20672,9 +20666,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(pruned, 1);
-        assert_eq!(frontier.snapshot(), CompactionFrontier::new(2_000));
-        assert_eq!(hot_tail.records(), vec![fresh]);
+        assert2::assert!(pruned == 1);
+        assert2::assert!(frontier.snapshot() == CompactionFrontier::new(2_000));
+        assert2::assert!(hot_tail.records() == vec![fresh]);
     }
 
     #[tokio::test]
@@ -20690,9 +20684,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(pruned, 0);
-        assert_eq!(frontier.snapshot(), CompactionFrontier::new(123));
-        assert_eq!(hot_tail.records(), vec![fresh]);
+        assert2::assert!(pruned == 0);
+        assert2::assert!(frontier.snapshot() == CompactionFrontier::new(123));
+        assert2::assert!(hot_tail.records() == vec![fresh]);
     }
 
     #[tokio::test]
@@ -20753,15 +20747,14 @@ mod tests {
         // tenant manifest, the shard catalog, and the old shard manifests
         // must not be rewritten.
         let put_paths = store.put_paths();
-        assert_eq!(
-            put_paths,
-            vec![
-                crabka_blockstore::log_tenant_index_shard_manifest_object_path(
-                    &prefix, tenant, new_range
-                )
-                .to_string()
-            ],
-            "only the new shard manifest should be written"
+        assert2::assert!(
+            put_paths
+                == vec![
+                    crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+                        &prefix, tenant, new_range
+                    )
+                    .to_string()
+                ]
         );
     }
 
@@ -20773,11 +20766,11 @@ mod tests {
         // rejects "" with `syntax error: unexpected $end, expecting '{'`.
         for raw in ["query=", "query=%20", "query=%20%20"] {
             let params = parse_detected_labels_params(Some(raw)).unwrap();
-            assert!(params.query.is_none(), "{raw}: {:?}", params.query);
+            assert2::assert!(params.query.is_none());
         }
         // A real stream selector is still preserved.
         let params = parse_detected_labels_params(Some("query=%7Bapp%3D%22api%22%7D")).unwrap();
-        assert_eq!(params.query.as_deref(), Some(r#"{app="api"}"#));
+        assert2::assert!(params.query.as_deref() == Some(r#"{app="api"}"#));
     }
 
     #[test]
@@ -20790,10 +20783,7 @@ mod tests {
             },
         );
 
-        assert_eq!(
-            response["data"]["result"][0]["value"][0],
-            json!(4_000_000_000i64)
-        );
+        assert2::assert!(response["data"]["result"][0]["value"][0] == json!(4_000_000_000i64));
     }
 
     #[test]
@@ -20805,7 +20795,7 @@ mod tests {
             },
         );
 
-        assert_eq!(response["data"]["result"][0], json!(4));
+        assert2::assert!(response["data"]["result"][0] == json!(4));
     }
 
     #[test]
@@ -20814,9 +20804,9 @@ mod tests {
         let timestamp = json!(1000000000);
         let line = json!("non-string push timestamp");
 
-        assert_eq!(
-            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
-            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|alues\":[[1000000000,\"non-string push timestamp\"]]}]}|...\n"
+        assert2::assert!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line))
+                == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|alues\":[[1000000000,\"non-string push timestamp\"]]}]}|...\n"
         );
     }
 
@@ -20826,9 +20816,9 @@ mod tests {
         let timestamp = json!({"ts": "1000000000"});
         let line = json!("object push timestamp");
 
-        assert_eq!(
-            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
-            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|\":[[{\"ts\":\"1000000000\"},\"object push timestamp\"]]}]}|...\n"
+        assert2::assert!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line))
+                == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|\":[[{\"ts\":\"1000000000\"},\"object push timestamp\"]]}]}|...\n"
         );
     }
 
@@ -20838,9 +20828,9 @@ mod tests {
         let timestamp = json!(["1000000000"]);
         let line = json!("array push timestamp");
 
-        assert_eq!(
-            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
-            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|values\":[[[\"1000000000\"],\"array push timestamp\"]]}]}|...\n"
+        assert2::assert!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line))
+                == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|values\":[[[\"1000000000\"],\"array push timestamp\"]]}]}|...\n"
         );
     }
 
@@ -20863,16 +20853,9 @@ mod tests {
             .with_request_tenant_index("test-tenant", query_range)
             .await;
 
-        assert!(
-            result.is_ok(),
-            "expected Ok on absent cold index manifest, got: {:?}",
-            result.err()
-        );
+        assert2::assert!(result.is_ok());
         let returned = result.unwrap();
-        assert!(
-            returned.block_index.blocks().is_empty(),
-            "expected empty block index when no manifest exists"
-        );
+        assert2::assert!(returned.block_index.blocks().is_empty());
     }
 
     /// Same check for the TenantObjectStoreShards variant.
@@ -20891,11 +20874,7 @@ mod tests {
             .with_request_tenant_index("test-tenant", query_range)
             .await;
 
-        assert!(
-            result.is_ok(),
-            "expected Ok on absent cold index shards, got: {:?}",
-            result.err()
-        );
+        assert2::assert!(result.is_ok());
     }
 
     #[tokio::test]
@@ -20940,13 +20919,11 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            first.label_index.label_names(tenant),
-            BTreeSet::from(["app".to_string()])
+        assert2::assert!(
+            first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
         );
-        assert_eq!(
-            second.label_index.label_names(tenant),
-            BTreeSet::from(["app".to_string()])
+        assert2::assert!(
+            second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
         );
 
         let shard_prefix =
@@ -20968,11 +20945,8 @@ mod tests {
             .filter(|path| path == &shard_manifest)
             .count();
 
-        assert!(list_count == 1, "shard prefix should be listed once");
-        assert!(
-            shard_get_count == 1,
-            "shard manifest should be fetched once"
-        );
+        assert2::assert!(list_count == 1);
+        assert2::assert!(shard_get_count == 1);
     }
 
     #[tokio::test]
@@ -21026,9 +21000,11 @@ mod tests {
             .await
             .unwrap();
 
-        for state in [&first, &second] {
-            check!(state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
-            check!(state.block_index.blocks().len() == 2);
+        for (_name, state) in [("first range", &first), ("moving range", &second)] {
+            assert2::assert!(
+                state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
+            );
+            assert2::assert!(state.block_index.blocks().len() == 2);
         }
 
         let shard_prefix =
@@ -21119,19 +21095,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            state.label_index.label_names(tenant),
-            BTreeSet::from(["app".to_string()])
+        assert2::assert!(
+            state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
         );
         let expected_offset =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant)
                 .join(format!("time={}", query_start - (query_end - query_start)))
                 .to_string();
-        assert!(
-            store.list_offsets().contains(&expected_offset),
-            "shard listing should start near the query window; offsets={:?}",
-            store.list_offsets()
-        );
+        assert2::assert!(store.list_offsets().contains(&expected_offset));
     }
 
     #[test]
@@ -21213,12 +21184,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert_eq!(scan.scanned_blocks.len(), 4);
-        assert!(
-            store.max_active_gets() > 1,
-            "expected cold block reads to overlap, max_active_gets={}",
-            store.max_active_gets()
-        );
+        assert2::assert!(scan.scanned_blocks.len() == 4);
+        assert2::assert!(store.max_active_gets() > 1);
     }
 
     // --- FIX B3 tests ---
@@ -21232,7 +21199,7 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.unwrap(), 42);
+        assert2::assert!(result.unwrap() == 42);
     }
 
     /// connect_with_startup_retry retries on failure and returns Ok when a later attempt succeeds.
@@ -21256,8 +21223,8 @@ mod tests {
             })
             .await;
 
-        assert_eq!(result.unwrap(), 99);
-        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert2::assert!(result.unwrap() == 99);
+        assert2::assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
     }
 
     /// connect_with_startup_retry returns the error after the deadline is exceeded.
@@ -21270,8 +21237,7 @@ mod tests {
         )
         .await;
 
-        assert!(result.is_err(), "expected Err after deadline");
-        assert_eq!(result.unwrap_err(), "always fails");
+        assert2::assert!(result.unwrap_err() == "always fails");
     }
 
     fn acl_entry(
@@ -21295,11 +21261,8 @@ mod tests {
 
     #[test]
     fn service_duration_constants_are_exact() {
-        assert_eq!(
-            LOKI_REJECT_OLD_SAMPLES_MAX_AGE,
-            Duration::from_secs(604_800)
-        );
-        assert_eq!(LOKI_CREATION_GRACE_PERIOD, Duration::from_secs(600));
+        assert2::assert!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE == Duration::from_secs(604_800));
+        assert2::assert!(LOKI_CREATION_GRACE_PERIOD == Duration::from_secs(600));
     }
 
     #[test]
@@ -21340,41 +21303,45 @@ mod tests {
                 "topic".to_string(),
             );
 
-        check!(deps.metrics.is_some());
-        check!(deps.wal_sink.is_some());
-        check!(deps.ingest_limiter.is_some());
-        check!(deps.query_authorizer.is_some());
-        check!(deps.hot_tail.is_some());
-        check!(deps.deferred_wal_consumer_connect.is_some());
+        assert2::assert!(deps.metrics.is_some());
+        assert2::assert!(deps.wal_sink.is_some());
+        assert2::assert!(deps.ingest_limiter.is_some());
+        assert2::assert!(deps.query_authorizer.is_some());
+        assert2::assert!(deps.hot_tail.is_some());
+        assert2::assert!(deps.deferred_wal_consumer_connect.is_some());
         check!(Arc::ptr_eq(
             &deps.metrics.as_ref().unwrap().registry,
             &metrics.registry
         ));
         match deps.hot_tail.as_ref().unwrap().frontier.clone() {
             CompactionFrontierSource::Shared(actual) => {
-                assert_eq!(actual.snapshot(), frontier.snapshot());
+                assert2::assert!(actual.snapshot() == frontier.snapshot());
             }
             CompactionFrontierSource::Snapshot(_) => panic!("expected shared frontier"),
         }
-        let deferred = deps.deferred_wal_consumer_connect.as_ref().unwrap();
-        assert_eq!(deferred.bootstrap, "broker:9092");
-        assert_eq!(deferred.group_id, "group");
-        assert_eq!(deferred.topic, "topic");
+        assert2::assert!(
+            deps.deferred_wal_consumer_connect.as_ref()
+                == Some(&DeferredWalConsumerConnect {
+                    bootstrap: "broker:9092".to_string(),
+                    group_id: "group".to_string(),
+                    topic: "topic".to_string(),
+                })
+        );
     }
 
     #[test]
     fn retry_backoff_doubles_and_caps() {
-        assert_eq!(
-            next_compactor_object_store_backoff(Duration::from_millis(10)),
-            Duration::from_millis(20)
+        assert2::assert!(
+            next_compactor_object_store_backoff(Duration::from_millis(10))
+                == Duration::from_millis(20)
         );
-        assert_eq!(
-            next_compactor_object_store_backoff(Duration::from_millis(300)),
-            Duration::from_millis(500)
+        assert2::assert!(
+            next_compactor_object_store_backoff(Duration::from_millis(300))
+                == Duration::from_millis(500)
         );
-        assert_eq!(
-            next_compactor_object_store_backoff(Duration::from_millis(500)),
-            Duration::from_millis(500)
+        assert2::assert!(
+            next_compactor_object_store_backoff(Duration::from_millis(500))
+                == Duration::from_millis(500)
         );
     }
 
@@ -21504,28 +21471,28 @@ mod tests {
             + "prod".len()
             + "trace_id".len()
             + "abc".len();
-        assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
+        assert2::assert!(ingest_quota_bytes(&[record]) == expected_bytes);
 
         let mut bucket = IngestQuotaBucket::new(10.0);
         check!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
         check!(bucket.consume(10.0));
         check!(!bucket.consume(0.1));
         bucket.update_rate(5.0);
-        assert!(bucket.available <= 5.0);
+        assert2::assert!(bucket.available <= 5.0);
         bucket.available = 4.0;
         bucket.update_rate(20.0);
-        assert!(bucket.available >= 4.0);
-        assert!(bucket.consume(4.0));
+        assert2::assert!(bucket.available >= 4.0);
+        assert2::assert!(bucket.consume(4.0));
     }
 
     #[test]
     fn hot_tail_bucket_key_uses_euclidean_minutes() {
-        assert_eq!(hot_tail_bucket_key(0), 0);
-        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS - 1), 0);
-        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS), 1);
-        assert_eq!(hot_tail_bucket_key(-1), -1);
-        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS), -1);
-        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS - 1), -2);
+        assert2::assert!(hot_tail_bucket_key(0) == 0);
+        assert2::assert!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS - 1) == 0);
+        assert2::assert!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS) == 1);
+        assert2::assert!(hot_tail_bucket_key(-1) == -1);
+        assert2::assert!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS) == -1);
+        assert2::assert!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS - 1) == -2);
     }
 
     #[test]
@@ -21541,7 +21508,7 @@ mod tests {
                 key: key.to_string(),
                 value: value.map(<[u8]>::to_vec),
             };
-            assert_eq!(has_native_kafka_log_headers(&[header]), want);
+            assert2::assert!(has_native_kafka_log_headers(&[header]) == want);
         }
     }
 
@@ -21552,7 +21519,7 @@ mod tests {
         encode_varint(127, &mut body);
         encode_varint(128, &mut body);
         encode_varint(300, &mut body);
-        assert_eq!(body, vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
+        assert2::assert!(body == vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
 
         let state = DistributorState {
             sink: Arc::new(InMemoryWalSink::default()),
@@ -21564,25 +21531,24 @@ mod tests {
             reject_old_samples_max_age: None,
             creation_grace_period: None,
         };
-        assert!(validate_ingest_body_limit(&state, 5).is_ok());
-        assert!(validate_ingest_body_limit(&state, 6).is_err());
+        assert2::assert!(validate_ingest_body_limit(&state, 5).is_ok());
+        assert2::assert!(validate_ingest_body_limit(&state, 6).is_err());
     }
 
     #[test]
     fn loki_content_type_and_body_decoding_accept_only_expected_forms() {
         let mut headers = HeaderMap::new();
-        assert_eq!(decode_loki_http_body(&headers, b"raw").unwrap(), b"raw");
+        assert2::assert!(decode_loki_http_body(&headers, b"raw").unwrap() == b"raw");
         headers.insert(CONTENT_ENCODING, "snappy".parse().unwrap());
-        assert_eq!(decode_loki_http_body(&headers, b"raw").unwrap(), b"raw");
+        assert2::assert!(decode_loki_http_body(&headers, b"raw").unwrap() == b"raw");
         headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut encoder, b"raw").unwrap();
-        assert_eq!(
-            decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap(),
-            b"raw"
+        assert2::assert!(
+            decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap() == b"raw"
         );
         headers.insert(CONTENT_ENCODING, "br".parse().unwrap());
-        assert!(decode_loki_http_body(&headers, b"raw").is_err());
+        assert2::assert!(decode_loki_http_body(&headers, b"raw").is_err());
 
         fn loki_content_type(value: &str) -> HeaderMap {
             let mut headers = HeaderMap::new();
@@ -21597,17 +21563,14 @@ mod tests {
             ("application/json; charset", None),
             ("application/json; charset=", None),
         ] {
-            assert_eq!(
-                is_loki_json_content_type(&loki_content_type(value)).ok(),
-                want
-            );
+            assert2::assert!(is_loki_json_content_type(&loki_content_type(value)).ok() == want);
         }
     }
 
     #[test]
     fn loki_error_contexts_respect_utf8_boundaries_and_offsets() {
         let body = "{\"streams\":\"not-array\"}";
-        assert!(
+        assert2::assert!(
             loki_json_push_streams_parse_error(body.as_bytes(), &json!("not-array"))
                 .contains("|{\"streams\":\"not-array\"}|")
         );
@@ -21615,11 +21578,11 @@ mod tests {
         let structured =
             br#"{"streams":[{"stream":{"app":"api"},"values":[["1","line",{"ok":true}]]}]}"#;
         let error = loki_structured_metadata_value_parse_error(structured, "ok", &json!(true));
-        assert!(error.contains("ok\":true"));
+        assert2::assert!(error.contains("ok\":true"));
 
         let text = "ab\u{20ac}cd";
-        assert_eq!(previous_char_boundary(text, 4), 2);
-        assert_eq!(previous_char_boundary(text, text.len()), text.len());
+        assert2::assert!(previous_char_boundary(text, 4) == 2);
+        assert2::assert!(previous_char_boundary(text, text.len()) == text.len());
     }
 
     #[test]
@@ -21628,10 +21591,7 @@ mod tests {
             ("app".to_string(), "api".to_string()),
             ("env".to_string(), "prod".to_string()),
         ]);
-        assert_eq!(
-            loki_label_set(&rendered_labels),
-            r#"{app="api",env="prod"}"#
-        );
+        assert2::assert!(loki_label_set(&rendered_labels) == r#"{app="api",env="prod"}"#);
         check!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
         check!(
             loki_proto_label_parse_error(r#"{9bad="x"}"#)
@@ -21646,36 +21606,30 @@ mod tests {
 
         let mut detected = BTreeMap::from([("app".to_string(), "api".to_string())]);
         discover_detected_level_label(&mut detected, "api ERROR happened");
-        assert_eq!(
-            detected.get("detected_level").map(String::as_str),
-            Some("error")
-        );
+        assert2::assert!(detected.get("detected_level").map(String::as_str) == Some("error"));
         let mut explicit = BTreeMap::from([("level".to_string(), "custom".to_string())]);
         discover_detected_level_label(&mut explicit, "api error happened");
-        assert!(!explicit.contains_key("detected_level"));
+        assert2::assert!(!explicit.contains_key("detected_level"));
         for (line, want) in [
             ("error happened", true),
             ("happened error", true),
             ("terror", false),
             ("error_code", false),
         ] {
-            assert_eq!(contains_log_level_token(line, "error"), want);
+            assert2::assert!(contains_log_level_token(line, "error") == want);
         }
         for (byte, want) in [(b'a', true), (b'1', true), (b'_', true), (b'-', false)] {
-            assert_eq!(is_log_level_word_byte(byte), want);
+            assert2::assert!(is_log_level_word_byte(byte) == want);
         }
     }
 
     #[test]
     fn timestamp_and_value_conversions_cover_json_and_proto_shapes() {
-        assert_eq!(otlp_timestamp_ns(&json!("123")).unwrap(), 123);
-        assert_eq!(otlp_timestamp_ns(&json!(456)).unwrap(), 456);
-        assert!(otlp_timestamp_ns(&json!(-1)).is_err());
-        assert_eq!(
-            otlp_severity_number_to_string(&json!("INFO")).unwrap(),
-            "INFO"
-        );
-        assert_eq!(otlp_severity_number_to_string(&json!(9)).unwrap(), "9");
+        assert2::assert!(otlp_timestamp_ns(&json!("123")).unwrap() == 123);
+        assert2::assert!(otlp_timestamp_ns(&json!(456)).unwrap() == 456);
+        assert2::assert!(otlp_timestamp_ns(&json!(-1)).is_err());
+        assert2::assert!(otlp_severity_number_to_string(&json!("INFO")).unwrap() == "INFO");
+        assert2::assert!(otlp_severity_number_to_string(&json!(9)).unwrap() == "9");
 
         let otlp_value = OtlpAnyValue::Kvlist(OtlpKeyValueList {
             values: Some(vec![
@@ -21691,10 +21645,7 @@ mod tests {
                 },
             ]),
         });
-        assert_eq!(
-            otlp_value_to_json(&otlp_value),
-            json!({"items": ["a"], "ok": true})
-        );
+        assert2::assert!(otlp_value_to_json(&otlp_value) == json!({"items": ["a"], "ok": true}));
 
         let proto_value = ProtoAnyValue {
             value: Some(proto_any_value::Value::KvlistValue(
@@ -21709,7 +21660,7 @@ mod tests {
                 },
             )),
         };
-        assert_eq!(proto_value_to_json(&proto_value), json!({"answer": 42}));
+        assert2::assert!(proto_value_to_json(&proto_value) == json!({"answer": 42}));
     }
 
     #[test]
@@ -21718,26 +21669,34 @@ mod tests {
             "query=%7Bapp%3D%22api%22%7D&start=10&end=20&max_interval=1h",
         ))
         .unwrap();
-        assert_eq!(params.query, r#"{app="api"}"#);
-        assert_eq!(params.start_time, 10);
-        assert_eq!(params.end_time, 20);
-        assert!(parse_create_delete_request_params(Some("query=x&start=20&end=10")).is_err());
+        assert2::assert!(
+            params
+                == CreateDeleteRequestParams {
+                    query: r#"{app="api"}"#.to_string(),
+                    start_time: 10,
+                    end_time: 20,
+                }
+        );
+        assert2::assert!(
+            parse_create_delete_request_params(Some("query=x&start=20&end=10")).is_err()
+        );
 
         let list = parse_list_delete_requests_params(Some("start=10&end=20")).unwrap();
-        assert_eq!(list.start_time, Some(10));
-        assert_eq!(list.end_time, Some(20));
-        assert!(parse_list_delete_requests_params(Some("start=10")).is_err());
-        assert_eq!(
-            parse_cancel_delete_request_params(Some("request_id=delete-1&force=true")).unwrap(),
-            "delete-1"
+        assert2::assert!(
+            list == ListDeleteRequestsParams {
+                start_time: Some(10),
+                end_time: Some(20),
+            }
         );
-        assert!(
+        assert2::assert!(parse_list_delete_requests_params(Some("start=10")).is_err());
+        assert2::assert!(
+            parse_cancel_delete_request_params(Some("request_id=delete-1&force=true")).unwrap()
+                == "delete-1"
+        );
+        assert2::assert!(
             parse_cancel_delete_request_params(Some("request_id=delete-1&force=maybe")).is_err()
         );
-        assert_eq!(
-            parse_loki_delete_timestamp_query_param("start", "1.5").unwrap(),
-            1
-        );
+        assert2::assert!(parse_loki_delete_timestamp_query_param("start", "1.5").unwrap() == 1);
 
         let request = CompactorDeleteRequest {
             tenant: "tenant-a".to_string(),
@@ -21765,13 +21724,13 @@ mod tests {
                 false,
             ),
         ] {
-            assert_eq!(delete_request_overlaps_filter(&request, &filter), want);
+            assert2::assert!(delete_request_overlaps_filter(&request, &filter) == want);
         }
         for (right, want) in [
             (TimeRange::new(20, 30).unwrap(), true),
             (TimeRange::new(21, 30).unwrap(), false),
         ] {
-            assert_eq!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right), want);
+            assert2::assert!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right) == want);
         }
     }
 
@@ -21781,21 +21740,21 @@ mod tests {
             "type=alert&exclude_alerts=true&time=10&rule_name=HighError&rule_group=api&file=rules.yaml&group_limit=2&group_next_token=next&match=%7Bapp%3D%22api%22%7D",
         ))
         .unwrap();
-        assert_eq!(filters.rule_kind, Some("alerting"));
-        check!(filters.exclude_alerts);
-        check!(filters.evaluation_time.is_some());
-        check!(filters.rule_names.contains("HighError"));
-        check!(filters.rule_groups.contains("api"));
-        check!(filters.files.contains("rules.yaml"));
-        assert_eq!(filters.group_limit, Some(2));
-        assert_eq!(filters.group_next_token.as_deref(), Some("next"));
-        assert_eq!(filters.label_selectors.len(), 1);
-        assert!(filters.has_rule_filter());
+        assert2::assert!(filters.rule_kind == Some("alerting"));
+        assert2::assert!(filters.exclude_alerts);
+        assert2::assert!(filters.evaluation_time.is_some());
+        assert2::assert!(filters.rule_names.contains("HighError"));
+        assert2::assert!(filters.rule_groups.contains("api"));
+        assert2::assert!(filters.files.contains("rules.yaml"));
+        assert2::assert!(filters.group_limit == Some(2));
+        assert2::assert!(filters.group_next_token.as_deref() == Some("next"));
+        assert2::assert!(filters.label_selectors.len() == 1);
+        assert2::assert!(filters.has_rule_filter());
 
         let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
-        assert_eq!(recording.rule_kind, Some("recording"));
-        assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
-        assert!(
+        assert2::assert!(recording.rule_kind == Some("recording"));
+        assert2::assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
+        assert2::assert!(
             !PrometheusRulesFilters::parse(Some(""))
                 .unwrap()
                 .has_rule_filter()
@@ -21808,10 +21767,10 @@ mod tests {
         // to one pattern with the timestamp templatized and every constant kept.
         let first = r#"{"timestamp":"2026-07-01T04:19:26.1238077Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#;
         let second = r#"{"timestamp":"2026-07-01T04:19:27.9981001Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#;
-        assert_eq!(log_line_pattern(first), log_line_pattern(second));
-        assert_eq!(
-            log_line_pattern(first),
-            r#"{"timestamp":"<_>","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#
+        assert2::assert!(log_line_pattern(first) == log_line_pattern(second));
+        assert2::assert!(
+            log_line_pattern(first)
+                == r#"{"timestamp":"<_>","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#
         );
     }
 
@@ -21820,65 +21779,65 @@ mod tests {
         let pattern = log_line_pattern(
             r#"{"severity":"INFO","request_id":"550e8400-e29b-41d4-a716-446655440000","trace":"4f3a9c2be18d4f6a5b7c9e0f1a2d3e4b","offset":12345,"sasl":false,"listener":"PLAIN"}"#,
         );
-        assert_eq!(
-            pattern,
-            r#"{"severity":"INFO","request_id":"<_>","trace":"<_>","offset":"<_>","sasl":false,"listener":"PLAIN"}"#
+        assert2::assert!(
+            pattern
+                == r#"{"severity":"INFO","request_id":"<_>","trace":"<_>","offset":"<_>","sasl":false,"listener":"PLAIN"}"#
         );
     }
 
     #[test]
     fn json_message_field_templatizes_embedded_variables() {
-        assert_eq!(
-            log_line_pattern(r#"{"message":"processed request 550e8400e29b41d4a716 in 42ms"}"#),
-            r#"{"message":"processed request <_> in <_>"}"#
+        assert2::assert!(
+            log_line_pattern(r#"{"message":"processed request 550e8400e29b41d4a716 in 42ms"}"#)
+                == r#"{"message":"processed request <_> in <_>"}"#
         );
     }
 
     #[test]
     fn non_json_lines_still_use_logfmt_mining() {
-        assert_eq!(
-            log_line_pattern("status=500 user=100 route=/checkout"),
-            "status=<_> user=<_> route=/checkout"
+        assert2::assert!(
+            log_line_pattern("status=500 user=100 route=/checkout")
+                == "status=<_> user=<_> route=/checkout"
         );
         // A line that merely starts with `{` but is not valid JSON falls back.
-        assert_eq!(log_line_pattern("{not json ts=1"), "{not json ts=<_>");
+        assert2::assert!(log_line_pattern("{not json ts=1") == "{not json ts=<_>");
     }
 
     #[test]
     fn pattern_value_variable_classification() {
         // Variable: timestamps, floats, UUIDs, long hex ids, opaque tokens.
-        assert!(pattern_value_is_variable("2026-07-01T04:19:26.1238077Z"));
-        assert!(pattern_value_is_variable("42.5"));
-        assert!(pattern_value_is_variable(
+        assert2::assert!(pattern_value_is_variable("2026-07-01T04:19:26.1238077Z"));
+        assert2::assert!(pattern_value_is_variable("42.5"));
+        assert2::assert!(pattern_value_is_variable(
             "550e8400-e29b-41d4-a716-446655440000"
         ));
-        assert!(pattern_value_is_variable(
+        assert2::assert!(pattern_value_is_variable(
             "4f3a9c2be18d4f6a5b7c9e0f1a2d3e4b"
         ));
-        assert!(pattern_value_is_variable("AKIAIOSFODNN7EXAMPLE"));
-        assert!(pattern_value_is_variable("\"2026-07-01T04:19:26Z\""));
+        assert2::assert!(pattern_value_is_variable("AKIAIOSFODNN7EXAMPLE"));
+        assert2::assert!(pattern_value_is_variable("\"2026-07-01T04:19:26Z\""));
         // Sole-reason coverage: each value below is variable via exactly one
         // classifier, so every branch of the `||` chain (and the shape checks
         // inside `is_uuid`/`is_hex_id`) is independently exercised.
-        assert!(pattern_value_is_variable("-42.5")); // negative float: only the f64 parse
-        assert!(pattern_value_is_variable(
+        assert2::assert!(pattern_value_is_variable("-42.5")); // negative float: only the f64 parse
+        assert2::assert!(pattern_value_is_variable(
             "f47ac10b-58cc-4372-a567-0e02b2c3d479" // letter-led UUID: only is_uuid
         ));
-        assert!(pattern_value_is_variable("abcdefabcdefabcd")); // 16 hex letters, no digit: only is_hex_id
+        assert2::assert!(pattern_value_is_variable("abcdefabcdefabcd")); // 16 hex letters, no digit: only is_hex_id
         // UUID *layout* but non-hex groups must not be accepted as a UUID (guards
         // the `len == n && all-hex` check inside is_uuid).
-        assert!(!pattern_value_is_variable(
+        assert2::assert!(!pattern_value_is_variable(
             "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
         ));
         // Constant: levels, module paths, file:line callers, short words.
-        assert!(!pattern_value_is_variable("INFO"));
-        assert!(!pattern_value_is_variable(
+        assert2::assert!(!pattern_value_is_variable("INFO"));
+        assert2::assert!(!pattern_value_is_variable(
             "crabka_broker::network::dispatch"
         ));
-        assert!(!pattern_value_is_variable("grpc_logging.go:66"));
-        assert!(!pattern_value_is_variable("/cortex.Ingester/Push"));
-        assert!(!pattern_value_is_variable("cafe"));
-        assert!(!pattern_value_is_variable("authenticationToken"));
+        assert2::assert!(!pattern_value_is_variable("grpc_logging.go:66"));
+        assert2::assert!(!pattern_value_is_variable("/cortex.Ingester/Push"));
+        assert2::assert!(!pattern_value_is_variable("cafe"));
+        assert2::assert!(!pattern_value_is_variable("authenticationToken"));
     }
 
     /// A negative range offset MUST render with a leading `-` sign, and a positive

@@ -23,6 +23,7 @@ workspace = true
 heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 [dependencies]
+assert2 = { workspace = true }
 arc-swap = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 crabka-broker = { path = "../broker", version = "0.3.8" }
@@ -67,7 +68,6 @@ wincode = { workspace = true }
 tikv-jemallocator = { version = "0.7", optional = true, features = ["profiling", "unprefixed_malloc_on_supported_platforms"] }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 crabka-client-core = { path = "../client-core", version = "0.3.9" }
 crabka-protocol = { path = "../protocol", version = "0.3.9" }
 datatest-stable = { workspace = true }

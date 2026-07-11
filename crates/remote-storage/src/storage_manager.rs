@@ -147,14 +147,22 @@ mod tests {
     #[test]
     fn index_suffixes_match_kafka() {
         // Filesystem-backed stores key files off these exact suffixes.
-        for (index_type, want) in [
-            (IndexType::Offset, ".index"),
-            (IndexType::Timestamp, ".timeindex"),
-            (IndexType::ProducerSnapshot, ".snapshot"),
-            (IndexType::LeaderEpoch, ".leader-epoch-checkpoint"),
-            (IndexType::Transaction, ".txnindex"),
+        for (name, index_type, want) in [
+            ("offset", IndexType::Offset, ".index"),
+            ("timestamp", IndexType::Timestamp, ".timeindex"),
+            (
+                "producer snapshot",
+                IndexType::ProducerSnapshot,
+                ".snapshot",
+            ),
+            (
+                "leader epoch",
+                IndexType::LeaderEpoch,
+                ".leader-epoch-checkpoint",
+            ),
+            ("transaction", IndexType::Transaction, ".txnindex"),
         ] {
-            check!(index_type.suffix() == want, "{index_type:?}");
+            check!(index_type.suffix() == want, "case {name}: {index_type:?}");
         }
     }
 }

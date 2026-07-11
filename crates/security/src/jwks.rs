@@ -337,7 +337,7 @@ pub(crate) use tests::{mint_es256, mint_rs256, mint_rs256_with_header};
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use ring::{
         rand::SystemRandom,
         signature::{EcdsaKeyPair, KeyPair, RsaKeyPair},
@@ -361,7 +361,7 @@ mod tests {
     fn split_pkcs1_public(der: &[u8]) -> (Vec<u8>, Vec<u8>) {
         // SEQUENCE { INTEGER n, INTEGER e }
         let mut p = 0usize;
-        assert!(der[p] == 0x30, "expected SEQUENCE");
+        assert2::assert!(der[p] == 0x30);
         p += 1;
         let (_seq_len, adv) = read_der_len(&der[p..]);
         p += adv;
@@ -384,7 +384,7 @@ mod tests {
     }
 
     fn read_der_integer(der: &[u8], p: &mut usize) -> Vec<u8> {
-        assert!(der[*p] == 0x02, "expected INTEGER");
+        assert2::assert!(der[*p] == 0x02);
         *p += 1;
         let (len, adv) = read_der_len(&der[*p..]);
         *p += adv;
@@ -483,30 +483,26 @@ mod tests {
     #[test]
     fn empty_jwks_has_no_keys() {
         let jwks = Jwks::empty();
-        check!(jwks.is_empty());
-        check!(jwks.len() == 0);
-        check!(!jwks.contains_kid("k1"));
+        check!((jwks.is_empty(), jwks.len(), jwks.contains_kid("k1")) == (true, 0, false));
     }
 
     #[test]
     fn jwks_with_key_is_not_empty() {
         let (_token, jwks_json) = rs256("k1", "{\"sub\":\"alice\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).expect("parse jwks");
-        check!(!jwks.is_empty());
-        check!(jwks.len() == 1);
-        check!(jwks.contains_kid("k1"));
+        check!((jwks.is_empty(), jwks.len(), jwks.contains_kid("k1")) == (false, 1, true));
     }
 
     #[test]
     fn left_pad_32_accepts_short_and_exact_coordinates_only() {
-        assert!(left_pad_32(&[0xAA; 33]).is_none());
+        assert2::assert!(left_pad_32(&[0xAA; 33]).is_none());
 
         let short = left_pad_32(&[0x01, 0x02]).expect("short coordinate padded");
-        assert!(short[..30] == [0u8; 30]);
-        assert!(short[30..] == [0x01, 0x02]);
+        assert2::assert!(&short[..30] == &[0u8; 30][..]);
+        assert2::assert!(&short[30..] == &[0x01, 0x02][..]);
 
         let exact = [0x7Fu8; 32];
-        assert!(left_pad_32(&exact).expect("exact coordinate") == exact);
+        assert2::assert!(left_pad_32(&exact).expect("exact coordinate") == exact);
     }
 
     #[test]
@@ -520,7 +516,7 @@ mod tests {
         keys.extend(rsa["keys"].as_array().unwrap().clone());
         let merged = serde_json::json!({ "keys": keys }).to_string();
         let jwks = Jwks::from_json(&merged, false).unwrap();
-        assert!(jwks.len() == 2);
+        assert2::assert!(jwks.len() == 2);
     }
 
     #[test]
@@ -534,13 +530,14 @@ mod tests {
             false,
         )
         .unwrap();
-        assert!(jwks.is_empty());
+        assert2::assert!(jwks.is_empty());
     }
 
     #[test]
     fn rejects_non_json_and_missing_keys_array() {
-        assert!(Jwks::from_json("not json", false) == Err(AuthError::MalformedMessage));
-        assert!(Jwks::from_json("{}", false) == Err(AuthError::MalformedMessage));
+        for (_name, input) in [("invalid JSON", "not json"), ("missing keys array", "{}")] {
+            assert2::assert!(Jwks::from_json(input, false) == Err(AuthError::MalformedMessage));
+        }
     }
 
     #[test]
@@ -548,7 +545,7 @@ mod tests {
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"admin\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
-        assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig).is_ok());
+        assert2::assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig).is_ok());
     }
 
     #[test]
@@ -557,7 +554,7 @@ mod tests {
         let token = es256_token(&kp, "ec1", "{\"sub\":\"admin\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
-        assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig).is_ok());
+        assert2::assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig).is_ok());
     }
 
     #[test]
@@ -566,7 +563,9 @@ mod tests {
         let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, mut sig) = parts(&token);
         sig[0] ^= 0xff;
-        assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig) == Err(AuthError::InvalidToken));
+        assert2::assert!(
+            jwks.verify(kid.as_deref(), &alg, &si, &sig) == Err(AuthError::InvalidToken)
+        );
     }
 
     #[test]
@@ -574,7 +573,9 @@ mod tests {
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (_kid, alg, si, sig) = parts(&token);
-        assert!(jwks.verify(Some("other"), &alg, &si, &sig) == Err(AuthError::InvalidToken));
+        assert2::assert!(
+            jwks.verify(Some("other"), &alg, &si, &sig) == Err(AuthError::InvalidToken)
+        );
     }
 
     #[test]
@@ -594,7 +595,7 @@ mod tests {
         let sig = kp
             .sign(&SystemRandom::new(), signing_input.as_bytes())
             .unwrap();
-        assert!(
+        assert2::assert!(
             jwks.verify(None, "ES256", signing_input.as_bytes(), sig.as_ref())
                 == Err(AuthError::InvalidToken)
         );
@@ -606,7 +607,7 @@ mod tests {
             mint_rs256_with_header("{\"alg\":\"RS256\"}", "{\"sub\":\"a\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
-        assert!(kid.is_none());
+        assert2::assert!(kid.is_none());
         jwks.verify(kid.as_deref(), &alg, &si, &sig)
             .expect("single-key JWKS should verify a token without kid");
     }
@@ -618,7 +619,9 @@ mod tests {
         let token = es256_token(&kp_a, "ec1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_b, false).unwrap();
         let (kid, alg, si, sig) = parts(&token);
-        assert!(jwks.verify(kid.as_deref(), &alg, &si, &sig) == Err(AuthError::InvalidToken));
+        assert2::assert!(
+            jwks.verify(kid.as_deref(), &alg, &si, &sig) == Err(AuthError::InvalidToken)
+        );
     }
 
     #[test]
@@ -627,16 +630,18 @@ mod tests {
         let (token, jwks_json) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
         let jwks = Jwks::from_json(&jwks_json, false).unwrap();
         let (kid, _alg, si, sig) = parts(&token);
-        assert!(jwks.verify(kid.as_deref(), "ES256", &si, &sig) == Err(AuthError::InvalidToken));
+        assert2::assert!(
+            jwks.verify(kid.as_deref(), "ES256", &si, &sig) == Err(AuthError::InvalidToken)
+        );
     }
 
     #[test]
     fn handle_store_and_load_round_trips() {
         let h = JwksHandle::default();
-        assert!(h.load().is_empty());
+        assert2::assert!(h.load().is_empty());
         let (_t, jwks_json) = rs256("rsa1", "{\"sub\":\"a\",\"exp\":9999999999}");
         h.store(Jwks::from_json(&jwks_json, false).unwrap());
-        assert!(h.load().len() == 1);
+        assert2::assert!(h.load().len() == 1);
     }
 
     // ---- ignore_key_use filter + handle helpers ------------------
@@ -650,8 +655,9 @@ mod tests {
             ]
         }"#;
         let jwks = Jwks::from_json(json, false).expect("parses");
-        assert!(jwks.contains_kid("sig-key"));
-        assert!(!jwks.contains_kid("enc-key"));
+        assert2::assert!(
+            (jwks.contains_kid("sig-key"), jwks.contains_kid("enc-key")) == (true, false)
+        );
     }
 
     #[test]
@@ -663,8 +669,9 @@ mod tests {
             ]
         }"#;
         let jwks = Jwks::from_json(json, true).expect("parses");
-        assert!(jwks.contains_kid("sig-key"));
-        assert!(jwks.contains_kid("enc-key"));
+        assert2::assert!(
+            (jwks.contains_kid("sig-key"), jwks.contains_kid("enc-key")) == (true, true)
+        );
     }
 
     #[test]
@@ -674,8 +681,8 @@ mod tests {
                 {"kty":"RSA","kid":"no-use","n":"AQAB","e":"AQAB"}
             ]
         }"#;
-        assert!(Jwks::from_json(json, false).unwrap().contains_kid("no-use"));
-        assert!(Jwks::from_json(json, true).unwrap().contains_kid("no-use"));
+        assert2::assert!(Jwks::from_json(json, false).unwrap().contains_kid("no-use"));
+        assert2::assert!(Jwks::from_json(json, true).unwrap().contains_kid("no-use"));
     }
 
     #[test]
@@ -685,7 +692,7 @@ mod tests {
         // or not a refresher is paired.
         let h = JwksHandle::default();
         h.signal_refresh();
-        assert!(h.last_successful_fetch_ms() == 0);
+        assert2::assert!(h.last_successful_fetch_ms() == 0);
     }
 
     #[tokio::test(flavor = "current_thread")]
@@ -694,7 +701,7 @@ mod tests {
         let ts = Arc::new(std::sync::atomic::AtomicI64::new(0));
         let h = JwksHandle::new_with_refresher_handles(Jwks::empty(), ts, tx);
         h.signal_refresh();
-        assert!(rx.try_recv().is_ok(), "signal should land in receiver");
+        assert2::assert!(rx.try_recv().is_ok());
     }
 
     // Expose minting helpers to the sibling `oauthbearer` tests.

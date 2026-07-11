@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::BytesMut;
 use crabka_client_core::{ClientError, Connection, ConnectionOptions, MockBroker};
 // Use the raw constants so we don't need `ProtocolRequest` in scope.
@@ -99,7 +99,7 @@ fn metadata_response_with_throttle(version: i16, throttle_time_ms: i32) -> Vec<u
 async fn connect_negotiates_api_versions() {
     let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
         // Only the bootstrap ApiVersions call is expected here.
-        assert!(api_key == api_versions_request::API_KEY);
+        assert2::assert!(api_key == api_versions_request::API_KEY);
         Some(api_versions_response_v0())
     })
     .await;
@@ -108,11 +108,13 @@ async fn connect_negotiates_api_versions() {
         .await
         .unwrap();
 
-    check!(!conn.versions().is_empty());
-    // The mock advertised api_key 18 min=0 max=3.
-    check!(conn.versions().broker_range(api_versions_request::API_KEY) == Some((0, 3)));
-    // The mock advertised api_key 3 min=0 max=12.
-    check!(conn.versions().broker_range(metadata_request_mod::API_KEY) == Some((0, 12)));
+    check!(
+        (
+            conn.versions().is_empty(),
+            conn.versions().broker_range(api_versions_request::API_KEY),
+            conn.versions().broker_range(metadata_request_mod::API_KEY),
+        ) == (false, Some((0, 3)), Some((0, 12)))
+    );
 
     conn.close();
     mock.stop();
@@ -232,10 +234,7 @@ async fn concurrent_sends_get_correct_responses() {
         r3.throttle_time_ms,
     ];
     seen.sort_unstable();
-    assert!(
-        seen == [0, 1, 2],
-        "each concurrent send must get a distinct response"
-    );
+    assert2::assert!(seen == [0, 1, 2]);
 
     conn.close();
     mock.stop();
@@ -295,10 +294,7 @@ async fn client_refresh_metadata_populates_pool() {
         .unwrap();
 
     let metadata = client.refresh_metadata().await.unwrap();
-    assert!(
-        metadata.brokers.len() == 2,
-        "expected 2 brokers in metadata"
-    );
+    assert2::assert!(metadata.brokers.len() == 2);
 
     // After refresh the pool knows broker 1 and 2's addresses. We can't
     // actually connect to those ports (the mock isn't listening there), but

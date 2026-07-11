@@ -218,7 +218,7 @@ impl RemoteStorageManager for LocalTieredStorage {
 mod tests {
     use std::{collections::BTreeMap, io::Write};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
     use uuid::Uuid;
@@ -269,13 +269,13 @@ mod tests {
         let src = tempfile::tempdir().unwrap();
         let rsm = LocalTieredStorage::new(remote.path());
         let md = metadata(10);
-        assert!(
+        assert2::assert!(
             rsm.copy_log_segment_data(&md, &sample_data(src.path(), true))
                 .unwrap()
                 .is_none()
         );
         let full = rsm.fetch_log_segment(&md, 0, None).unwrap();
-        assert!(full == b"0123456789");
+        assert2::assert!(full == b"0123456789");
     }
 
     #[test]
@@ -286,19 +286,19 @@ mod tests {
         let md = metadata(10);
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), false))
             .unwrap();
-        for (start, end, want) in [
+        for (name, start, end, want) in [
             // Inclusive [2, 5] -> "2345".
-            (2, Some(5), b"2345".as_ref()),
+            ("bounded", 2, Some(5), b"2345".as_ref()),
             // Open-ended from 7 -> "789".
-            (7, None, b"789".as_ref()),
+            ("open ended", 7, None, b"789".as_ref()),
             // End past EOF clamps.
-            (8, Some(99), b"89".as_ref()),
+            ("clamped end", 8, Some(99), b"89".as_ref()),
             // Start at EOF -> empty.
-            (10, None, b"".as_ref()),
+            ("start at eof", 10, None, b"".as_ref()),
         ] {
             check!(
                 rsm.fetch_log_segment(&md, start, end).unwrap() == want,
-                "range [{start}, {end:?}]"
+                "case {name}: range [{start}, {end:?}]"
             );
         }
     }
@@ -313,7 +313,7 @@ mod tests {
             .unwrap();
         // Inclusive [3, 3] is a valid single-byte range -> "3". (The guard is
         // `end < start`, not `<=`/`==`, so an equal start/end must succeed.)
-        assert!(rsm.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
+        assert2::assert!(rsm.fetch_log_segment(&md, 3, Some(3)).unwrap() == b"3");
     }
 
     #[test]
@@ -324,16 +324,24 @@ mod tests {
         let md = metadata(10);
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), true))
             .unwrap();
-        for (index_type, want) in [
-            (IndexType::Offset, b"OFFSET-IDX".as_ref()),
-            (IndexType::Timestamp, b"TIME-IDX".as_ref()),
-            (IndexType::ProducerSnapshot, b"SNAP".as_ref()),
-            (IndexType::LeaderEpoch, b"EPOCH-BYTES".as_ref()),
-            (IndexType::Transaction, b"TXN-IDX".as_ref()),
+        for (name, index_type, want) in [
+            ("offset", IndexType::Offset, b"OFFSET-IDX".as_ref()),
+            ("timestamp", IndexType::Timestamp, b"TIME-IDX".as_ref()),
+            (
+                "producer snapshot",
+                IndexType::ProducerSnapshot,
+                b"SNAP".as_ref(),
+            ),
+            (
+                "leader epoch",
+                IndexType::LeaderEpoch,
+                b"EPOCH-BYTES".as_ref(),
+            ),
+            ("transaction", IndexType::Transaction, b"TXN-IDX".as_ref()),
         ] {
             check!(
                 rsm.fetch_index(&md, index_type).unwrap() == want,
-                "{index_type:?}"
+                "case {name}: {index_type:?}"
             );
         }
     }
@@ -347,7 +355,7 @@ mod tests {
         rsm.copy_log_segment_data(&md, &sample_data(src.path(), false))
             .unwrap();
         let err = rsm.fetch_index(&md, IndexType::Transaction).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[test]
@@ -356,7 +364,7 @@ mod tests {
         let rsm = LocalTieredStorage::new(remote.path());
         let md = metadata(404);
         let err = rsm.fetch_log_segment(&md, 0, None).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[test]
@@ -370,7 +378,7 @@ mod tests {
         rsm.delete_log_segment_data(&md).unwrap();
         // Second delete is a no-op.
         rsm.delete_log_segment_data(&md).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             rsm.fetch_log_segment(&md, 0, None).unwrap_err(),
             RemoteStorageError::SegmentNotFound(_)
         ));
@@ -389,6 +397,6 @@ mod tests {
             .unwrap();
         rsm.delete_log_segment_data(&a).unwrap();
         // Deleting `a` leaves `b` intact.
-        assert!(rsm.fetch_log_segment(&b, 0, None).unwrap() == b"0123456789");
+        assert2::assert!(rsm.fetch_log_segment(&b, 0, None).unwrap() == b"0123456789");
     }
 }

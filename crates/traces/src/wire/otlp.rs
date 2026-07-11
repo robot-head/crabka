@@ -175,7 +175,7 @@ pub fn decode_otlp(data: &TracesData) -> Result<Vec<Span>, WireError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use opentelemetry_proto::tonic::{
         common::v1::{
             AnyValue, ArrayValue, InstrumentationScope, KeyValue as OtlpKv, any_value::Value,
@@ -234,31 +234,31 @@ mod tests {
     #[test]
     fn decodes_one_span_with_resource_attrs() {
         let spans = decode_otlp(&data()).unwrap();
-        assert_eq!(
-            spans,
-            vec![Span {
-                trace_id: [1; 16],
-                span_id: [2; 8],
-                parent_span_id: None,
-                name: "GET /".into(),
-                kind: SpanKind::Server,
-                start_ns: 1_000,
-                duration_ns: 500,
-                status: StatusCode::Ok,
-                status_message: String::new(),
-                resource_attrs: vec![KeyValue {
-                    key: "service.name".into(),
-                    value: AttrValue::Str("api".into()),
-                }],
-                span_attrs: vec![KeyValue {
-                    key: "http.method".into(),
-                    value: AttrValue::Str("GET".into()),
-                }],
-                events: Vec::new(),
-                links: Vec::new(),
-                instrumentation_scope: String::new(),
-                instrumentation_version: String::new(),
-            }]
+        assert2::assert!(
+            spans
+                == vec![Span {
+                    trace_id: [1; 16],
+                    span_id: [2; 8],
+                    parent_span_id: None,
+                    name: "GET /".into(),
+                    kind: SpanKind::Server,
+                    start_ns: 1_000,
+                    duration_ns: 500,
+                    status: StatusCode::Ok,
+                    status_message: String::new(),
+                    resource_attrs: vec![KeyValue {
+                        key: "service.name".into(),
+                        value: AttrValue::Str("api".into()),
+                    }],
+                    span_attrs: vec![KeyValue {
+                        key: "http.method".into(),
+                        value: AttrValue::Str("GET".into()),
+                    }],
+                    events: Vec::new(),
+                    links: Vec::new(),
+                    instrumentation_scope: String::new(),
+                    instrumentation_version: String::new(),
+                }]
         );
     }
 
@@ -292,8 +292,8 @@ mod tests {
             .map(|attr| &attr.value)
             .collect::<Vec<_>>();
 
-        assert!(methods.contains(&&AttrValue::Str("GET".into())));
-        assert!(methods.contains(&&AttrValue::Str("POST".into())));
+        assert2::assert!(methods.contains(&&AttrValue::Str("GET".into())));
+        assert2::assert!(methods.contains(&&AttrValue::Str("POST".into())));
     }
 
     #[test]
@@ -307,14 +307,18 @@ mod tests {
 
         let spans = decode_otlp(&data).unwrap();
 
-        assert!(spans[0].instrumentation_scope == "tracer");
-        assert!(spans[0].instrumentation_version == "1.2.3");
+        assert2::assert!(
+            (
+                spans[0].instrumentation_scope.as_str(),
+                spans[0].instrumentation_version.as_str(),
+            ) == ("tracer", "1.2.3")
+        );
     }
 
     #[test]
     fn rejects_wrong_length_trace_id() {
         let mut data = data();
         data.resource_spans[0].scope_spans[0].spans[0].trace_id = vec![1; 8];
-        assert!(decode_otlp(&data).is_err());
+        assert2::assert!(decode_otlp(&data).is_err());
     }
 }

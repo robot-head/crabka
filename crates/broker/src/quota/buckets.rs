@@ -69,7 +69,7 @@ impl QuotaBuckets {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -81,8 +81,8 @@ mod tests {
     fn get_or_create_returns_new_bucket_first_time() {
         let buckets = QuotaBuckets::new();
         let b = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
-        assert!(b.rate() == 1024);
-        assert!(buckets.len() == 1);
+        assert2::assert!(b.rate() == 1024);
+        assert2::assert!(buckets.len() == 1);
     }
 
     #[test]
@@ -101,7 +101,7 @@ mod tests {
         let buckets = QuotaBuckets::new();
         let _ = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
         let _ = buckets.get_or_create("consumer_byte_rate", &key("alice"), 2048);
-        assert!(buckets.len() == 2);
+        assert2::assert!(buckets.len() == 2);
     }
 
     #[test]
@@ -109,6 +109,6 @@ mod tests {
         let buckets = QuotaBuckets::new();
         let _ = buckets.get_or_create("producer_byte_rate", &key("alice"), 1024);
         let _ = buckets.get_or_create("producer_byte_rate", &key("bob"), 2048);
-        assert!(buckets.len() == 2);
+        assert2::assert!(buckets.len() == 2);
     }
 }

@@ -97,7 +97,7 @@ impl Goal for ReplicaDistribution {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::model::BrokerView;
@@ -167,7 +167,7 @@ mod tests {
             },
         ];
         let s = state_with(parts, vec![1, 2, 3]);
-        assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
+        assert2::assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
     }
 
     #[test]
@@ -181,13 +181,13 @@ mod tests {
 
         let counts = ReplicaDistribution::counts(&s);
 
-        assert!(counts == HashMap::from([(1, 2), (2, 1), (3, 1), (4, 0), (99, 1)]));
+        assert2::assert!(counts == HashMap::from([(1, 2), (2, 1), (3, 1), (4, 0), (99, 1)]));
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let counts = std::collections::HashMap::from([(1, 3), (2, 1)]);
-        assert!(ReplicaDistribution::imbalance_pct(&counts) == 50);
+        assert2::assert!(ReplicaDistribution::imbalance_pct(&counts) == 50);
     }
 
     #[test]
@@ -204,10 +204,10 @@ mod tests {
             .collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = ReplicaDistribution.propose(&s, &ctx());
-        assert!(!mvs.is_empty(), "expected at least one swap");
+        assert2::assert!(!mvs.is_empty());
         // RF preserved on every movement.
         for m in &mvs {
-            assert!(m.old_replicas.len() == m.new_replicas.len());
+            assert2::assert!(m.old_replicas.len() == m.new_replicas.len());
         }
     }
 
@@ -222,7 +222,7 @@ mod tests {
             isr: vec![1, 2, 3],
         }];
         let s = state_with(parts, vec![1, 2, 3]);
-        assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
+        assert2::assert!(ReplicaDistribution.propose(&s, &ctx()).is_empty());
     }
 
     #[test]
@@ -232,7 +232,7 @@ mod tests {
 
         let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 1,
@@ -255,7 +255,7 @@ mod tests {
 
         let mvs = ReplicaDistribution.propose(&s, &ctx_with_cap(1));
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 0,
@@ -289,16 +289,11 @@ mod tests {
         }];
         let s = state_with(parts.clone(), vec![1, 2, 3, 4]);
         let mvs = ReplicaDistribution.propose(&s, &ctx());
-        assert!(!mvs.is_empty(), "expected at least one swap");
+        assert2::assert!(!mvs.is_empty());
         // Sanity check: we want this scenario to actually trigger the
         // double-swap path. Otherwise the test is silently passing for
         // the wrong reason and the bug could regress unnoticed.
-        assert!(
-            mvs.len() >= 2,
-            "expected the algorithm to swap the same partition multiple times \
-             (got {} movements) — test scenario must exercise the double-swap",
-            mvs.len()
-        );
+        assert2::assert!(mvs.len() >= 2);
         for m in &mvs {
             let original = parts
                 .iter()

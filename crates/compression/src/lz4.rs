@@ -50,7 +50,6 @@ pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionEr
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -61,12 +60,12 @@ mod tests {
     fn roundtrip() {
         let z = compress(HELLO).unwrap();
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.as_ref() == HELLO);
+        assert2::assert!(back.as_ref() == HELLO);
     }
 
     #[test]
     fn decompress_empty_rejected() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(b"", BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -74,7 +73,7 @@ mod tests {
 
     #[test]
     fn decompress_garbage_rejected() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(b"this is not lz4", BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -85,19 +84,19 @@ mod tests {
         let big = vec![0xABu8; 128 * 1024]; // 128 KiB -> multiple 64 KiB blocks
         let z = compress(&big).unwrap();
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.as_ref() == big.as_slice());
+        assert2::assert!(back.as_ref() == big.as_slice());
     }
 
     #[test]
     fn decompression_bomb_rejected() {
         let bomb = vec![0u8; 64 * 1024 * 1024];
         let z = compress(&bomb).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&z, 1024),
             Err(CompressionError::TooLarge { limit: 1024 })
         ));
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.len() == bomb.len());
+        assert2::assert!(back.as_ref() == bomb.as_slice());
     }
 
     #[test]
@@ -106,9 +105,9 @@ mod tests {
         // Output of exactly `max_output` bytes is allowed (cap check is
         // `len > max_output`, not `>=`).
         let back = decompress(&z, HELLO.len()).unwrap();
-        assert!(back.as_ref() == HELLO);
+        assert2::assert!(back.as_ref() == HELLO);
         // One byte under the exact size is rejected.
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&z, HELLO.len() - 1),
             Err(CompressionError::TooLarge { limit }) if limit == HELLO.len() - 1
         ));
@@ -124,15 +123,13 @@ mod tests {
         let big = vec![0xCDu8; 128 * 1024];
         let z = compress(&big).unwrap();
         // LZ4 frame layout: [magic:4][FLG][BD]...
-        assert!(z[0..4] == [0x04, 0x22, 0x4D, 0x18]);
         let flg = z[4];
         let bd = z[5];
         // BD bits 4..6 encode the block max size; value 4 == 64 KiB.
-        assert!((bd >> 4) & 0x7 == 4, "BD={bd:#04x}");
-        // FLG bit 5 = block-independence flag (we request Independent).
-        assert!((flg >> 5) & 1 == 1, "FLG={flg:#04x}");
-        // FLG bit 4 = per-block checksum, bit 2 = content checksum: both off.
-        assert!((flg >> 4) & 1 == 0, "FLG={flg:#04x}");
-        assert!((flg >> 2) & 1 == 0, "FLG={flg:#04x}");
+        assert2::assert!(&z[0..4] == &[0x04, 0x22, 0x4D, 0x18][..]);
+        assert2::assert!(bd >> 4 & 0x7 == 4);
+        assert2::assert!(flg >> 5 & 1 == 1);
+        assert2::assert!(flg >> 4 & 1 == 0);
+        assert2::assert!(flg >> 2 & 1 == 0);
     }
 }

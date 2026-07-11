@@ -92,7 +92,7 @@ mod tests {
     #[test]
     fn extract_trims_indent_and_markers() {
         let src = "fn main() {\n    // docs:begin foo\n    let x = 1;\n    // docs:end foo\n}\n";
-        assert_eq!(extract(src, "foo").unwrap(), "let x = 1;");
+        assert2::assert!(extract(src, "foo").unwrap() == "let x = 1;");
     }
 
     #[test]
@@ -107,8 +107,8 @@ mod tests {
         let md = "intro\n<!-- snippet: c/examples/e.rs#a -->\nOLD\n<!-- /snippet -->\nend\n";
         let once = sync_markdown(md, dir.path()).unwrap();
         let twice = sync_markdown(&once, dir.path()).unwrap();
-        assert_eq!(once, twice);
-        assert!(once.contains("```rust\nlet y = 2;\n```"));
-        assert!(!once.contains("OLD"));
+        assert2::assert!(once == twice);
+        assert2::assert!(once.contains("```rust\nlet y = 2;\n```"));
+        assert2::assert!(!once.contains("OLD"));
     }
 }

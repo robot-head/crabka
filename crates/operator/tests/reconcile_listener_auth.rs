@@ -2,7 +2,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{Kafka, KafkaSpec, Listener, ListenerAuthentication, ListenerType},
@@ -66,75 +66,49 @@ fn internal_listener(
     }
 }
 
-// ── test 1 ────────────────────────────────────────────────────────────────────
-
-/// SCRAM-SHA-512 internal listener with TLS renders `protocol = "SaslSsl"`
-/// and the correct `sasl_config` inline table.
 #[tokio::test]
-async fn scram_sha_512_internal_listener_renders_sasl_ssl() {
-    let items = vec![fake_pool_list_item("brokers", "ns1", "c1", 1, 1)];
-    let (ctx, state) = build_ctx("ns1", happy_path_rules("c1", "ns1", &items));
-
-    let kafka = kafka_cr_with_listeners(
-        "c1",
-        "ns1",
-        vec![internal_listener(
-            "data",
-            9094,
-            true,
-            Some(ListenerAuthentication::ScramSha512),
-        )],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c1");
-
-    for needle in [
-        "protocol = \"SaslSsl\"",
-        "tls_config = {",
-        "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+async fn internal_listener_auth_render_cases() {
+    for (case, namespace, cluster, listener, expected_fragments) in [
+        (
+            "SCRAM-SHA-512 with TLS",
+            "ns1",
+            "c1",
+            internal_listener(
+                "data",
+                9094,
+                true,
+                Some(ListenerAuthentication::ScramSha512),
+            ),
+            vec![
+                "protocol = \"SaslSsl\"",
+                "tls_config = {",
+                "sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-512\"] }",
+            ],
+        ),
+        (
+            "mTLS client authentication",
+            "ns2",
+            "c2",
+            internal_listener("mtls", 9095, true, Some(ListenerAuthentication::Tls)),
+            vec![
+                "protocol = \"Ssl\"",
+                "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
+                "client_auth = \"Required\"",
+            ],
+        ),
     ] {
-        assert!(
-            toml.contains(needle),
-            "expected {needle:?} for SCRAM-SHA-512 with TLS;\n{toml}"
-        );
-    }
-}
+        let items = vec![fake_pool_list_item("brokers", namespace, cluster, 1, 1)];
+        let (ctx, state) = build_ctx(namespace, happy_path_rules(cluster, namespace, &items));
+        let kafka = kafka_cr_with_listeners(cluster, namespace, vec![listener]);
+        reconcile(Arc::new(kafka), ctx)
+            .await
+            .unwrap_or_else(|error| panic!("{case}: reconcile failed: {error}"));
 
-// ── test 2 ────────────────────────────────────────────────────────────────────
-
-/// mTLS internal listener renders `protocol = "Ssl"`, `client_ca_path`, and
-/// `client_auth = "Required"`.
-#[tokio::test]
-async fn mtls_internal_listener_renders_client_auth_required() {
-    let items = vec![fake_pool_list_item("brokers", "ns2", "c2", 1, 1)];
-    let (ctx, state) = build_ctx("ns2", happy_path_rules("c2", "ns2", &items));
-
-    let kafka = kafka_cr_with_listeners(
-        "c2",
-        "ns2",
-        vec![internal_listener(
-            "mtls",
-            9095,
-            true,
-            Some(ListenerAuthentication::Tls),
-        )],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c2");
-
-    for needle in [
-        "protocol = \"Ssl\"",
-        "client_ca_path = \"/etc/crabka/clients-ca/ca.crt\"",
-        "client_auth = \"Required\"",
-    ] {
-        assert!(
-            toml.contains(needle),
-            "mTLS listener must render {needle:?};\n{toml}"
-        );
+        let observed = state.take_observed();
+        let toml = extract_broker0_toml(&observed, cluster);
+        for fragment in expected_fragments {
+            assert2::assert!(toml.contains(fragment));
+        }
     }
 }
 
@@ -162,14 +136,8 @@ async fn scram_sha_256_renders_sasl_ssl_with_256_mechanism() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c3");
 
-    assert!(
-        toml.contains("protocol = \"SaslSsl\""),
-        "expected SaslSsl for SCRAM-SHA-256 with TLS;\n{toml}"
-    );
-    assert!(
-        toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-256\"] }"),
-        "expected SCRAM-SHA-256 mechanism;\n{toml}"
-    );
+    assert2::assert!(toml.contains("protocol = \"SaslSsl\""));
+    assert2::assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"SCRAM-SHA-256\"] }"));
 }
 
 // ── test 4 ────────────────────────────────────────────────────────────────────
@@ -230,13 +198,9 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
     let observed = state.take_observed();
 
     // ConfigMap PATCH must be absent.
-    assert!(
-        !observed.iter().any(|r| {
-            r.method() == Method::PATCH
-                && r.uri().to_string().contains("/configmaps/c5-broker-config")
-        }),
-        "validation failure must not patch the broker-config ConfigMap"
-    );
+    assert2::assert!(!observed.iter().any(|r| {
+        r.method() == Method::PATCH && r.uri().to_string().contains("/configmaps/c5-broker-config")
+    }));
 
     // Status must surface the validation error.
     let status_patch = observed
@@ -253,11 +217,8 @@ async fn listener_mtls_requires_tls_validation_error_surfaces_status() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    check!(valid["status"] == "False", "body = {body}");
-    check!(
-        valid["reason"] == "ListenerMtlsRequiresTransportTls",
-        "body = {body}"
-    );
+    assert2::assert!(valid["status"].as_str() == Some("False"));
+    assert2::assert!(valid["reason"].as_str() == Some("ListenerMtlsRequiresTransportTls"));
 
     check!(state.remaining_rules() == 0);
 }
@@ -326,21 +287,12 @@ async fn auth_change_bumps_config_hash() {
         .unwrap_or_else(|| panic!("config-hash label missing; body = {body2}"))
         .to_string();
 
-    assert!(
-        hash1 != hash2,
-        "config-hash must differ between SCRAM-SHA-512 and mTLS configs"
-    );
+    assert2::assert!(hash1 != hash2);
 
     // Both hashes must be valid 16-char hex strings.
-    for (hash, label) in [(&hash1, "scram"), (&hash2, "mtls")] {
-        assert!(
-            hash.len() == 16,
-            "{label} config-hash must be 16 hex chars, got {hash:?}"
-        );
-        assert!(
-            hash.chars().all(|c| c.is_ascii_hexdigit()),
-            "{label} config-hash must be hex, got {hash:?}"
-        );
+    for (hash, _label) in [(&hash1, "scram"), (&hash2, "mtls")] {
+        assert2::assert!(hash.len() == 16);
+        assert2::assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 }
 
@@ -682,8 +634,5 @@ async fn nodeport_listener_external_san_added_to_per_broker_cert() {
     // ExternalIP). This proves the SAN computation reached the keystore-write path, but does
     // not parse the cert PEM itself — issue_broker_cert is independently tested in
     // security/src/ca.rs and operator/src/controller/cluster_ca.rs::san_tests.
-    assert!(
-        stored_digest == expected_digest,
-        "keystore 0.sans-digest must include the NodePort external IP {ext_node_ip}"
-    );
+    assert2::assert!(stored_digest == expected_digest);
 }

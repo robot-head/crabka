@@ -37,7 +37,7 @@ pub fn percentiles(h: &Histogram<u64>) -> LatencyPercentiles {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -49,7 +49,7 @@ mod tests {
         }
         let p = percentiles(&h);
         check!(p.p50_ms > 0.0);
-        check!(p.count == 5);
+        assert2::assert!(p.count == 5);
         check!(p.max_ms >= p.p99_ms);
     }
 
@@ -57,6 +57,6 @@ mod tests {
     fn clamps_above_max_into_range() {
         let mut h = new();
         record_us(&mut h, u64::MAX);
-        assert!(h.len() == 1);
+        assert2::assert!(h.len() == 1);
     }
 }

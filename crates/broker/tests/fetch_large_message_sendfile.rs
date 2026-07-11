@@ -10,7 +10,6 @@
 //! test exercises the portable vectored (Increment C) fallback — the wire bytes
 //! are identical either way, so the assertions hold on every platform.
 
-use assert2::assert;
 mod support;
 
 use bytes::Bytes;
@@ -40,7 +39,7 @@ async fn create_topic(p: &support::InProcess, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0);
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn topic_id_for(p: &support::InProcess, name: &str) -> WireUuid {
@@ -121,7 +120,7 @@ async fn large_message_fetch_round_trips_byte_exact() {
         })
         .await
         .expect("Produce");
-    assert!(prod.responses[0].partition_responses[0].error_code == 0);
+    assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
 
     // Fetch with a generous byte budget so the whole run comes back in one go.
     let r = p
@@ -148,8 +147,7 @@ async fn large_message_fetch_round_trips_byte_exact() {
         .await
         .expect("Fetch");
 
-    assert!(r.error_code == 0);
-    assert!(r.responses.len() == 1);
+    assert2::assert!((r.error_code, r.responses.len()) == (0, 1));
     let batches = r.responses[0].partitions[0]
         .records
         .as_ref()
@@ -163,17 +161,9 @@ async fn large_message_fetch_round_trips_byte_exact() {
         .flat_map(|b| b.records.iter())
         .filter_map(|rec| rec.value.as_ref())
         .collect();
-    assert!(
-        got_values.len() == expected.len(),
-        "expected {} records, got {}",
-        expected.len(),
-        got_values.len()
-    );
-    for (i, (got, want)) in got_values.iter().zip(expected.iter()).enumerate() {
-        assert!(
-            got.as_ref() == &want[..],
-            "record {i} value mismatch (sendfile byte corruption?)"
-        );
+    assert2::assert!(got_values.len() == expected.len());
+    for (got, want) in got_values.iter().zip(expected.iter()) {
+        assert2::assert!(got.as_ref() == &want[..]);
     }
 
     p.broker.shutdown().await;

@@ -323,8 +323,8 @@ impl Tree {
 
     #[cfg(test)]
     fn node_at(&self, path: &[&str]) -> &Node {
-        assert!(!path.is_empty());
-        assert_eq!(path[0], ROOT_NAME);
+        assert2::assert!(!path.is_empty());
+        assert2::assert!(path[0] == ROOT_NAME);
         let mut idx = self.root;
         for name in &path[1..] {
             idx = *self.nodes[idx]
@@ -434,7 +434,6 @@ fn write_uvarint(out: &mut Vec<u8>, mut value: u64) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
 
     use super::*;
     use crate::Frame;
@@ -457,13 +456,13 @@ mod tests {
         tree.add_stack(&stack(&["work", "main"]), 10);
         tree.add_stack(&stack(&["other", "main"]), 3);
 
-        check!(tree.total_of(&["total"]) == 13);
-        check!(tree.self_of(&["total"]) == 0);
-        check!(tree.total_of(&["total", "main"]) == 13);
-        check!(tree.self_of(&["total", "main"]) == 0);
-        check!(tree.total_of(&["total", "main", "work"]) == 10);
-        check!(tree.self_of(&["total", "main", "work"]) == 10);
-        check!(tree.self_of(&["total", "main", "other"]) == 3);
+        assert2::assert!(tree.total_of(&["total"]) == 13);
+        assert2::assert!(tree.self_of(&["total"]) == 0);
+        assert2::assert!(tree.total_of(&["total", "main"]) == 13);
+        assert2::assert!(tree.self_of(&["total", "main"]) == 0);
+        assert2::assert!(tree.total_of(&["total", "main", "work"]) == 10);
+        assert2::assert!(tree.self_of(&["total", "main", "work"]) == 10);
+        assert2::assert!(tree.self_of(&["total", "main", "other"]) == 3);
     }
 
     #[test]
@@ -474,10 +473,10 @@ mod tests {
         tree.add_stack(&stack(&["work", "main"]), 10);
         tree.add_stack(&[], 1);
 
-        assert!(tree.total_of(&["total"]) == 10);
-        assert!(tree.self_of(&["total"]) == 0);
+        assert2::assert!(tree.total_of(&["total"]) == 10);
+        assert2::assert!(tree.self_of(&["total"]) == 0);
         let fg = tree.to_flamegraph(2048);
-        assert!(fg.total == 10);
+        assert2::assert!(fg.total == 10);
     }
 
     #[test]
@@ -488,9 +487,9 @@ mod tests {
         b.add_stack(&stack(&["work", "main"]), 5);
         b.add_stack(&stack(&["new", "main"]), 2);
         a.merge(b);
-        check!(a.total_of(&["total"]) == 17);
-        check!(a.total_of(&["total", "main", "work"]) == 15);
-        check!(a.self_of(&["total", "main", "new"]) == 2);
+        assert2::assert!(a.total_of(&["total"]) == 17);
+        assert2::assert!(a.total_of(&["total", "main", "work"]) == 15);
+        assert2::assert!(a.self_of(&["total", "main", "new"]) == 2);
     }
 
     #[test]
@@ -499,9 +498,9 @@ mod tests {
         tree.add_stack(&stack(&["a", "main"]), 6);
         tree.add_stack(&stack(&["b", "main"]), 4);
         let fg = tree.to_flamegraph(2048);
-        check!(fg.names[0] == "total");
-        check!(fg.total == 10);
-        check!(fg.levels[0].values == vec![0, 10, 0, 0]);
+        assert2::assert!(fg.names[0].as_str() == "total");
+        assert2::assert!(fg.total == 10);
+        assert2::assert!(&fg.levels[0].values == &vec![0, 10, 0, 0]);
     }
 
     #[test]
@@ -510,11 +509,11 @@ mod tests {
         tree.add_stack(&stack(&["a", "main"]), 6);
         tree.add_stack(&stack(&["b", "main"]), 4);
         let fg = tree.to_flamegraph(2048);
-        assert!(fg.levels[1].values[0..4] == [0, 10, 0, names_index(&fg, "main")]);
+        assert2::assert!(fg.levels[1].values[0..4] == [0, 10, 0, names_index(&fg, "main")]);
         let a = &fg.levels[2].values[0..4];
-        assert!(a[0] == 0 && a[1] == 6 && a[2] == 6);
+        assert2::assert!(a[0] == 0 && a[1] == 6 && a[2] == 6);
         let b = &fg.levels[2].values[4..8];
-        assert!(b[0] == 0 && b[1] == 4 && b[2] == 4);
+        assert2::assert!(b[0] == 0 && b[1] == 4 && b[2] == 4);
     }
 
     #[test]
@@ -526,7 +525,7 @@ mod tests {
         let fg = tree.to_flamegraph(2048);
         let work = &fg.levels[2].values[0..4];
 
-        assert!(work == [5, 7, 7, names_index(&fg, "work")]);
+        assert2::assert!(work == [5, 7, 7, names_index(&fg, "work")]);
     }
 
     #[test]
@@ -537,10 +536,13 @@ mod tests {
 
         let fg = tree.to_flamegraph(2048);
 
-        assert!(fg.names == vec!["total", "main", "z_leaf", "a_leaf"]);
-        assert!(
-            fg.levels[2].values
-                == vec![
+        assert2::assert!(
+            fg.names.iter().map(String::as_str).collect::<Vec<_>>()
+                == vec!["total", "main", "z_leaf", "a_leaf"]
+        );
+        assert2::assert!(
+            &fg.levels[2].values
+                == &vec![
                     0,
                     4,
                     4,
@@ -560,8 +562,8 @@ mod tests {
             tree.add_stack(&stack(&[&format!("leaf{idx}"), "main"]), 1);
         }
         let fg = tree.to_flamegraph(4);
-        assert!(fg.names.iter().any(|name| name == "other"));
-        assert!(fg.total == 10);
+        assert2::assert!(fg.names.iter().any(|name| name == "other"));
+        assert2::assert!(fg.total == 10);
     }
 
     #[test]
@@ -581,8 +583,8 @@ mod tests {
             .find(|chunk| chunk[3] == other)
             .unwrap();
 
-        assert!(other_bar[1] == 9);
-        assert!(other_bar[2] == 9);
+        assert2::assert!(other_bar[1] == 9);
+        assert2::assert!(other_bar[2] == 9);
     }
 
     #[test]
@@ -594,7 +596,7 @@ mod tests {
         let mut samples = tree.sample_paths(2048);
         samples.sort();
 
-        assert!(
+        assert2::assert!(
             samples
                 == vec![
                     (vec!["main".to_string(), "a".to_string()], 7),
@@ -610,7 +612,7 @@ mod tests {
 
         let bytes = tree.to_pyroscope_tree_bytes(2048);
 
-        assert!(bytes == b"\x00\x00\x01\x04main\x00\x01\x04work\x07\x00");
+        assert2::assert!(bytes == b"\x00\x00\x01\x04main\x00\x01\x04work\x07\x00");
     }
 
     #[test]
@@ -622,7 +624,7 @@ mod tests {
         write_uvarint(&mut out, 128);
         write_uvarint(&mut out, 300);
 
-        assert!(out == vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
+        assert2::assert!(out == vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
     }
 
     fn names_index(fg: &FlameGraph, name: &str) -> i64 {

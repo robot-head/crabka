@@ -22,7 +22,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -99,10 +99,7 @@ async fn create_topic(
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
     broker.wait_until_partition_present(topic, 0).await;
 }
 
@@ -131,11 +128,7 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
         })
         .await
         .expect("FindCoordinator(SHARE)");
-    assert!(
-        resp.coordinators[0].error_code == 0,
-        "FindCoordinator(SHARE) error: {}",
-        resp.coordinators[0].error_code
-    );
+    assert2::assert!(resp.coordinators[0].error_code == 0);
     // Wait until every state partition this single broker should lead is local,
     // so the share-state writes land durably.
     for p in 0..SHARE_STATE_PARTITIONS {
@@ -224,7 +217,7 @@ async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
         })
         .await
         .expect("ShareGroupHeartbeat");
-    assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
+    assert2::assert!(resp.error_code == 0);
     let member_id = resp.member_id.expect("broker must mint a member id");
     let mut epoch = resp.member_epoch;
 
@@ -260,7 +253,7 @@ async fn leave(client: &Client, group: &str, member_id: &str) {
         })
         .await
         .expect("ShareGroupHeartbeat leave");
-    assert!(resp.error_code == 0, "leave failed: {:?}", resp.error_code);
+    assert2::assert!(resp.error_code == 0);
 }
 
 fn share_fetch_req(
@@ -309,11 +302,7 @@ async fn share_fetch(
 ) -> crabka_protocol::owned::share_fetch_response::PartitionData {
     let req = share_fetch_req(group, member, tid, partition, epoch, max_wait_ms, vec![]);
     let resp: ShareFetchResponse = client.send(req).await.expect("ShareFetch");
-    assert!(
-        resp.error_code == NONE,
-        "ShareFetch top-level error: {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == NONE);
     resp.responses[0].partitions[0].clone()
 }
 
@@ -352,11 +341,7 @@ async fn share_ack(
         ..Default::default()
     };
     let resp: ShareAcknowledgeResponse = client.send(req).await.expect("ShareAcknowledge");
-    assert!(
-        resp.error_code == NONE,
-        "ShareAcknowledge top-level error: {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == NONE);
     resp.responses[0].partitions[0].clone()
 }
 
@@ -440,35 +425,15 @@ async fn describe_reflects_spso_after_consume() {
 
     // Acquire 0..2, Accept all → SPSO advances to 3.
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 3, "must acquire all 3 offsets");
+    assert2::assert!(acquired_count(&row) == 3);
     let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 2, ACCEPT).await;
-    assert!(ack.error_code == NONE, "accept error: {}", ack.error_code);
+    assert2::assert!(ack.error_code == NONE);
 
     // Let the persister land the advanced SPSO durably.
     let group = describe_until(&client, "g1", "t", vec![0], 3).await;
     let part = &group.topics[0].partitions[0];
-    check!(
-        group.error_code == NONE,
-        "group error: {}",
-        group.error_code
-    );
-    check!(group.topics[0].topic_name == "t");
-    check!(
-        part.error_code == NONE,
-        "partition error: {}",
-        part.error_code
-    );
-    check!(
-        part.start_offset == 3,
-        "SPSO must be 3 after Accept of 0..2, got {}",
-        part.start_offset
-    );
-    // HWM is 3 (3 produced), SPSO is 3, partition is local ⇒ lag 0.
-    check!(
-        part.lag == 0,
-        "lag must be 0 (HWM 3 − SPSO 3), got {}",
-        part.lag
-    );
+    check!((group.error_code, group.topics[0].topic_name.as_str()) == (NONE, "t"));
+    check!((part.error_code, part.start_offset, part.lag) == (NONE, 3, 0));
 }
 
 /// Poll Describe until the partition reports the expected SPSO (the persister
@@ -553,26 +518,18 @@ async fn alter_resets_empty_group() {
         // metadata-image signal or awaiter.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(altered, "AlterShareGroupOffsets never succeeded");
+    assert2::assert!(altered);
 
     // Describe now reports the new SPSO.
     let group = describe_until(&client, "g1", "t", vec![0], 5).await;
-    assert!(
-        group.topics[0].partitions[0].start_offset == 5,
-        "SPSO must be 5 after Alter, got {}",
-        group.topics[0].partitions[0].start_offset
-    );
+    assert2::assert!(group.topics[0].partitions[0].start_offset == 5);
 
     // Join and ShareFetch: must acquire starting at offset 5 (the reset SPSO).
     // The first-join lifecycle re-init is fenced by the Alter's state_epoch, so
     // the acquire reads the reset SPSO 5 via the invalidated leader cache.
     let (member, _epoch) = join(&client, "g1", "t").await;
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(
-        row.acquired_records[0].first_offset == 5,
-        "fetch after Alter must acquire from offset 5, got {:?}",
-        row.acquired_records
-    );
+    assert2::assert!(row.acquired_records[0].first_offset == 5);
 }
 
 /// Alter on a non-empty (live-member) group is rejected top-level with
@@ -609,11 +566,7 @@ async fn alter_non_empty_group_fenced() {
         })
         .await
         .expect("AlterShareGroupOffsets");
-    assert!(
-        resp.error_code == NON_EMPTY_GROUP,
-        "alter on non-empty group must be NON_EMPTY_GROUP (68), got {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == NON_EMPTY_GROUP);
 }
 
 /// Delete removes the durable share-state for a topic of an empty group; a
@@ -649,34 +602,17 @@ async fn delete_removes_topic() {
         .await
         .expect("DeleteShareGroupOffsets");
     check!(
-        resp.error_code == NONE,
-        "delete top-level error: {}",
-        resp.error_code
-    );
-    check!(
-        resp.responses[0].topic_name == "t",
-        "delete response topic name mismatch: {}",
-        resp.responses[0].topic_name
-    );
-    check!(
-        resp.responses[0].error_code == NONE,
-        "delete per-topic error: {}",
-        resp.responses[0].error_code
+        (
+            resp.error_code,
+            resp.responses[0].topic_name.as_str(),
+            resp.responses[0].error_code
+        ) == (NONE, "t", NONE)
     );
 
     // Describe now reads the removed partition as missing → start_offset -1.
     let group = describe_until(&client, "g1", "t", vec![0], -1).await;
     let part = &group.topics[0].partitions[0];
-    assert!(
-        part.start_offset == -1,
-        "deleted state must read as missing (start_offset -1), got {}",
-        part.start_offset
-    );
-    assert!(
-        part.error_code == NONE,
-        "describe of missing partition is not an error, got {}",
-        part.error_code
-    );
+    assert2::assert!((part.start_offset, part.error_code) == (-1, NONE));
 }
 
 /// Describe of an unknown topic returns UNKNOWN_TOPIC_OR_PARTITION per partition.
@@ -695,17 +631,9 @@ async fn describe_unknown_topic() {
     bootstrap_share_state(&broker, &client, &format!("g1:{dummy}:0")).await;
 
     let group = describe_offsets(&client, "g1", "nonexistent", vec![0]).await;
-    assert!(
-        group.error_code == NONE,
-        "group-level describe must succeed, got {}",
-        group.error_code
-    );
+    assert2::assert!(group.error_code == NONE);
     let part = &group.topics[0].partitions[0];
-    assert!(
-        part.error_code == UNKNOWN_TOPIC_OR_PARTITION,
-        "unknown topic must be UNKNOWN_TOPIC_OR_PARTITION (3), got {}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == UNKNOWN_TOPIC_OR_PARTITION);
 }
 
 /// With `share_group.enable = false` the admin offset RPCs are not implemented:
@@ -720,11 +648,7 @@ async fn admin_offsets_rejected_when_share_disabled() {
     create_topic(&broker, &client, "t", 1).await;
 
     let group = describe_offsets(&client, "g1", "t", vec![0]).await;
-    assert!(
-        group.error_code == UNSUPPORTED_VERSION,
-        "share-disabled describe must be UNSUPPORTED_VERSION (35), got {}",
-        group.error_code
-    );
+    assert2::assert!(group.error_code == UNSUPPORTED_VERSION);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -760,9 +684,9 @@ async fn delivery_complete_count_restored_across_restart() {
 
         // Acquire 0..N-1 and Accept all → SPSO advances to N, dcc = N.
         let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-        assert!(acquired_count(&row) == N, "must acquire all {N} offsets");
+        assert2::assert!(acquired_count(&row) == N);
         let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, N - 1, ACCEPT).await;
-        assert!(ack.error_code == NONE, "accept error: {}", ack.error_code);
+        assert2::assert!(ack.error_code == NONE);
 
         // Wait until the persisted summary reflects dcc == N before restarting.
         broker
@@ -773,10 +697,7 @@ async fn delivery_complete_count_restored_across_restart() {
             .await
             .map(|(_, _, _, d)| d)
             .unwrap_or(-1);
-        assert!(
-            dcc == i32::try_from(N).unwrap(),
-            "pre-restart dcc must be {N}, got {dcc}"
-        );
+        assert2::assert!(dcc == i32::try_from(N).unwrap());
 
         // The awaiter above confirms dcc is durable; shut down immediately.
         broker.shutdown().await;
@@ -799,11 +720,8 @@ async fn delivery_complete_count_restored_across_restart() {
             .expect("summary present after wait_for_share_state_summary");
         let (_se, _le, start, dcc) = summary;
         // Sanity: the SPSO also recovered past the accepted records.
-        assert!(start == N, "recovered SPSO must be {N}, got {start}");
-        assert!(
-            dcc == i32::try_from(N).unwrap(),
-            "delivery_complete_count must be restored to {N} across restart, got {dcc}"
-        );
+        assert2::assert!(start == N);
+        assert2::assert!(dcc == i32::try_from(N).unwrap());
     }
 }
 
@@ -848,10 +766,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
             .find(|t| t.topic_name == "t")
             .map(|t| t.partitions.iter().map(|p| p.partition_index).collect())
             .unwrap_or_default();
-        assert!(
-            before_parts == vec![0],
-            "describe must enumerate initialized partition [0] before delete, got {before_parts:?}"
-        );
+        assert2::assert!(before_parts == vec![0]);
 
         leave(&client, "g1", &member).await;
 
@@ -866,12 +781,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
             })
             .await
             .expect("DeleteShareGroupOffsets");
-        assert!(
-            resp.error_code == NONE && resp.responses[0].error_code == NONE,
-            "delete failed: top={} per-topic={}",
-            resp.error_code,
-            resp.responses[0].error_code
-        );
+        assert2::assert!(resp.error_code == NONE && resp.responses[0].error_code == NONE);
 
         // The describe-by-name with empty partitions no longer enumerates any
         // initialized partition for "t" (the v14 metadata record was rewritten).
@@ -895,10 +805,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
             // real-time wait (not a progress poll): settle between re-checks asserting the deleted topic stays absent (absence, not a positive poll)
             tokio::time::sleep(Duration::from_millis(100)).await;
         }
-        assert!(
-            absent,
-            "describe must not enumerate any initialized partition for the deleted topic"
-        );
+        assert2::assert!(absent);
 
         // `absent` is confirmed above (positive absence observed via describe).
         // A brief flush sleep lets the v14 metadata-rewrite persist to disk
@@ -929,10 +836,7 @@ async fn delete_rewrites_metadata_topic_absent_after_restart() {
                 .find(|t| t.topic_name == "t")
                 .map(|t| t.partitions.iter().map(|p| p.partition_index).collect())
                 .unwrap_or_default();
-            assert!(
-                parts.is_empty(),
-                "deleted topic must remain un-initialized after restart (v14 rewrite), got {parts:?}"
-            );
+            assert2::assert!(parts.is_empty());
             if std::time::Instant::now() >= deadline {
                 break;
             }

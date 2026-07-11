@@ -16,6 +16,7 @@ name = "crabka-docgen"
 path = "src/main.rs"
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-operator = { version = "0.3.8", path = "../operator" }
 crabka-broker = { version = "0.3.8", path = "../broker" }
 crabka-protocol = { version = "0.3.9", path = "../protocol" }
@@ -27,5 +28,4 @@ schemars = { workspace = true }
 kube = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 tempfile = { workspace = true }

@@ -202,7 +202,7 @@ mod tests {
         array::{Array, Int64Array, StringArray},
         datatypes::{DataType, Field, Schema},
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::{
         catalog::MemTable,
         datasource::memory::MemorySourceConfig,
@@ -270,7 +270,7 @@ mod tests {
         let rewritten = node
             .with_exprs_and_inputs(vec![], vec![input.clone()])
             .expect("valid rewrite");
-        assert!(
+        assert2::assert!(
             rewritten
                 == SeriesDivide {
                     tag_columns: vec!["job".to_string()],
@@ -323,9 +323,9 @@ mod tests {
                 .downcast_ref::<StringArray>()
                 .unwrap();
             let first = job.value(0);
-            assert!((0..job.len()).all(|index| job.value(index) == first));
+            assert2::assert!((0..job.len()).all(|index| job.value(index) == first));
         }
         let total = out.iter().map(RecordBatch::num_rows).sum::<usize>();
-        assert!(total == 3);
+        assert2::assert!(total == 3);
     }
 }

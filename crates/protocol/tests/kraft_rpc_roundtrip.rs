@@ -4,7 +4,6 @@
 
 use std::path::Path;
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     Decode, Encode,
@@ -31,12 +30,12 @@ where
     let mut cur: &[u8] = frame;
     let hdr = RequestHeader::decode(&mut cur, FLEX_REQ_HDR).expect("request header decodes");
     let body = T::decode(&mut cur, api_version).expect("request body decodes");
-    assert!(cur.is_empty(), "trailing bytes after request body");
+    assert2::assert!(cur.is_empty());
     let mut out = BytesMut::new();
     hdr.encode(&mut out, FLEX_REQ_HDR)
         .expect("header re-encodes");
     body.encode(&mut out, api_version).expect("body re-encodes");
-    assert!(out.as_ref() == frame, "request frame not byte-identical");
+    assert2::assert!(out.as_ref() == frame);
 }
 
 fn roundtrip_response<T>(frame: &[u8], api_version: i16)
@@ -46,12 +45,12 @@ where
     let mut cur: &[u8] = frame;
     let hdr = ResponseHeader::decode(&mut cur, FLEX_RESP_HDR).expect("response header decodes");
     let body = T::decode(&mut cur, api_version).expect("response body decodes");
-    assert!(cur.is_empty(), "trailing bytes after response body");
+    assert2::assert!(cur.is_empty());
     let mut out = BytesMut::new();
     hdr.encode(&mut out, FLEX_RESP_HDR)
         .expect("header re-encodes");
     body.encode(&mut out, api_version).expect("body re-encodes");
-    assert!(out.as_ref() == frame, "response frame not byte-identical");
+    assert2::assert!(out.as_ref() == frame);
 }
 
 fn rpc_frame_roundtrips(path: &Path) -> datatest_stable::Result<()> {

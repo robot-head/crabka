@@ -90,8 +90,6 @@ impl Goal for DiskUsage {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         model::BrokerView,
@@ -166,7 +164,7 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let ctx = ctx_with(Arc::new(UsageStore::default()));
-        assert!(DiskUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(DiskUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -181,7 +179,7 @@ mod tests {
         let store = store_with_disk_samples(samples);
         let ctx = ctx_with(store);
         let mvs = DiskUsage.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected disk-hot swaps");
+        assert2::assert!(!mvs.is_empty());
     }
 
     #[test]
@@ -197,16 +195,13 @@ mod tests {
         ];
         let store = store_with_disk_samples(samples);
         let ctx = ctx_with(store);
-        assert!(
-            DiskUsage.propose(&s, &ctx).is_empty(),
-            "within-threshold should no-op"
-        );
+        assert2::assert!(DiskUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert!(DiskUsage::imbalance_pct(&totals) == 50);
+        assert2::assert!(DiskUsage::imbalance_pct(&totals) == 50);
     }
 
     #[test]
@@ -219,7 +214,7 @@ mod tests {
 
         let mvs = DiskUsage.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "hot".into(),
                 partition: 0,
@@ -238,7 +233,7 @@ mod tests {
         let store = store_with_disk_samples(vec![(1, "t", 0, 300.0)]);
         let ctx = ctx_with(store);
 
-        assert!(DiskUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(DiskUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -256,6 +251,6 @@ mod tests {
 
         let mvs = DiskUsage.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

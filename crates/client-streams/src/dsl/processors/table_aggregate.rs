@@ -215,23 +215,35 @@ mod tests {
             .await;
         }
 
-        // First forwarded record: subtract-only on "even".
-        let (_, rec0) = buffer.pop_front().expect("expected subtract record");
-        let key0 = rec0.key.unwrap().downcast::<String>().unwrap();
-        let change0 = rec0.value.downcast::<Change<i64>>().unwrap();
-        check!(*key0 == "even");
-        check!(change0.old == Some(4i64));
-        check!(change0.new.is_none());
-
-        // Second forwarded record: add-only on "odd".
-        let (_, rec1) = buffer.pop_front().expect("expected add record");
-        let key1 = rec1.key.unwrap().downcast::<String>().unwrap();
-        let change1 = rec1.value.downcast::<Change<i64>>().unwrap();
-        check!(*key1 == "odd");
-        check!(change1.old.is_none());
-        check!(change1.new == Some(5i64));
-
-        check!(buffer.is_empty(), "no further records expected");
+        let actual = buffer
+            .into_iter()
+            .map(|(_, rec)| {
+                (
+                    *rec.key.unwrap().downcast::<String>().unwrap(),
+                    *rec.value.downcast::<Change<i64>>().unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
+        check!(
+            actual
+                == vec![
+                    (
+                        "even".into(),
+                        Change {
+                            old: Some(4i64),
+                            new: None,
+                        },
+                    ),
+                    (
+                        "odd".into(),
+                        Change {
+                            old: None,
+                            new: Some(5i64),
+                        },
+                    ),
+                ],
+            "forwarded subtract/add records"
+        );
     }
 
     /// `KTableAggregateProcessor` subtract-then-adds through three operations,
@@ -293,8 +305,13 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old.is_none());
-        check!(change.new == Some(2i64));
+        check!(
+            *change
+                == Change {
+                    old: None,
+                    new: Some(2i64)
+                }
+        );
 
         // --- Step 2: key="even", old=Some(2), new=Some(6) → store: 2-2+6=6 ---
         {
@@ -328,8 +345,13 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old == Some(2i64));
-        check!(change.new == Some(6i64));
+        check!(
+            *change
+                == Change {
+                    old: Some(2i64),
+                    new: Some(6i64)
+                }
+        );
 
         // --- Step 3: key="even", old=Some(6), new=None → store: 6-6=0 ---
         {
@@ -363,8 +385,13 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old == Some(6i64));
-        check!(change.new == Some(0i64));
+        check!(
+            *change
+                == Change {
+                    old: Some(6i64),
+                    new: Some(0i64)
+                }
+        );
 
         // Store must reflect the final accumulator = 0.
         check!(

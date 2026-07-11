@@ -41,14 +41,28 @@ mod tests {
     #[test]
     fn change_update_and_tombstone() {
         let upd = Change::update(Some(1), 2);
-        check!(upd.old == Some(1));
-        check!(upd.new == Some(2));
+        check!(
+            upd == Change {
+                old: Some(1),
+                new: Some(2)
+            }
+        );
         check!(!upd.is_tombstone());
         let tomb: Change<i64> = Change::tombstone(Some(5));
-        check!(tomb.new.is_none());
+        check!(
+            tomb == Change {
+                old: Some(5),
+                new: None
+            }
+        );
         check!(tomb.is_tombstone());
         let mapped = Change::update(Some(1), 2).map(ToString::to_string);
-        check!(mapped.old == Some("1".to_string()));
-        check!(mapped.new == Some("2".to_string()));
+        check!(
+            mapped
+                == Change {
+                    old: Some("1".to_string()),
+                    new: Some("2".to_string()),
+                }
+        );
     }
 }

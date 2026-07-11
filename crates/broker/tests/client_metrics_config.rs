@@ -11,7 +11,7 @@
 
 #![allow(clippy::default_trait_access)]
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use crabka_protocol::owned::{
@@ -100,18 +100,9 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
         .await
         .expect("IncrementalAlterConfigs");
 
-    assert!(
-        alter_resp.responses.len() == 1,
-        "expected exactly one resource response, got {}",
-        alter_resp.responses.len()
-    );
+    assert2::assert!(alter_resp.responses.len() == 1);
     let resource_resp = &alter_resp.responses[0];
-    assert!(
-        resource_resp.error_code == 0,
-        "IncrementalAlterConfigs CLIENT_METRICS must succeed; error_code={} message={:?}",
-        resource_resp.error_code,
-        resource_resp.error_message
-    );
+    assert2::assert!(resource_resp.error_code == 0);
 
     // ── Step 2: DescribeConfigs ───────────────────────────────────────────────
     let describe_req = DescribeConfigsRequest {
@@ -129,85 +120,36 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
     let describe_resp: DescribeConfigsResponse =
         client.send(describe_req).await.expect("DescribeConfigs");
 
-    assert!(
-        describe_resp.results.len() == 1,
-        "expected exactly one describe result, got {}",
-        describe_resp.results.len()
-    );
+    assert2::assert!(describe_resp.results.len() == 1);
     let result = &describe_resp.results[0];
     check!(
-        result.error_code == 0,
-        "DescribeConfigs for CLIENT_METRICS 'sub-a' must succeed; error_code={} message={:?}",
-        result.error_code,
-        result.error_message
-    );
-    check!(
-        result.resource_type == RESOURCE_TYPE_CLIENT_METRICS,
-        "resource_type must be 16 (CLIENT_METRICS), got {}",
-        result.resource_type
-    );
-    check!(
-        result.resource_name == "sub-a",
-        "resource_name must be 'sub-a', got '{}'",
-        result.resource_name
+        (
+            result.error_code,
+            result.resource_type,
+            result.resource_name.as_str(),
+            result.configs.len(),
+        ) == (0, RESOURCE_TYPE_CLIENT_METRICS, "sub-a", 3),
+        "DescribeConfigs result mismatch: {result:?}"
     );
 
     // Assert the three expected config entries.
     let find_config = |name: &str| result.configs.iter().find(|c| c.name == name);
 
-    // metrics: set value, source = CLIENT_METRICS_CONFIG (7)
-    let metrics_cfg = find_config("metrics");
-    assert!(
-        metrics_cfg.is_some(),
-        "DescribeConfigs must include 'metrics' entry; got configs: {:?}",
-        result.configs.iter().map(|c| &c.name).collect::<Vec<_>>()
-    );
-    let metrics_cfg = metrics_cfg.unwrap();
-    assert!(
-        metrics_cfg.value.as_deref() == Some("org.apache.kafka.consumer."),
-        "metrics value must be 'org.apache.kafka.consumer.', got {:?}",
-        metrics_cfg.value
-    );
-    assert!(
-        metrics_cfg.config_source == CONFIG_SOURCE_CLIENT_METRICS,
-        "metrics config_source must be {} (CLIENT_METRICS_CONFIG), got {}",
-        CONFIG_SOURCE_CLIENT_METRICS,
-        metrics_cfg.config_source
-    );
-
-    // interval.ms: set value, source = CLIENT_METRICS_CONFIG (7)
-    let interval_cfg = find_config("interval.ms");
-    assert!(
-        interval_cfg.is_some(),
-        "DescribeConfigs must include 'interval.ms' entry; got configs: {:?}",
-        result.configs.iter().map(|c| &c.name).collect::<Vec<_>>()
-    );
-    let interval_cfg = interval_cfg.unwrap();
-    assert!(
-        interval_cfg.value.as_deref() == Some("60000"),
-        "interval.ms value must be '60000', got {:?}",
-        interval_cfg.value
-    );
-    assert!(
-        interval_cfg.config_source == CONFIG_SOURCE_CLIENT_METRICS,
-        "interval.ms config_source must be {} (CLIENT_METRICS_CONFIG), got {}",
-        CONFIG_SOURCE_CLIENT_METRICS,
-        interval_cfg.config_source
-    );
-
-    // match: defaulted (not set), source = DEFAULT_CONFIG (5)
-    let match_cfg = find_config("match");
-    assert!(
-        match_cfg.is_some(),
-        "DescribeConfigs must include 'match' entry (defaulted); got configs: {:?}",
-        result.configs.iter().map(|c| &c.name).collect::<Vec<_>>()
-    );
-    let match_cfg = match_cfg.unwrap();
-    assert!(
-        match_cfg.config_source == CONFIG_SOURCE_DEFAULT,
-        "match config_source must be {} (DEFAULT_CONFIG), got {}",
-        CONFIG_SOURCE_DEFAULT,
-        match_cfg.config_source
+    assert2::assert!(
+        (
+            find_config("metrics").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
+            find_config("interval.ms").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
+            find_config("match").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
+        ) == (
+            Some((
+                Some("org.apache.kafka.consumer."),
+                CONFIG_SOURCE_CLIENT_METRICS,
+            )),
+            Some((Some("60000"), CONFIG_SOURCE_CLIENT_METRICS)),
+            // The generated wire type decodes the defaulted empty value as
+            // `Some("")`; keep that normalization explicit in the projection.
+            Some((Some(""), CONFIG_SOURCE_DEFAULT)),
+        )
     );
 
     // ── Step 3: ListConfigResources ───────────────────────────────────────────
@@ -219,23 +161,9 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
     let list_resp: ListConfigResourcesResponse =
         client.send(list_req).await.expect("ListConfigResources");
 
-    assert!(
-        list_resp.error_code == 0,
-        "ListConfigResources top-level error_code must be 0, got {}",
-        list_resp.error_code
-    );
-
     let found = list_resp
         .config_resources
         .iter()
         .any(|r| r.resource_type == RESOURCE_TYPE_CLIENT_METRICS && r.resource_name == "sub-a");
-    assert!(
-        found,
-        "ListConfigResources must contain CLIENT_METRICS 'sub-a'; got: {:?}",
-        list_resp
-            .config_resources
-            .iter()
-            .map(|r| (r.resource_type, &r.resource_name))
-            .collect::<Vec<_>>()
-    );
+    assert2::assert!((list_resp.error_code, found) == (0, true));
 }

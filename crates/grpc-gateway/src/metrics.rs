@@ -408,7 +408,7 @@ async fn render() -> impl axum::response::IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -432,10 +432,7 @@ mod tests {
         m.record_send("ok");
         let buf = encode(&m);
         // prometheus-client appends _total for Counter; prefix = crabka_gateway.
-        assert!(
-            buf.contains("crabka_gateway_sends_total"),
-            "missing crabka_gateway_sends_total in:\n{buf}"
-        );
+        assert2::assert!(buf.contains("crabka_gateway_sends_total"));
     }
 
     #[test]
@@ -458,7 +455,7 @@ mod tests {
 
         let buf = encode(&m);
 
-        for needle in [
+        let expected = [
             "crabka_gateway_sends_total",
             "crabka_gateway_produce_latency_seconds",
             "crabka_gateway_dedup_hits_total",
@@ -473,9 +470,12 @@ mod tests {
             "crabka_gateway_request_duration_seconds_bucket",
             "crabka_gateway_request_duration_seconds_count",
             "crabka_gateway_inflight_requests",
-        ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
-        }
+        ];
+        let missing: Vec<_> = expected
+            .into_iter()
+            .filter(|needle| !buf.contains(needle))
+            .collect();
+        assert2::assert!(missing == Vec::<&str>::new());
     }
 
     #[test]
@@ -486,20 +486,14 @@ mod tests {
         m.observe_request_duration("webhook_in", 0.02);
 
         let buf = encode(&m);
-        assert!(
-            buf.contains("method=\"send\""),
-            "send label missing:\n{buf}"
-        );
-        assert!(
-            buf.contains("method=\"webhook_in\""),
-            "webhook_in label missing:\n{buf}"
-        );
+        assert2::assert!(buf.contains("method=\"send\""));
+        assert2::assert!(buf.contains("method=\"webhook_in\""));
 
         m.inc_inflight();
         m.inc_inflight();
-        assert!(m.inflight_requests.get() == 2);
+        assert2::assert!(m.inflight_requests.get() == 2);
         m.dec_inflight();
-        assert!(m.inflight_requests.get() == 1);
+        assert2::assert!(m.inflight_requests.get() == 1);
     }
 
     #[test]
@@ -515,8 +509,8 @@ mod tests {
         let lbl_err = ResultLabel {
             result: "error".into(),
         };
-        assert!(m.sends_total.get_or_create(&lbl_ok).get() == 2);
-        assert!(m.sends_total.get_or_create(&lbl_err).get() == 1);
+        assert2::assert!(m.sends_total.get_or_create(&lbl_ok).get() == 2);
+        assert2::assert!(m.sends_total.get_or_create(&lbl_err).get() == 1);
     }
 
     #[test]
@@ -524,12 +518,12 @@ mod tests {
         let m = fresh();
         m.inc_active_subscriptions();
         m.inc_active_subscriptions();
-        assert!(m.active_subscriptions.get() == 2);
+        assert2::assert!(m.active_subscriptions.get() == 2);
         m.dec_active_subscriptions();
-        assert!(m.active_subscriptions.get() == 1);
+        assert2::assert!(m.active_subscriptions.get() == 1);
 
         m.set_owned_partitions(7);
-        assert!(m.owned_partitions.get() == 7);
+        assert2::assert!(m.owned_partitions.get() == 7);
     }
 
     #[test]
@@ -538,14 +532,8 @@ mod tests {
         m.observe_produce_latency(0.01);
         m.observe_produce_latency(0.5);
         let buf = encode(&m);
-        assert!(
-            buf.contains("crabka_gateway_produce_latency_seconds_bucket"),
-            "histogram bucket missing:\n{buf}"
-        );
-        assert!(
-            buf.contains("crabka_gateway_produce_latency_seconds_count"),
-            "histogram count missing:\n{buf}"
-        );
+        assert2::assert!(buf.contains("crabka_gateway_produce_latency_seconds_bucket"));
+        assert2::assert!(buf.contains("crabka_gateway_produce_latency_seconds_count"));
     }
 
     #[test]
@@ -563,8 +551,8 @@ mod tests {
         let unavail = OutcomeLabel {
             outcome: "unavailable".into(),
         };
-        assert!(m.forward_total.get_or_create(&ok).get() == 2);
-        assert!(m.forward_total.get_or_create(&unavail).get() == 1);
+        assert2::assert!(m.forward_total.get_or_create(&ok).get() == 2);
+        assert2::assert!(m.forward_total.get_or_create(&unavail).get() == 1);
 
         let commit = KindLabel {
             kind: "commit".into(),
@@ -572,8 +560,8 @@ mod tests {
         let abort = KindLabel {
             kind: "abort".into(),
         };
-        assert!(m.txn_total.get_or_create(&commit).get() == 1);
-        assert!(m.txn_total.get_or_create(&abort).get() == 1);
+        assert2::assert!(m.txn_total.get_or_create(&commit).get() == 1);
+        assert2::assert!(m.txn_total.get_or_create(&abort).get() == 1);
     }
 
     #[test]
@@ -599,11 +587,15 @@ mod tests {
         let dl = ResultLabel {
             result: "dead_letter".into(),
         };
-        check!(m.webhook_in_total.get_or_create(&ok).get() == 1);
-        check!(m.webhook_in_total.get_or_create(&err).get() == 1);
-        check!(m.webhook_out_total.get_or_create(&delivered).get() == 1);
-        check!(m.webhook_out_total.get_or_create(&dl).get() == 1);
-        check!(m.webhook_retries_total.get() == 2);
-        check!(m.dead_letter_total.get() == 1);
+        check!(
+            (
+                m.webhook_in_total.get_or_create(&ok).get(),
+                m.webhook_in_total.get_or_create(&err).get(),
+                m.webhook_out_total.get_or_create(&delivered).get(),
+                m.webhook_out_total.get_or_create(&dl).get(),
+                m.webhook_retries_total.get(),
+                m.dead_letter_total.get(),
+            ) == (1, 1, 1, 1, 2, 1)
+        );
     }
 }

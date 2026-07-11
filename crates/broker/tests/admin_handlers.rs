@@ -12,7 +12,7 @@
 
 #![allow(clippy::default_trait_access, clippy::manual_assert)]
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use std::time::Duration;
@@ -68,11 +68,7 @@ async fn create_topic_helper(client: &crabka_client_core::Client, name: &str, pa
     };
     let resp = client.send(req).await.expect("create_topics");
     let result = &resp.topics[0];
-    assert!(
-        result.error_code == 0,
-        "create_topics failed: {:?}",
-        result.error_message
-    );
+    assert2::assert!(result.error_code == 0);
 }
 
 // ── AlterConfigs (api_key 33) ────────────────────────────────────────────────
@@ -103,11 +99,7 @@ async fn alter_configs_round_trip() {
         ..Default::default()
     };
     let resp = client.send(req).await.expect("alter_configs");
-    assert!(
-        resp.responses[0].error_code == 0,
-        "alter_configs response: {:?}",
-        resp.responses[0].error_message
-    );
+    assert2::assert!(resp.responses[0].error_code == 0);
 
     // Wait for the supervisor reconcile loop to push the new config into the
     // partition's log. The supervisor runs on every metadata-image update
@@ -133,10 +125,7 @@ async fn alter_configs_round_trip() {
         }
         tokio::task::yield_now().await;
     };
-    assert!(
-        last == Some(want),
-        "retention_ms did not converge within 10 s after AlterConfigs"
-    );
+    assert2::assert!(last == Some(want));
 }
 
 /// AlterConfigs rejects an unknown key with `error_code == 40` (INVALID_CONFIG)
@@ -165,19 +154,15 @@ async fn alter_configs_rejects_unknown_key() {
     };
     let resp = client.send(req).await.expect("alter_configs");
     // 40 = INVALID_CONFIG
-    assert!(
-        resp.responses[0].error_code == 40,
-        "expected INVALID_CONFIG(40), got {}",
-        resp.responses[0].error_code
-    );
-    assert!(
-        resp.responses[0]
-            .error_message
-            .as_deref()
-            .unwrap_or("")
-            .contains("flush.ms"),
-        "expected error_message to mention `flush.ms`, got {:?}",
-        resp.responses[0].error_message
+    assert2::assert!(
+        (
+            resp.responses[0].error_code,
+            resp.responses[0]
+                .error_message
+                .as_deref()
+                .unwrap_or("")
+                .contains("flush.ms"),
+        ) == (40, true)
     );
 }
 
@@ -235,11 +220,7 @@ async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
         ..Default::default()
     };
     let alter_resp = client.send(alter).await.expect("alter_configs");
-    assert!(
-        alter_resp.responses[0].error_code == 0,
-        "AlterConfigs must accept min.insync.replicas=2: {:?}",
-        alter_resp.responses[0].error_message
-    );
+    assert2::assert!(alter_resp.responses[0].error_code == 0);
 
     // Build a one-record batch for the produce calls below.
     let batch = RecordBatch {
@@ -272,12 +253,7 @@ async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
         })
         .await
         .expect("Produce (acks=-1)");
-    assert!(
-        bad.responses[0].partition_responses[0].error_code == 19,
-        "acks=-1 with isr.len()=1 < min.insync.replicas=2 must return NOT_ENOUGH_REPLICAS (19); \
-         got code = {}",
-        bad.responses[0].partition_responses[0].error_code
-    );
+    assert2::assert!(bad.responses[0].partition_responses[0].error_code == 19);
 
     // acks=1: leader-only — min.insync.replicas does NOT gate, so this
     // must still succeed even though the threshold is unsatisfiable for
@@ -300,11 +276,7 @@ async fn min_insync_replicas_blocks_acks_all_when_isr_too_small() {
         })
         .await
         .expect("Produce (acks=1)");
-    assert!(
-        ok.responses[0].partition_responses[0].error_code == 0,
-        "acks=1 must succeed regardless of min.insync.replicas; got code = {}",
-        ok.responses[0].partition_responses[0].error_code
-    );
+    assert2::assert!(ok.responses[0].partition_responses[0].error_code == 0);
 }
 
 // ── CreatePartitions (api_key 37) ────────────────────────────────────────────
@@ -332,11 +304,7 @@ async fn create_partitions_extends_topic() {
         ..Default::default()
     };
     let resp = client.send(req).await.expect("create_partitions");
-    assert!(
-        resp.results[0].error_code == 0,
-        "create_partitions result: {:?}",
-        resp.results[0].error_message
-    );
+    assert2::assert!(resp.results[0].error_code == 0);
 
     // Wait for the supervisor reconcile to materialise all three partitions.
     for p in 0..3 {
@@ -379,11 +347,7 @@ async fn create_partitions_honors_explicit_assignments() {
         .send(req)
         .await
         .expect("create_partitions (explicit)");
-    assert!(
-        resp.results[0].error_code == 0,
-        "explicit assignment must succeed: {:?}",
-        resp.results[0].error_message
-    );
+    assert2::assert!(resp.results[0].error_code == 0);
 
     // Wait for the new partition to materialise.
     broker.wait_until_partition_present("t-cpa", 1).await;
@@ -415,15 +379,8 @@ async fn create_partitions_honors_explicit_assignments() {
         .send(bad)
         .await
         .expect("create_partitions (length-mismatch)");
-    assert!(
-        bad_resp.results[0].error_code == 39,
-        "length-mismatch must return INVALID_REPLICA_ASSIGNMENT (39): {:?}",
-        bad_resp.results[0].error_message
-    );
-    assert!(
-        !broker.partition_exists_for_test("t-cpa", 2),
-        "partition 2 must NOT have been created on an INVALID_REPLICA_ASSIGNMENT path",
-    );
+    assert2::assert!(bad_resp.results[0].error_code == 39);
+    assert2::assert!(!broker.partition_exists_for_test("t-cpa", 2));
 }
 
 // ── DeleteRecords (api_key 21) ───────────────────────────────────────────────
@@ -461,18 +418,11 @@ async fn delete_records_trims_log_start() {
     let resp = client.send(req).await.expect("delete_records");
     let part_result = &resp.topics[0].partitions[0];
     check!(
-        part_result.error_code == 0,
-        "delete_records error: {:?}",
-        part_result.error_code
-    );
-    // low_watermark must be the resulting log_start_offset after trim.
-    check!(
-        part_result.low_watermark >= 0,
-        "low_watermark should be non-negative, got {}",
-        part_result.low_watermark
-    );
-    check!(
-        part_result.low_watermark <= 50,
+        (
+            part_result.error_code,
+            part_result.low_watermark >= 0,
+            part_result.low_watermark <= 50,
+        ) == (0, true, true),
         "low_watermark {} should be <= requested offset 50",
         part_result.low_watermark
     );
@@ -480,10 +430,7 @@ async fn delete_records_trims_log_start() {
     let log_start = broker
         .partition_log_start_for_test("t-dr", 0)
         .expect("partition exists");
-    assert!(
-        log_start == part_result.low_watermark,
-        "partition log_start_offset should equal low_watermark"
-    );
+    assert2::assert!(log_start == part_result.low_watermark);
 }
 
 // ── DescribeCluster (api_key 60) ─────────────────────────────────────────────
@@ -500,9 +447,7 @@ async fn describe_cluster_lists_brokers() {
         .send(DescribeClusterRequest::default())
         .await
         .expect("describe_cluster");
-    check!(resp.error_code == 0, "describe_cluster error_code");
-    check!(resp.brokers.len() == 1, "expected exactly 1 broker");
-    check!(resp.controller_id == 1, "expected controller_id == 1");
+    check!((resp.error_code, resp.brokers.len(), resp.controller_id) == (0, 1, 1));
 }
 
 /// KIP-919: `DescribeCluster` with `endpoint_type = 2` (CONTROLLERS) projects
@@ -524,27 +469,16 @@ async fn describe_cluster_endpoint_type_controllers_lists_voters() {
         })
         .await
         .expect("describe_cluster controllers");
-    check!(resp.error_code == 0, "describe_cluster error_code");
     check!(
-        resp.endpoint_type == ENDPOINT_TYPE_CONTROLLERS,
-        "response echoes endpoint_type=2; got {}",
-        resp.endpoint_type
-    );
-    assert!(
-        resp.brokers.len() == 1,
-        "1-node quorum has exactly one controller voter; got {}",
-        resp.brokers.len()
-    );
-    check!(
-        resp.brokers[0].broker_id == 1,
-        "bootstrap voter id is 1; got {}",
-        resp.brokers[0].broker_id
-    );
-    check!(
-        !resp.brokers[0].host.is_empty() && resp.brokers[0].port > 0,
-        "controller endpoint host/port populated; got {}:{}",
-        resp.brokers[0].host,
-        resp.brokers[0].port
+        (
+            resp.error_code,
+            resp.endpoint_type,
+            resp.brokers.len(),
+            resp.brokers[0].broker_id,
+            resp.brokers[0].host.is_empty(),
+            resp.brokers[0].port > 0,
+        ) == (0, ENDPOINT_TYPE_CONTROLLERS, 1, 1, false, true),
+        "controller endpoint response mismatch: {resp:?}"
     );
 }
 
@@ -574,39 +508,27 @@ async fn describe_quorum_reports_cluster_metadata_voter_set() {
         ..Default::default()
     };
     let resp = client.send(req).await.expect("describe_quorum");
-    check!(resp.error_code == 0, "top-level error_code");
-    assert!(resp.topics.len() == 1, "exactly one topic row");
-    check!(resp.topics[0].topic_name == "__cluster_metadata");
+    check!(
+        (
+            resp.error_code,
+            resp.topics.len(),
+            resp.topics[0].topic_name.as_str()
+        ) == (0, 1, "__cluster_metadata")
+    );
     let pd = &resp.topics[0].partitions[0];
-    check!(pd.partition_index == 0);
-    check!(pd.error_code == 0, "metadata partition 0 succeeds");
     check!(
-        pd.leader_id == 1,
-        "1-broker cluster: bootstrap voter id=1 is leader"
-    );
-    check!(
-        pd.leader_epoch >= 1,
-        "openraft term must be >= 1 once a leader is elected; got {}",
-        pd.leader_epoch,
-    );
-    check!(
-        pd.high_watermark >= 0,
-        "last_applied_index is non-negative once any record applies; got {}",
-        pd.high_watermark,
-    );
-    assert!(
-        pd.current_voters.len() == 1,
-        "single voter for 1-broker cluster"
-    );
-    check!(pd.current_voters[0].replica_id == 1);
-    check!(
-        pd.current_voters[0].log_end_offset >= 0,
-        "leader knows its own matched index; got {}",
-        pd.current_voters[0].log_end_offset,
-    );
-    check!(
-        pd.observers.is_empty(),
-        "Crabka has no observer-role concept"
+        (
+            pd.partition_index,
+            pd.error_code,
+            pd.leader_id,
+            pd.leader_epoch >= 1,
+            pd.high_watermark >= 0,
+            pd.current_voters.len(),
+            pd.current_voters[0].replica_id,
+            pd.current_voters[0].log_end_offset >= 0,
+            pd.observers.is_empty(),
+        ) == (0, 0, 1, true, true, 1, 1, true, true),
+        "DescribeQuorum partition projection mismatch: {pd:?}"
     );
 }
 
@@ -632,7 +554,7 @@ async fn list_config_resources_default_set_includes_topics_and_brokers() {
         .send(ListConfigResourcesRequest::default())
         .await
         .expect("list_config_resources");
-    assert!(resp.error_code == 0, "list_config_resources error_code");
+    assert2::assert!(resp.error_code == 0);
 
     // Default set on a 1-broker cluster with two topics: 2 topic entries
     // (type 2) + 1 broker entry (type 4) + 0 client-metrics entries.
@@ -642,20 +564,14 @@ async fn list_config_resources_default_set_includes_topics_and_brokers() {
         .filter(|r| r.resource_type == RESOURCE_TYPE_TOPIC)
         .map(|r| r.resource_name.as_str())
         .collect();
-    assert!(
-        topics.contains(&"t-lcr-a") && topics.contains(&"t-lcr-b"),
-        "expected both seeded topics in response, got {topics:?}"
-    );
+    assert2::assert!(topics.contains(&"t-lcr-a") && topics.contains(&"t-lcr-b"));
     let brokers: Vec<&str> = resp
         .config_resources
         .iter()
         .filter(|r| r.resource_type == RESOURCE_TYPE_BROKER)
         .map(|r| r.resource_name.as_str())
         .collect();
-    assert!(
-        brokers == vec!["1"],
-        "expected exactly broker '1', got {brokers:?}"
-    );
+    assert2::assert!(brokers == vec!["1"]);
 }
 
 // ── ListGroups (api_key 16) ──────────────────────────────────────────────────
@@ -676,11 +592,8 @@ async fn list_groups_includes_freshly_created_group() {
         .send(ListGroupsRequest::default())
         .await
         .expect("list_groups");
-    assert!(resp.error_code == 0, "list_groups error_code");
+    assert2::assert!(resp.error_code == 0);
 
     let ids: Vec<&str> = resp.groups.iter().map(|g| g.group_id.as_str()).collect();
-    assert!(
-        ids.contains(&"test-group-listed"),
-        "expected `test-group-listed` in group list, got {ids:?}"
-    );
+    assert2::assert!(ids.contains(&"test-group-listed"));
 }

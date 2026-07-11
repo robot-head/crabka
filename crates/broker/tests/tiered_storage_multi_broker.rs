@@ -50,7 +50,6 @@
 
 #![allow(clippy::pedantic, clippy::manual_assert, clippy::too_many_lines)]
 
-use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -266,10 +265,7 @@ async fn fetch_all_records(
         if id != WireUuid::default() {
             break id;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "survivor never returned a valid topic id for {topic} within deadline"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: topic-id visibility is polled over the wire client (this
         // helper has no BrokerHandle); retry until the survivor's metadata settles.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -322,11 +318,7 @@ async fn fetch_all_records(
             break;
         }
 
-        assert!(
-            Instant::now() <= deadline,
-            "survivor only served {total_records}/{expected_count} records before deadline; \
-             fetch_offset={fetch_offset}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: records are fetched over the wire client (no BrokerHandle
         // here); retry the bounded Fetch poll until the survivor serves them all.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -415,11 +407,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        create_resp.topics[0].error_code == 0,
-        "CreateTopics failed: {:?}",
-        create_resp.topics[0].error_message
-    );
+    assert2::assert!(create_resp.topics[0].error_code == 0);
     eprintln!("ITEST: topic {TOPIC} created (rf=2, tiered)");
 
     // Wait for the tiered config to propagate to the partition leader's log.
@@ -436,13 +424,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
         if b1_ok || b2_ok {
             break;
         }
-        assert!(
-            Instant::now() <= cfg_deadline,
-            "tiered-storage config never propagated to b1 or b2 within 30s; \
-             b1={:?} b2={:?}",
-            b1.partition_log_config_for_test(TOPIC, 0),
-            b2.partition_log_config_for_test(TOPIC, 0),
-        );
+        assert2::assert!(Instant::now() <= cfg_deadline);
         // intentional: the tiered LogConfig override is applied by each broker's
         // local reconcile loop and is not surfaced in the metadata image or any
         // metric, so poll partition_log_config_for_test directly.
@@ -508,11 +490,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             })
             .await
             .expect("Produce");
-        assert!(
-            prod.responses[0].partition_responses[0].error_code == 0,
-            "Produce record {i} failed: error_code={}",
-            prod.responses[0].partition_responses[0].error_code
-        );
+        assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
     }
     eprintln!("ITEST: produced {RECORDS} records; waiting for segments to be tiered");
 
@@ -526,10 +504,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
             eprintln!("ITEST: {n} segments tiered to shared remote dir");
             break;
         }
-        assert!(
-            Instant::now() <= copy_deadline,
-            "fewer than 2 segments tiered within 60s (found {n})"
-        );
+        assert2::assert!(Instant::now() <= copy_deadline);
         // intentional: segments landing in the shared remote object store is
         // filesystem state with no crabka metric/awaiter; poll the dir directly.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -600,12 +575,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     let served = fetch_all_records(&follower_addr, TOPIC, 0, 0, RECORDS, consume_deadline).await;
 
     eprintln!("ITEST: survivor served {served} records (expected >= {RECORDS})");
-    assert!(
-        served >= RECORDS,
-        "expected >= {RECORDS} records served by the surviving broker via the remote tier; \
-         got {served}. The survivor (broker{follower_node_id}) should have learned segment \
-         locations from __remote_log_metadata (rf=2) without having run the copy task itself."
-    );
+    assert2::assert!(served >= RECORDS);
 
     // Shut down surviving brokers.
     if let Some(h) = opt_b1.take() {

@@ -35,6 +35,7 @@ name = "crabka-broker"
 path = "src/bin/broker.rs"
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-audit = { workspace = true }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
@@ -128,7 +129,6 @@ rcgen = { workspace = true }
 nix = { version = "0.31", default-features = false, features = ["zerocopy"] }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 # Trait mocks for the KIP-939 reaper orchestration unit tests
 # (`txn::coordinator::ReaperBackend`).
 mockall = { workspace = true }

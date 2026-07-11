@@ -65,34 +65,24 @@ mod tests {
     use crate::ids::SchemaVersion;
 
     #[test]
-    fn parse_concrete_version_positive_is_ok() {
-        check!(matches!(parse_concrete_version("1"), Ok(SchemaVersion(1))));
-        check!(matches!(parse_concrete_version("7"), Ok(SchemaVersion(7))));
-    }
-
-    #[test]
-    fn parse_concrete_version_zero_is_rejected() {
-        // 0 parses as i32 but fails the `n >= 1` guard: must be InvalidVersion,
-        // not Ok(SchemaVersion(0)).
-        check!(matches!(
-            parse_concrete_version("0"),
-            Err(SrError::InvalidVersion(_))
-        ));
-    }
-
-    #[test]
-    fn parse_concrete_version_negative_is_rejected() {
-        check!(matches!(
-            parse_concrete_version("-3"),
-            Err(SrError::InvalidVersion(_))
-        ));
-    }
-
-    #[test]
-    fn parse_concrete_version_non_numeric_is_rejected() {
-        check!(matches!(
-            parse_concrete_version("latest"),
-            Err(SrError::InvalidVersion(_))
-        ));
+    fn parse_concrete_version_cases() {
+        for (name, input, expected) in [
+            ("one", "1", SchemaVersion(1)),
+            ("seven", "7", SchemaVersion(7)),
+        ] {
+            check!(
+                parse_concrete_version(input).unwrap() == expected,
+                "case {name}"
+            );
+        }
+        for (name, input) in [("zero", "0"), ("negative", "-3"), ("non_numeric", "latest")] {
+            check!(
+                matches!(
+                    parse_concrete_version(input),
+                    Err(SrError::InvalidVersion(_))
+                ),
+                "case {name}"
+            );
+        }
     }
 }

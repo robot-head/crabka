@@ -661,7 +661,7 @@ fn encode_response(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_ids::PartitionIndex;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
     use crabka_protocol::{UnknownTaggedFields, owned::end_txn_response::EndTxnResponse};
@@ -677,7 +677,7 @@ mod tests {
     #[test]
     fn encode_err_leaves_producer_identity_at_error_sentinels() {
         let bytes = encode_err(5, codes::NOT_COORDINATOR).expect("encode error");
-        assert!(!bytes.is_empty());
+        assert2::assert!(!bytes.is_empty());
         let resp = decode_response(&bytes, 5);
 
         let expected = EndTxnResponse {
@@ -687,13 +687,13 @@ mod tests {
             producer_epoch: -1,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
     fn encode_ok_returns_v5_producer_identity() {
         let bytes = encode_ok(5, 42, 7).expect("encode ok");
-        assert!(!bytes.is_empty());
+        assert2::assert!(!bytes.is_empty());
         let resp = decode_response(&bytes, 5);
 
         let expected = EndTxnResponse {
@@ -703,7 +703,7 @@ mod tests {
             producer_epoch: 7,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -712,16 +712,25 @@ mod tests {
         let ids = crate::producer_id_manager::ProducerIdManager::new();
         let cases = [
             // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
-            (TxnVersion::Classic, (ProducerId(7), 3)),
-            (TxnVersion::Flexible, (ProducerId(7), 3)),
+            (
+                "classic identity unchanged",
+                TxnVersion::Classic,
+                (ProducerId(7), 3),
+            ),
+            (
+                "flexible identity unchanged",
+                TxnVersion::Flexible,
+                (ProducerId(7), 3),
+            ),
             // TV_2 (Verified) non-overflow: same pid, epoch + 1.
-            (TxnVersion::Verified, (ProducerId(7), 4)),
+            (
+                "verified epoch bumps",
+                TxnVersion::Verified,
+                (ProducerId(7), 4),
+            ),
         ];
-        for (version, want) in cases {
-            assert!(
-                next_producer_identity(version, ProducerId(7), 3, &ids) == want,
-                "txn version {version:?}"
-            );
+        for (_case, version, want) in cases {
+            assert2::assert!(next_producer_identity(version, ProducerId(7), 3, &ids) == want);
         }
     }
 
@@ -733,14 +742,13 @@ mod tests {
         // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
         let (new_pid, new_epoch) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
-        assert!(new_pid != 7);
-        assert!(new_epoch == 0);
+        assert2::assert!((new_pid != 7, new_epoch) == (true, 0));
         // The allocator hands out a distinct pid on the next overflow too.
         let (next_pid, _) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
-        assert!(next_pid != new_pid);
+        assert2::assert!(next_pid != new_pid);
         // Below TV_2 at i16::MAX: no roll, epoch stays (no bump path taken).
-        assert!(
+        assert2::assert!(
             next_producer_identity(TxnVersion::Classic, ProducerId(7), i16::MAX, &ids)
                 == (ProducerId(7), i16::MAX)
         );
@@ -764,11 +772,18 @@ mod tests {
         let cases = [
             // Entry is exactly as Phase 1 left it: same pid/epoch, still in
             // Prepare — proceed.
-            (7, 3, TxnState::PrepareCommit, ReacquireDecision::Proceed),
+            (
+                "unchanged prepared entry",
+                7,
+                3,
+                TxnState::PrepareCommit,
+                ReacquireDecision::Proceed,
+            ),
             // A concurrent InitProducerId bumped the epoch during the marker
             // fan-out. We must NOT overwrite with the stale epoch / Complete
             // state.
             (
+                "concurrent epoch bump",
                 7,
                 4,
                 TxnState::PrepareCommit,
@@ -776,6 +791,7 @@ mod tests {
             ),
             // Producer id changed underneath us — fenced.
             (
+                "new producer id",
                 8,
                 3,
                 TxnState::PrepareCommit,
@@ -784,6 +800,7 @@ mod tests {
             // Another caller (or an EndTxn retry that lost the race) already
             // drove this exact transition. Report success, do not re-write.
             (
+                "already completed",
                 7,
                 3,
                 TxnState::CompleteCommit,
@@ -794,6 +811,7 @@ mod tests {
             // fan-out no longer reflects the live transaction; refuse to
             // finalise.
             (
+                "wrong ongoing state",
                 7,
                 3,
                 TxnState::Ongoing,
@@ -803,13 +821,14 @@ mod tests {
             // different finalisation kind raced us. Refuse to write
             // CompleteCommit.
             (
+                "wrong prepare state",
                 7,
                 3,
                 TxnState::PrepareAbort,
                 ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
             ),
         ];
-        for (pid, epoch, state, expected) in cases {
+        for (_case, pid, epoch, state, expected) in cases {
             let e = entry(pid, epoch, state);
             let decision = validate_complete_reacquire(
                 &e,
@@ -818,10 +837,7 @@ mod tests {
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit,
             );
-            assert!(
-                decision == expected,
-                "observed pid {pid}, epoch {epoch}, state {state:?}"
-            );
+            assert2::assert!(decision == expected);
         }
     }
 
@@ -829,7 +845,7 @@ mod tests {
     fn abort_path_proceeds_and_is_idempotent() {
         // Mirror the abort branch: prepare=PrepareAbort, complete=CompleteAbort.
         let prep = entry(7, 3, TxnState::PrepareAbort);
-        assert!(
+        assert2::assert!(
             validate_complete_reacquire(
                 &prep,
                 ProducerId(7),
@@ -839,7 +855,7 @@ mod tests {
             ) == ReacquireDecision::Proceed
         );
         let done = entry(7, 3, TxnState::CompleteAbort);
-        assert!(
+        assert2::assert!(
             validate_complete_reacquire(
                 &done,
                 ProducerId(7),
@@ -889,10 +905,7 @@ mod tests {
         )
         .await
         .expect_err("missing leader must error");
-        assert!(
-            matches!(&err, BrokerError::Txn(m) if m.contains("not found")),
-            "unexpected error: {err:?}"
-        );
+        assert2::assert!(matches!(&err, BrokerError::Txn(m) if m.contains("not found")));
     }
 
     /// Leader resolves to its inter-broker endpoint, but the address is
@@ -931,9 +944,8 @@ mod tests {
         )
         .await
         .expect_err("unreachable endpoint must error");
-        assert!(
-            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
-            "unexpected error: {err:?}"
+        assert2::assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9"))
         );
     }
 
@@ -974,9 +986,8 @@ mod tests {
         )
         .await
         .expect_err("unreachable fallback must error");
-        assert!(
-            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
-            "expected fallback to top-level 127.0.0.1:9, got: {err:?}"
+        assert2::assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9"))
         );
     }
 }

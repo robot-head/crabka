@@ -376,7 +376,6 @@ pub fn decode_native_histograms(
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::{assert, check};
 
     use super::*;
 
@@ -388,16 +387,16 @@ mod tests {
             ResetHint::No,
             ResetHint::Gauge,
         ] {
-            assert!(ResetHint::from_i8(h.as_i8()) == h);
+            assert2::assert!(ResetHint::from_i8(h.as_i8()) == h);
         }
     }
 
     #[test]
     fn nhcb_detected_by_schema() {
         let mut h = sample_histogram();
-        assert!(!h.is_nhcb());
+        assert2::assert!(!h.is_nhcb());
         h.schema = -53;
-        assert!(h.is_nhcb());
+        assert2::assert!(h.is_nhcb());
     }
 
     #[test]
@@ -423,13 +422,10 @@ mod tests {
             (30_u64, 3000_i64, h3.clone()),
         ];
         let batch = encode_native_histograms(&rows).unwrap();
-        assert!(batch.num_rows() == 3);
+        assert2::assert!(batch.num_rows() == 3);
 
         let back = decode_native_histograms(&batch).unwrap();
-        assert!(back == rows);
-        check!(back[0].2.custom_values == None);
-        check!(back[1].2.custom_values == Some(vec![0.5, 1.0, 2.0]));
-        check!(back[2].2.custom_values == Some(vec![]));
+        assert2::assert!(back == rows);
     }
 
     #[test]
@@ -441,7 +437,7 @@ mod tests {
         }];
         bad.positive_counts = vec![1.0, 2.0];
         let err = encode_native_histograms(&[(1, 1, bad)]);
-        assert!(err.is_err());
+        assert2::assert!(err.is_err());
     }
 
     #[test]
@@ -453,7 +449,7 @@ mod tests {
 
         let err = decode_native_histograms(&batch).unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             HistogramCodecError::SpanCountMismatch {
                 spans: 2,
@@ -474,7 +470,7 @@ mod tests {
 
         let err = decode_native_histograms(&batch).unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             HistogramCodecError::SchemaMismatch(message)
                 if message.contains(COL_NH_SCHEMA) && message.contains("null")
@@ -490,7 +486,7 @@ mod tests {
 
         let err = decode_native_histograms(&batch).unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             HistogramCodecError::SchemaMismatch(message)
                 if message.contains(COL_NH_POS_SPANS) && message.contains("null")
@@ -525,7 +521,7 @@ mod tests {
 
         let err = decode_native_histograms(&batch).unwrap_err();
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             HistogramCodecError::SchemaMismatch(message) if message.contains(COL_NH_POS_SPANS)
         ));
@@ -542,7 +538,7 @@ mod tests {
 
         let decoded = decode_native_histograms(&batch).unwrap();
 
-        assert!(decoded == sample_rows());
+        assert2::assert!(decoded == sample_rows());
     }
 
     fn encoded_sample_batch() -> RecordBatch {

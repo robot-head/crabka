@@ -60,10 +60,7 @@ pub async fn await_topic_count(bootstrap: &str, topic: &str, n: usize, timeout: 
         if count >= n {
             return;
         }
-        assert!(
-            start.elapsed() < timeout,
-            "await_topic_count({topic}): timed out after {timeout:?}: got {count}, want {n}",
-        );
+        assert2::assert!(start.elapsed() < timeout);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }

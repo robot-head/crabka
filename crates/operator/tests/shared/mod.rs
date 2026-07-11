@@ -13,7 +13,6 @@
 
 #![allow(dead_code)]
 
-use assert2::assert;
 pub mod fake_admin;
 pub mod fake_rebalancer;
 
@@ -708,8 +707,8 @@ pub fn assert_ready_false_with_reason(
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap_or_else(|| panic!("Ready condition present; body = {body}"));
-    assert!(ready["status"] == "False", "body = {body}");
-    assert!(ready["reason"] == expected_reason, "body = {body}");
+    assert2::assert!(ready["status"] == "False");
+    assert2::assert!(ready["reason"] == expected_reason);
 }
 
 /// Extract the `broker-0.toml` string from the `ConfigMap` PATCH captured

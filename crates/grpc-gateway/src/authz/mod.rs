@@ -143,13 +143,16 @@ mod tests {
             permission_type: crabka_client_admin::PermissionType::Allow,
         };
         let meta = acl_entry_from_admin(admin);
-        assert_eq!(
-            meta.operation,
-            crabka_metadata::AclOperation::TwoPhaseCommit
-        );
-        assert_eq!(
-            meta.resource_type,
-            crabka_metadata::ResourceType::TransactionalId
+        assert2::assert!(
+            meta == crabka_metadata::AclEntry {
+                resource_type: crabka_metadata::ResourceType::TransactionalId,
+                resource_name: "my-txn".into(),
+                pattern_type: crabka_metadata::PatternType::Literal,
+                principal: "User:flink".into(),
+                host: "*".into(),
+                operation: crabka_metadata::AclOperation::TwoPhaseCommit,
+                permission_type: crabka_metadata::PermissionType::Allow,
+            }
         );
     }
 }

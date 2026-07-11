@@ -36,6 +36,7 @@ lz4    = ["crabka-compression/lz4"]
 zstd   = ["crabka-compression/zstd"]
 
 [dependencies]
+assert2 = { workspace = true }
 bytes = { workspace = true }
 thiserror = { workspace = true }
 crc32fast = { workspace = true }
@@ -44,6 +45,5 @@ crabka-ids = { version = "0.3.8", path = "../ids" }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 proptest = { workspace = true }
 hex = { workspace = true }

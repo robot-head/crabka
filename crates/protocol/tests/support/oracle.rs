@@ -5,7 +5,6 @@ use std::{
     sync::{LazyLock, Mutex, MutexGuard},
 };
 
-use assert2::assert;
 use serde_json::{Value, json};
 
 pub struct Oracle {
@@ -31,10 +30,7 @@ impl Oracle {
         } else {
             base.join("bin/crabka-oracle")
         };
-        assert!(
-            bin.exists(),
-            "oracle not built; run `(cd tools/oracle && ./gradlew installDist)`"
-        );
+        assert2::assert!(bin.exists());
         let java_home = std::env::var("JAVA_HOME").unwrap_or_else(|_| {
             r"C:\Program Files\Eclipse Adoptium\jdk-17.0.19.10-hotspot".to_string()
         });
@@ -75,11 +71,7 @@ impl Oracle {
         let mut resp = String::new();
         self.stdout.read_line(&mut resp).unwrap();
         let v: Value = serde_json::from_str(&resp).unwrap();
-        assert!(
-            v["ok"].as_bool().unwrap_or(false),
-            "oracle error: {}",
-            v["error"].as_str().unwrap_or("?")
-        );
+        assert2::assert!(v["ok"].as_bool().unwrap_or(false));
         v
     }
 

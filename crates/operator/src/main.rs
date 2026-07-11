@@ -62,30 +62,27 @@ async fn main() -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use clap::Parser;
 
     use super::*;
 
     #[test]
-    fn ca_renewal_check_parses() {
-        let cli = Cli::parse_from(["bin", "ca-renewal-check", "--namespace", "demo"]);
-        match cli.command {
-            Command::CaRenewalCheck(args) => {
-                assert!(args.namespace.as_deref() == Some("demo"));
+    fn ca_renewal_check_parse_cases() {
+        for (name, argv, expected_namespace) in [
+            (
+                "explicit namespace",
+                vec!["bin", "ca-renewal-check", "--namespace", "demo"],
+                Some("demo"),
+            ),
+            ("no namespace", vec!["bin", "ca-renewal-check"], None),
+        ] {
+            let cli = Cli::parse_from(argv);
+            match cli.command {
+                Command::CaRenewalCheck(args) => {
+                    assert2::assert!(args.namespace.as_deref() == expected_namespace);
+                }
+                _ => panic!("case {name}: expected CaRenewalCheck variant"),
             }
-            _ => panic!("expected CaRenewalCheck variant"),
-        }
-    }
-
-    #[test]
-    fn ca_renewal_check_parses_no_namespace() {
-        let cli = Cli::parse_from(["bin", "ca-renewal-check"]);
-        match cli.command {
-            Command::CaRenewalCheck(args) => {
-                assert!(args.namespace.is_none());
-            }
-            _ => panic!("expected CaRenewalCheck variant"),
         }
     }
 }

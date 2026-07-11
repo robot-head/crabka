@@ -236,7 +236,7 @@ fn hex_topic_id(id: WireUuid) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::{
         owned::common::share_group_heartbeat_response::topic_partitions::TopicPartitions,
         tagged_fields::UnknownTaggedFields,
@@ -273,7 +273,7 @@ mod tests {
     #[test]
     fn heartbeat_requests_preserve_group_member_epoch_and_subscription() {
         let leave = build_leave_heartbeat_request("group-a".into(), "member-a".into());
-        assert!(
+        assert2::assert!(
             leave
                 == ShareGroupHeartbeatRequest {
                     group_id: "group-a".into(),
@@ -291,7 +291,7 @@ mod tests {
             4,
             Some(vec!["topic-a".into()]),
         );
-        assert!(
+        assert2::assert!(
             heartbeat
                 == ShareGroupHeartbeatRequest {
                     group_id: "group-a".into(),
@@ -306,20 +306,30 @@ mod tests {
 
     #[test]
     fn heartbeat_result_classifies_success_rejoin_and_transient_errors() {
-        assert!(matches!(heartbeat_result(0), HeartbeatOutcome::Ok));
-        assert!(matches!(
-            heartbeat_result(FENCED_MEMBER_EPOCH),
-            HeartbeatOutcome::RejoinFromScratch
-        ));
-        assert!(matches!(
-            heartbeat_result(UNKNOWN_MEMBER_ID),
-            HeartbeatOutcome::RejoinFromScratch
-        ));
-        assert!(matches!(
-            heartbeat_result(STALE_MEMBER_EPOCH),
-            HeartbeatOutcome::RejoinFromScratch
-        ));
-        assert!(matches!(heartbeat_result(17), HeartbeatOutcome::Transient));
+        for (_name, code, expected) in [
+            ("success", 0, HeartbeatOutcome::Ok),
+            (
+                "fenced epoch",
+                FENCED_MEMBER_EPOCH,
+                HeartbeatOutcome::RejoinFromScratch,
+            ),
+            (
+                "unknown member",
+                UNKNOWN_MEMBER_ID,
+                HeartbeatOutcome::RejoinFromScratch,
+            ),
+            (
+                "stale epoch",
+                STALE_MEMBER_EPOCH,
+                HeartbeatOutcome::RejoinFromScratch,
+            ),
+            ("transient", 17, HeartbeatOutcome::Transient),
+        ] {
+            assert2::assert!(
+                std::mem::discriminant(&heartbeat_result(code))
+                    == std::mem::discriminant(&expected)
+            );
+        }
     }
 
     #[tokio::test]
@@ -346,7 +356,7 @@ mod tests {
         .await;
 
         let assignment = state.assignment.lock().await.clone();
-        assert!(
+        assert2::assert!(
             assignment
                 == vec![
                     (id(7), "topic-a".into(), 1),
@@ -357,6 +367,6 @@ mod tests {
 
     #[test]
     fn hex_topic_id_formats_all_uuid_bytes() {
-        assert!(hex_topic_id(id(9)) == "00000000000000000000000000000009");
+        assert2::assert!(hex_topic_id(id(9)) == "00000000000000000000000000000009");
     }
 }

@@ -80,17 +80,9 @@ impl Model for ProducerModel {
         match decision {
             Decision::Append => {
                 if last.initialized && epoch == last.epoch {
-                    assert!(
-                        base_seq == last.last_sequence + 1,
-                        "same-epoch Append not contiguous: base_seq={base_seq} last={}",
-                        last.last_sequence
-                    );
+                    assert2::assert!(base_seq == last.last_sequence + 1);
                 } else if last.initialized {
-                    assert!(
-                        epoch > last.epoch,
-                        "Append epoch not fresh: {epoch} <= {}",
-                        last.epoch
-                    );
+                    assert2::assert!(epoch > last.epoch);
                 }
                 s.epoch = epoch;
                 s.last_sequence = base_seq;
@@ -98,24 +90,19 @@ impl Model for ProducerModel {
                 Some(s)
             }
             Decision::Duplicate { .. } => {
-                assert!(
-                    last.initialized && epoch == last.epoch && base_seq <= last.last_sequence,
-                    "Duplicate misclassified: epoch={epoch} base_seq={base_seq} state={last:?}"
+                assert2::assert!(
+                    last.initialized && epoch == last.epoch && base_seq <= last.last_sequence
                 );
                 None
             }
             Decision::OutOfOrder => {
-                assert!(
-                    last.initialized && epoch == last.epoch && base_seq > last.last_sequence + 1,
-                    "OutOfOrder misclassified: epoch={epoch} base_seq={base_seq} state={last:?}"
+                assert2::assert!(
+                    last.initialized && epoch == last.epoch && base_seq > last.last_sequence + 1
                 );
                 None
             }
             Decision::Fenced => {
-                assert!(
-                    last.initialized && epoch < last.epoch,
-                    "Fenced misclassified: epoch={epoch} state={last:?}"
-                );
+                assert2::assert!(last.initialized && epoch < last.epoch);
                 None
             }
         }
@@ -158,11 +145,8 @@ fn run(model: ProducerModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] state cap hit"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

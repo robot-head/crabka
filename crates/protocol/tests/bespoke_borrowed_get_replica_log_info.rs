@@ -4,7 +4,6 @@
 // coverage here — the generated min/max wrapper tests only exercise default
 // (empty) messages and skip the nested-element loops and nullable-string path.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     DecodeBorrow, Encode,
@@ -33,12 +32,12 @@ fn borrowed_request_populated_roundtrip() {
         };
         let mut buf = BytesMut::new();
         req.encode(&mut buf, v).unwrap();
-        assert!(req.encoded_len(v) == buf.len());
+        assert2::assert!(req.encoded_len(v) == buf.len());
         let frozen = buf.freeze();
         let mut cur = &frozen[..];
         let decoded = GetReplicaLogInfoRequest::decode_borrow(&mut cur, v).unwrap();
-        assert!(cur.is_empty(), "decoder left trailing bytes");
-        assert!(decoded == req);
+        assert2::assert!(cur.is_empty());
+        assert2::assert!(decoded == req);
     }
 }
 
@@ -75,10 +74,10 @@ fn borrowed_response_populated_roundtrip() {
     let v = 0;
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, v).unwrap();
-    assert!(resp.encoded_len(v) == buf.len());
+    assert2::assert!(resp.encoded_len(v) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = GetReplicaLogInfoResponse::decode_borrow(&mut cur, v).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded == resp);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded == resp);
 }

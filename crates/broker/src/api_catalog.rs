@@ -177,7 +177,6 @@ fn admin_apis() -> Vec<ApiVersion> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -185,10 +184,10 @@ mod tests {
     fn share_group_apis_are_advertised() {
         let apis = supported_apis();
         let keys: Vec<i16> = apis.iter().map(|a| a.api_key).collect();
-        assert!(keys.contains(&76));
-        assert!(keys.contains(&77));
+        assert2::assert!(keys.contains(&76));
+        assert2::assert!(keys.contains(&77));
         let hb = apis.iter().find(|a| a.api_key == 76).unwrap();
-        assert!(hb.min_version == 1 && hb.max_version == 1);
+        assert2::assert!(hb.min_version == 1 && hb.max_version == 1);
     }
 
     #[test]
@@ -196,10 +195,10 @@ mod tests {
         let apis = supported_apis();
         let keys: Vec<i16> = apis.iter().map(|a| a.api_key).collect();
         // StreamsGroupHeartbeat(88), StreamsGroupDescribe(89).
-        assert!(keys.contains(&88));
-        assert!(keys.contains(&89));
+        assert2::assert!(keys.contains(&88));
+        assert2::assert!(keys.contains(&89));
         let hb = apis.iter().find(|a| a.api_key == 88).unwrap();
-        assert!(hb.min_version == 0 && hb.max_version == 0);
+        assert2::assert!(hb.min_version == 0 && hb.max_version == 0);
     }
 
     #[test]
@@ -210,21 +209,18 @@ mod tests {
         // WriteShareGroupState(85), DeleteShareGroupState(86),
         // ReadShareGroupStateSummary(87).
         for k in [83, 84, 85, 86, 87] {
-            assert!(
-                keys.contains(&k),
-                "persister api_key {k} must be advertised"
-            );
+            assert2::assert!(keys.contains(&k));
         }
     }
 
     #[test]
     fn supported_apis_is_nonempty_and_sane() {
         let apis = supported_apis();
-        assert!(!apis.is_empty(), "advertised API table must not be empty");
+        assert2::assert!(!apis.is_empty());
         // ApiVersions itself (api_key 18) is always advertised.
-        assert!(apis.iter().any(|a| a.api_key == 18));
+        assert2::assert!(apis.iter().any(|a| a.api_key == 18));
         for a in &apis {
-            assert!(a.min_version <= a.max_version, "api {} min>max", a.api_key);
+            assert2::assert!(a.min_version <= a.max_version);
         }
     }
 }

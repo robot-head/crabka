@@ -96,50 +96,35 @@ mod tests {
     #[test]
     fn tombstone_batch_has_one_null_value_k2_record() {
         let batch = classic_group_metadata_tombstone_batch("g", 123);
-        assert_eq!(batch.records.len(), 1, "exactly one record");
+        assert2::assert!(batch.records.len() == 1);
         let r = &batch.records[0];
-        assert!(r.key.is_some(), "k2 GroupMetadata key present");
-        assert!(r.value.is_none(), "tombstone = null value");
+        assert2::assert!(r.key.is_some());
+        assert2::assert!(r.value.is_none());
         let key = r.key.as_ref().unwrap();
-        assert_eq!(
-            &key[..2],
-            &2i16.to_be_bytes(),
-            "classic GroupMetadata key version 2"
-        );
+        assert2::assert!(&key[..2] == &2i16.to_be_bytes());
     }
 
     #[test]
     fn streams_tombstone_batch_group_level_only() {
         let batch = streams_records_tombstone_batch("g", &[], 123);
         // k15 GroupMetadata, k17 Topology, k18 PartitionMetadata, k19 TargetAssignmentMetadata.
-        assert_eq!(batch.records.len(), 4, "four group-level tombstones");
-        assert_eq!(batch.max_timestamp, 123);
-        assert_eq!(batch.last_offset_delta, 3);
+        assert2::assert!(batch.records.len() == 4);
+        assert2::assert!(batch.max_timestamp == 123);
+        assert2::assert!(batch.last_offset_delta == 3);
         for r in &batch.records {
-            assert!(r.key.is_some(), "every record carries a key");
-            assert!(
-                r.value.is_none(),
-                "every record is a tombstone (null value)"
-            );
+            assert2::assert!(r.key.is_some());
+            assert2::assert!(r.value.is_none());
         }
         // The first record is the load-bearing k15 GroupMetadata tombstone.
         let k15 = batch.records[0].key.as_ref().unwrap();
-        assert_eq!(
-            &k15[..2],
-            &15i16.to_be_bytes(),
-            "k15 GroupMetadata key version"
-        );
+        assert2::assert!(&k15[..2] == &15i16.to_be_bytes());
     }
 
     #[test]
     fn streams_tombstone_batch_includes_per_member_records() {
         let batch = streams_records_tombstone_batch("g", &["m1".to_string()], 1);
         // 4 group-level + k16/k20/k21 for m1 = 7.
-        assert_eq!(
-            batch.records.len(),
-            7,
-            "group-level + 3 per-member tombstones"
-        );
-        assert!(batch.records.iter().all(|r| r.value.is_none()));
+        assert2::assert!(batch.records.len() == 7);
+        assert2::assert!(batch.records.iter().all(|r| r.value.is_none()));
     }
 }

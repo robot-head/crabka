@@ -118,15 +118,9 @@ async fn real_pyroscope_render_matches_crabka_after_identical_ingest() -> TestRe
     .await?;
 
     let cases = [("pyroscope", &pyroscope_render), ("crabka", &crabka_render)];
-    for (backend, render) in cases {
-        assert!(
-            flame_ticks(render).is_some_and(|ticks| ticks > 0),
-            "{backend} render must report positive ticks"
-        );
-        assert!(
-            flame_names(render).contains("runtime/pprof.profileWriter"),
-            "{backend} render must contain runtime/pprof.profileWriter"
-        );
+    for (_backend, render) in cases {
+        assert2::assert!(flame_ticks(render).is_some_and(|ticks| ticks > 0));
+        assert2::assert!(flame_names(render).contains("runtime/pprof.profileWriter"));
     }
     assert_flamebearer_equal(&pyroscope_render, &crabka_render)?;
 
@@ -736,13 +730,11 @@ async fn grafana_accepts_pyroscope_datasource_pointing_at_crabka() -> TestResult
             .await?
     };
 
-    assert_eq!(
-        fetched.get("type").and_then(Value::as_str),
-        Some("grafana-pyroscope-datasource")
+    assert2::assert!(
+        fetched.get("type").and_then(Value::as_str) == Some("grafana-pyroscope-datasource")
     );
-    assert_eq!(
-        fetched.get("url").and_then(Value::as_str),
-        Some(crabka.querier_base.as_str())
+    assert2::assert!(
+        fetched.get("url").and_then(Value::as_str) == Some(crabka.querier_base.as_str())
     );
 
     crabka.shutdown();
@@ -996,10 +988,8 @@ async fn assert_profile_types_contain(
                     ("periodUnit", "count"),
                 ];
                 for (field, expected) in field_cases {
-                    assert_eq!(
-                        profile_type.get(field).and_then(Value::as_str),
-                        Some(expected),
-                        "profile type field `{field}`"
+                    assert2::assert!(
+                        profile_type.get(field).and_then(Value::as_str) == Some(expected)
                     );
                 }
             }
@@ -1914,7 +1904,7 @@ fn flamebearer_differential_rejects_shape_drift() {
     });
 
     let err = assert_flamebearer_equal(&expected, &actual).unwrap_err();
-    assert!(err.to_string().contains("flamebearer mismatch"));
+    assert2::assert!(err.to_string().contains("flamebearer mismatch"));
 }
 
 #[test]
@@ -1923,7 +1913,7 @@ fn connect_differential_rejects_canonical_response_drift() {
     let actual = json!({ "names": ["__name__", "service_name"] });
 
     let err = assert_canonical_json_equal("LabelNames", expected, actual).unwrap_err();
-    assert!(err.to_string().contains("LabelNames mismatch"));
+    assert2::assert!(err.to_string().contains("LabelNames mismatch"));
 }
 
 #[test]
@@ -1932,7 +1922,7 @@ fn label_names_differential_rejects_name_drift() {
     let actual = json!({ "names": ["__name__", "service_name"] });
 
     let err = assert_label_names_equal(&expected, &actual).unwrap_err();
-    assert!(err.to_string().contains("LabelNames mismatch"));
+    assert2::assert!(err.to_string().contains("LabelNames mismatch"));
 }
 
 #[test]
@@ -1956,7 +1946,7 @@ fn connect_flamegraph_differential_rejects_tick_drift() {
 
     let err =
         assert_connect_flamegraph_equal("SelectMergeStacktraces", &expected, &actual).unwrap_err();
-    assert!(err.to_string().contains("SelectMergeStacktraces mismatch"));
+    assert2::assert!(err.to_string().contains("SelectMergeStacktraces mismatch"));
 }
 
 #[test]
@@ -1975,7 +1965,7 @@ fn connect_series_differential_rejects_point_drift() {
     });
 
     let err = assert_select_series_equal(&expected, &actual).unwrap_err();
-    assert!(err.to_string().contains("SelectSeries mismatch"));
+    assert2::assert!(err.to_string().contains("SelectSeries mismatch"));
 }
 
 fn shared_api_tuple() -> Vec<(String, String)> {
@@ -1999,7 +1989,7 @@ fn series_differential_rejects_wire_key_casing_drift() {
     let snake = json!({ "labels_set": [projected_set("api", PROFILE_TYPE)] });
 
     let err = assert_series_drilldown_compatible(&camel, &snake, &tuple).unwrap_err();
-    assert!(err.to_string().contains("wire key differs"), "{err}");
+    assert2::assert!(err.to_string().contains("wire key differs"));
 }
 
 #[test]
@@ -2016,10 +2006,7 @@ fn series_differential_rejects_spurious_empty_label_set() {
     });
 
     let err = assert_series_drilldown_compatible(&pyroscope, &crabka, &tuple).unwrap_err();
-    assert!(
-        err.to_string().contains("spurious empty label set"),
-        "{err}"
-    );
+    assert2::assert!(err.to_string().contains("spurious empty label set"));
 }
 
 #[test]
@@ -2033,10 +2020,7 @@ fn series_differential_rejects_missing_shared_tuple_on_crabka() {
     let crabka = json!({ "labelsSet": [projected_set("other", PROFILE_TYPE)] });
 
     let err = assert_series_drilldown_compatible(&pyroscope, &crabka, &tuple).unwrap_err();
-    assert!(
-        err.to_string().contains("crabka missing shared tuple"),
-        "{err}"
-    );
+    assert2::assert!(err.to_string().contains("crabka missing shared tuple"));
 }
 
 #[test]
@@ -2048,7 +2032,7 @@ fn series_differential_rejects_empty_crabka_response() {
     let crabka = json!({});
 
     let err = assert_series_drilldown_compatible(&pyroscope, &crabka, &tuple).unwrap_err();
-    assert!(err.to_string().contains("wire key differs"), "{err}");
+    assert2::assert!(err.to_string().contains("wire key differs"));
 }
 
 #[test]
@@ -2064,10 +2048,9 @@ fn series_differential_rejects_intra_set_key_reordering() {
     ] }] });
 
     let err = assert_series_drilldown_compatible(&pyroscope, &crabka, &tuple).unwrap_err();
-    assert!(
+    assert2::assert!(
         err.to_string()
-            .contains("key order for shared tuple differs"),
-        "{err}"
+            .contains("key order for shared tuple differs")
     );
 }
 
@@ -2097,10 +2080,7 @@ fn series_full_differential_rejects_spurious_empty_label_set() {
     let crabka = json!({ "labelsSet": [{ "labels": [] }] });
 
     let err = assert_series_full_compatible(&pyroscope, &crabka).unwrap_err();
-    assert!(
-        err.to_string().contains("spurious empty label set"),
-        "{err}"
-    );
+    assert2::assert!(err.to_string().contains("spurious empty label set"));
 }
 
 #[test]
@@ -2113,10 +2093,7 @@ fn profile_stats_differential_rejects_int_representation_drift() {
         json!({ "dataIngested": true, "oldestProfileTime": 1000, "newestProfileTime": 2000 });
 
     let err = assert_get_profile_stats_compatible(&as_string, &as_number).unwrap_err();
-    assert!(
-        err.to_string().contains("JSON representation differs"),
-        "{err}"
-    );
+    assert2::assert!(err.to_string().contains("JSON representation differs"));
 }
 
 #[test]
@@ -2137,10 +2114,7 @@ fn profile_stats_differential_rejects_data_ingested_key_casing_drift() {
     let snake = json!({ "data_ingested": true });
 
     let err = assert_get_profile_stats_compatible(&camel, &snake).unwrap_err();
-    assert!(
-        err.to_string().contains("dataIngested wire key differs"),
-        "{err}"
-    );
+    assert2::assert!(err.to_string().contains("dataIngested wire key differs"));
 }
 
 #[test]
@@ -2167,7 +2141,7 @@ fn connect_diff_differential_rejects_tick_drift() {
     });
 
     let err = assert_diff_equal(&expected, &actual).unwrap_err();
-    assert!(err.to_string().contains("Diff mismatch"));
+    assert2::assert!(err.to_string().contains("Diff mismatch"));
 }
 
 // ---------------------------------------------------------------------------
@@ -2215,18 +2189,12 @@ async fn querier_echoes_proto_content_type_for_proto_requests() -> TestResult {
         .and_then(|value| value.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    let body = response.text().await.unwrap_or_default();
+    let _body = response.text().await.unwrap_or_default();
 
     crabka.shutdown();
 
-    assert!(
-        status.is_success(),
-        "ProfileTypes (application/proto) returned {status}: ct=`{content_type}` body=`{body}`"
-    );
-    assert!(
-        content_type.starts_with("application/proto"),
-        "ProfileTypes (application/proto) response must echo application/proto, got `{content_type}` (status {status})"
-    );
+    assert2::assert!(status.is_success());
+    assert2::assert!(content_type.starts_with("application/proto"));
     Ok(())
 }
 
@@ -2284,10 +2252,7 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
     // 3. Config-test / health probe: Grafana's datasource health check drives ProfileTypes
     //    through the plugin to Crabka (the spec's health surface; there is no /ready).
     let health = datasource_health_until_ok(&client, &grafana_base, &uid_a).await?;
-    assert!(
-        datasource_health_is_ok(&health),
-        "tenant-a datasource health not OK: {health}"
-    );
+    assert2::assert!(datasource_health_is_ok(&health));
 
     // 4. Drive a flamegraph query THROUGH Grafana and assert Crabka's symbolized data returns.
     let query_a = GrafanaQuery {
@@ -2304,15 +2269,9 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
         })
         .await?;
     for func in [FUNC_WORK, FUNC_HOT] {
-        assert!(
-            names_a.contains(func),
-            "Grafana query must return {func}: {names_a:?}"
-        );
+        assert2::assert!(names_a.contains(func));
     }
-    assert!(
-        positive_a,
-        "Grafana query must return a positive sample value: {names_a:?}"
-    );
+    assert2::assert!(positive_a);
 
     // 5. Multi-tenant isolation THROUGH Grafana: tenant-b's datasource must not see any of
     //    tenant-a's profiles, labels, or frames.
@@ -2325,14 +2284,8 @@ async fn grafana_renders_crabka_profiles_end_to_end() -> TestResult {
         to_ms,
     };
     let (names_b, positive_b) = grafana_profile_evidence(&client, &query_b).await?;
-    assert!(
-        !names_b.contains(FUNC_WORK) && !names_b.contains(FUNC_HOT),
-        "tenant-b leaked tenant-a frames through Grafana: {names_b:?}"
-    );
-    assert!(
-        !positive_b,
-        "tenant-b saw tenant-a sample values through Grafana"
-    );
+    assert2::assert!(!names_b.contains(FUNC_WORK) && !names_b.contains(FUNC_HOT));
+    assert2::assert!(!positive_b);
 
     crabka.shutdown();
     Ok(())

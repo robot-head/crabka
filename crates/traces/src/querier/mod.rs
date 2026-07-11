@@ -25,14 +25,13 @@ impl Default for QuerierConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn default_config_matches_tempo_defaults() {
         let c = QuerierConfig::default();
-        assert!(
+        assert2::assert!(
             c == QuerierConfig {
                 listen_addr: ([0, 0, 0, 0], 3200).into(),
                 default_search_limit: 20,

@@ -197,7 +197,7 @@ fn build_roundtrip(specs: &[MessageSpec]) -> TokenStream {
                 #name_lit => {
                     let mut cur = bytes;
                     let msg = crabka_protocol::owned::#snake_ident::#type_ident::decode(&mut cur, version).unwrap();
-                    assert!(cur.is_empty());
+                    assert2::assert!(cur.is_empty());
                     let mut buf = BytesMut::new();
                     msg.encode(&mut buf, version).unwrap();
                     buf.to_vec()

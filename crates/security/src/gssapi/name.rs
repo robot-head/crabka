@@ -198,7 +198,6 @@ pub fn apply(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -211,69 +210,69 @@ mod tests {
         let r = rules(&["DEFAULT"]);
         // DEFAULT only matches when the principal realm equals the default
         // realm (matching the JVM `KerberosName`), so realm == default_realm.
-        assert!(apply(&r, "REALM", &["alice"], "REALM").unwrap() == "alice");
+        assert2::assert!(apply(&r, "REALM", &["alice"], "REALM").unwrap() == "alice");
     }
 
     #[test]
     fn default_rule_rejects_multi_component() {
         let r = rules(&["DEFAULT"]);
-        assert!(apply(&r, "REALM", &["kafka", "host"], "REALM").is_err());
+        assert2::assert!(apply(&r, "REALM", &["kafka", "host"], "REALM").is_err());
     }
 
     #[test]
     fn rule_substitutes_and_matches_regex() {
         let r = rules(&["RULE:[2:$1](kafka.*)s/^.*$/kafka/", "DEFAULT"]);
-        assert!(apply(&r, "REALM", &["kafka", "host"], "REALM").unwrap() == "kafka");
+        assert2::assert!(apply(&r, "REALM", &["kafka", "host"], "REALM").unwrap() == "kafka");
     }
 
     #[test]
     fn rule_substitution_accepts_no_trailing_flags_segment() {
         let r = rules(&["RULE:[1:$1]s/A/a"]);
-        assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
+        assert2::assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
     }
 
     #[test]
     fn rule_lowercase_modifier() {
         let r = rules(&["RULE:[1:$1]/L"]);
-        assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
+        assert2::assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice");
     }
 
     #[test]
     fn rule_lowercase_modifier_after_substitution() {
         // `/L` riding in the substitution flags must still lowercase the result.
         let r = rules(&["RULE:[1:$1](.*)s/$/-X/L"]);
-        assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice-x");
+        assert2::assert!(apply(&r, "REALM", &["Alice"], "REALM").unwrap() == "alice-x");
     }
 
     #[test]
     fn rule_global_and_lowercase_flags_combined() {
         let r = rules(&["RULE:[1:$1](.*)s/A/a/gL"]);
-        assert!(apply(&r, "REALM", &["BANANA"], "REALM").unwrap() == "banana");
+        assert2::assert!(apply(&r, "REALM", &["BANANA"], "REALM").unwrap() == "banana");
     }
 
     #[test]
     fn first_matching_rule_wins() {
         let r = rules(&["RULE:[1:$1](nomatch)s/x/y/", "RULE:[1:$1]/L"]);
-        assert!(apply(&r, "REALM", &["BOB"], "REALM").unwrap() == "bob");
+        assert2::assert!(apply(&r, "REALM", &["BOB"], "REALM").unwrap() == "bob");
     }
 
     #[test]
     fn no_matching_rule_is_error() {
         let r = rules(&["RULE:[1:$1](nope)s/a/b/"]);
-        assert!(apply(&r, "REALM", &["alice"], "REALM").is_err());
+        assert2::assert!(apply(&r, "REALM", &["alice"], "REALM").is_err());
     }
 
     #[test]
     fn parse_round_trips_two_component_format_string() {
         let rule = Rule::parse("RULE:[2:$1@$0](.*@REALM)s/@REALM//").unwrap();
         match rule {
-            Rule::Translate { num_components, .. } => assert!(num_components == 2),
+            Rule::Translate { num_components, .. } => assert2::assert!(num_components == 2),
             Rule::Default => panic!("expected Translate"),
         }
     }
 
     #[test]
     fn parse_rejects_rule_with_empty_component_count() {
-        assert!(Rule::parse("RULE:[:$1]").is_err());
+        assert2::assert!(Rule::parse("RULE:[:$1]").is_err());
     }
 }

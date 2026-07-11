@@ -588,12 +588,35 @@ mod tests {
         let builder = StreamsBuilder::new();
         let _s = builder.stream::<String, String>(["in"]);
         let g = builder.internal.borrow();
-        check!(g.graph.nodes.len() == 1);
-        check!(matches!(
-            g.graph.nodes[0].kind,
-            GraphNodeKind::StreamSource { .. }
-        ));
-        check!(g.graph.nodes[0].name == "KSTREAM-SOURCE-0000000000");
+        let node = &g.graph.nodes[0];
+        let GraphNodeKind::StreamSource { topics } = &node.kind else {
+            panic!("expected stream source node");
+        };
+        check!(
+            (
+                g.graph.nodes.len(),
+                node.id,
+                node.name.as_str(),
+                topics.as_slice(),
+                node.predecessors.as_slice(),
+                node.children.as_slice(),
+                node.key_changing_operation,
+                node.merge_node,
+                node.lower.is_some(),
+                node.aux.is_some(),
+            ) == (
+                1,
+                0,
+                "KSTREAM-SOURCE-0000000000",
+                &["in".to_string()][..],
+                &[][..],
+                &[][..],
+                false,
+                false,
+                true,
+                false,
+            )
+        );
     }
 
     #[test]
@@ -602,9 +625,13 @@ mod tests {
         b.stream::<String, String>(["in"]).to("out");
         let built = b.build("app").unwrap();
         let wire = built.to_wire();
-        check!(wire.epoch == 0);
-        check!(wire.subtopologies.len() == 1);
-        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (
+                wire.epoch,
+                wire.subtopologies.len(),
+                wire.subtopologies[0].source_topics.as_slice(),
+            ) == (0, 1, &["in".to_string()][..])
+        );
         // The sink topic surfaces as a list-able output topic.
         check!(built.list_sink_topics() == vec!["out".to_string()]);
     }
@@ -616,8 +643,12 @@ mod tests {
             .map_values(|v: &String| v.clone())
             .to("out");
         let wire = b.build_optimized("app").unwrap().to_wire();
-        check!(wire.subtopologies.len() == 1);
-        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (
+                wire.subtopologies.len(),
+                wire.subtopologies[0].source_topics.as_slice()
+            ) == (1, &["in".to_string()][..])
+        );
     }
 
     #[test]
@@ -659,8 +690,7 @@ mod tests {
     fn global_table_returns_handle_with_store_name() {
         let builder = StreamsBuilder::new();
         let gt = builder.global_table::<String, String>("global", "g-store");
-        check!(gt.store_name() == "g-store");
-        check!(gt.source_topic == "global");
+        check!((gt.store_name(), gt.source_topic.as_str()) == ("g-store", "global"));
         // The global source is the FIRST logical node (so it takes index 0 at
         // grouping time, bumping a later stream's subtopology id).
         let g = builder.internal.borrow();
@@ -681,9 +711,13 @@ mod tests {
         drop(gt);
         b.stream::<String, String>(["in"]).to("out");
         let wire = b.build("app").unwrap().to_wire();
-        check!(wire.subtopologies.len() == 1);
-        check!(wire.subtopologies[0].subtopology_id == "1");
-        check!(wire.subtopologies[0].source_topics == vec!["in".to_string()]);
+        check!(
+            (
+                wire.subtopologies.len(),
+                wire.subtopologies[0].subtopology_id.as_str(),
+                wire.subtopologies[0].source_topics.as_slice(),
+            ) == (1, "1", &["in".to_string()][..])
+        );
         // No changelog topic for the global store.
         check!(
             wire.subtopologies
@@ -698,8 +732,15 @@ mod tests {
         let b = StreamsBuilder::new();
         // Chains (returns &Self) and records a thunk under the given name.
         b.add_state_store("counts", StringSerde, I64Serde);
-        check!(b.internal.borrow().store_thunk("counts").is_some());
-        check!(b.internal.borrow().store_thunk("missing").is_none());
+        for (name, store_name, expected) in [
+            ("registered store", "counts", true),
+            ("missing store", "missing", false),
+        ] {
+            check!(
+                b.internal.borrow().store_thunk(store_name).is_some() == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]

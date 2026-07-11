@@ -34,7 +34,6 @@ pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionEr
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -44,14 +43,14 @@ mod tests {
     #[test]
     fn roundtrip() {
         let z = compress(HELLO).unwrap();
-        assert!(z.len() < HELLO.len() + 32, "z={:?}", z.len());
+        assert2::assert!(z.len() < HELLO.len() + 32);
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.as_ref() == HELLO);
+        assert2::assert!(back.as_ref() == HELLO);
     }
 
     #[test]
     fn decompress_empty_rejected() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(b"", BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -59,7 +58,7 @@ mod tests {
 
     #[test]
     fn decompress_garbage_rejected() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(b"this is not gzip", BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -68,9 +67,9 @@ mod tests {
     #[test]
     fn compress_empty_produces_valid_frame() {
         let z = compress(b"").unwrap();
-        assert!(!z.is_empty(), "empty input still requires a gzip header");
+        assert2::assert!(!z.is_empty());
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.as_ref() == b"");
+        assert2::assert!(back.as_ref() == b"");
     }
 
     #[test]
@@ -78,12 +77,12 @@ mod tests {
         // 64 MiB of zeros compresses tiny but expands hugely.
         let bomb = vec![0u8; 64 * 1024 * 1024];
         let z = compress(&bomb).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&z, 1024),
             Err(CompressionError::TooLarge { limit: 1024 })
         ));
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.len() == bomb.len());
+        assert2::assert!(back.as_ref() == bomb.as_slice());
     }
 
     #[test]
@@ -92,9 +91,9 @@ mod tests {
         // Output of exactly `max_output` bytes is allowed (cap check is
         // `len > max_output`, not `>=`).
         let back = decompress(&z, HELLO.len()).unwrap();
-        assert!(back.as_ref() == HELLO);
+        assert2::assert!(back.as_ref() == HELLO);
         // One byte under the exact size is rejected.
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&z, HELLO.len() - 1),
             Err(CompressionError::TooLarge { limit }) if limit == HELLO.len() - 1
         ));

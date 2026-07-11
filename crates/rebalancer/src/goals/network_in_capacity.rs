@@ -128,8 +128,6 @@ impl Goal for NetworkInCapacity {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         capacity::{BrokerCapacities, BrokerCapacity},
@@ -244,8 +242,12 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(caps(1, 1_000_000), Arc::new(UsageStore::default()));
-        assert!(NetworkInCapacity.propose(&s, &ctx).is_empty());
-        assert!(NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(
+            (
+                NetworkInCapacity.propose(&s, &ctx).is_empty(),
+                NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -257,7 +259,7 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, 500_000), store);
         let mvs = NetworkInCapacity.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected eviction; got {mvs:?}");
+        assert2::assert!(!mvs.is_empty());
     }
 
     #[test]
@@ -267,7 +269,7 @@ mod tests {
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 0.0, 200_000.0)).collect();
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, 500_000), store);
-        assert!(!NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(!NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 
     #[test]
@@ -278,8 +280,12 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(caps(1, 500_000), store);
 
-        assert!(NetworkInCapacity.propose(&s, &ctx).is_empty());
-        assert!(NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(
+            (
+                NetworkInCapacity.propose(&s, &ctx).is_empty(),
+                NetworkInCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -298,7 +304,7 @@ mod tests {
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "large_limit".into(),
                 partition: 0,
@@ -326,7 +332,7 @@ mod tests {
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "high_excess".into(),
                 partition: 0,
@@ -347,8 +353,9 @@ mod tests {
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3, 2]);
+        assert2::assert!(
+            mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3, 2]]
+        );
     }
 
     #[test]
@@ -358,7 +365,7 @@ mod tests {
         let store = store_with_counter_pair(vec![(1, "hot", 0, 0.0, 1_000.0)]);
         let ctx = ctx_with(caps(1, 500), store);
 
-        assert!(NetworkInCapacity.propose(&s, &ctx).is_empty());
+        assert2::assert!(NetworkInCapacity.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -370,7 +377,7 @@ mod tests {
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "hot".into(),
                 partition: 0,
@@ -393,6 +400,6 @@ mod tests {
 
         let mvs = NetworkInCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

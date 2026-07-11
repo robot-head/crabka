@@ -72,7 +72,6 @@ pub fn decode_offer_layers(bytes: &[u8]) -> Result<SecurityLayer, LayerError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -80,7 +79,7 @@ mod tests {
     fn encode_offer_auth_only() {
         // bitmask 0x01 (auth), max recv size 0x10000 (65536)
         let bytes = encode_offer(SecurityLayer::AUTH, 0x1_0000);
-        assert!(bytes == vec![0x01, 0x01, 0x00, 0x00]);
+        assert2::assert!(bytes == vec![0x01, 0x01, 0x00, 0x00]);
     }
 
     #[test]
@@ -88,7 +87,7 @@ mod tests {
         // selected 0x01, max size 0x1000, no authzid
         let bytes = [0x01u8, 0x00, 0x10, 0x00];
         let choice = decode_choice(&bytes).unwrap();
-        assert!(
+        assert2::assert!(
             choice
                 == LayerChoice {
                     selected: SecurityLayer::AUTH,
@@ -103,18 +102,18 @@ mod tests {
         let mut bytes = vec![0x01u8, 0x00, 0x10, 0x00];
         bytes.extend_from_slice(b"alice");
         let choice = decode_choice(&bytes).unwrap();
-        assert!(choice.authzid.as_deref() == Some("alice"));
+        assert2::assert!(choice.authzid.as_deref() == Some("alice"));
     }
 
     #[test]
     fn decode_rejects_non_auth_layer() {
         // client picked integrity (0x02) which we never offered
         let bytes = [0x02u8, 0x00, 0x10, 0x00];
-        assert!(decode_choice(&bytes).is_err());
+        assert2::assert!(decode_choice(&bytes).is_err());
     }
 
     #[test]
     fn decode_rejects_short_message() {
-        assert!(decode_choice(&[0x01u8, 0x00]).is_err());
+        assert2::assert!(decode_choice(&[0x01u8, 0x00]).is_err());
     }
 }

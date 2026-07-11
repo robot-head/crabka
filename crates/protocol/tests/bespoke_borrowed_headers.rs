@@ -2,7 +2,6 @@
 // conversion tests and specific-value roundtrips. Relocated from hand-written
 // wrappers.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     DecodeBorrow, Encode, UnknownTaggedFields,
@@ -23,12 +22,12 @@ fn borrowed_request_header_min_version_specific_values() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, MIN_VERSION).unwrap();
-    assert!(hdr.encoded_len(MIN_VERSION) == buf.len());
+    assert2::assert!(hdr.encoded_len(MIN_VERSION) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = RequestHeader::decode_borrow(&mut cur, MIN_VERSION).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded == hdr);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded == hdr);
 }
 
 #[test]
@@ -42,12 +41,12 @@ fn borrowed_request_header_max_version_with_client_id() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, MAX_VERSION).unwrap();
-    assert!(hdr.encoded_len(MAX_VERSION) == buf.len());
+    assert2::assert!(hdr.encoded_len(MAX_VERSION) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = RequestHeader::decode_borrow(&mut cur, MAX_VERSION).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded == hdr);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded == hdr);
 }
 
 #[test]
@@ -65,7 +64,7 @@ fn borrowed_request_header_to_owned_matches_owned_codec() {
     let owned = hdr.to_owned();
     let mut b = BytesMut::new();
     owned.encode(&mut b, MAX_VERSION).unwrap();
-    assert!(a.as_ref() == b.as_ref());
+    assert2::assert!(a.as_ref() == b.as_ref());
 }
 
 #[test]
@@ -76,12 +75,12 @@ fn borrowed_response_header_min_version_specific_values() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, RESP_MIN).unwrap();
-    assert!(hdr.encoded_len(RESP_MIN) == buf.len());
+    assert2::assert!(hdr.encoded_len(RESP_MIN) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = ResponseHeader::decode_borrow(&mut cur, RESP_MIN).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.correlation_id == hdr.correlation_id);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded.correlation_id == hdr.correlation_id);
 }
 
 #[test]
@@ -92,12 +91,12 @@ fn borrowed_response_header_max_version_specific_values() {
     };
     let mut buf = BytesMut::new();
     hdr.encode(&mut buf, RESP_MAX).unwrap();
-    assert!(hdr.encoded_len(RESP_MAX) == buf.len());
+    assert2::assert!(hdr.encoded_len(RESP_MAX) == buf.len());
     let frozen = buf.freeze();
     let mut cur = &frozen[..];
     let decoded = ResponseHeader::decode_borrow(&mut cur, RESP_MAX).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.correlation_id == hdr.correlation_id);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded.correlation_id == hdr.correlation_id);
 }
 
 #[test]
@@ -112,5 +111,5 @@ fn borrowed_response_header_to_owned_matches_owned_codec() {
     let owned = hdr.to_owned();
     let mut b = BytesMut::new();
     owned.encode(&mut b, RESP_MAX).unwrap();
-    assert!(a.as_ref() == b.as_ref());
+    assert2::assert!(a.as_ref() == b.as_ref());
 }

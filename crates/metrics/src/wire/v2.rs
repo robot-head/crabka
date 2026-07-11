@@ -124,7 +124,7 @@ fn metadata_type(value: i32) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+
     use prost::Message;
 
     use super::*;
@@ -161,11 +161,21 @@ mod tests {
 
         let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
-        assert!(decoded.len() == 1);
-        check!(decoded[0].labels.get("__name__") == Some("up"));
-        check!(decoded[0].samples == vec![DecodedSample::new(1000, 1.0)]);
-        check!(decoded[0].exemplars[0].labels.get("trace_id") == Some("abc"));
-        check!(
+        assert2::assert!(
+            decoded
+                == vec![DecodedSeries {
+                    labels: Labels::from_iter([("__name__".to_string(), "up".to_string())]),
+                    samples: vec![DecodedSample::new(1000, 1.0)],
+                    histograms: vec![],
+                    exemplars: vec![DecodedExemplar {
+                        labels: Labels::from_iter([("trace_id".to_string(), "abc".to_string())]),
+                        timestamp_ms: 1100,
+                        value: 2.0,
+                    }],
+                    metadata: None,
+                }]
+        );
+        assert2::assert!(
             counts
                 == WrittenCounts {
                     samples: 1,
@@ -196,8 +206,8 @@ mod tests {
 
         let (decoded, counts) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
-        assert!(counts.histograms == 1);
-        assert!(decoded[0].histograms[0].1.positive_counts == vec![1.0, 3.0]);
+        assert2::assert!(counts.histograms == 1);
+        assert2::assert!(decoded[0].histograms[0].1.positive_counts == vec![1.0, 3.0]);
     }
 
     #[test]
@@ -209,7 +219,7 @@ mod tests {
 
         let err = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap_err();
 
-        assert!(matches!(err, WireError::Invalid(_)));
+        assert2::assert!(matches!(err, WireError::Invalid(_)));
     }
 
     #[test]
@@ -236,8 +246,8 @@ mod tests {
 
         let err = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap_err();
 
-        assert!(matches!(err, WireError::Invalid(_)));
-        assert!(format!("{err}").contains("duplicate label `job`"));
+        assert2::assert!(matches!(err, WireError::Invalid(_)));
+        assert2::assert!(format!("{err}").contains("duplicate label `job`"));
     }
 
     #[test]
@@ -257,7 +267,7 @@ mod tests {
 
         let (decoded, _) = decode_v2(&snappy(&req.encode_to_vec()), 1 << 20).unwrap();
 
-        assert!(
+        assert2::assert!(
             decoded[0].samples == vec![DecodedSample::with_start_timestamp(1000, 1.0, Some(500))]
         );
     }

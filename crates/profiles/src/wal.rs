@@ -111,7 +111,7 @@ pub fn partition_key(tenant: &str, fingerprint: u64) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -167,7 +167,7 @@ mod tests {
         let record = record();
         let bytes = record.encode().unwrap();
         let decoded = ProfileRecord::decode(&bytes).unwrap();
-        assert!(decoded == record);
+        assert2::assert!(decoded == record);
     }
 
     #[test]
@@ -178,7 +178,7 @@ mod tests {
             ("service_name".to_string(), "api".to_string()),
             ("__name__".to_string(), "process_cpu".to_string()),
         ];
-        assert!(a.series_fingerprint() == b.series_fingerprint());
+        assert2::assert!(a.series_fingerprint() == b.series_fingerprint());
     }
 
     #[test]

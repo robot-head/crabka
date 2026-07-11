@@ -3,7 +3,6 @@
 //! the sought offset instead of `auto.offset.reset`. Proves the seek wins over
 //! the post-assignment prime, drops no pre-seek records, and skips none above.
 
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
@@ -60,7 +59,7 @@ async fn seek_before_first_poll_resumes_from_sought_offset() {
         })
         .await
         .unwrap();
-    assert!(ct.topics[0].error_code == 0, "CreateTopics failed: {ct:?}");
+    assert2::assert!(ct.topics[0].error_code == 0);
 
     // Offsets 0..=4 on partition 0.
     produce_n(&bootstrap, "s", 5).await;
@@ -94,10 +93,7 @@ async fn seek_before_first_poll_resumes_from_sought_offset() {
     let offsets: Vec<i64> = got.iter().map(|r| r.offset).collect();
     // No pre-seek record (offset 0 or 1) is ever delivered, and nothing above
     // the seek is skipped: exactly 2, 3, 4.
-    assert!(
-        offsets == vec![2, 3, 4],
-        "expected offsets [2,3,4] after seek(2), got {offsets:?}"
-    );
+    assert2::assert!(offsets == vec![2, 3, 4]);
 
     consumer.close().await.unwrap();
 }
@@ -139,14 +135,11 @@ async fn seek_rejects_negative_offset() {
         .unwrap();
 
     let err = consumer.seek("n", 0, -1).await;
-    assert!(err.is_err(), "negative seek offset must be rejected");
+    assert2::assert!(err.is_err());
 
     // Offset 0 is a valid seek target (re-read from the beginning): the reject
     // boundary is strictly `offset < 0`, so 0 must be accepted.
-    assert!(
-        consumer.seek("n", 0, 0).await.is_ok(),
-        "seek to offset 0 must be accepted"
-    );
+    assert2::assert!(consumer.seek("n", 0, 0).await.is_ok());
 
     consumer.close().await.unwrap();
 }

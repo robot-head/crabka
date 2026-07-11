@@ -108,7 +108,7 @@ impl EdgeCheckpointStore for InMemoryCheckpointStore {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -118,7 +118,7 @@ mod tests {
         let key = encode_checkpoint_key("tenant-a", &trace, &[0xAA, 0xBB]);
         let parsed = parse_checkpoint_key(&key).unwrap();
 
-        assert_eq!(parsed, ("tenant-a".to_string(), trace, vec![0xAA, 0xBB]));
+        assert2::assert!(parsed == ("tenant-a".to_string(), trace, vec![0xAA, 0xBB]));
     }
 
     #[test]
@@ -127,7 +127,7 @@ mod tests {
         let key = encode_checkpoint_key("tenant-a", &trace, &[0xAA, 0xBB]);
         let truncated = &key[..key.len() - 1];
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             parse_checkpoint_key(truncated),
             Err(CheckpointCodecError::Truncated)
         ));
@@ -140,11 +140,11 @@ mod tests {
         store.save("t", b"k2", b"v2");
 
         let all = store.load_all("t");
-        assert!(all.len() == 2);
+        assert2::assert!(all.len() == 2);
 
         store.save("t", b"k1", b"");
         let after_tombstone = store.load_all("t");
-        assert_eq!(after_tombstone, vec![(b"k2".to_vec(), b"v2".to_vec())]);
+        assert2::assert!(after_tombstone == vec![(b"k2".to_vec(), b"v2".to_vec())]);
         check!(store.load_all("other").is_empty());
         check!(store.tenants() == vec!["t".to_string()]);
     }

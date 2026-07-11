@@ -8,7 +8,6 @@
 
 use std::time::Duration;
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -90,13 +89,8 @@ async fn bootstrap_member_id(
         .send(req)
         .await
         .expect("first JoinGroup must round-trip");
-    assert!(
-        resp.error_code == ERR_MEMBER_ID_REQUIRED,
-        "first JoinGroup (empty member_id) must return MEMBER_ID_REQUIRED (79), got {resp:?}"
-    );
-    assert!(
-        !resp.member_id.is_empty(),
-        "broker must return a non-empty generated member_id on MEMBER_ID_REQUIRED"
+    assert2::assert!(
+        (resp.error_code, resp.member_id.is_empty()) == (ERR_MEMBER_ID_REQUIRED, false)
     );
     resp.member_id
 }
@@ -199,10 +193,9 @@ async fn empty_intersection_returns_inconsistent_group_protocol() {
     // We accept either both-error or one-error-one-empty (the post-error
     // notify could in theory let the other proceed in a future refactor),
     // but assert the contract loud enough that any regression is obvious.
-    assert!(
+    assert2::assert!(
         resp_a.error_code == ERR_INCONSISTENT_GROUP_PROTOCOL
-            || resp_b.error_code == ERR_INCONSISTENT_GROUP_PROTOCOL,
-        "at least one of (A, B) must return INCONSISTENT_GROUP_PROTOCOL (23); got A={resp_a:?} B={resp_b:?}"
+            || resp_b.error_code == ERR_INCONSISTENT_GROUP_PROTOCOL
     );
 }
 
@@ -297,14 +290,10 @@ async fn vote_picks_cooperative_when_majority() {
     let resp_c = join_c.await.expect("member C task panic");
     handle.shutdown().await;
 
-    for (label, resp) in [("A", &resp_a), ("B", &resp_b), ("C", &resp_c)] {
-        assert!(
-            resp.error_code == ERR_NONE,
-            "member {label} must succeed, got {resp:?}"
-        );
-        assert!(
-            resp.protocol_name.as_deref() == Some("cooperative-sticky"),
-            "member {label} must see protocol_name=cooperative-sticky (2 votes vs 1 for range), got {resp:?}"
+    for (_label, resp) in [("A", &resp_a), ("B", &resp_b), ("C", &resp_c)] {
+        assert2::assert!(
+            (resp.error_code, resp.protocol_name.as_deref())
+                == (ERR_NONE, Some("cooperative-sticky"))
         );
     }
 }
@@ -371,14 +360,10 @@ async fn vote_ties_broken_lexicographically() {
     let resp_b = join_b.await.expect("member B task panic");
     handle.shutdown().await;
 
-    for (label, resp) in [("A", &resp_a), ("B", &resp_b)] {
-        assert!(
-            resp.error_code == ERR_NONE,
-            "member {label} must succeed, got {resp:?}"
-        );
-        assert!(
-            resp.protocol_name.as_deref() == Some("cooperative-sticky"),
-            "tie must break lexicographically to cooperative-sticky ('c' < 'r'), got {resp:?}"
+    for (_label, resp) in [("A", &resp_a), ("B", &resp_b)] {
+        assert2::assert!(
+            (resp.error_code, resp.protocol_name.as_deref())
+                == (ERR_NONE, Some("cooperative-sticky"))
         );
     }
 }
@@ -393,14 +378,7 @@ async fn single_member_picks_its_first_protocol() {
     let resp = full_join(&client, "cg-single", "consumer", &[("range", b"")]).await;
     handle.shutdown().await;
 
-    assert!(
-        resp.error_code == ERR_NONE,
-        "single-member JoinGroup must succeed, got {resp:?}"
-    );
-    assert!(
-        resp.protocol_name.as_deref() == Some("range"),
-        "single-member must land on its only proposed protocol, got {resp:?}"
-    );
+    assert2::assert!((resp.error_code, resp.protocol_name.as_deref()) == (ERR_NONE, Some("range")));
 }
 
 /// Member A establishes the group with `protocol_type = "consumer"`.
@@ -417,11 +395,9 @@ async fn protocol_type_mismatch_rejected() {
     // Member A: full two-step, completes the rebalance. After this the
     // group has `protocol_type = Some("consumer")` and is Stable.
     let resp_a = full_join(&client_a, group_id, "consumer", &[("range", b"")]).await;
-    assert!(
-        resp_a.error_code == ERR_NONE,
-        "member A must complete first-round rebalance, got {resp_a:?}"
+    assert2::assert!(
+        (resp_a.error_code, resp_a.protocol_name.as_deref()) == (ERR_NONE, Some("range"))
     );
-    assert!(resp_a.protocol_name.as_deref() == Some("range"));
 
     // Member B: bootstrap a member id, then join with `protocol_type =
     // "stream"`. The handler checks the existing group's protocol_type
@@ -430,8 +406,5 @@ async fn protocol_type_mismatch_rejected() {
     let resp_b = second_join(&client_b, group_id, &member_b, "stream", &[("range", b"")]).await;
     handle.shutdown().await;
 
-    assert!(
-        resp_b.error_code == ERR_INCONSISTENT_GROUP_PROTOCOL,
-        "member B with protocol_type=stream must hit INCONSISTENT_GROUP_PROTOCOL on a consumer group, got {resp_b:?}"
-    );
+    assert2::assert!(resp_b.error_code == ERR_INCONSISTENT_GROUP_PROTOCOL);
 }

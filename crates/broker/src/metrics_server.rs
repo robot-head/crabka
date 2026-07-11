@@ -65,7 +65,7 @@ async fn metrics(State(registry): State<SharedRegistry>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use axum::{body::Body, http::Request};
     use tower::ServiceExt as _;
 
@@ -86,20 +86,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(ct.starts_with("application/openmetrics-text"), "ct={ct}");
+        assert2::assert!(ct.starts_with("application/openmetrics-text"));
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
         for needle in ["crabka_broker_topic_bytes_in_total", "42", "# EOF"] {
-            assert!(s.contains(needle), "missing {needle:?} in {s}");
+            assert2::assert!(s.contains(needle));
         }
     }
 }

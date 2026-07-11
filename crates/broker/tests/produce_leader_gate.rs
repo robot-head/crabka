@@ -32,7 +32,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use crabka_broker::BrokerHandle;
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -121,10 +120,7 @@ async fn wait_for_local_replica(broker: &BrokerHandle, topic: &str, partition: i
         .await
         .is_none()
     {
-        assert!(
-            Instant::now() <= deadline,
-            "broker never materialized a local replica for {topic}/{partition}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: gates on the LOCAL writer-actor (PartitionRegistry)
         // being materialized by the supervisor reconcile, which lags the
         // metadata image. No image-based awaiter observes local-registry
@@ -169,10 +165,7 @@ async fn produce_to_non_leader_is_rejected() {
         })
         .await
         .unwrap();
-    assert!(
-        cr.topics.iter().all(|t| t.error_code == 0),
-        "create: {cr:?}"
-    );
+    assert2::assert!(cr.topics.iter().all(|t| t.error_code == 0));
     // v13 Produce drops topic.name and carries only topic_id; echo the ids.
     let rf3_id = cr
         .topics
@@ -213,7 +206,7 @@ async fn produce_to_non_leader_is_rejected() {
         .iter()
         .position(|(h, _, _)| h.node_id() != rf3_leader)
         .expect("a non-leader broker exists at rf=3");
-    let follower_node = cluster[follower_idx].0.node_id();
+    let _follower_node = cluster[follower_idx].0.node_id();
     let follower_addr = cluster[follower_idx].1.listen_addr.to_string();
 
     // Wait for the follower to materialize its LOCAL replica (supervisor
@@ -234,15 +227,8 @@ async fn produce_to_non_leader_is_rejected() {
         .unwrap();
     let (code, leader_hint) =
         produce_one(&follower_client, "gate-rf3", rf3_id, 0, "rf3-to-follower").await;
-    assert!(
-        code == 6,
-        "rf=3 Produce to follower node{follower_node} (leader=node{rf3_leader}) must be \
-         NOT_LEADER_OR_FOLLOWER (6); got {code}"
-    );
-    assert!(
-        leader_hint == i32::try_from(rf3_leader).unwrap(),
-        "current_leader hint must name the real leader node{rf3_leader}; got {leader_hint}"
-    );
+    assert2::assert!(code == 6);
+    assert2::assert!(leader_hint == i32::try_from(rf3_leader).unwrap());
     // The load-bearing anti-silent-append assertion: the follower's local log
     // MUST NOT have grown. Pre-fix it advanced by one (silent follower append).
     let follower_leo_after = cluster[follower_idx]
@@ -250,11 +236,7 @@ async fn produce_to_non_leader_is_rejected() {
         .local_log_end_offset("gate-rf3", 0)
         .await
         .expect("follower hosts gate-rf3");
-    assert!(
-        follower_leo_after == follower_leo_before,
-        "rejected Produce must NOT append to the follower's local log: \
-         before={follower_leo_before} after={follower_leo_after}"
-    );
+    assert2::assert!(follower_leo_after == follower_leo_before);
 
     // ───────────────────────────────────────────────────────────────────
     // Case B: rf=1 — Produce to a NON-leader that holds NO replica.
@@ -273,13 +255,12 @@ async fn produce_to_non_leader_is_rejected() {
         .partition_leader_for_test("gate-rf1", off_node_part)
         .unwrap();
     // Node 1 holds no replica for this rf=1 partition.
-    assert!(
+    assert2::assert!(
         cluster[0]
             .0
             .local_log_end_offset("gate-rf1", off_node_part)
             .await
-            .is_none(),
-        "test premise: node1 must NOT host gate-rf1/{off_node_part} (rf=1)"
+            .is_none()
     );
     let (code, leader_hint) = produce_one(
         &admin,
@@ -289,15 +270,8 @@ async fn produce_to_non_leader_is_rejected() {
         "rf1-to-nonreplica",
     )
     .await;
-    assert!(
-        code == 6,
-        "rf=1 Produce to non-replica node{n1} (leader=node{rf1_leader}) must be \
-         NOT_LEADER_OR_FOLLOWER (6); got {code}"
-    );
-    assert!(
-        leader_hint == i32::try_from(rf1_leader).unwrap(),
-        "current_leader hint must name node{rf1_leader}; got {leader_hint}"
-    );
+    assert2::assert!(code == 6);
+    assert2::assert!(leader_hint == i32::try_from(rf1_leader).unwrap());
 
     // ───────────────────────────────────────────────────────────────────
     // Leader path unchanged: the SAME Produce sent to the real leader of each
@@ -322,20 +296,13 @@ async fn produce_to_non_leader_is_rejected() {
         .await
         .expect("leader hosts gate-rf3");
     let (code, _) = produce_one(&leader3_client, "gate-rf3", rf3_id, 0, "rf3-to-leader").await;
-    assert!(
-        code == 0,
-        "rf=3 Produce to the leader must succeed; got {code}"
-    );
+    assert2::assert!(code == 0);
     let leader3_leo_after = cluster[rf3_leader_idx]
         .0
         .local_log_end_offset("gate-rf3", 0)
         .await
         .expect("leader hosts gate-rf3");
-    assert!(
-        leader3_leo_after == leader3_leo_before + 1,
-        "leader's local log must grow by one on a successful Produce: \
-         before={leader3_leo_before} after={leader3_leo_after}"
-    );
+    assert2::assert!(leader3_leo_after == leader3_leo_before + 1);
 
     let rf1_leader_idx = cluster
         .iter()
@@ -360,19 +327,13 @@ async fn produce_to_non_leader_is_rejected() {
         "rf1-to-leader",
     )
     .await;
-    assert!(
-        code == 0,
-        "rf=1 Produce to the leader must succeed; got {code}"
-    );
+    assert2::assert!(code == 0);
     let leader1_leo = cluster[rf1_leader_idx]
         .0
         .local_log_end_offset("gate-rf1", off_node_part)
         .await
         .expect("leader hosts gate-rf1");
-    assert!(
-        leader1_leo >= 1,
-        "rf=1 record must be durably stored on its leader; leo={leader1_leo}"
-    );
+    assert2::assert!(leader1_leo >= 1);
 
     for (h, _, _) in cluster {
         h.shutdown().await;

@@ -49,7 +49,6 @@ pub fn leader_epoch_checkpoint_path(dir: &Path) -> std::path::PathBuf {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -58,9 +57,9 @@ mod tests {
             #[test]
             fn $name() {
                 let formatted = format_base_offset($offset);
-                assert!(formatted == $expected_filename);
+                assert2::assert!(formatted == $expected_filename);
                 let parsed = parse_log_filename(&format!("{formatted}.log")).unwrap();
-                assert!(parsed == $offset);
+                assert2::assert!(parsed == $offset);
             }
         };
     }
@@ -74,12 +73,16 @@ mod tests {
 
     #[test]
     fn rejects_non_log_extension() {
-        assert!(parse_log_filename("00000000000000000000.index").is_err());
+        assert2::assert!(parse_log_filename("00000000000000000000.index").is_err());
     }
 
     #[test]
     fn rejects_wrong_digit_count() {
-        assert!(parse_log_filename("123.log").is_err());
-        assert!(parse_log_filename("000000000000000001847.log").is_err()); // 21 digits
+        for (_name, filename) in [
+            ("too few digits", "123.log"),
+            ("too many digits", "000000000000000001847.log"),
+        ] {
+            assert2::assert!(parse_log_filename(filename).is_err());
+        }
     }
 }

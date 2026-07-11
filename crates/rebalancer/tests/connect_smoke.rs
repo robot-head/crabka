@@ -14,7 +14,6 @@
 
 use std::time::{Duration, Instant};
 
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -67,10 +66,7 @@ async fn connect_get_state_over_http_json() {
             Ok(r) if r.status() == reqwest::StatusCode::OK => break,
             _ => {}
         }
-        assert!(
-            Instant::now() < deadline,
-            "rebalancer /readyz never returned 200"
-        );
+        assert2::assert!(Instant::now() < deadline);
         // intentional: poll backoff while waiting on the out-of-process
         // rebalancer subprocess to flip /readyz green (external process).
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -88,18 +84,15 @@ async fn connect_get_state_over_http_json() {
         .expect("Connect POST");
     let status = resp.status();
     let body_text = resp.text().await.unwrap_or_default();
-    assert!(status.is_success(), "got {status}: {body_text}");
+    assert2::assert!(status.is_success());
     let body: serde_json::Value =
         serde_json::from_str(&body_text).expect("response body parses as JSON");
 
     // 6. Sanity: response shape matches the proto. pbjson emits
     // `snapshotAtMs` (camelCase) but accept either casing in case
     // codegen settings change later.
-    assert!(body.is_object(), "expected JSON object, got {body}");
-    assert!(
-        body.get("snapshotAtMs").is_some() || body.get("snapshot_at_ms").is_some(),
-        "missing snapshotAtMs / snapshot_at_ms: {body}"
-    );
+    assert2::assert!(body.is_object());
+    assert2::assert!(body.get("snapshotAtMs").is_some() || body.get("snapshot_at_ms").is_some());
 
     // 7. Connect proto content-type regression: a connect-go client (the canonical
     // Connect clients) posts `application/proto` and requires the 200 response to echo it.
@@ -122,14 +115,8 @@ async fn connect_get_state_over_http_json() {
         .and_then(|v| v.to_str().ok())
         .unwrap_or_default()
         .to_string();
-    assert!(
-        proto_status.is_success(),
-        "proto GetState got {proto_status} (ct `{proto_ct}`)"
-    );
-    assert!(
-        proto_ct.starts_with("application/proto"),
-        "proto GetState response must echo application/proto, got `{proto_ct}`"
-    );
+    assert2::assert!(proto_status.is_success());
+    assert2::assert!(proto_ct.starts_with("application/proto"));
 
     let _ = child.kill().await;
     broker.shutdown().await;
@@ -182,10 +169,7 @@ async fn connect_execute_proposal_and_cancel_over_http_json() {
             Ok(r) if r.status() == reqwest::StatusCode::OK => break,
             _ => {}
         }
-        assert!(
-            Instant::now() < deadline,
-            "rebalancer /readyz never returned 200"
-        );
+        assert2::assert!(Instant::now() < deadline);
         // intentional: poll backoff while waiting on the out-of-process
         // rebalancer subprocess to flip /readyz green (external process).
         tokio::time::sleep(Duration::from_millis(200)).await;
@@ -203,11 +187,7 @@ async fn connect_execute_proposal_and_cancel_over_http_json() {
         .send()
         .await
         .expect("create POST");
-    assert!(
-        create.status().is_success(),
-        "create_proposal status {}",
-        create.status()
-    );
+    assert2::assert!(create.status().is_success());
     let create_body: serde_json::Value = create.json().await.expect("create JSON");
     let id = create_body
         .get("id")
@@ -226,16 +206,9 @@ async fn connect_execute_proposal_and_cancel_over_http_json() {
         .await
         .expect("execute POST");
     // Connect's FailedPrecondition maps to HTTP 400.
-    assert!(
-        exec.status() == reqwest::StatusCode::BAD_REQUEST,
-        "expected FailedPrecondition for zero-movement proposal; got {}",
-        exec.status()
-    );
+    assert2::assert!(exec.status() == reqwest::StatusCode::BAD_REQUEST);
     let body_text = exec.text().await.unwrap_or_default();
-    assert!(
-        body_text.contains("movement") || body_text.contains("Computed"),
-        "expected explanatory message in error body; got {body_text}"
-    );
+    assert2::assert!(body_text.contains("movement") || body_text.contains("Computed"));
 
     let _ = child.kill().await;
     let _ = tokio::time::timeout(Duration::from_secs(30), broker.shutdown()).await;

@@ -303,7 +303,7 @@ mod tests {
             (Kind::DependencyRemoved, true),
             (Kind::ConditionalChanged, false),
         ] {
-            assert_eq!(is_backward_compatible(&kind), want, "case {kind:?}");
+            assert2::assert!(is_backward_compatible(&kind) == want);
         }
     }
 }

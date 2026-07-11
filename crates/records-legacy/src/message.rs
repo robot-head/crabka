@@ -233,7 +233,7 @@ fn get_nullable_bytes(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+
     use bytes::BytesMut;
 
     use super::*;
@@ -269,25 +269,14 @@ mod tests {
     }
 
     #[test]
-    fn v0_roundtrip() {
-        let m = fixture_v0();
-        let mut buf = BytesMut::new();
-        m.encode_into(&mut buf);
-        assert!(buf.len() == m.encoded_len());
-        let mut cur: &[u8] = &buf[..];
-        let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded == m);
-    }
-
-    #[test]
-    fn v1_roundtrip() {
-        let m = fixture_v1();
-        let mut buf = BytesMut::new();
-        m.encode_into(&mut buf);
-        assert!(buf.len() == m.encoded_len());
-        let mut cur: &[u8] = &buf[..];
-        let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded == m);
+    fn message_roundtrips() {
+        for (_name, message) in [("v0", fixture_v0()), ("v1", fixture_v1())] {
+            let mut buffer = BytesMut::new();
+            message.encode_into(&mut buffer);
+            let decoded = Message::decode_from(&mut &buffer[..], message.encoded_len()).unwrap();
+            assert2::assert!(buffer.len() == message.encoded_len());
+            assert2::assert!(decoded == message);
+        }
     }
 
     #[test]
@@ -297,9 +286,7 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        check!(decoded == m);
-        check!(decoded.key.is_none());
-        check!(decoded.value.is_none());
+        assert2::assert!(decoded == m);
     }
 
     #[test]
@@ -309,7 +296,7 @@ mod tests {
         m.encode_into(&mut buf);
         buf[0] ^= 0xFF;
         let mut cur: &[u8] = &buf[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             Message::decode_from(&mut cur, m.encoded_len()),
             Err(LegacyRecordsError::CrcMismatch { .. })
         ));
@@ -327,7 +314,7 @@ mod tests {
         buf.extend_from_slice(&body);
         let frame_size = buf.len();
         let mut cur: &[u8] = &buf[..];
-        assert!(matches!(
+        assert2::assert!(matches!(
             Message::decode_from(&mut cur, frame_size),
             Err(LegacyRecordsError::UnsupportedMagic { found: 2 })
         ));
@@ -335,14 +322,14 @@ mod tests {
 
     #[test]
     fn attrs_codec_roundtrip() {
-        for c in [
-            CompressionType::None,
-            CompressionType::Gzip,
-            CompressionType::Snappy,
-            CompressionType::Lz4,
+        for (_name, compression) in [
+            ("none", CompressionType::None),
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
         ] {
-            let bits = attrs_with_compression(0, c);
-            assert!(compression_from_attrs(bits).unwrap() == c);
+            let bits = attrs_with_compression(0, compression);
+            assert2::assert!(compression_from_attrs(bits).unwrap() == compression);
         }
     }
 
@@ -362,33 +349,43 @@ mod tests {
     #[test]
     fn attribute_bit_constants() {
         // `1 << 3`; a `>>` flip would zero the timestamp-type bit.
-        assert!(attrs::TIMESTAMP_TYPE_BIT == 0b0000_1000);
-        assert!(attrs::COMPRESSION_MASK == 0b0000_0111);
+        assert2::assert!(attrs::TIMESTAMP_TYPE_BIT == 0b0000_1000);
+        assert2::assert!(attrs::COMPRESSION_MASK == 0b0000_0111);
     }
 
     #[test]
     fn attrs_with_compression_exact_codes() {
-        for (compression, want) in [
-            (CompressionType::None, 0),
-            (CompressionType::Gzip, 1),
-            (CompressionType::Snappy, 2),
-            (CompressionType::Lz4, 3),
+        for (_name, compression, want) in [
+            ("none", CompressionType::None, 0),
+            ("gzip", CompressionType::Gzip, 1),
+            ("snappy", CompressionType::Snappy, 2),
+            ("lz4", CompressionType::Lz4, 3),
         ] {
-            check!(
-                attrs_with_compression(0, compression) == want,
-                "{compression:?}"
-            );
+            assert2::assert!(attrs_with_compression(0, compression) == want);
         }
     }
 
     #[test]
     fn attrs_with_compression_replaces_low_bits_keeps_high() {
         // Overwriting an existing codec replaces (not ORs) the low 3 bits.
-        assert!(attrs_with_compression(3 /* lz4 */, CompressionType::Gzip) == 1);
-        // The timestamp-type bit (bit 3) is preserved across the rewrite.
         let ts = attrs::TIMESTAMP_TYPE_BIT;
-        assert!(attrs_with_compression(ts, CompressionType::Gzip) == ts | 1);
-        assert!(attrs_with_compression(ts, CompressionType::None) == ts);
+        for (_name, initial, compression, expected) in [
+            ("replace lz4 with gzip", 3, CompressionType::Gzip, 1),
+            (
+                "preserve timestamp with gzip",
+                ts,
+                CompressionType::Gzip,
+                ts | 1,
+            ),
+            (
+                "preserve timestamp with none",
+                ts,
+                CompressionType::None,
+                ts,
+            ),
+        ] {
+            assert2::assert!(attrs_with_compression(initial, compression) == expected);
+        }
     }
 
     #[test]
@@ -410,7 +407,13 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded.timestamp == Some(-1));
+        assert2::assert!(
+            decoded
+                == Message {
+                    timestamp: Some(-1),
+                    ..m
+                }
+        );
     }
 
     #[test]
@@ -427,8 +430,7 @@ mod tests {
         m.encode_into(&mut buf);
         let mut cur: &[u8] = &buf[..];
         let decoded = Message::decode_from(&mut cur, m.encoded_len()).unwrap();
-        assert!(decoded.key == Some(Bytes::new()));
-        assert!(decoded.value == Some(Bytes::from_static(b"v")));
+        assert2::assert!(decoded == m);
     }
 
     // Build a frame: crc(4) | magic | attrs | trailing, with a valid CRC.
@@ -447,7 +449,7 @@ mod tests {
         let data = [0u8; 4];
         let mut cur: &[u8] = &data;
         let err = Message::decode_from(&mut cur, 10).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 6 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 6 }));
     }
 
     #[test]
@@ -455,7 +457,7 @@ mod tests {
         // frame_size 5 (< 6) is malformed; buffer has >= 5 bytes.
         let data = [0u8; 5];
         let mut cur: &[u8] = &data;
-        assert!(matches!(
+        assert2::assert!(matches!(
             Message::decode_from(&mut cur, 5),
             Err(LegacyRecordsError::Malformed(_))
         ));
@@ -467,10 +469,10 @@ mod tests {
         // the missing key-length field -> Truncated, not Malformed. This
         // distinguishes `<` from `<=` at the boundary.
         let frame = frame_with_body(0, 0, &[]);
-        assert!(frame.len() == 6);
+        assert2::assert!(frame.len() == 6);
         let mut cur: &[u8] = &frame;
         let err = Message::decode_from(&mut cur, 6).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { .. }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { .. }));
     }
 
     #[test]
@@ -480,7 +482,7 @@ mod tests {
         let fs = frame.len();
         let mut cur: &[u8] = &frame;
         let err = Message::decode_from(&mut cur, fs).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
     }
 
     #[test]
@@ -492,7 +494,7 @@ mod tests {
         let fs = frame.len();
         let mut cur: &[u8] = &frame;
         let err = Message::decode_from(&mut cur, fs).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 4 }));
     }
 
     #[test]
@@ -503,7 +505,7 @@ mod tests {
         let fs = frame.len();
         let mut cur: &[u8] = &frame;
         let err = Message::decode_from(&mut cur, fs).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 3 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 3 }));
     }
 
     #[test]
@@ -516,6 +518,6 @@ mod tests {
         let fs = frame.len();
         let mut cur: &[u8] = &frame;
         let err = Message::decode_from(&mut cur, fs).unwrap_err();
-        assert!(matches!(err, LegacyRecordsError::Truncated { needed: 3 }));
+        assert2::assert!(matches!(err, LegacyRecordsError::Truncated { needed: 3 }));
     }
 }

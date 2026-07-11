@@ -74,16 +74,16 @@ async fn manual_connector_config_contract_builds_typed_config() {
         .unwrap();
     let config = ManualConfig::from_resolved(&resolved).unwrap();
 
-    assert_eq!(config.database_url, "postgres://localhost/app");
-    assert_eq!(config.password.expose_secret(), "secret");
-    assert!(config.enabled);
-    assert_eq!(config.signed_limit, -12);
-    assert_eq!(config.max_batch, 500);
-    assert!((config.ratio - 0.75).abs() < f32::EPSILON);
-    assert_eq!(config.topics, vec!["alpha".to_string(), "beta".to_string()]);
-    assert_eq!(config.metadata, json!({"mode": "snapshot"}));
-    assert_eq!(config.optional_label, None);
-    assert_eq!(config.poll_interval, Duration::from_millis(1500));
+    assert2::assert!(config.database_url.as_str() == "postgres://localhost/app");
+    assert2::assert!(config.password.expose_secret() == "secret");
+    assert2::assert!(config.enabled);
+    assert2::assert!(config.signed_limit == -12);
+    assert2::assert!(config.max_batch == 500);
+    assert2::assert!(config.topics == vec!["alpha".to_string(), "beta".to_string()]);
+    assert2::assert!(config.metadata == json!({"mode": "snapshot"}));
+    assert2::assert!(config.optional_label == None);
+    assert2::assert!(config.poll_interval == Duration::from_millis(1500));
+    assert2::assert!((config.ratio - 0.75).abs() < f32::EPSILON);
 }
 
 #[tokio::test]
@@ -110,7 +110,7 @@ async fn optional_config_field_reads_some_when_present() {
         .unwrap();
     let config = ManualConfig::from_resolved(&resolved).unwrap();
 
-    assert_eq!(config.optional_label, Some("snapshot".to_string()));
+    assert2::assert!(config.optional_label == Some("snapshot".to_string()));
 }
 
 #[tokio::test]
@@ -120,7 +120,7 @@ async fn unsigned_fields_reject_negative_values() {
 
     let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-    assert!(
+    assert2::assert!(
         matches!(err, ConfigError::WrongType { key, expected: "unsigned integer" } if key == "max_batch")
     );
 }
@@ -134,7 +134,7 @@ async fn narrow_unsigned_fields_report_range_errors() {
 
     let err = u16::from_resolved_value(&resolved, "max_batch").unwrap_err();
 
-    assert!(
+    assert2::assert!(
         matches!(err, ConfigError::WrongType { key, expected: "unsigned integer in range for u16" } if key == "max_batch")
     );
 }
@@ -147,7 +147,7 @@ async fn f32_fields_reject_values_outside_f32_range() {
 
     let err = f32::from_resolved_value(&resolved, "ratio").unwrap_err();
 
-    assert!(
+    assert2::assert!(
         matches!(err, ConfigError::WrongType { key, expected: "float in range for f32" } if key == "ratio")
     );
 }
@@ -159,7 +159,7 @@ async fn duration_fields_reject_negative_milliseconds() {
 
     let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-    assert!(
+    assert2::assert!(
         matches!(err, ConfigError::WrongType { key, expected: "duration milliseconds" } if key == "poll_interval")
     );
 }

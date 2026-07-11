@@ -91,21 +91,29 @@ mod tests {
     #[test]
     fn default_security_is_fully_open() {
         let s = SecurityConfig::default();
-        check!(!s.require_auth);
-        check!(s.realm.is_empty());
-        check!(s.basic.is_none());
-        check!(s.bearer.is_none());
-        check!(s.tls.is_none());
-        check!(s.authz.is_none());
-        check!(s.client.is_none());
+        check!(
+            (
+                s.require_auth,
+                s.realm.is_empty(),
+                s.basic.is_none(),
+                s.bearer.is_none(),
+                s.tls.is_none(),
+                s.authz.is_none(),
+                s.client.is_none(),
+            ) == (false, true, true, true, true, true, true)
+        );
     }
 
     #[test]
     fn authz_config_default_is_disabled_with_30s_refresh() {
         let a = super::AuthzConfig::default();
-        assert!(!a.enabled);
-        assert!(a.super_users.is_empty());
-        assert_eq!(a.acl_refresh, std::time::Duration::from_secs(30));
+        assert2::assert!(
+            a == super::AuthzConfig {
+                enabled: false,
+                super_users: std::collections::HashSet::new(),
+                acl_refresh: std::time::Duration::from_secs(30),
+            }
+        );
     }
 
     #[test]
@@ -117,6 +125,6 @@ mod tests {
             crabka_security::UnsecuredJwsValidator::default(),
         ));
         let cfg = super::BearerAuthConfig { validator };
-        assert_eq!(format!("{cfg:?}"), "BearerAuthConfig");
+        assert2::assert!(format!("{cfg:?}") == "BearerAuthConfig");
     }
 }

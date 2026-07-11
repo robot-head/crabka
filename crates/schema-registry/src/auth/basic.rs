@@ -83,7 +83,7 @@ mod tests {
             ("alice", "bad", false),
             ("bob", "pw", false),
         ] {
-            assert_eq!(s.verify(user, pass), want, "case {user}:{pass}");
+            assert2::assert!(s.verify(user, pass) == want);
         }
     }
 
@@ -91,8 +91,9 @@ mod tests {
     fn bcrypt_verify() {
         let hash = bcrypt::hash("pw", 4).unwrap();
         let s = BasicAuthStore::from_users([("alice".to_string(), hash)].into_iter().collect());
-        assert!(s.verify("alice", "pw"));
-        assert!(!s.verify("alice", "bad"));
+        for (_name, password, expected) in [("matching", "pw", true), ("wrong", "bad", false)] {
+            assert2::assert!(s.verify("alice", password) == expected);
+        }
     }
 
     #[test]
@@ -115,13 +116,13 @@ mod tests {
         let store = BasicAuthStore::load(&cfg).unwrap();
         std::fs::remove_file(&path).ok();
 
-        for (user, pass, want, why) in [
+        for (user, pass, want, _why) in [
             ("alice", "inlinepw", true, "inline credential wins"),
             ("alice", "filepw", false, "file credential is overridden"),
             // File-only entries (no inline override) still load.
             ("bob", "bobpw", true, "file-only entry preserved"),
         ] {
-            assert_eq!(store.verify(user, pass), want, "{why} ({user}:{pass})");
+            assert2::assert!(store.verify(user, pass) == want);
         }
     }
 
@@ -147,13 +148,13 @@ mod tests {
         let store = BasicAuthStore::load(&cfg).unwrap();
         std::fs::remove_file(&path).ok();
 
-        for (user, pass, want, why) in [
+        for (user, pass, want, _why) in [
             ("alice", "pw", true, "plain entry loads"),
             ("bob", "bpw", true, "leading/trailing ws trimmed"),
             // The colon-less line produced no entry, so nothing matches it.
             ("malformed-no-colon", "", false, "colon-less line skipped"),
         ] {
-            assert_eq!(store.verify(user, pass), want, "{why} ({user}:{pass})");
+            assert2::assert!(store.verify(user, pass) == want);
         }
     }
 
@@ -168,6 +169,6 @@ mod tests {
             )),
         };
         let err = BasicAuthStore::load(&cfg).expect_err("missing file must error");
-        assert_eq!(err.kind(), std::io::ErrorKind::NotFound);
+        assert2::assert!(err.kind() == std::io::ErrorKind::NotFound);
     }
 }

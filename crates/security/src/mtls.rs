@@ -29,7 +29,7 @@ pub fn extract_principal_from_cert(cert_der: &[u8]) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use rustls::pki_types::{CertificateDer, pem::PemObject};
 
     use super::*;
@@ -44,12 +44,16 @@ mod tests {
         // x509-parser preserves that order (most-significant first),
         // comma-separated, no spaces. Operators pin this DN verbatim in
         // ACLs and super_users.
-        assert!(dn == "CN=test-client,OU=integration,O=crabka");
+        assert2::assert!(dn == "CN=test-client,OU=integration,O=crabka");
     }
 
     #[test]
     fn malformed_cert_returns_none() {
-        assert!(extract_principal_from_cert(b"not-a-cert").is_none());
-        assert!(extract_principal_from_cert(&[]).is_none());
+        for (_name, input) in [
+            ("garbage", b"not-a-cert".as_slice()),
+            ("empty", b"".as_slice()),
+        ] {
+            assert2::assert!(extract_principal_from_cert(input).is_none());
+        }
     }
 }

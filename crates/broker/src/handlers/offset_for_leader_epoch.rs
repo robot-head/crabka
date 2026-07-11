@@ -158,7 +158,7 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
     use crabka_protocol::Encode;
 
@@ -187,7 +187,7 @@ mod tests {
             sendfile_capable: false,
             connection_listener_name: "PLAINTEXT",
         };
-        assert!(crate::handlers::acl_denied(
+        assert2::assert!(crate::handlers::acl_denied(
             &authorizer,
             &image,
             &ctx,
@@ -216,6 +216,8 @@ mod tests {
         resp.encode(&mut buf, version).expect("encode");
         let mut cur: &[u8] = &buf;
         let decoded = OffsetForLeaderEpochResponse::decode(&mut cur, version).unwrap();
-        assert!(decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED);
+        assert2::assert!(
+            decoded.topics[0].partitions[0].error_code == codes::TOPIC_AUTHORIZATION_FAILED
+        );
     }
 }

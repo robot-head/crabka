@@ -47,6 +47,6 @@ mod tests {
     fn value_size_counts_value_and_context() {
         let entry = LruCacheEntry::new(Some(Bytes::from_static(b"abcd")), false, ctx("t"));
         // 4 (value) + 8 + 8 + 4 + 1 (topic "t") = 25
-        assert_eq!(entry.value_size(), 25);
+        assert2::assert!(entry.value_size() == 25);
     }
 }

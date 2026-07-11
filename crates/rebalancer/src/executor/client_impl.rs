@@ -333,7 +333,7 @@ mod tests {
         time::Duration,
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -386,8 +386,8 @@ mod tests {
         };
 
         let err = check_alter_configs_response(&resp).expect_err("failure should surface");
-        assert!(err.to_string().contains("IncrementalAlterConfigs failed"));
-        assert!(err.to_string().contains("error_code=42"));
+        assert2::assert!(err.to_string().contains("IncrementalAlterConfigs failed"));
+        assert2::assert!(err.to_string().contains("error_code=42"));
     }
 
     #[test]
@@ -426,7 +426,7 @@ mod tests {
     fn build_alter_throttle_request_sets_all_resource_fields() {
         let req = build_alter_throttle_request(ConfigOp::Set, &targets(), 1234);
 
-        assert!(
+        assert2::assert!(
             req == IncrementalAlterConfigsRequest {
                 resources: vec![
                     AlterConfigsResource {
@@ -480,7 +480,7 @@ mod tests {
     #[test]
     fn build_alter_throttle_delete_request_tombstones_values() {
         let req = build_alter_throttle_request(ConfigOp::Delete, &targets(), 1234);
-        assert!(req.resources.iter().all(|r| {
+        assert2::assert!(req.resources.iter().all(|r| {
             r.configs
                 .iter()
                 .all(|c| c.config_operation == OP_DELETE && c.value.is_none())
@@ -495,7 +495,7 @@ mod tests {
             movement("payments", 0, vec![2], vec![3]),
         ]);
 
-        assert!(
+        assert2::assert!(
             req == AlterPartitionReassignmentsRequest {
                 timeout_ms: 60_000,
                 allow_replication_factor_change: true,
@@ -538,7 +538,7 @@ mod tests {
             ("payments".to_string(), 0),
         ]);
 
-        assert!(
+        assert2::assert!(
             req == AlterPartitionReassignmentsRequest {
                 timeout_ms: 60_000,
                 allow_replication_factor_change: true,
@@ -600,7 +600,7 @@ mod tests {
         let filtered =
             filter_in_flight_response(&resp, &[("orders".into(), 2), ("payments".into(), 9)]);
 
-        assert!(filtered == vec![("orders".to_string(), 2)]);
+        assert2::assert!(filtered == vec![("orders".to_string(), 2)]);
     }
 
     async fn unreachable_live_client(suffix: &str) -> LiveClient {
@@ -619,25 +619,25 @@ mod tests {
     async fn live_client_methods_propagate_send_errors() {
         let client = unreachable_live_client("send-errors").await;
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             client
                 .alter_throttle_configs(ConfigOp::Set, &targets(), 1234)
                 .await,
             Err(PhaseError::Client(_))
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             client
                 .submit_reassignments(&[movement("orders", 0, vec![1], vec![2])])
                 .await,
             Err(PhaseError::Client(_))
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             client
                 .cancel_reassignments(&[("orders".to_string(), 0)])
                 .await,
             Err(PhaseError::Client(_))
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             client.list_in_flight(&[("orders".to_string(), 0)]).await,
             Err(PhaseError::Client(_))
         ));

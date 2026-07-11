@@ -32,14 +32,13 @@ pub struct RecordMetadata {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn producer_record_default_is_empty() {
         let r = ProducerRecord::default();
-        assert!(
+        assert2::assert!(
             r == ProducerRecord {
                 topic: String::new(),
                 partition: None,

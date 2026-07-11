@@ -190,9 +190,12 @@ async fn send_as(
     )
     .await
     .expect("handler returned Err");
-    let mut results = resp.0.results;
-    assert_eq!(results.len(), 1, "expected exactly one record result");
-    results.pop().unwrap()
+    let [result]: [pb::RecordResult; 1] = resp
+        .0
+        .results
+        .try_into()
+        .unwrap_or_else(|results: Vec<_>| panic!("expected one result, got {results:?}"));
+    result
 }
 
 /// Spawn `run_acl_refresh` (short interval) and poll until an authorization
@@ -239,12 +242,9 @@ async fn allow_all_default_is_unrestricted() {
     let state = app_state(&bootstrap, "aa", authz).await;
 
     let result = send_as(&state, &anonymous(), "aa-topic", b"hello").await;
-    assert!(
-        result.error.is_none(),
-        "AllowAll must not deny: {:?}",
-        result.error
-    );
-    assert_eq!(result.partition, 0);
+    assert2::assert!(result.error.as_ref() == None);
+    assert2::assert!(result.partition == 0);
+    assert2::assert!(result.offset >= 0);
 
     broker.shutdown().await;
 }
@@ -268,12 +268,12 @@ async fn simpleacl_denies_unauthorized_produce() {
     let err = result
         .error
         .expect("expected a per-record PERMISSION_DENIED");
-    assert_eq!(err.code, PERMISSION_DENIED, "wrong error code: {err:?}");
-    assert_eq!(result.partition, -1);
-    assert_eq!(result.offset, -1);
+    assert2::assert!(err.code == PERMISSION_DENIED);
+    assert2::assert!(result.partition == -1);
+    assert2::assert!(result.offset == -1);
 
     // The record must NOT have landed in the topic.
-    assert_eq!(count_value(&bootstrap, "t", b"nope").await, 0);
+    assert2::assert!(count_value(&bootstrap, "t", b"nope").await == 0);
 
     broker.shutdown().await;
 }
@@ -299,10 +299,7 @@ async fn simpleacl_allows_authorized_produce() {
         )])
         .await
         .unwrap();
-    assert!(
-        outcomes.iter().all(|o| o.error.is_none()),
-        "create_acls: {outcomes:?}"
-    );
+    assert2::assert!(outcomes.iter().all(|o| o.error.is_none()));
 
     let authz = Arc::new(GatewayAuthz::new(Arc::new(SimpleAclAuthorizer::new(
         HashSet::new(),
@@ -331,18 +328,15 @@ async fn simpleacl_allows_authorized_produce() {
 
     // Granted topic → produced, no error, present in the topic.
     let ok = send_as(&state, &alice, "t", b"yes").await;
-    assert!(ok.error.is_none(), "granted produce denied: {:?}", ok.error);
-    assert_eq!(ok.partition, 0);
-    assert_eq!(count_value(&bootstrap, "t", b"yes").await, 1);
+    assert2::assert!(ok.error.as_ref() == None);
+    assert2::assert!(ok.partition == 0);
+    assert2::assert!(ok.offset >= 0);
+    assert2::assert!(count_value(&bootstrap, "t", b"yes").await == 1);
 
     // Ungranted topic → PERMISSION_DENIED, not produced.
     let denied = send_as(&state, &alice, "other", b"yes").await;
-    assert_eq!(
-        denied.error.as_ref().map(|e| e.code),
-        Some(PERMISSION_DENIED),
-        "produce to ungranted topic should be denied: {denied:?}"
-    );
-    assert_eq!(count_value(&bootstrap, "other", b"yes").await, 0);
+    assert2::assert!(denied.error.as_ref().map(|e| e.code) == Some(PERMISSION_DENIED));
+    assert2::assert!(count_value(&bootstrap, "other", b"yes").await == 0);
 
     shutdown.cancel();
     broker.shutdown().await;
@@ -371,8 +365,9 @@ async fn bearer_token_resolves_principal() {
         .validate(&token, now_ms)
         .await
         .expect("token validates");
-    assert_eq!(outcome.principal.name, "alice");
-    assert_eq!(outcome.principal.auth_method, AuthMethod::SaslOAuthBearer);
+    assert2::assert!(outcome.principal.name.as_str() == "alice");
+    assert2::assert!(outcome.principal.auth_method == AuthMethod::SaslOAuthBearer);
+    assert2::assert!(outcome.principal.groups.is_empty());
 }
 
 /// 5. Forwarding re-authorizes the ORIGINAL caller against the OWNER's cache.
@@ -411,10 +406,7 @@ async fn forwarding_owner_reauthorizes_caller() {
         )])
         .await
         .unwrap();
-    assert!(
-        outcomes.iter().all(|o| o.error.is_none()),
-        "create_acls: {outcomes:?}"
-    );
+    assert2::assert!(outcomes.iter().all(|o| o.error.is_none()));
 
     // Two SimpleAcl gateways with the SAME ACL cache (both refresh from the
     // broker) — so both authorize identically.
@@ -435,10 +427,7 @@ async fn forwarding_owner_reauthorizes_caller() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert!(
-        ready,
-        "replicas did not reach a stable split + converged routing"
-    );
+    assert2::assert!(ready);
 
     // Arm BOTH caches: alice's Write on `t` must authorize on each replica
     // before we drive a forward (the owner is the one that re-authorizes).
@@ -461,11 +450,8 @@ async fn forwarding_owner_reauthorizes_caller() {
         .find(|k| gw_b.store.owns(partition_for(k, N)))
         .expect("a key owned by B");
     let p = partition_for(&key, N);
-    assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
-    assert_eq!(
-        gw_a.membership.owner_of(p).as_deref(),
-        Some(gw_b.addr.as_str())
-    );
+    assert2::assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
+    assert2::assert!(gw_a.membership.owner_of(p).as_deref() == Some(gw_b.addr.as_str()));
 
     let mk = |val: &str| GatewayRecord {
         topic: "t".into(),
@@ -485,8 +471,8 @@ async fn forwarding_owner_reauthorizes_caller() {
         .produce(mk("alice-val"), &alice)
         .await
         .expect("granted forward should produce");
-    assert!(!first.deduplicated, "first granted forward should produce");
-    assert_eq!(count_value(&bootstrap, "t", b"alice-val").await, 1);
+    assert2::assert!(!first.deduplicated);
+    assert2::assert!(count_value(&bootstrap, "t", b"alice-val").await == 1);
 
     // Denied: mallory forwarded A→B, B's cache denies ⇒ origin sees a
     // non-retriable Unauthorized (403 body parsed) and nothing extra lands.
@@ -496,19 +482,8 @@ async fn forwarding_owner_reauthorizes_caller() {
         .produce
         .produce(mk("mallory-val"), &mallory)
         .await;
-    assert!(
-        denied.is_err(),
-        "ungranted forwarded caller must be rejected, got {denied:?}"
-    );
-    assert!(
-        matches!(denied, Err(GatewayError::Unauthorized(_))),
-        "denied forward surfaces as non-retriable Unauthorized, got {denied:?}"
-    );
-    assert_eq!(
-        count_value(&bootstrap, "t", b"mallory-val").await,
-        0,
-        "denied caller's record must not be produced"
-    );
+    assert2::assert!(matches!(denied, Err(GatewayError::Unauthorized(_))));
+    assert2::assert!(count_value(&bootstrap, "t", b"mallory-val").await == 0);
 
     gw_a.token.cancel();
     gw_b.token.cancel();
@@ -606,18 +581,14 @@ async fn audit_log_emitted() {
     .expect("handler returned Err");
     let result = resp.0.results.into_iter().next().unwrap();
     // AllowAll ⇒ produced, no error.
-    assert!(result.error.is_none());
+    assert2::assert!(result.error.is_none());
 
     let found = {
         let g = events().lock().unwrap();
         g.iter().find(|(p, _)| p == "audit-probe").cloned()
     };
     let (_, allowed) = found.expect("no gateway::audit event for principal audit-probe");
-    assert_eq!(
-        allowed,
-        Some(true),
-        "AllowAll decision should record allowed=true"
-    );
+    assert2::assert!(allowed == Some(true));
 
     broker.shutdown().await;
 }

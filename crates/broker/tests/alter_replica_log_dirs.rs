@@ -19,7 +19,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::{
@@ -104,7 +104,7 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
     let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn alter_replica_log_dirs(
@@ -210,10 +210,7 @@ async fn wait_for_move_complete(
         if !any_future && current_in_target == expected {
             return;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "move never completed: in_target={current_in_target:?} any_future={any_future}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: log-dir move completion is broker-local physical state
         // (the `future_logs` map plus the on-disk partition-dir rename), not
         // reflected in the MetadataImage, exposed by any `*_for_test`
@@ -247,17 +244,9 @@ async fn alter_replica_log_dirs_moves_partitions_to_target_dir() {
         .iter()
         .filter(|t| t.topic_name == "t")
         .collect();
-    assert!(
-        topic_results.len() == 1,
-        "topic must be present in response"
-    );
+    assert2::assert!(topic_results.len() == 1);
     for p in &topic_results[0].partitions {
-        assert!(
-            p.error_code == 0,
-            "partition {} ack must be NONE, got {}",
-            p.partition_index,
-            p.error_code
-        );
+        assert2::assert!(p.error_code == 0);
     }
 
     wait_for_move_complete(addr, target_dir, "t", &[0, 1]).await;
@@ -268,18 +257,14 @@ async fn alter_replica_log_dirs_moves_partitions_to_target_dir() {
     } else {
         extra.path()
     };
-    assert!(count_topic_dirs(target_dir, "t") == 2);
-    assert!(count_topic_dirs(source_dir, "t") == 0);
+    assert2::assert!(count_topic_dirs(target_dir, "t") == 2);
+    assert2::assert!(count_topic_dirs(source_dir, "t") == 0);
     // No future dirs should remain anywhere.
     for d in [primary.path(), extra.path()] {
         for entry in std::fs::read_dir(d).unwrap().flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            assert!(
-                !name.ends_with("-future"),
-                "future dir lingered in {}: {name}",
-                d.display()
-            );
+            assert2::assert!(!name.ends_with("-future"));
         }
     }
 
@@ -290,7 +275,7 @@ async fn alter_replica_log_dirs_moves_partitions_to_target_dir() {
         .iter()
         .find(|t| t.topic_name == "t")
         .expect("response includes t");
-    assert!(topic2.partitions[0].error_code == 0);
+    assert2::assert!(topic2.partitions[0].error_code == 0);
 
     handle.shutdown().await;
 }
@@ -309,7 +294,7 @@ async fn alter_replica_log_dirs_rejects_unknown_target() {
         .find(|t| t.topic_name == "t")
         .expect("topic in response");
     // 57 == LOG_DIR_NOT_FOUND
-    assert!(topic.partitions[0].error_code == 57);
+    assert2::assert!(topic.partitions[0].error_code == 57);
 
     handle.shutdown().await;
 }
@@ -327,7 +312,7 @@ async fn alter_replica_log_dirs_rejects_unknown_replica() {
         .find(|t| t.topic_name == "missing")
         .expect("topic in response");
     // 11 == REPLICA_NOT_AVAILABLE
-    assert!(topic.partitions[0].error_code == 11);
+    assert2::assert!(topic.partitions[0].error_code == 11);
 
     handle.shutdown().await;
 }
@@ -362,15 +347,10 @@ async fn alter_replica_log_dirs_denied_without_cluster_alter() {
         .iter()
         .find(|t| t.topic_name == "t")
         .expect("topic in response");
-    assert!(topic.partitions.len() == 2);
+    assert2::assert!(topic.partitions.len() == 2);
     for p in &topic.partitions {
         // 31 == CLUSTER_AUTHORIZATION_FAILED
-        assert!(
-            p.error_code == 31,
-            "partition {} must be denied, got {}",
-            p.partition_index,
-            p.error_code
-        );
+        assert2::assert!(p.error_code == 31);
     }
 
     handle.shutdown().await;
@@ -426,7 +406,7 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
         .iter()
         .find(|t| t.topic_name == "t")
         .expect("topic");
-    assert!(topic.partitions[0].error_code == 0);
+    assert2::assert!(topic.partitions[0].error_code == 0);
     wait_for_move_complete(addr, target_dir, "t", &[0]).await;
 
     let mut consumer = Consumer::builder()
@@ -454,7 +434,7 @@ async fn alter_replica_log_dirs_preserves_records_across_move() {
     consumed.sort();
     let mut expected: Vec<String> = (0..50).map(|i| format!("v{i}")).collect();
     expected.sort();
-    assert!(consumed == expected, "all records survived the move");
+    assert2::assert!(consumed == expected);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -519,11 +499,8 @@ async fn startup_resumes_move_for_existing_partition() {
     // already-produced batches into it.
     let future_path = target_dir.join("t-0-future");
     std::fs::create_dir_all(&future_path).expect("plant future dir");
-    assert!(future_path.exists());
-    assert!(
-        current_dir.join("t-0").exists(),
-        "source must still be here"
-    );
+    assert2::assert!(future_path.exists());
+    assert2::assert!(current_dir.join("t-0").exists());
 
     // Restart against the same dirs. `BootstrapMode::Rejoin`
     // because the raft log from the first boot is still on disk.
@@ -555,7 +532,7 @@ async fn startup_cleans_up_stranded_future_dir() {
     // Stranded future dir: topic "ghost" was never created.
     let stranded = extra.path().join("ghost-0-future");
     std::fs::create_dir_all(&stranded).unwrap();
-    assert!(stranded.exists());
+    assert2::assert!(stranded.exists());
 
     let mut cfg = BrokerConfig::for_tests(primary.path().to_path_buf());
     cfg.extra_log_dirs = vec![extra.path().to_path_buf()];
@@ -563,11 +540,7 @@ async fn startup_cleans_up_stranded_future_dir() {
     let addr = handle.listen_addr();
 
     // Broker startup must have swept the stranded future dir.
-    assert!(
-        !stranded.exists(),
-        "startup must remove stranded future dir at {}",
-        stranded.display()
-    );
+    assert2::assert!(!stranded.exists());
 
     // DescribeLogDirs surfaces no future entries.
     let resp = describe_log_dirs(addr).await;
@@ -577,7 +550,7 @@ async fn startup_cleans_up_stranded_future_dir() {
         .flat_map(|r| r.topics.iter())
         .flat_map(|t| t.partitions.iter())
         .any(|p| p.is_future_key);
-    assert!(!any_future, "no future entries should remain after sweep");
+    assert2::assert!(!any_future);
 
     handle.shutdown().await;
 }

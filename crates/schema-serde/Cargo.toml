@@ -23,6 +23,7 @@ protobuf = ["dep:prost", "dep:prost-reflect"]
 json = ["dep:schemars", "dep:jsonschema"]
 
 [dependencies]
+assert2 = { workspace = true }
 bytes = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 serde_json = { workspace = true }
@@ -36,7 +37,6 @@ schemars = { workspace = true, optional = true }
 jsonschema = { workspace = true, optional = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 tokio = { workspace = true, features = ["rt-multi-thread", "macros", "test-util"] }
 serde_json = { workspace = true }
 hex = { workspace = true }

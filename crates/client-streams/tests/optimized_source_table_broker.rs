@@ -50,7 +50,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(resp.error_code, 0, "streams.version finalize: {resp:?}");
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -67,7 +67,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(resp.topics[0].error_code, 0, "topic create: {resp:?}");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn produce(producer: &crabka_client_producer::Producer, topic: &str, key: &str, val: &str) {
@@ -226,20 +226,12 @@ async fn reuse_source_topic_store_does_not_loop_changelog() {
     // changelog write-back loop re-emitted the stored row back onto `rt-in`,
     // growing it without bound from the single input record.
     let in_count = count_records(&admin, &bootstrap, "rt-in").await;
-    assert_eq!(
-        in_count, 1,
-        "reused source topic 'rt-in' must hold exactly the 1 produced record; \
-         found {in_count} (changelog write-back loop regression)",
-    );
+    assert2::assert!(in_count == 1);
 
     // And the output must not have exploded (a couple of legitimate re-emissions
     // are tolerated; unbounded growth is the regression).
     let out_count = count_records(&admin, &bootstrap, "rt-out").await;
-    assert!(
-        out_count <= 4,
-        "output topic 'rt-out' grew unexpectedly to {out_count} records \
-         (changelog write-back loop regression)",
-    );
+    assert2::assert!(out_count <= 4);
 
     streams.close().await.unwrap();
     broker.shutdown().await;

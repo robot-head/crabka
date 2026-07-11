@@ -37,27 +37,29 @@ impl CompressionType {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn attribute_bits_roundtrip() {
-        for ct in [
-            CompressionType::None,
-            CompressionType::Gzip,
-            CompressionType::Snappy,
-            CompressionType::Lz4,
-            CompressionType::Zstd,
+        for (_name, compression) in [
+            ("none", CompressionType::None),
+            ("gzip", CompressionType::Gzip),
+            ("snappy", CompressionType::Snappy),
+            ("lz4", CompressionType::Lz4),
+            ("zstd", CompressionType::Zstd),
         ] {
-            assert!(CompressionType::from_attribute_bits(ct.as_attribute_bits()) == Some(ct));
+            assert2::assert!(
+                CompressionType::from_attribute_bits(compression.as_attribute_bits())
+                    == Some(compression)
+            );
         }
     }
 
     #[test]
     fn attribute_bits_mask() {
         // Only the low 3 bits define the codec; upper bits are other flags.
-        assert!(
+        assert2::assert!(
             CompressionType::from_attribute_bits(0b1111_1000 | 0b0000_0001)
                 == Some(CompressionType::Gzip)
         );
@@ -65,7 +67,8 @@ mod tests {
 
     #[test]
     fn attribute_bits_unknown() {
-        assert!(CompressionType::from_attribute_bits(5) == None);
-        assert!(CompressionType::from_attribute_bits(7) == None);
+        for (_name, bits) in [("reserved five", 5), ("reserved seven", 7)] {
+            assert2::assert!(CompressionType::from_attribute_bits(bits) == None);
+        }
     }
 }

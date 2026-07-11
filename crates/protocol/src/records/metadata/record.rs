@@ -219,7 +219,7 @@ impl KraftMetadataRecord {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -244,15 +244,15 @@ mod tests {
         // apiKey 99 is not modeled.
         let value = encode_value(99, 0, &[0xAB, 0xCD]);
         let (decoded, ver) = KraftMetadataRecord::decode_value(&value).expect("decode");
-        assert!(ver == 0);
+        assert2::assert!(ver == 0);
         let expected = KraftMetadataRecord::Unknown {
             api_key: 99,
             api_version: 0,
             body: Bytes::from_static(&[0xAB, 0xCD]),
         };
-        assert!(decoded == expected);
+        assert2::assert!(decoded == expected);
         // Unknown re-encodes byte-identically too.
-        assert!(decoded.encode_value(ver).expect("re-encode") == value);
+        assert2::assert!(decoded.encode_value(ver).expect("re-encode") == value);
     }
 
     #[test]
@@ -261,8 +261,8 @@ mod tests {
         let rec = KraftMetadataRecord::Config(ConfigRecord::default());
         let (decoded, ver) =
             KraftMetadataRecord::decode_value(&rec.encode_value(0).unwrap()).unwrap();
-        assert!(decoded.encode_value(ver).unwrap() == rec.encode_value(0).unwrap());
-        assert!(decoded.api_key() == 4);
+        assert2::assert!(decoded.encode_value(ver).unwrap() == rec.encode_value(0).unwrap());
+        assert2::assert!(decoded.api_key() == 4);
     }
 
     #[test]
@@ -317,7 +317,7 @@ mod tests {
             ),
         ];
         for (rec, want) in cases {
-            assert!(rec.api_key() == want);
+            assert2::assert!(rec.api_key() == want);
         }
     }
 }

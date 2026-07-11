@@ -459,7 +459,6 @@ fn local_advertised_for_listener(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -476,28 +475,44 @@ mod tests {
     }
 
     #[test]
-    fn group_key_denied_maps_to_group_authorization_failed() {
+    fn denied_keys_map_to_resource_specific_authorization_errors() {
         let authz = deny_authorizer();
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
-        let code = key_authz_failure(&authz, &image, &anon(), &peer, KEY_TYPE_GROUP, "g");
-        assert!(code == Some(codes::GROUP_AUTHORIZATION_FAILED));
-    }
+        let cases = [
+            (
+                "group key",
+                KEY_TYPE_GROUP,
+                "g",
+                codes::GROUP_AUTHORIZATION_FAILED,
+            ),
+            (
+                "transactional id key",
+                KEY_TYPE_TRANSACTION,
+                "t",
+                codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
+            ),
+        ];
 
-    #[test]
-    fn txn_key_denied_maps_to_transactional_id_authorization_failed() {
-        let authz = deny_authorizer();
-        let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
-        let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
-        let code = key_authz_failure(&authz, &image, &anon(), &peer, KEY_TYPE_TRANSACTION, "t");
-        assert!(code == Some(codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED));
+        for (_case, key_type, key, expected) in cases {
+            let code = key_authz_failure(&authz, &image, &anon(), &peer, key_type, key);
+            assert2::assert!(code == Some(expected));
+        }
     }
 
     #[test]
     fn denied_entry_carries_the_failure_code() {
         let c = denied_coordinator("g".into(), codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(c.error_code == codes::GROUP_AUTHORIZATION_FAILED);
-        assert!(c.node_id == -1);
+        let expected = Coordinator {
+            key: "g".into(),
+            node_id: -1,
+            host: String::new(),
+            port: -1,
+            error_code: codes::GROUP_AUTHORIZATION_FAILED,
+            error_message: Some("authorization failed".into()),
+            ..Default::default()
+        };
+        assert2::assert!(c == expected);
     }
 
     fn listener(name: &str, advertised: &str) -> crate::config::ListenerSpec {
@@ -524,8 +539,8 @@ mod tests {
             ],
             ..Default::default()
         };
-        assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
-        assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
+        assert2::assert!(local_advertised_for_listener(&config, "tls") == "tls-host:9094");
+        assert2::assert!(local_advertised_for_listener(&config, "plain") == "plain-host:9092");
     }
 
     /// When the connection listener isn't configured, fall back to the legacy
@@ -537,6 +552,6 @@ mod tests {
             listeners: vec![listener("plain", "plain-host:9092")],
             ..Default::default()
         };
-        assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
+        assert2::assert!(local_advertised_for_listener(&config, "external") == "legacy:1000");
     }
 }

@@ -228,12 +228,7 @@ impl Model for IsrModel {
         }
         // Transition invariant (kept out of the fingerprinted state): the
         // high-watermark never regresses.
-        assert!(
-            state.rs.hw >= last.rs.hw,
-            "HWM regressed: {} -> {}",
-            last.rs.hw,
-            state.rs.hw
-        );
+        assert2::assert!(state.rs.hw >= last.rs.hw);
         Some(state)
     }
 
@@ -302,14 +297,8 @@ fn run(model: IsrModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

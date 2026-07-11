@@ -24,10 +24,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(
-        resp.error_code, 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -44,10 +41,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -97,13 +91,13 @@ async fn member_joins_converges_and_leaves() {
     .await
     .expect("converged to an assignment");
 
-    assert_eq!(assigned.active[0].subtopology_id, "0");
+    assert2::assert!(assigned.active[0].subtopology_id == "0");
     let topics: Vec<&str> = assigned.active[0]
         .source_topic_partitions
         .iter()
         .map(|tp| tp.topic.as_str())
         .collect();
-    assert!(topics.iter().all(|t| *t == "streams-input"));
+    assert2::assert!(topics.iter().all(|t| *t == "streams-input"));
 
     membership.close().await.expect("close");
     broker.shutdown().await;
@@ -149,10 +143,7 @@ async fn missing_source_topic_reports_not_ready() {
     })
     .await
     .unwrap_or(false);
-    assert!(
-        saw_not_ready,
-        "expected a NotReady status for the missing source topic"
-    );
+    assert2::assert!(saw_not_ready);
 
     membership.close().await.expect("close");
     broker.shutdown().await;

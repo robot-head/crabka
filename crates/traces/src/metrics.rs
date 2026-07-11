@@ -259,7 +259,7 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -298,7 +298,7 @@ mod tests {
             "route=\"search\"",
             "tenant=\"tenant-a\"",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 
@@ -307,9 +307,9 @@ mod tests {
         let m = ServiceMetrics::new();
         m.record_ingest(true, 100, 3, 0.01);
         m.record_ingest(true, 50, 2, 0.01);
-        check!(m.ingest_bytes.get() == 150);
-        check!(m.ingest_items.get() == 5);
-        check!(
+        assert2::assert!(m.ingest_bytes.get() == 150);
+        assert2::assert!(m.ingest_items.get() == 5);
+        assert2::assert!(
             m.ingest_requests
                 .get_or_create(&StatusLabel {
                     status: "ok".into()
@@ -324,10 +324,10 @@ mod tests {
         let m = ServiceMetrics::new();
         // A 4xx client error: error outcome, but NOT a WAL failure.
         m.record_ingest(false, 0, 0, 0.001);
-        assert!(m.wal_append_failures.get() == 0);
+        assert2::assert!(m.wal_append_failures.get() == 0);
         // A produce failure: bump explicitly at the WAL error site.
         m.record_wal_append_failure();
-        assert!(m.wal_append_failures.get() == 1);
+        assert2::assert!(m.wal_append_failures.get() == 1);
     }
 
     #[test]
@@ -341,7 +341,7 @@ mod tests {
         m.record_block_flushed();
         m.record_block_flushed();
 
-        assert!(
+        assert2::assert!(
             m.ingest_spans
                 .get_or_create(&TenantLabel {
                     tenant: "tenant-a".into()
@@ -349,7 +349,7 @@ mod tests {
                 .get()
                 == 5
         );
-        assert!(
+        assert2::assert!(
             m.ingest_spans
                 .get_or_create(&TenantLabel {
                     tenant: "tenant-b".into()
@@ -357,7 +357,7 @@ mod tests {
                 .get()
                 == 4
         );
-        assert!(m.blocks_flushed.get() == 2);
+        assert2::assert!(m.blocks_flushed.get() == 2);
     }
 
     #[test]
@@ -372,15 +372,14 @@ mod tests {
             ("search", "error", 1),
             ("tags", "ok", 1),
         ] {
-            assert!(
+            assert2::assert!(
                 m.query_requests
                     .get_or_create(&RouteStatusLabel {
                         route: route.into(),
                         status: status.into()
                     })
                     .get()
-                    == want,
-                "case route={route} status={status}"
+                    == want
             );
         }
     }
@@ -399,19 +398,19 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert!(ct.starts_with("application/openmetrics-text"), "ct={ct}");
+        assert2::assert!(ct.starts_with("application/openmetrics-text"));
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert!(s.contains("crabka_traces_ingest_requests_total"), "{s}");
-        assert!(s.contains("# EOF"), "{s}");
+        assert2::assert!(s.contains("crabka_traces_ingest_requests_total"));
+        assert2::assert!(s.contains("# EOF"));
     }
 }

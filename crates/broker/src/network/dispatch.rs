@@ -1221,7 +1221,7 @@ fn patch_leading_throttle(
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -1282,8 +1282,8 @@ mod tests {
             ("reauthenticating uses previous", &reauth, Some("bob")),
             ("anonymous", &anonymous, None),
         ];
-        for (case, auth, want) in cases {
-            assert!(auth_principal_name(auth) == want, "{case}");
+        for (_case, auth, want) in cases {
+            assert2::assert!(auth_principal_name(auth) == want);
         }
     }
 
@@ -1296,7 +1296,7 @@ mod tests {
         // `None` never resolves; the 10ms timeout is the only timer, so virtual
         // time jumps to it and the timeout elapses -> Err.
         let result = tokio::time::timeout(Duration::from_millis(10), sleep_until_some(None)).await;
-        assert!(result.is_err());
+        assert2::assert!(result.is_err());
     }
 
     #[tokio::test(start_paused = true)]
@@ -1308,7 +1308,7 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(1), sleep_until_some(Some(deadline)))
             .await
             .expect("deadline should resolve");
-        assert!(tokio::time::Instant::now() >= deadline);
+        assert2::assert!(tokio::time::Instant::now() >= deadline);
     }
 
     #[test]
@@ -1320,16 +1320,10 @@ mod tests {
         let before = tokio::time::Instant::now();
         let future = instant_at_epoch_ms(now_ms + 250);
         let delay = future.duration_since(before);
-        assert!(
-            delay >= Duration::from_millis(100) && delay <= Duration::from_secs(2),
-            "future epoch should become a near future tokio deadline, got {delay:?}"
-        );
+        assert2::assert!(delay >= Duration::from_millis(100) && delay <= Duration::from_secs(2));
 
         let past = instant_at_epoch_ms(now_ms - 250);
-        assert!(
-            past <= tokio::time::Instant::now() + Duration::from_millis(50),
-            "past epoch should fire immediately"
-        );
+        assert2::assert!(past <= tokio::time::Instant::now() + Duration::from_millis(50));
     }
 
     #[test]
@@ -1339,7 +1333,7 @@ mod tests {
         let body = [0u8, 0u8]; // error_code=0
         let out = encode_response(API_VERSIONS_KEY, 7, true, &body);
         // 4 byte corr_id + body, no tagged byte.
-        assert!(out.len() == 4 + body.len());
+        assert2::assert!(out.len() == 4 + body.len());
     }
 
     #[test]
@@ -1360,10 +1354,7 @@ mod tests {
             (18, 3, false), // ApiVersions
         ];
         for (api_key, version, want) in cases {
-            assert!(
-                throttle_is_leading_field(api_key, version) == want,
-                "api_key {api_key} version {version}"
-            );
+            assert2::assert!(throttle_is_leading_field(api_key, version) == want);
         }
     }
 
@@ -1378,16 +1369,16 @@ mod tests {
         body.put_i32(0); // ThrottleTimeMs = 0
         let resp = encode_response(68, 7, true, &body);
         let patched = patch_leading_throttle(resp, 68, true, 250);
-        assert!(read(&patched, 5) == 250);
-        assert!(read(&patched, 0) == 7); // corr_id preserved
+        assert2::assert!(read(&patched, 5) == 250);
+        assert2::assert!(read(&patched, 0) == 7); // corr_id preserved
 
         // Non-flexible response header (Metadata v3): header = 4 bytes.
         let mut body = BytesMut::new();
         body.put_i32(10); // existing throttle 10 < 250
         let resp = encode_response(3, 9, false, &body);
         let patched = patch_leading_throttle(resp, 3, false, 250);
-        assert!(read(&patched, 4) == 250);
-        assert!(read(&patched, 0) == 9);
+        assert2::assert!(read(&patched, 4) == 250);
+        assert2::assert!(read(&patched, 0) == 9);
     }
 
     #[test]
@@ -1398,7 +1389,7 @@ mod tests {
         let resp = encode_response(3, 1, false, &body);
         let patched = patch_leading_throttle(resp, 3, false, 100);
         let v = i32::from_be_bytes([patched[4], patched[5], patched[6], patched[7]]);
-        assert!(v == 500);
+        assert2::assert!(v == 500);
     }
 
     #[test]
@@ -1408,21 +1399,21 @@ mod tests {
         buf.put_i16(18);
         buf.put_i16(3);
         buf.put_i32(1);
-        assert!(crate::network::request::peek_api_key(&buf).unwrap() == 18);
+        assert2::assert!(crate::network::request::peek_api_key(&buf).unwrap() == 18);
     }
 
     #[test]
     fn peek_api_key_rejects_short_frame() {
         let buf = [0u8; 1];
-        assert!(crate::network::request::peek_api_key(&buf).is_err());
+        assert2::assert!(crate::network::request::peek_api_key(&buf).is_err());
     }
 
     #[test]
     fn encode_response_other_flexible_inserts_tagged_byte() {
         let body = [0u8, 0u8];
         let out = encode_response(3, 7, true, &body);
-        assert!(out.len() == 5 + body.len());
-        assert!(out[4] == 0); // tagged byte
+        assert2::assert!(out.len() == 5 + body.len());
+        assert2::assert!(out[4] == 0); // tagged byte
     }
 
     /// KIP-853 RPCs (80/81/82) route through the registry path and are
@@ -1437,11 +1428,8 @@ mod tests {
             buf.put_i16(api_key);
             buf.put_i16(0); // version 0
             buf.put_i32(1); // corr_id
-            assert!(crate::network::request::peek_api_key(&buf).unwrap() == api_key);
-            assert!(
-                registry.body_flexible(api_key, 0),
-                "api_key {api_key} is flexible from v0"
-            );
+            assert2::assert!(crate::network::request::peek_api_key(&buf).unwrap() == api_key);
+            assert2::assert!(registry.body_flexible(api_key, 0));
         }
     }
 

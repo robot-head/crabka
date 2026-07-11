@@ -41,7 +41,6 @@ fn is_allowed_tenant_byte(byte: u8) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::validate_tenant;
 
@@ -56,7 +55,7 @@ mod tests {
             "ascii!-_.*'()",
         ];
         for id in valid {
-            assert!(validate_tenant(id).is_ok(), "expected `{id}` to be valid");
+            assert2::assert!(validate_tenant(id).is_ok());
         }
 
         let invalid = [
@@ -70,14 +69,11 @@ mod tests {
             "tab\ttenant",
         ];
         for id in invalid {
-            assert!(
-                validate_tenant(id).is_err(),
-                "expected `{id}` to be invalid"
-            );
+            assert2::assert!(validate_tenant(id).is_err());
         }
 
         // Length boundary: exactly 150 bytes is allowed, 151 is rejected.
-        assert!(validate_tenant(&"x".repeat(150)).is_ok());
-        assert!(validate_tenant(&"x".repeat(151)).is_err());
+        assert2::assert!(validate_tenant(&"x".repeat(150)).is_ok());
+        assert2::assert!(validate_tenant(&"x".repeat(151)).is_err());
     }
 }

@@ -69,55 +69,45 @@ mod tests {
         r#"{"type":"object","required":["id"],"properties":{"id":{"type":"integer"}}}"#;
 
     #[test]
-    fn validate_valid_instance() {
-        assert!(validate(SCHEMA, br#"{"id":1}"#).is_ok());
+    fn validation_cases() {
+        for (name, schema, payload, valid) in [
+            ("valid", SCHEMA, br#"{"id":1}"#.as_slice(), true),
+            ("wrong_type", SCHEMA, br#"{"id":"x"}"#.as_slice(), false),
+            ("missing_required", SCHEMA, br"{}".as_slice(), false),
+            ("invalid_payload", SCHEMA, b"not json".as_slice(), false),
+            (
+                "invalid_schema",
+                "not json",
+                br#"{"id":1}"#.as_slice(),
+                false,
+            ),
+        ] {
+            let result = validate(schema, payload);
+            assert2::assert!(result.is_ok() == valid);
+        }
     }
 
     #[test]
-    fn validate_wrong_type() {
-        let err = validate(SCHEMA, br#"{"id":"x"}"#).unwrap_err();
-        assert!(matches!(err, CodecError::Validate(_)));
-    }
-
-    #[test]
-    fn validate_missing_required() {
-        let err = validate(SCHEMA, br"{}").unwrap_err();
-        assert!(matches!(err, CodecError::Validate(_)));
-    }
-
-    #[test]
-    fn validate_invalid_json_payload() {
-        let err = validate(SCHEMA, b"not json").unwrap_err();
-        assert!(matches!(err, CodecError::Validate(_)));
-    }
-
-    #[test]
-    fn validate_invalid_schema_string() {
-        let err = validate("not json", br#"{"id":1}"#).unwrap_err();
-        assert!(matches!(err, CodecError::Validate(_)));
-    }
-
-    #[test]
-    fn serialize_returns_input_bytes_on_valid() {
-        let input = br#"{"id":42}"#;
-        let result = serialize(SCHEMA, input).unwrap();
-        assert_eq!(result.as_ref(), input);
-    }
-
-    #[test]
-    fn serialize_rejects_invalid() {
-        assert!(serialize(SCHEMA, br#"{"id":"not-an-int"}"#).is_err());
-    }
-
-    #[test]
-    fn deserialize_returns_input_bytes_on_valid() {
-        let input = br#"{"id":99}"#;
-        let result = deserialize(SCHEMA, input).unwrap();
-        assert_eq!(result.as_ref(), input);
-    }
-
-    #[test]
-    fn deserialize_rejects_invalid() {
-        assert!(deserialize(SCHEMA, br"{}").is_err());
+    fn codec_operation_cases() {
+        for (name, result, expected) in [
+            (
+                "serialize_valid",
+                serialize(SCHEMA, br#"{"id":42}"#),
+                Some(br#"{"id":42}"#.as_slice()),
+            ),
+            (
+                "serialize_invalid",
+                serialize(SCHEMA, br#"{"id":"not-an-int"}"#),
+                None,
+            ),
+            (
+                "deserialize_valid",
+                deserialize(SCHEMA, br#"{"id":99}"#),
+                Some(br#"{"id":99}"#.as_slice()),
+            ),
+            ("deserialize_invalid", deserialize(SCHEMA, br"{}"), None),
+        ] {
+            assert2::assert!(result.as_deref().ok() == expected);
+        }
     }
 }

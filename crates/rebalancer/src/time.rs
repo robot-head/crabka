@@ -31,7 +31,7 @@ mod tests {
             .duration_since(UNIX_EPOCH)
             .expect("system clock after Unix epoch")
             .as_millis();
-        assert!(got >= i64::try_from(before).unwrap());
-        assert!(got <= i64::try_from(after).unwrap_or(i64::MAX));
+        assert2::assert!(got >= i64::try_from(before).unwrap());
+        assert2::assert!(got <= i64::try_from(after).unwrap_or(i64::MAX));
     }
 }

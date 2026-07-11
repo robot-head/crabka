@@ -212,7 +212,7 @@ fn sort_by_start_offset(segments: &mut [RemoteLogSegmentMetadata]) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::metadata::{CustomMetadata, RemoteLogSegmentId, TopicIdPartition};
@@ -262,38 +262,35 @@ mod tests {
     #[test]
     fn started_segment_is_invisible_until_finished() {
         let mut c = RemoteLogMetadataCache::default();
-        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
-        assert!(
-            c.segment_for(LeaderEpoch(0), 50).is_none(),
-            "started not yet readable"
-        );
+        let started = seg(10, &[(0, 0)], 0, 99);
+        let finished = started.clone().with_update(&finish(10)).unwrap();
+        c.add(started).unwrap();
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50).is_none());
         c.update(&finish(10)).unwrap();
-        let got = c
-            .segment_for(LeaderEpoch(0), 50)
-            .expect("finished is readable");
-        assert!(got.remote_log_segment_id().id == Uuid::from_u128(10));
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50) == Some(finished));
     }
 
     #[test]
     fn offset_lookup_across_segments_one_epoch() {
         let mut c = RemoteLogMetadataCache::default();
-        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
-        c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
+        let first = seg(10, &[(0, 0)], 0, 99);
+        let second = seg(11, &[(0, 100)], 100, 199);
+        let finished_first = first.clone().with_update(&finish(10)).unwrap();
+        let finished_second = second.clone().with_update(&finish(11)).unwrap();
+        c.add(first).unwrap();
+        c.add(second).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        for (offset, want) in [
-            (0, Some(Uuid::from_u128(10))),
-            (99, Some(Uuid::from_u128(10))),
-            (100, Some(Uuid::from_u128(11))),
-            (199, Some(Uuid::from_u128(11))),
-            // past the end
-            (200, None),
+        for (name, offset, want) in [
+            ("first segment start", 0, Some(finished_first.clone())),
+            ("first segment end", 99, Some(finished_first)),
+            ("second segment start", 100, Some(finished_second.clone())),
+            ("second segment end", 199, Some(finished_second)),
+            ("past final segment", 200, None),
         ] {
             check!(
-                c.segment_for(LeaderEpoch(0), offset)
-                    .map(|s| s.remote_log_segment_id().id)
-                    == want,
-                "offset={offset}"
+                c.segment_for(LeaderEpoch(0), offset) == want,
+                "case {name}: offset={offset}"
             );
         }
     }
@@ -301,18 +298,12 @@ mod tests {
     #[test]
     fn list_by_epoch_returns_matching_segments() {
         let mut c = RemoteLogMetadataCache::default();
-        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
+        let started = seg(10, &[(0, 0)], 0, 99);
+        let finished = started.clone().with_update(&finish(10)).unwrap();
+        c.add(started).unwrap();
         c.update(&finish(10)).unwrap();
-        let listed_ids: Vec<Uuid> = c
-            .list_by_epoch(LeaderEpoch(0))
-            .iter()
-            .map(|s| s.remote_log_segment_id().id)
-            .collect();
-        assert!(listed_ids == [Uuid::from_u128(10)]);
-        assert!(
-            c.list_by_epoch(LeaderEpoch(7)).is_empty(),
-            "unknown epoch -> empty"
-        );
+        assert2::assert!(c.list_by_epoch(LeaderEpoch(0)) == vec![finished]);
+        assert2::assert!(c.list_by_epoch(LeaderEpoch(7)) == Vec::new());
     }
 
     #[test]
@@ -320,39 +311,56 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         c.update(&finish(10)).unwrap();
-        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(99));
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(99));
         // DeleteSegmentStarted deindexes the epoch slot (but the metadata is
         // still present until DeleteSegmentFinished). highest_offset_for_epoch
         // reads the epoch index directly, so it must now miss.
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
-        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)).is_none());
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(0)).is_none());
     }
 
     #[test]
     fn offset_lookup_respects_epoch() {
         let mut c = RemoteLogMetadataCache::default();
         // One segment spanning two epochs: epoch 0 owns [0,49], epoch 1 owns [50,99].
-        c.add(seg(10, &[(0, 0), (1, 50)], 0, 99)).unwrap();
+        let first = seg(10, &[(0, 0), (1, 50)], 0, 99);
+        let second = seg(11, &[(1, 100)], 100, 199);
+        let finished_first = first.clone().with_update(&finish(10)).unwrap();
+        let finished_second = second.clone().with_update(&finish(11)).unwrap();
+        c.add(first).unwrap();
         c.update(&finish(10)).unwrap();
         // A second segment, epoch 1 only.
-        c.add(seg(11, &[(1, 100)], 100, 199)).unwrap();
+        c.add(second).unwrap();
         c.update(&finish(11)).unwrap();
 
-        for (epoch, offset, want) in [
+        for (name, epoch, offset, want) in [
             // Epoch 0 lookups only see the first segment.
-            (LeaderEpoch(0), 10, Some(Uuid::from_u128(10))),
+            (
+                "epoch zero hit",
+                LeaderEpoch(0),
+                10,
+                Some(finished_first.clone()),
+            ),
             // Epoch 0 has no segment at 150.
-            (LeaderEpoch(0), 150, None),
+            ("epoch zero miss", LeaderEpoch(0), 150, None),
             // Epoch 1 floor lookup picks the right segment.
-            (LeaderEpoch(1), 60, Some(Uuid::from_u128(10))),
-            (LeaderEpoch(1), 150, Some(Uuid::from_u128(11))),
+            (
+                "epoch one first segment",
+                LeaderEpoch(1),
+                60,
+                Some(finished_first),
+            ),
+            (
+                "epoch one second segment",
+                LeaderEpoch(1),
+                150,
+                Some(finished_second),
+            ),
         ] {
             check!(
-                c.segment_for(epoch, offset)
-                    .map(|s| s.remote_log_segment_id().id)
-                    == want,
-                "epoch={epoch:?} offset={offset}"
+                c.segment_for(epoch, offset) == want,
+                "case {name}: epoch={epoch:?} offset={offset}"
             );
         }
     }
@@ -364,41 +372,41 @@ mod tests {
         c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
-        assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(199));
-        assert!(c.highest_offset_for_epoch(LeaderEpoch(7)) == None);
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(0)) == Some(199));
+        assert2::assert!(c.highest_offset_for_epoch(LeaderEpoch(7)) == None);
     }
 
     #[test]
     fn delete_started_hides_segment_delete_finished_drops_it() {
         let mut c = RemoteLogMetadataCache::default();
-        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
+        let started = seg(10, &[(0, 0)], 0, 99);
+        let finished = started.clone().with_update(&finish(10)).unwrap();
+        let delete_started = finished
+            .clone()
+            .with_update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
+            .unwrap();
+        c.add(started).unwrap();
         c.update(&finish(10)).unwrap();
-        assert!(c.segment_for(LeaderEpoch(0), 50).is_some());
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50) == Some(finished));
 
         c.update(&transition(10, RemoteLogSegmentState::DeleteSegmentStarted))
             .unwrap();
-        assert!(
-            c.segment_for(LeaderEpoch(0), 50).is_none(),
-            "delete-started hides it"
-        );
-        assert!(
-            c.list().len() == 1,
-            "still tracked while delete in progress"
-        );
+        assert2::assert!(c.segment_for(LeaderEpoch(0), 50) == None);
+        assert2::assert!(c.list() == vec![delete_started]);
 
         c.update(&transition(
             10,
             RemoteLogSegmentState::DeleteSegmentFinished,
         ))
         .unwrap();
-        assert!(c.list().is_empty(), "delete-finished drops it entirely");
+        assert2::assert!(c.list().is_empty());
     }
 
     #[test]
     fn update_unknown_segment_errors() {
         let mut c = RemoteLogMetadataCache::default();
         let err = c.update(&finish(404)).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[test]
@@ -409,7 +417,7 @@ mod tests {
             .with_update(&finish(10))
             .expect("force to finished for the test");
         let err = c.add(s).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
     }
 
     #[test]
@@ -417,14 +425,21 @@ mod tests {
         let mut c = RemoteLogMetadataCache::default();
         c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
         let err = c.add(seg(10, &[(0, 0)], 0, 99)).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
+        assert2::assert!(matches!(err, RemoteStorageError::InvalidAdd { .. }));
     }
 
     #[test]
     fn dump_then_seed_rebuilds_epoch_index() {
         let mut c = RemoteLogMetadataCache::default();
-        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
-        c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
+        let first = seg(10, &[(0, 0)], 0, 99);
+        let second = seg(11, &[(0, 100)], 100, 199);
+        let finished_first = first.clone().with_update(&finish(10)).unwrap();
+        let finished_second = second.clone().with_update(&finish(11)).unwrap();
+        let delete_started_second = finished_second
+            .with_update(&transition(11, RemoteLogSegmentState::DeleteSegmentStarted))
+            .unwrap();
+        c.add(first).unwrap();
+        c.add(second).unwrap();
         c.update(&finish(10)).unwrap();
         c.update(&finish(11)).unwrap();
         c.update(&transition(11, RemoteLogSegmentState::DeleteSegmentStarted))
@@ -439,26 +454,21 @@ mod tests {
 
         // Finished seg 10 is queryable; delete-started seg 11 is hidden
         // but still listed; delete_state survives.
-        check!(
-            seeded
-                .segment_for(LeaderEpoch(0), 50)
-                .unwrap()
-                .remote_log_segment_id()
-                .id
-                == Uuid::from_u128(10)
+        assert2::assert!(seeded.segment_for(LeaderEpoch(0), 50) == Some(finished_first.clone()));
+        assert2::assert!(seeded.segment_for(LeaderEpoch(0), 150) == None);
+        assert2::assert!(seeded.list() == vec![finished_first, delete_started_second]);
+        assert2::assert!(
+            seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked)
         );
-        check!(seeded.segment_for(LeaderEpoch(0), 150).is_none());
-        check!(seeded.list().len() == 2);
-        check!(seeded.delete_state() == Some(RemotePartitionDeleteState::DeletePartitionMarked));
     }
 
     #[test]
     fn list_is_ordered_by_start_offset() {
         let mut c = RemoteLogMetadataCache::default();
-        c.add(seg(11, &[(0, 100)], 100, 199)).unwrap();
-        c.add(seg(10, &[(0, 0)], 0, 99)).unwrap();
-        let listed = c.list();
-        assert!(listed[0].start_offset() == 0);
-        assert!(listed[1].start_offset() == 100);
+        let first = seg(10, &[(0, 0)], 0, 99);
+        let second = seg(11, &[(0, 100)], 100, 199);
+        c.add(second.clone()).unwrap();
+        c.add(first.clone()).unwrap();
+        assert2::assert!(c.list() == vec![first, second]);
     }
 }

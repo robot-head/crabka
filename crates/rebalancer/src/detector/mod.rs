@@ -323,7 +323,7 @@ impl Detector {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use tokio_util::sync::CancellationToken;
 
     use super::*;
@@ -440,9 +440,9 @@ mod tests {
         h.push(&make_state(10, &[1, 2]));
         h.push(&make_state(20, &[1, 2]));
         h.push(&make_state(30, &[1, 2, 3]));
-        assert!(h.len() == 2);
         let oldest = h.iter_recent().next().expect("at least one memo");
-        assert!(oldest.snapshot_at_ms == 20);
+        assert2::assert!(h.len() == 2);
+        assert2::assert!(oldest.snapshot_at_ms == 20);
     }
 
     #[test]
@@ -452,16 +452,16 @@ mod tests {
         h.push(&make_state(20, &[1]));
         h.push(&make_state(30, &[1]));
         let got = h.oldest_since(15).expect("memo at 20 satisfies cutoff");
-        assert!(got.snapshot_at_ms == 20);
-        assert!(h.oldest_since(1000).is_none());
+        assert2::assert!(got.snapshot_at_ms == 20);
+        assert2::assert!(h.oldest_since(1000).is_none());
     }
 
     #[test]
     fn snapshot_history_is_empty_tracks_pushes() {
         let mut h = SnapshotHistory::new(2);
-        assert!(h.is_empty());
+        assert2::assert!(h.is_empty());
         h.push(&make_state(10, &[1]));
-        assert!(!h.is_empty());
+        assert2::assert!(!h.is_empty());
     }
 
     #[tokio::test]
@@ -484,7 +484,7 @@ mod tests {
 
         let handle = tokio::spawn(detector.run());
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!handle.is_finished());
+        assert2::assert!(!handle.is_finished());
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(1), handle)
             .await
@@ -525,14 +525,18 @@ mod tests {
         let open = anomaly_store
             .find_open(AnomalyKind::UnderReplicatedPartitions, &key)
             .expect("under-replicated anomaly should be open");
-        check!(open.severity == AnomalySeverity::Critical);
-        check!(metrics.anomalies_detected_under_replicated.get() == 1);
-        check!(metrics.anomalies_open_under_replicated.get() == 1);
+        check!(
+            (
+                open.severity,
+                metrics.anomalies_detected_under_replicated.get(),
+                metrics.anomalies_open_under_replicated.get(),
+            ) == (AnomalySeverity::Critical, 1, 1)
+        );
 
         snapshot.store(Arc::new(Some(make_under_replicated_state(210_000, false))));
         detector.tick_once(210_000).await;
 
-        assert!(
+        assert2::assert!(
             anomaly_store
                 .find_open(AnomalyKind::UnderReplicatedPartitions, &key)
                 .is_none()
@@ -542,8 +546,12 @@ mod tests {
             .into_iter()
             .find(|a| a.id == open.id)
             .expect("resolved anomaly remains in history");
-        check!(resolved.resolved_at_ms == Some(210_000));
-        check!(metrics.anomalies_resolved_under_replicated.get() == 1);
-        check!(metrics.anomalies_open_under_replicated.get() == 0);
+        check!(
+            (
+                resolved.resolved_at_ms,
+                metrics.anomalies_resolved_under_replicated.get(),
+                metrics.anomalies_open_under_replicated.get(),
+            ) == (Some(210_000), 1, 0)
+        );
     }
 }

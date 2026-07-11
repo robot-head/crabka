@@ -292,16 +292,14 @@ impl ControllerLivenessState {
 mod tests {
     use std::time::Duration;
 
-    use assert2::assert;
-
     use super::*;
 
     #[tokio::test]
     async fn new_broker_starts_alive_after_first_heartbeat() {
         let liveness = ControllerLivenessState::new(Duration::from_secs(10));
         let transition = liveness.record_heartbeat(1).await;
-        assert!(transition == None); // first heartbeat: not a revival
-        assert!(liveness.state(1).await == Some(BrokerLivenessState::Alive));
+        assert2::assert!(transition == None); // first heartbeat: not a revival
+        assert2::assert!(liveness.state(1).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
@@ -313,8 +311,8 @@ mod tests {
         // Advance past the timeout deterministically (no wall-clock sleep).
         clock.advance(Duration::from_millis(11));
         let transitions = liveness.tick().await;
-        assert!(transitions == vec![LivenessTransition::AliveToDead(2)]);
-        assert!(liveness.state(2).await == Some(BrokerLivenessState::Dead));
+        assert2::assert!(transitions == vec![LivenessTransition::AliveToDead(2)]);
+        assert2::assert!(liveness.state(2).await == Some(BrokerLivenessState::Dead));
     }
 
     #[tokio::test]
@@ -326,8 +324,8 @@ mod tests {
         clock.advance(Duration::from_millis(11));
         let _ = liveness.tick().await; // broker 3 → Dead
         let transition = liveness.record_heartbeat(3).await;
-        assert!(transition == Some(LivenessTransition::DeadToAlive(3)));
-        assert!(liveness.state(3).await == Some(BrokerLivenessState::Alive));
+        assert2::assert!(transition == Some(LivenessTransition::DeadToAlive(3)));
+        assert2::assert!(liveness.state(3).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
@@ -343,7 +341,7 @@ mod tests {
 
         let transitions = liveness.tick().await;
 
-        assert!(transitions == vec![LivenessTransition::AliveToDead(7)]);
+        assert2::assert!(transitions == vec![LivenessTransition::AliveToDead(7)]);
     }
 
     #[tokio::test]
@@ -357,8 +355,8 @@ mod tests {
 
         let transitions = liveness.tick().await;
 
-        assert!(transitions.is_empty());
-        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
+        assert2::assert!(transitions.is_empty());
+        assert2::assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
@@ -378,8 +376,8 @@ mod tests {
         clock.advance(Duration::from_millis(1));
         let transitions = liveness.tick().await;
 
-        assert!(transitions.is_empty());
-        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
+        assert2::assert!(transitions.is_empty());
+        assert2::assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
@@ -392,18 +390,18 @@ mod tests {
 
         let transitions = liveness.tick().await;
 
-        assert!(transitions.is_empty());
-        assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
+        assert2::assert!(transitions.is_empty());
+        assert2::assert!(liveness.state(7).await == Some(BrokerLivenessState::Alive));
     }
 
     #[tokio::test]
     async fn wants_shutdown_set_and_unset() {
         let liveness = ControllerLivenessState::new(Duration::from_secs(10));
-        assert!(!liveness.wants_shutdown(5).await);
+        assert2::assert!(!liveness.wants_shutdown(5).await);
         liveness.set_wants_shutdown(5, true).await;
-        assert!(liveness.wants_shutdown(5).await);
+        assert2::assert!(liveness.wants_shutdown(5).await);
         liveness.set_wants_shutdown(5, false).await;
-        assert!(!liveness.wants_shutdown(5).await);
+        assert2::assert!(!liveness.wants_shutdown(5).await);
     }
 
     #[tokio::test]
@@ -412,14 +410,11 @@ mod tests {
         liveness.set_wants_shutdown(1, true).await;
         liveness.set_wants_shutdown(2, true).await;
         for (broker, want) in [(1, true), (2, true), (3, false)] {
-            assert!(
-                liveness.wants_shutdown(broker).await == want,
-                "broker {broker}"
-            );
+            assert2::assert!(liveness.wants_shutdown(broker).await == want);
         }
         liveness.set_wants_shutdown(1, false).await;
-        assert!(!liveness.wants_shutdown(1).await);
-        assert!(liveness.wants_shutdown(2).await);
+        assert2::assert!(!liveness.wants_shutdown(1).await);
+        assert2::assert!(liveness.wants_shutdown(2).await);
     }
 
     #[tokio::test]
@@ -427,10 +422,7 @@ mod tests {
         let liveness = ControllerLivenessState::new(Duration::from_mins(1));
         liveness.record_heartbeat(4).await;
         let transitions = liveness.tick().await;
-        assert!(
-            transitions.is_empty(),
-            "broker 4 should not expire with 60s timeout"
-        );
-        assert!(liveness.state(4).await == Some(BrokerLivenessState::Alive));
+        assert2::assert!(transitions.is_empty());
+        assert2::assert!(liveness.state(4).await == Some(BrokerLivenessState::Alive));
     }
 }

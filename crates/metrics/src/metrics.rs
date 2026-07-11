@@ -244,7 +244,7 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -282,7 +282,7 @@ mod tests {
             "route=\"query\"",
             "tenant=\"tenant-a\"",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 
@@ -292,7 +292,7 @@ mod tests {
         // An error outcome must NOT bump wal_append_failures — that is reserved
         // for actual WAL/produce errors, incremented at the append site.
         m.record_ingest(false, 0, 0, 0.0);
-        assert!(m.wal_append_failures.get() == 0);
+        assert2::assert!(m.wal_append_failures.get() == 0);
     }
 
     #[tokio::test]
@@ -309,12 +309,12 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert!(s.contains("crabka_metrics_ingest_bytes_total"), "{s}");
-        assert!(s.contains("# EOF"), "{s}");
+        assert2::assert!(s.contains("crabka_metrics_ingest_bytes_total"));
+        assert2::assert!(s.contains("# EOF"));
     }
 }

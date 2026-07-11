@@ -117,53 +117,30 @@ async fn per_tenant_quota_is_isolated() {
     // Drive org-a until its tight bucket rejects with 429. Bounded loop so a
     // regression (global / never-tripping quota) fails fast instead of hanging.
     let mut org_a_throttled = false;
-    let mut org_a_successes = 0usize;
     for _ in 0..50 {
         let status = push(&client, addr, ORG_A).await;
         if status == reqwest::StatusCode::TOO_MANY_REQUESTS {
             org_a_throttled = true;
             break;
         }
-        assert!(
-            status.is_success(),
-            "org-a push before throttle expected success, got {status}"
-        );
-        org_a_successes += 1;
+        assert2::assert!(status.is_success());
     }
-    assert!(
-        org_a_throttled,
-        "org-a was never rate-limited within 50 pushes (after {org_a_successes} accepted) \
-         — its tight quota is not being enforced"
-    );
+    assert2::assert!(org_a_throttled);
 
     // Same load under org-b's own tenant header must still be accepted: the
     // token bucket is per-tenant, so org-a draining its bucket cannot starve
     // org-b. A global bucket would already be empty here and return 429.
     let appends_before_b = sink.len();
-    for index in 0..10 {
+    for _index in 0..10 {
         let status = push(&client, addr, ORG_B).await;
-        assert!(
-            status.is_success(),
-            "org-b push #{index} should succeed under its own generous quota, got {status} \
-             — quota is leaking across tenants (global, not per-tenant)"
-        );
+        assert2::assert!(status.is_success());
     }
 
     // org-b's accepted pushes must have reached the WAL sink.
-    assert!(
-        sink.len() >= appends_before_b + 10,
-        "expected org-b's 10 pushes to append to the WAL sink"
-    );
+    assert2::assert!(sink.len() >= appends_before_b + 10);
 
     // Sanity: org-a really is still throttled (its bucket stays drained) while
     // org-b keeps succeeding — confirms the two buckets are independent.
-    assert_eq!(
-        push(&client, addr, ORG_A).await,
-        reqwest::StatusCode::TOO_MANY_REQUESTS,
-        "org-a should remain throttled"
-    );
-    assert!(
-        push(&client, addr, ORG_B).await.is_success(),
-        "org-b should remain unaffected by org-a's throttling"
-    );
+    assert2::assert!(push(&client, addr, ORG_A).await == reqwest::StatusCode::TOO_MANY_REQUESTS);
+    assert2::assert!(push(&client, addr, ORG_B).await.is_success());
 }

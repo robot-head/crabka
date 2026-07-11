@@ -91,7 +91,6 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use assert2::assert;
     use crabka_security::ClientAuthMode;
 
     use super::*;
@@ -140,8 +139,8 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = write_file(dir.path(), "cert.pem", "not a real cert");
 
-        assert!(read_mtime(&path).is_some());
-        assert!(read_mtime(&dir.path().join("missing.pem")).is_none());
+        assert2::assert!(read_mtime(&path).is_some());
+        assert2::assert!(read_mtime(&dir.path().join("missing.pem")).is_none());
     }
 
     #[test]
@@ -165,8 +164,8 @@ mod tests {
             key: read_mtime(&key),
             client_ca: read_mtime(&ca),
         };
-        assert!(snapshot != PathMtimes::default());
-        assert!(snapshot == expected);
+        assert2::assert!(snapshot != PathMtimes::default());
+        assert2::assert!(snapshot == expected);
     }
 
     #[tokio::test(start_paused = true)]
@@ -191,10 +190,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         let unchanged = dynamic.current();
-        assert!(
-            Arc::ptr_eq(&before, &unchanged),
-            "unchanged mtimes must not reload"
-        );
+        assert2::assert!(Arc::ptr_eq(&before, &unchanged));
 
         let (cert_b, key_b) = generated_pair();
         fs::write(&cert, cert_b).unwrap();
@@ -205,10 +201,7 @@ mod tests {
         tokio::time::advance(Duration::from_secs(1)).await;
         tokio::task::yield_now().await;
         let after = dynamic.current();
-        assert!(
-            !Arc::ptr_eq(&before, &after),
-            "changed mtimes must reload the server config"
-        );
+        assert2::assert!(!Arc::ptr_eq(&before, &after));
 
         shutdown.cancel();
         task.await.unwrap();

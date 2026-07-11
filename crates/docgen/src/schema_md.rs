@@ -258,7 +258,7 @@ fn render_default(v: &Value) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use serde_json::json;
 
     use super::*;
@@ -282,7 +282,7 @@ mod tests {
             "| `replicas` | integer | no | `3` |",
             "`nested.enabled`",
         ] {
-            assert!(md.contains(needle), "missing {needle:?} in {md}");
+            assert2::assert!(md.contains(needle));
         }
     }
 
@@ -291,8 +291,8 @@ mod tests {
         let schema = json!({ "type": "object", "properties": {
             "ports": { "type": "array", "items": { "type": "integer" }, "description": "Listener ports." } } });
         let md = render_field_table(&schema);
-        assert!(md.contains("`ports`"));
-        assert!(md.contains("array<integer>"));
+        assert2::assert!(md.contains("`ports`"));
+        assert2::assert!(md.contains("array<integer>"));
     }
 
     /// Mimic schemars 1.x output: `Option<T>` types are arrays `["T","null"]`,
@@ -332,7 +332,7 @@ mod tests {
             // array of $ref renders as an object-element array
             "| `listeners` | array<object> | no |",
         ] {
-            assert!(md.contains(needle), "missing {needle:?} in {md}");
+            assert2::assert!(md.contains(needle));
         }
     }
 
@@ -359,7 +359,7 @@ mod tests {
         });
         // Returns (doesn't hang/overflow) and emits the top-level field row.
         let md = render_field_table(&schema);
-        assert!(md.contains("| `root` | object | no |"), "{md}");
+        assert2::assert!(md.contains("| `root` | object | no |"));
         // It recurses some, but the cap keeps the path length bounded.
         let deepest = md
             .lines()
@@ -367,7 +367,7 @@ mod tests {
             .map(|path| path.matches('.').count())
             .max()
             .unwrap_or(0);
-        assert!(deepest <= MAX_DEPTH, "path nesting {deepest} exceeded cap");
+        assert2::assert!(deepest <= MAX_DEPTH);
     }
 
     #[test]
@@ -384,13 +384,13 @@ mod tests {
         let md = render_field_table(&schema);
         let row = md.lines().find(|l| l.contains("`mode`")).expect("mode row");
         // Pipes in the description are escaped...
-        assert!(row.contains("a \\| b \\| c"), "{row}");
+        assert2::assert!(row.contains("a \\| b \\| c"));
         // ...so the row keeps exactly the 5 columns (6 unescaped delimiters).
         let unescaped_bars = row
             .match_indices('|')
             .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
             .count();
-        assert!(unescaped_bars == 6, "{row}");
+        assert2::assert!(unescaped_bars == 6);
     }
 
     #[test]
@@ -451,11 +451,11 @@ mod tests {
         });
         let md = render_sectioned_field_table(&schema);
         let row = md.lines().find(|l| l.contains("`mode`")).expect("mode row");
-        assert!(row.contains("a \\| b \\| c"), "{row}");
+        assert2::assert!(row.contains("a \\| b \\| c"));
         let unescaped_bars = row
             .match_indices('|')
             .filter(|(i, _)| *i == 0 || row.as_bytes()[i - 1] != b'\\')
             .count();
-        assert!(unescaped_bars == 6, "{row}");
+        assert2::assert!(unescaped_bars == 6);
     }
 }

@@ -179,7 +179,6 @@ pub fn new_registry_with_metrics() -> (Registry, ControllerMetrics) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -190,7 +189,7 @@ mod tests {
         r.register("up", "operator liveness", g);
         let mut s = String::new();
         prometheus_client::encoding::text::encode(&mut s, &r).unwrap();
-        assert!(s.contains("crabka_operator_up"));
+        assert2::assert!(s.contains("crabka_operator_up"));
     }
 
     #[test]
@@ -212,21 +211,33 @@ mod tests {
         prometheus_client::encoding::text::encode(&mut s, &registry).unwrap();
 
         // Counter is registered without `_total`; the encoder appends it.
-        assert!(s.contains("crabka_operator_reconciliations_total"));
-        assert!(s.contains("crabka_operator_reconcile_duration_seconds"));
-        assert!(s.contains("crabka_operator_managed_resources"));
-        // Label sets render on the counter.
-        assert!(s.contains("kind=\"Kafka\""));
-        assert!(s.contains("result=\"ok\""));
-        assert!(s.contains("result=\"error\""));
-        assert!(s.contains("result=\"requeue\""));
-        assert!(s.contains("# EOF"), "OpenMetrics terminator missing");
+        for (_name, expected) in [
+            (
+                "reconciliation counter",
+                "crabka_operator_reconciliations_total",
+            ),
+            (
+                "duration histogram",
+                "crabka_operator_reconcile_duration_seconds",
+            ),
+            (
+                "managed resource gauge",
+                "crabka_operator_managed_resources",
+            ),
+            ("kind label", "kind=\"Kafka\""),
+            ("ok label", "result=\"ok\""),
+            ("error label", "result=\"error\""),
+            ("requeue label", "result=\"requeue\""),
+            ("OpenMetrics terminator", "# EOF"),
+        ] {
+            assert2::assert!(s.contains(expected));
+        }
 
         // Re-encoding still works and the gauge reflects the last set value.
         metrics.set_managed_resources("Kafka", 5);
         let mut s2 = String::new();
         prometheus_client::encoding::text::encode(&mut s2, &registry).unwrap();
-        assert!(s2.contains("crabka_operator_managed_resources"));
+        assert2::assert!(s2.contains("crabka_operator_managed_resources"));
     }
 
     #[test]
@@ -244,6 +255,6 @@ mod tests {
                 result: "ok".into(),
             })
             .get();
-        assert!(n == 2, "expected 2 ok reconciles, got {n}");
+        assert2::assert!(n == 2);
     }
 }

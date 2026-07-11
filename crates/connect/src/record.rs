@@ -171,10 +171,15 @@ mod tests {
         )
         .with_timestamp(42)
         .with_header("h", Some(Bytes::from_static(b"hv")));
-        check!(r.timestamp == Some(42));
-        check!(r.headers.len() == 1);
-        check!(r.headers[0].key == "h");
-        check!(r.headers[0].value == Some(Bytes::from_static(b"hv")));
+        check!(
+            (
+                r.timestamp,
+                r.headers
+                    .iter()
+                    .map(|header| (header.key.as_str(), header.value.clone()))
+                    .collect::<Vec<_>>(),
+            ) == (Some(42), vec![("h", Some(Bytes::from_static(b"hv")))])
+        );
     }
 
     #[test]

@@ -569,7 +569,7 @@ fn encode_error_response(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{share_fetch_request::AcknowledgementBatch, share_fetch_response},
@@ -601,7 +601,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -627,7 +627,7 @@ mod tests {
 
         let batches = collect_ack_batches(&partition);
 
-        assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
+        assert2::assert!(batches == vec![(10, 12, vec![0, 1, 1]), (30, 30, Vec::new())]);
     }
 
     #[test]
@@ -758,6 +758,6 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
             },
         ];
-        assert!(responses == expected);
+        assert2::assert!(responses == expected);
     }
 }

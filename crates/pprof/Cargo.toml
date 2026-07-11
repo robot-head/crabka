@@ -18,6 +18,7 @@ categories = ["database-implementations"]
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 addr2line = { workspace = true }
 arrow = { workspace = true }
 async-trait = { workspace = true }
@@ -39,7 +40,6 @@ prost-build = { workspace = true }
 protox = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 mutants = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

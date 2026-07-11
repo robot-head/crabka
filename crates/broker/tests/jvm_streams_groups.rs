@@ -37,7 +37,7 @@ use std::{
     time::Duration,
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
 use crabka_log::LogConfig;
@@ -127,12 +127,9 @@ async fn create_topic(broker: &BrokerHandle, client: &Client, topic: &str, parti
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
     broker.wait_until_partition_present(topic, 0).await;
-    assert!(broker.has_partition(topic, 0).await, "partition never led");
+    assert2::assert!(broker.has_partition(topic, 0).await);
 }
 
 /// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
@@ -150,10 +147,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert!(
-        resp.error_code == 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 /// A single-subtopology topology subscribing to one source topic (stateless).
@@ -234,7 +228,7 @@ async fn join_and_converge(
             member_id = resp.member_id.clone();
             continue;
         }
-        assert!(resp.error_code == 0, "heartbeat error: {resp:?}");
+        assert2::assert!(resp.error_code == 0);
         if active_partition_count(&resp) >= want_active {
             break;
         }
@@ -426,11 +420,6 @@ async fn jvm_streams_groups_admin_round_trips_crabka() {
         (group_needle.as_str(), true),
     ];
     for (needle, expected) in cases {
-        assert!(
-            wire.contains(needle) == expected,
-            "JVM streams-group admin round-trip checkpoint failed: wire log must {} \
-             {needle:?}; wire log:\n{wire}",
-            if expected { "contain" } else { "not contain" },
-        );
+        assert2::assert!(wire.contains(needle) == expected);
     }
 }

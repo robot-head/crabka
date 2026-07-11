@@ -164,7 +164,6 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::assert;
     use datafusion::{
         catalog::MemTable,
         logical_expr::{Extension, LogicalPlan},
@@ -260,6 +259,6 @@ mod tests {
 
         // At grid step 120_000 within a 300_000 lookback, the latest sample for
         // each series (ts=60_000) is selected.
-        assert!(got == vec![("a".to_string(), 2.0), ("b".to_string(), 20.0)]);
+        assert2::assert!(got == vec![("a".to_string(), 2.0), ("b".to_string(), 20.0)]);
     }
 }

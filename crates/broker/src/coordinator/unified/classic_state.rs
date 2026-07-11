@@ -472,7 +472,7 @@ mod classic_state_model;
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -504,9 +504,9 @@ mod tests {
     #[test]
     fn empty_to_preparing_on_first_join() {
         let mut g = Group::new("g");
-        assert!(g.state == GroupState::Empty);
+        assert2::assert!(g.state == GroupState::Empty);
         g.add_member(sample_member("m1"));
-        assert!(g.state == GroupState::PreparingRebalance);
+        assert2::assert!(g.state == GroupState::PreparingRebalance);
     }
 
     #[test]
@@ -515,10 +515,19 @@ mod tests {
         g.add_member(sample_member("m1"));
         g.add_member(sample_member("m2"));
         g.complete_rebalance("range");
-        check!(g.generation_id == 1);
-        check!(g.leader_id.as_deref() == Some("m1"));
-        check!(g.protocol_name.as_deref() == Some("range"));
-        check!(g.state == GroupState::CompletingRebalance);
+        check!(
+            (
+                g.generation_id,
+                g.leader_id.as_deref(),
+                g.protocol_name.as_deref(),
+                g.state,
+            ) == (
+                1,
+                Some("m1"),
+                Some("range"),
+                GroupState::CompletingRebalance,
+            )
+        );
     }
 
     #[test]
@@ -529,8 +538,10 @@ mod tests {
         let mut a = HashMap::new();
         a.insert("m1".into(), Bytes::from_static(b"assignment-bytes"));
         g.install_assignments(a);
-        assert!(g.state == GroupState::Stable);
-        assert!(g.members["m1"].assignment.is_some());
+        assert2::assert!(
+            (g.state, g.members["m1"].assignment.as_deref())
+                == (GroupState::Stable, Some(b"assignment-bytes" as &[u8]))
+        );
     }
 
     #[test]
@@ -538,8 +549,7 @@ mod tests {
         let mut g = Group::new("g");
         g.add_member(sample_member("m1"));
         g.remove_member("m1");
-        assert!(g.state == GroupState::Empty);
-        assert!(g.leader_id.is_none());
+        assert2::assert!((g.state, g.leader_id.as_deref()) == (GroupState::Empty, None));
     }
 
     fn static_member(member_id: &str, instance_id: &str) -> Member {
@@ -550,12 +560,12 @@ mod tests {
     fn static_rejoin_preserves_stable_state_and_assignment() {
         let mut g = Group::new("g");
         let outcome = g.add_member(static_member("m1", "inst-a"));
-        assert!(outcome == AddMemberOutcome::NewMember);
+        assert2::assert!(outcome == AddMemberOutcome::NewMember);
         g.complete_rebalance("range");
         let mut a = HashMap::new();
         a.insert("m1".into(), Bytes::from_static(b"assignment-bytes"));
         g.install_assignments(a);
-        assert!(g.state == GroupState::Stable);
+        assert2::assert!(g.state == GroupState::Stable);
 
         // Rejoin with the same instance id but a fresh `member_id` (the
         // client restarted; KIP-394 bootstrap gave it a new id).
@@ -566,14 +576,21 @@ mod tests {
                     prior_member_id: "m1".into()
                 }
         );
-        // State preserved: no rebalance kicked off.
-        check!(g.state == GroupState::Stable);
-        check!(g.members.len() == 1);
-        // New member inherited the prior assignment.
-        check!(g.members.contains_key("m2"));
-        check!(g.members["m2"].assignment.as_deref() == Some(b"assignment-bytes" as &[u8]));
-        // Index repointed.
-        check!(g.current_member_id_for_instance("inst-a") == Some("m2"));
+        check!(
+            (
+                g.state,
+                g.members.len(),
+                g.members.contains_key("m2"),
+                g.members["m2"].assignment.as_deref(),
+                g.current_member_id_for_instance("inst-a"),
+            ) == (
+                GroupState::Stable,
+                1,
+                true,
+                Some(b"assignment-bytes" as &[u8]),
+                Some("m2"),
+            )
+        );
     }
 
     #[test]
@@ -587,11 +604,14 @@ mod tests {
         g.state = GroupState::Stable;
 
         let dropped = g.expire_dead_members(Instant::now());
-        check!(dropped.is_empty(), "static member must NOT be expired");
-        check!(g.state == GroupState::Stable);
-        check!(g.members.contains_key("m1"));
-        // Index entry retained.
-        check!(g.current_member_id_for_instance("inst-a") == Some("m1"));
+        check!(
+            (
+                dropped,
+                g.state,
+                g.members.contains_key("m1"),
+                g.current_member_id_for_instance("inst-a"),
+            ) == (vec![], GroupState::Stable, true, Some("m1"))
+        );
     }
 
     #[test]
@@ -606,19 +626,25 @@ mod tests {
         g.state = GroupState::Stable;
 
         let dropped = g.expire_dead_members(Instant::now());
-        check!(dropped == vec!["dyn-1".to_string()]);
-        check!(g.state == GroupState::PreparingRebalance);
-        check!(g.members.contains_key("static-1"));
+        check!(
+            (dropped, g.state, g.members.contains_key("static-1"),)
+                == (
+                    vec!["dyn-1".to_string()],
+                    GroupState::PreparingRebalance,
+                    true
+                )
+        );
     }
 
     #[test]
     fn remove_static_member_clears_index() {
         let mut g = Group::new("g");
         g.add_member(static_member("m1", "inst-a"));
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m1"));
+        assert2::assert!(g.current_member_id_for_instance("inst-a") == Some("m1"));
         g.remove_member("m1");
-        assert!(g.current_member_id_for_instance("inst-a") == None);
-        assert!(g.state == GroupState::Empty);
+        assert2::assert!(
+            (g.current_member_id_for_instance("inst-a"), g.state) == (None, GroupState::Empty)
+        );
     }
 
     #[test]
@@ -629,73 +655,78 @@ mod tests {
         let mut g = Group::new("g");
         g.add_member(static_member("m1", "inst-a"));
         g.add_member(static_member("m2", "inst-a"));
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m2"));
+        assert2::assert!(g.current_member_id_for_instance("inst-a") == Some("m2"));
         // m1 is no longer in members (replaced), so this is a no-op.
         g.remove_member("m1");
-        assert!(g.current_member_id_for_instance("inst-a") == Some("m2"));
-        assert!(g.members.contains_key("m2"));
+        assert2::assert!(
+            (
+                g.current_member_id_for_instance("inst-a"),
+                g.members.contains_key("m2"),
+            ) == (Some("m2"), true)
+        );
     }
 
     #[test]
-    fn select_protocol_single_member_picks_first() {
-        let mut members = HashMap::new();
-        members.insert(
-            "m1".to_string(),
-            member_with_protocols("m1", vec![("range", b""), ("cooperative_sticky", b"")]),
-        );
-        assert!(select_protocol(&members).as_deref() == Some("range"));
-    }
+    fn select_protocol_scenarios() {
+        let cases = [
+            (
+                "single member picks first",
+                vec![(
+                    "m1",
+                    vec![("range", b"" as &[u8]), ("cooperative_sticky", b"")],
+                )],
+                Some("range"),
+            ),
+            (
+                "empty intersection",
+                vec![
+                    ("m1", vec![("range", b"" as &[u8])]),
+                    ("m2", vec![("cooperative_sticky", b"" as &[u8])]),
+                ],
+                None,
+            ),
+            (
+                "maximum votes",
+                vec![
+                    (
+                        "m1",
+                        vec![("range", b"" as &[u8]), ("cooperative_sticky", b"")],
+                    ),
+                    (
+                        "m2",
+                        vec![("range", b"" as &[u8]), ("cooperative_sticky", b"")],
+                    ),
+                    (
+                        "m3",
+                        vec![("cooperative_sticky", b"" as &[u8]), ("range", b"")],
+                    ),
+                ],
+                Some("range"),
+            ),
+            (
+                "lexicographic tie break",
+                vec![
+                    (
+                        "m1",
+                        vec![("range", b"" as &[u8]), ("cooperative_sticky", b"")],
+                    ),
+                    (
+                        "m2",
+                        vec![("cooperative_sticky", b"" as &[u8]), ("range", b"")],
+                    ),
+                ],
+                Some("cooperative_sticky"),
+            ),
+            ("empty members", vec![], None),
+        ];
 
-    #[test]
-    fn select_protocol_intersection_empty_returns_none() {
-        let mut members = HashMap::new();
-        members.insert(
-            "m1".to_string(),
-            member_with_protocols("m1", vec![("range", b"")]),
-        );
-        members.insert(
-            "m2".to_string(),
-            member_with_protocols("m2", vec![("cooperative_sticky", b"")]),
-        );
-        assert!(select_protocol(&members) == None);
-    }
-
-    #[test]
-    fn select_protocol_max_votes_wins() {
-        let mut members = HashMap::new();
-        members.insert(
-            "m1".to_string(),
-            member_with_protocols("m1", vec![("range", b""), ("cooperative_sticky", b"")]),
-        );
-        members.insert(
-            "m2".to_string(),
-            member_with_protocols("m2", vec![("range", b""), ("cooperative_sticky", b"")]),
-        );
-        members.insert(
-            "m3".to_string(),
-            member_with_protocols("m3", vec![("cooperative_sticky", b""), ("range", b"")]),
-        );
-        assert!(select_protocol(&members).as_deref() == Some("range"));
-    }
-
-    #[test]
-    fn select_protocol_tie_breaks_lexicographically() {
-        let mut members = HashMap::new();
-        members.insert(
-            "m1".to_string(),
-            member_with_protocols("m1", vec![("range", b""), ("cooperative_sticky", b"")]),
-        );
-        members.insert(
-            "m2".to_string(),
-            member_with_protocols("m2", vec![("cooperative_sticky", b""), ("range", b"")]),
-        );
-        assert!(select_protocol(&members).as_deref() == Some("cooperative_sticky"));
-    }
-
-    #[test]
-    fn select_protocol_empty_members_returns_none() {
-        let members = HashMap::new();
-        assert!(select_protocol(&members) == None);
+        for (_case, member_specs, expected) in cases {
+            let members = member_specs
+                .into_iter()
+                .map(|(id, protocols)| (id.to_string(), member_with_protocols(id, protocols)))
+                .collect();
+            assert2::assert!(select_protocol(&members).as_deref() == expected);
+        }
     }
 
     #[test]
@@ -710,8 +741,12 @@ mod tests {
             vec![("range", b"r2"), ("cooperative_sticky", b"c2")],
         ));
         g.resolve_selected_protocol_metadata("cooperative_sticky");
-        assert!(g.members["m1"].protocol_metadata.as_ref() == b"c1");
-        assert!(g.members["m2"].protocol_metadata.as_ref() == b"c2");
+        assert2::assert!(
+            (
+                g.members["m1"].protocol_metadata.as_ref(),
+                g.members["m2"].protocol_metadata.as_ref(),
+            ) == (b"c1" as &[u8], b"c2" as &[u8])
+        );
     }
 
     #[test]
@@ -724,8 +759,7 @@ mod tests {
         g.complete_rebalance("range");
         g.state = GroupState::Stable;
         let dropped = g.expire_dead_members(Instant::now());
-        assert!(dropped == vec!["m1".to_string()]);
-        assert!(g.state == GroupState::Empty);
+        assert2::assert!((dropped, g.state) == (vec!["m1".to_string()], GroupState::Empty));
     }
 
     #[test]
@@ -737,16 +771,28 @@ mod tests {
         g.add_member(m);
         g.rebalance_deadline = Some(Instant::now() + Duration::from_secs(3));
         g.rebalance_from_empty = true;
-        assert!(g.joined_this_round.contains("m1"));
+        assert2::assert!(g.joined_this_round.contains("m1"));
 
         let dropped = g.expire_dead_members(Instant::now());
 
-        check!(dropped == vec!["m1".to_string()]);
-        check!(g.state == GroupState::Empty);
-        check!(g.leader_id.is_none());
-        check!(g.protocol_name.is_none());
-        check!(g.rebalance_deadline.is_none());
-        check!(g.joined_this_round.is_empty());
-        check!(!g.rebalance_from_empty);
+        check!(
+            (
+                dropped,
+                g.state,
+                g.leader_id,
+                g.protocol_name,
+                g.rebalance_deadline,
+                g.joined_this_round,
+                g.rebalance_from_empty,
+            ) == (
+                vec!["m1".to_string()],
+                GroupState::Empty,
+                None,
+                None,
+                None,
+                std::collections::HashSet::new(),
+                false,
+            )
+        );
     }
 }

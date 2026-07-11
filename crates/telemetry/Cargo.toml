@@ -24,6 +24,7 @@ workspace = true
 heap-profiling = ["dep:jemalloc_pprof"]
 
 [dependencies]
+assert2 = { workspace = true }
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 opentelemetry = { workspace = true, features = ["trace"] }
 opentelemetry_sdk = { workspace = true, features = ["trace"] }
@@ -50,7 +51,6 @@ flate2 = { workspace = true }
 jemalloc_pprof = { version = "0.9", optional = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 mutants = { workspace = true }
 tower = { workspace = true, features = ["util"] }
 tokio = { workspace = true, features = ["io-util", "net", "rt", "time", "macros", "rt-multi-thread"] }

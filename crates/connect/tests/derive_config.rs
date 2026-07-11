@@ -30,17 +30,17 @@ async fn derive_builds_def_and_typed_config() {
         .map(|key| (key.name.as_str(), key.kind, key.required))
         .collect::<Vec<_>>();
 
-    for expected in [
-        ("database_url", ConfigKind::String, true),
-        ("password", ConfigKind::Secret, true),
-        ("rotation_token", ConfigKind::Secret, true),
-        ("schema", ConfigKind::String, false),
-        ("max_batch", ConfigKind::UnsignedInteger, false),
-        ("topics", ConfigKind::StringList, true),
-        ("omitted_note", ConfigKind::String, false),
-    ] {
-        assert!(keys.contains(&expected), "missing key {expected:?}");
-    }
+    assert2::assert!(
+        keys == vec![
+            ("database_url", ConfigKind::String, true),
+            ("max_batch", ConfigKind::UnsignedInteger, false),
+            ("omitted_note", ConfigKind::String, false),
+            ("password", ConfigKind::Secret, true),
+            ("rotation_token", ConfigKind::Secret, true),
+            ("schema", ConfigKind::String, false),
+            ("topics", ConfigKind::StringList, true),
+        ]
+    );
 
     let raw = serde_json::Map::from_iter([
         (
@@ -64,17 +64,17 @@ async fn derive_builds_def_and_typed_config() {
 
     let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
-    assert_eq!(config.database_url, "postgres://localhost/app");
-    assert_eq!(config.password.expose_secret(), "secret");
-    assert_eq!(
+    assert2::assert!(config.database_url.as_str() == "postgres://localhost/app");
+    assert2::assert!(config.password.expose_secret() == "secret");
+    assert2::assert!(
         config
             .rotation_token
             .as_ref()
-            .map(SecretString::expose_secret),
-        Some("rotate")
+            .map(SecretString::expose_secret)
+            == Some("rotate")
     );
-    assert_eq!(config.schema, "public");
-    assert_eq!(config.max_batch, 500);
-    assert_eq!(config.topic_names, vec!["a", "b"]);
-    assert_eq!(config.omitted_note, None);
+    assert2::assert!(config.schema.as_str() == "public");
+    assert2::assert!(config.max_batch == 500);
+    assert2::assert!(config.topic_names == vec!["a".to_string(), "b".to_string()]);
+    assert2::assert!(config.omitted_note == None);
 }

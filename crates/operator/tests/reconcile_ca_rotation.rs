@@ -8,7 +8,7 @@
 //! reconciler wiring.
 #![allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 
-use assert2::{assert, check};
+use assert2::check;
 #[path = "shared/mod.rs"]
 mod shared;
 
@@ -288,8 +288,8 @@ async fn cluster_ca_within_renewal_window_renews_same_key() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    check!(rot["status"] == "True", "body = {sbody}");
-    check!(rot["reason"] == "RenewingCert", "body = {sbody}");
+    assert2::assert!(rot["status"].as_str() == Some("True"));
+    assert2::assert!(rot["reason"].as_str() == Some("RenewingCert"));
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }
@@ -384,10 +384,7 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("cluster-ca key PATCH");
     let kbody: Value = serde_json::from_slice(key_patch.body()).expect("key PATCH JSON");
     for k in ["ca.key", "ca.key.next", "ca.crt.next"] {
-        assert!(
-            kbody["data"][k].is_string(),
-            "key Secret PATCH must carry {k}; body = {kbody}"
-        );
+        assert2::assert!(kbody["data"][k].is_string());
     }
 
     // Cert Secret PATCH must hold a 2-block trust bundle + the trust phase.
@@ -401,13 +398,10 @@ async fn force_replace_key_starts_staged_rotation() {
         })
         .expect("cluster-ca-cert PATCH");
     let cbody: Value = serde_json::from_slice(cert_patch.body()).expect("cert PATCH JSON");
-    assert!(
-        count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")) == 2,
-        "trust bundle must grow to old+new; body = {cbody}"
-    );
-    assert!(
-        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"] == "key-replace-trust",
-        "phase must be key-replace-trust; body = {cbody}"
+    assert2::assert!(count_cert_blocks(cbody["data"]["ca.crt"].as_str().expect("ca.crt")) == 2);
+    assert2::assert!(
+        cbody["metadata"]["annotations"]["crabka.io/ca-rotation-phase"].as_str()
+            == Some("key-replace-trust")
     );
 
     // The force annotation must be stripped (null) via a metadata PATCH.
@@ -420,10 +414,7 @@ async fn force_replace_key_starts_staged_rotation() {
         })
         .expect("metadata PATCH");
     let mbody: Value = serde_json::from_slice(meta_patch.body()).expect("meta PATCH JSON");
-    assert!(
-        mbody["metadata"]["annotations"]["crabka.io/force-replace-ca-key"].is_null(),
-        "force annotation must be stripped; body = {mbody}"
-    );
+    assert2::assert!(mbody["metadata"]["annotations"]["crabka.io/force-replace-ca-key"].is_null());
 
     // CaRotation=True/DistributingTrust.
     let status_patch = observed
@@ -436,8 +427,8 @@ async fn force_replace_key_starts_staged_rotation() {
         .expect("status PATCH");
     let sbody: Value = serde_json::from_slice(status_patch.body()).expect("status JSON");
     let rot = status_condition(&sbody, "CaRotation");
-    check!(rot["status"] == "True", "body = {sbody}");
-    check!(rot["reason"] == "DistributingTrust", "body = {sbody}");
+    assert2::assert!(rot["status"].as_str() == Some("True"));
+    assert2::assert!(rot["reason"].as_str() == Some("DistributingTrust"));
 
     check!(state.remaining_rules() == 0, "all rules consumed");
 }

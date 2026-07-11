@@ -2437,7 +2437,7 @@ mod tests {
     };
 
     use arc_swap::ArcSwap;
-    use assert2::{assert, check};
+    use assert2::check;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -2760,16 +2760,16 @@ mod tests {
     #[tokio::test]
     async fn operational_probes_return_plain_text() {
         let (status, body) = get_text("/api/echo").await;
-        assert!(status == StatusCode::OK);
-        assert!(body == "echo");
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(body == "echo");
 
         let (status, body) = get_text("/ready").await;
-        assert!(status == StatusCode::OK);
-        assert!(body == "ready");
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(body == "ready");
 
         let (status, body) = get_text("/status").await;
-        assert!(status == StatusCode::OK);
-        assert!(body == "ready");
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(body == "ready");
     }
 
     #[tokio::test]
@@ -2778,8 +2778,8 @@ mod tests {
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20rate()&start=0&end=1&step=1",
         )
         .await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "series": [{
                     "labels": [],
@@ -2804,8 +2804,8 @@ mod tests {
             "/api/metrics/query_range?q=%7B%20.svc%20%21%3D%20nil%20%7D%20%7C%20count_over_time()&start=0&end=1&step=1",
         )
         .await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "series": [{
                     "labels": [],
@@ -2846,8 +2846,8 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "series": [{
                     "labels": [],
@@ -2881,8 +2881,8 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -2902,8 +2902,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::OK);
-        assert!(body["series"][0]["exemplars"] == json!([]));
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(body["series"][0]["exemplars"] == json!([]));
     }
 
     #[tokio::test]
@@ -2941,8 +2941,8 @@ mod tests {
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(body["series"][0]["exemplars"].as_array().unwrap().len() == 1);
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(body["series"][0]["exemplars"].as_array().unwrap().len() == 1);
     }
 
     #[tokio::test]
@@ -2952,8 +2952,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body["series"][0]["samples"]
                 == json!([
                     {"timestampMs": "0", "value": 2.0},
@@ -2982,8 +2982,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter time");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter time");
     }
 
     #[tokio::test]
@@ -2993,8 +2993,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "end must be >= start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
@@ -3004,8 +3004,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "step must be positive");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "step must be positive");
     }
 
     #[tokio::test]
@@ -3017,8 +3017,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::OK);
-        assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3030,8 +3030,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::OK);
-        assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(!body["series"][0]["samples"].as_array().unwrap().is_empty());
     }
 
     #[tokio::test]
@@ -3041,8 +3041,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "missing query parameter start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "missing query parameter start");
     }
 
     #[tokio::test]
@@ -3052,8 +3052,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "missing query parameter end");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "missing query parameter end");
     }
 
     #[tokio::test]
@@ -3063,20 +3063,20 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "end must be >= start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
     async fn search_requires_start_and_end() {
         let (status, body) = get_text("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D").await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "missing query parameter start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "missing query parameter start");
 
         let (status, body) =
             get_text("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0").await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "missing query parameter end");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "missing query parameter end");
     }
 
     #[tokio::test]
@@ -3100,8 +3100,8 @@ mod tests {
     async fn search_rejects_invalid_legacy_tags_parameter() {
         let (status, body) = get_text("/api/search?tags=svc&start=0&end=10").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter tags");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter tags");
     }
 
     #[tokio::test]
@@ -3134,8 +3134,8 @@ mod tests {
     async fn search_parses_start_end_as_epoch_seconds() {
         let (status, body) =
             get_json("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1").await;
-        assert!(status == StatusCode::OK);
-        assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(body["traces"].as_array().unwrap().len() == 1);
     }
 
     #[tokio::test]
@@ -3146,9 +3146,9 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::OK);
+        assert2::assert!(status == StatusCode::OK);
         let traces = body["traces"].as_array().unwrap();
-        assert!(traces.len() == 1);
+        assert2::assert!(traces.len() == 1);
         check!(traces[0]["traceID"] == "02020202020202020202020202020202");
         check!(traces[0]["rootTraceName"] == "second-rg");
     }
@@ -3158,8 +3158,8 @@ mod tests {
         let (status, body) =
             get_text("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=2&end=1").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "end must be >= start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
@@ -3167,14 +3167,14 @@ mod tests {
         let (status, body) =
             get_text("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&limit=bogus")
                 .await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter limit");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter limit");
 
         let (status, body) =
             get_text("/api/search?q=%7B%20.svc%20%21%3D%20nil%20%7D&start=0&end=1&spss=bogus")
                 .await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter spss");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter spss");
     }
 
     #[tokio::test]
@@ -3189,8 +3189,8 @@ mod tests {
         )
         .await;
 
-        assert!(status == StatusCode::TOO_MANY_REQUESTS);
-        assert!(body == "max traces per search exceeded");
+        assert2::assert!(status == StatusCode::TOO_MANY_REQUESTS);
+        assert2::assert!(body == "max traces per search exceeded");
     }
 
     #[tokio::test]
@@ -3256,15 +3256,15 @@ overrides:
             .await
             .unwrap();
 
-        assert!(tight.status() == StatusCode::BAD_REQUEST);
+        assert2::assert!(tight.status() == StatusCode::BAD_REQUEST);
         let body = tight.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&body).unwrap();
-        assert!(
+        assert2::assert!(
             body["error"]
                 .as_str()
                 .is_some_and(|message| message.contains("max traces per search"))
         );
-        assert!(loose.status() == StatusCode::OK);
+        assert2::assert!(loose.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -3322,14 +3322,10 @@ overrides:
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
 
-        assert!(
-            status == StatusCode::OK,
-            "{}",
-            String::from_utf8_lossy(&bytes)
-        );
+        assert2::assert!(status == StatusCode::OK);
         let body: Value = serde_json::from_slice(&bytes).unwrap();
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["traces"][0]["rootTraceName"] == "inside");
+        assert2::assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert2::assert!(body["traces"][0]["rootTraceName"].as_str() == Some("inside"));
     }
 
     #[tokio::test]
@@ -3350,15 +3346,13 @@ overrides:
             .unwrap();
         let status = resp.status();
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
-        assert!(
-            status == StatusCode::OK,
-            "{}",
-            String::from_utf8_lossy(&bytes)
-        );
+        assert2::assert!(status == StatusCode::OK);
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(body["traces"].as_array().unwrap().len() == 1);
-        assert!(body["traces"][0]["traceID"] == "09090909090909090909090909090909");
+        assert2::assert!(body["traces"].as_array().unwrap().len() == 1);
+        assert2::assert!(
+            body["traces"][0]["traceID"].as_str() == Some("09090909090909090909090909090909")
+        );
     }
 
     #[tokio::test]
@@ -3563,8 +3557,8 @@ overrides:
     async fn search_returns_tempo_search_shape() {
         let (status, body) =
             get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0&end=10").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body["traces"]
                 == json!([{
                     "traceID": "09090909090909090909090909090909",
@@ -3601,7 +3595,7 @@ overrides:
         // even on a successful multi-job search).
         let (status, body) =
             get_json("/api/search?q=%7B%20.svc%20%3D%20%22b%22%20%7D&start=0&end=10").await;
-        assert!(status == StatusCode::OK);
+        assert2::assert!(status == StatusCode::OK);
         let metrics = &body["metrics"];
         for key in [
             "completedJobs",
@@ -3616,8 +3610,8 @@ overrides:
     #[tokio::test]
     async fn by_id_returns_tempo_trace_shape() {
         let (status, body) = get_json("/api/v2/traces/09090909090909090909090909090909").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "trace": {
                     "resourceSpans": [{
@@ -3665,10 +3659,7 @@ overrides:
         // protobuf trace; an absent (nil) status panics it and 500s the trace
         // view. Every span must carry a Status, including STATUS_CODE_UNSET (0).
         for code in [0, 1, 2] {
-            assert!(
-                otlp_status(code, "").code == code,
-                "code {code} must emit status"
-            );
+            assert2::assert!(otlp_status(code, "").code == code);
         }
         let unset = otlp_status(0, "");
         check!(unset.code == 0 && unset.message.is_empty());
@@ -3720,7 +3711,7 @@ overrides:
 
         let body = trace_json(&trace, 10);
 
-        assert!(
+        assert2::assert!(
             body["trace"]["resourceSpans"][0]["resource"]["attributes"]
                 .as_array()
                 .unwrap()
@@ -3764,7 +3755,7 @@ overrides:
 
         let body = trace_json(&trace, 10);
 
-        assert!(
+        assert2::assert!(
             body["trace"]["resourceSpans"][0]["resource"]["attributes"]
                 == json!([
                     {
@@ -3841,7 +3832,7 @@ overrides:
         let body = trace_json(&trace, 10);
         let resource_spans = body["trace"]["resourceSpans"].as_array().unwrap();
 
-        assert!(resource_spans.len() == 2);
+        assert2::assert!(resource_spans.len() == 2);
         check!(
             resource_spans[0]["resource"]["attributes"]
                 .as_array()
@@ -3872,7 +3863,7 @@ overrides:
 
         let body = attrs_json(&attrs);
 
-        assert!(
+        assert2::assert!(
             body == json!([
                 {
                     "key": "http.method",
@@ -3928,8 +3919,8 @@ overrides:
         let data = TracesData::decode(bytes.as_slice()).unwrap();
         let attrs = &data.resource_spans[0].resource.as_ref().unwrap().attributes;
 
-        assert!(attrs.len() == 2);
-        assert!(attrs[0].key == "deployment.zone");
+        assert2::assert!(attrs.len() == 2);
+        assert2::assert!(attrs[0].key.as_str() == "deployment.zone");
         let Some(OtlpValue::ArrayValue(array)) = attrs[0]
             .value
             .as_ref()
@@ -3937,7 +3928,7 @@ overrides:
         else {
             panic!("expected deployment.zone array value");
         };
-        assert!(
+        assert2::assert!(
             array
                 .values
                 .iter()
@@ -3948,7 +3939,7 @@ overrides:
                     Some(&OtlpValue::StringValue("b".into())),
                 ]
         );
-        assert!(attrs[1].key == "service.name");
+        assert2::assert!(attrs[1].key == "service.name");
     }
 
     #[tokio::test]
@@ -3976,8 +3967,8 @@ overrides:
 
         check!(status == StatusCode::OK);
         check!(content_type.as_deref() == Some("application/protobuf"));
-        assert!(data.resource_spans.len() == 1);
-        assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
+        assert2::assert!(data.resource_spans.len() == 1);
+        assert2::assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
         check!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
     }
 
@@ -4042,7 +4033,7 @@ overrides:
 
         check!(status == StatusCode::OK);
         check!(content_type.as_deref() == Some("application/protobuf"));
-        assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
+        assert2::assert!(data.resource_spans[0].scope_spans[0].spans.len() == 2);
         check!(data.resource_spans[0].scope_spans[0].spans[0].trace_id == vec![9; 16]);
     }
 
@@ -4066,8 +4057,8 @@ overrides:
             .map(str::to_string);
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
 
-        assert!(content_type.as_deref() == Some("application/protobuf"));
-        assert!(TracesData::decode(bytes).is_ok());
+        assert2::assert!(content_type.as_deref() == Some("application/protobuf"));
+        assert2::assert!(TracesData::decode(bytes).is_ok());
     }
 
     #[tokio::test]
@@ -4115,8 +4106,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body["trace"]["resourceSpans"][0]["scopeSpans"][0]["scope"]
                 == json!({
                     "name": "tracer",
@@ -4294,13 +4285,13 @@ overrides:
     async fn by_id_rejects_invalid_start_and_end() {
         let (status, body) =
             get_text("/api/v2/traces/09090909090909090909090909090909?start=bogus").await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter start");
 
         let (status, body) =
             get_text("/api/v2/traces/09090909090909090909090909090909?end=bogus").await;
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter end");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter end");
     }
 
     #[tokio::test]
@@ -4308,8 +4299,8 @@ overrides:
         let (status, body) =
             get_text("/api/v2/traces/09090909090909090909090909090909?start=2&end=1").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "end must be >= start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "end must be >= start");
     }
 
     #[tokio::test]
@@ -4358,8 +4349,8 @@ overrides:
     #[tokio::test]
     async fn search_tags_returns_legacy_tempo_shape() {
         let (status, body) = get_json("/api/search/tags?scope=span").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagNames": ["svc"],
                 "metrics": {
@@ -4427,8 +4418,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagNames": ["env", "svc", "target"],
                 "metrics": {
@@ -4481,8 +4472,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagNames": ["instrumentation:name", "instrumentation:version"],
                 "metrics": {
@@ -4496,23 +4487,23 @@ overrides:
     async fn search_tags_rejects_invalid_scope_parameter() {
         let (status, body) = get_text("/api/search/tags?scope=bogus").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid scope");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid scope");
     }
 
     #[tokio::test]
     async fn search_tags_rejects_invalid_time_bounds() {
         let (status, body) = get_text("/api/search/tags?start=bogus").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter start");
     }
 
     #[tokio::test]
     async fn search_tags_v2_returns_scoped_tempo_shape() {
         let (status, body) = get_json("/api/v2/search/tags").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [
                     {
@@ -4550,8 +4541,8 @@ overrides:
     #[tokio::test]
     async fn search_tags_v2_respects_scope_parameter() {
         let (status, body) = get_json("/api/v2/search/tags?scope=span").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [{
                     "name": "span",
@@ -4567,8 +4558,8 @@ overrides:
     #[tokio::test]
     async fn search_tags_v2_returns_intrinsic_scope() {
         let (status, body) = get_json("/api/v2/search/tags?scope=intrinsic").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [{
                     "name": "intrinsic",
@@ -4601,8 +4592,8 @@ overrides:
     #[tokio::test]
     async fn search_tags_v2_returns_event_scope() {
         let (status, body) = get_json("/api/v2/search/tags?scope=event").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [{
                     "name": "event",
@@ -4618,8 +4609,8 @@ overrides:
     #[tokio::test]
     async fn search_tags_v2_returns_link_scope() {
         let (status, body) = get_json("/api/v2/search/tags?scope=link").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [{
                     "name": "link",
@@ -4635,8 +4626,8 @@ overrides:
     #[tokio::test]
     async fn search_tags_v2_returns_instrumentation_scope() {
         let (status, body) = get_json("/api/v2/search/tags?scope=instrumentation").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [{
                     "name": "instrumentation",
@@ -4653,16 +4644,16 @@ overrides:
     async fn search_tags_v2_rejects_invalid_scope_parameter() {
         let (status, body) = get_text("/api/v2/search/tags?scope=bogus").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid scope");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid scope");
     }
 
     #[tokio::test]
     async fn search_tags_v2_rejects_invalid_time_bounds() {
         let (status, body) = get_text("/api/v2/search/tags?start=bogus").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter start");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter start");
     }
 
     #[tokio::test]
@@ -4723,8 +4714,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [{
                     "name": "span",
@@ -4790,8 +4781,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "scopes": [
                     {
@@ -4847,15 +4838,15 @@ overrides:
     async fn search_tags_v2_rejects_invalid_query_filter_as_bad_request() {
         let (status, body) = get_text("/api/v2/search/tags?q=%7B").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body.contains("parse error"));
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body.contains("parse error"));
     }
 
     #[tokio::test]
     async fn search_tag_values_returns_legacy_tempo_shape() {
         let (status, body) = get_json("/api/search/tag/service.name/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": ["svc-a"],
                 "metrics": {
@@ -4926,8 +4917,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": ["also-kept", "kept"],
                 "metrics": {
@@ -4941,15 +4932,15 @@ overrides:
     async fn search_tag_values_rejects_invalid_time_bounds() {
         let (status, body) = get_text("/api/search/tag/service.name/values?end=bogus").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter end");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter end");
     }
 
     #[tokio::test]
     async fn search_tag_values_v2_returns_typed_tempo_shape() {
         let (status, body) = get_json("/api/v2/search/tag/.svc/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -4971,8 +4962,8 @@ overrides:
     #[tokio::test]
     async fn search_tag_values_v2_accepts_grafana_unscoped_intrinsic_aliases() {
         let (status, body) = get_json("/api/v2/search/tag/name/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -4987,8 +4978,8 @@ overrides:
         );
 
         let (status, body) = get_json("/api/v2/search/tag/status/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5006,8 +4997,8 @@ overrides:
     #[tokio::test]
     async fn search_tag_values_v2_accepts_resource_scope_prefix() {
         let (status, body) = get_json("/api/v2/search/tag/resource.service.name/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5062,7 +5053,7 @@ overrides:
             _start_ns: i64,
             _end_ns: i64,
         ) -> Result<Vec<TypedValue>, TraceqlError> {
-            assert!(tag == "resource.service.name");
+            assert2::assert!(tag == "resource.service.name");
             Ok(vec![TypedValue {
                 type_: "string".into(),
                 value: "crabka-broker".into(),
@@ -5111,8 +5102,8 @@ overrides:
     #[tokio::test]
     async fn search_tag_values_v2_returns_intrinsic_values() {
         let (status, body) = get_json("/api/v2/search/tag/span:name/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5125,8 +5116,8 @@ overrides:
         );
 
         let (status, body) = get_json("/api/v2/search/tag/trace:rootService/values").await;
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5143,16 +5134,16 @@ overrides:
     async fn search_tag_values_v2_rejects_invalid_query_filter_as_bad_request() {
         let (status, body) = get_text("/api/v2/search/tag/.svc/values?q=%7B").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body.contains("parse error"));
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body.contains("parse error"));
     }
 
     #[tokio::test]
     async fn search_tag_values_v2_rejects_invalid_time_bounds() {
         let (status, body) = get_text("/api/v2/search/tag/.svc/values?end=bogus").await;
 
-        assert!(status == StatusCode::BAD_REQUEST);
-        assert!(body == "invalid query parameter end");
+        assert2::assert!(status == StatusCode::BAD_REQUEST);
+        assert2::assert!(body == "invalid query parameter end");
     }
 
     #[tokio::test]
@@ -5211,8 +5202,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5244,8 +5235,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5306,8 +5297,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5368,8 +5359,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5428,8 +5419,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5464,8 +5455,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "duration",
@@ -5494,8 +5485,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "int",
@@ -5524,8 +5515,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5560,8 +5551,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5596,8 +5587,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5631,8 +5622,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5687,8 +5678,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5716,8 +5707,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5773,8 +5764,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5803,8 +5794,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5833,8 +5824,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5862,8 +5853,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [{
                     "type": "string",
@@ -5914,8 +5905,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
-        assert!(
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(
             body == json!({
                 "tagValues": [
                     {
@@ -5985,9 +5976,9 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
+        assert2::assert!(status == StatusCode::OK);
         let values = body["tagValues"].as_array().unwrap();
-        assert!(values.len() == 1);
+        assert2::assert!(values.len() == 1);
     }
 
     #[tokio::test]
@@ -6027,8 +6018,8 @@ overrides:
         let bytes = resp.into_body().collect().await.unwrap().to_bytes();
         let body: Value = serde_json::from_slice(&bytes).unwrap();
 
-        assert!(status == StatusCode::OK);
+        assert2::assert!(status == StatusCode::OK);
         let values = body["tagValues"].as_array().unwrap();
-        assert!(values.len() == 25);
+        assert2::assert!(values.len() == 25);
     }
 }

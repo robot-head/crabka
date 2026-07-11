@@ -56,17 +56,22 @@ pub trait BlockIndex: Default + Serialize + DeserializeOwned {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::{DataType, Field, Schema};
-    use assert2::assert;
 
     use super::*;
     use crate::block::validate_against;
 
     #[test]
     fn series_declaration_lists_mandatory_columns() {
-        let decl = series_block_schema();
-        let names: Vec<&str> = decl.required.iter().map(|c| c.name.as_str()).collect();
-        assert!(names == vec!["series_fingerprint", "timestamp"]);
-        assert!(decl.sort_key == vec!["series_fingerprint".to_string(), "timestamp".to_string()]);
+        assert2::assert!(
+            series_block_schema()
+                == BlockSchema {
+                    required: vec![
+                        RequiredColumn::new("series_fingerprint", DataType::UInt64, false),
+                        RequiredColumn::new("timestamp", DataType::Int64, false),
+                    ],
+                    sort_key: vec!["series_fingerprint".to_string(), "timestamp".to_string()],
+                }
+        );
     }
 
     #[test]
@@ -77,7 +82,7 @@ mod tests {
             Field::new("timestamp", DataType::Int64, false),
             Field::new("line", DataType::Utf8, true),
         ]);
-        assert!(validate_against(&schema, &decl).is_ok());
+        assert2::assert!(validate_against(&schema, &decl).is_ok());
     }
 
     #[test]
@@ -87,6 +92,6 @@ mod tests {
             Field::new("series_fingerprint", DataType::UInt64, false),
             Field::new("timestamp", DataType::Utf8, false),
         ]);
-        assert!(validate_against(&schema, &decl).is_err());
+        assert2::assert!(validate_against(&schema, &decl).is_err());
     }
 }

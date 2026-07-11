@@ -869,7 +869,7 @@ impl Consumer {
 
 #[cfg(test)]
 mod security_arg_tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_client_core::{
         ClientError, MockBroker,
         security::{ClientSecurity, SaslCredentials},
@@ -886,6 +886,7 @@ mod security_arg_tests {
     use crabka_security::ListenerProtocol;
 
     use super::*;
+    use crate::builder::DecodedSubscription;
 
     fn api_versions_for_startup_cleanup() -> Vec<u8> {
         let resp = ApiVersionsResponse {
@@ -956,7 +957,7 @@ mod security_arg_tests {
         .await;
 
         mock.stop();
-        assert!(saw_leave.load(Ordering::SeqCst));
+        assert2::assert!(saw_leave.load(Ordering::SeqCst));
     }
 
     #[test]
@@ -964,10 +965,15 @@ mod security_arg_tests {
         let bytes = initial_subscription_bytes(&["topic".into()], Some("rack-a"));
         let decoded = decode_subscription(&bytes);
 
-        check!(decoded.topics == vec!["topic"]);
-        check!(decoded.owned.is_empty());
-        check!(decoded.generation_id == -1);
-        check!(decoded.rack_id.as_deref() == Some("rack-a"));
+        check!(
+            decoded
+                == DecodedSubscription {
+                    topics: vec!["topic".into()],
+                    owned: Vec::new(),
+                    generation_id: -1,
+                    rack_id: Some("rack-a".into()),
+                }
+        );
     }
 
     #[test]
@@ -983,7 +989,7 @@ mod security_arg_tests {
             60_000,
         );
 
-        assert!(
+        assert2::assert!(
             req == JoinGroupRequest {
                 group_id: "group-a".into(),
                 session_timeout_ms: 45_000,
@@ -1004,39 +1010,39 @@ mod security_arg_tests {
 
     #[test]
     fn first_join_member_id_accepts_required_or_success_and_rejects_errors() {
-        let required = JoinGroupResponse {
-            error_code: 79,
-            member_id: "member-a".into(),
-            ..Default::default()
-        };
-        assert!(first_join_member_id(&required).unwrap() == "member-a");
-
-        let success = JoinGroupResponse {
-            error_code: 0,
-            member_id: "member-b".into(),
-            ..Default::default()
-        };
-        assert!(first_join_member_id(&success).unwrap() == "member-b");
-
-        let server = JoinGroupResponse {
-            error_code: 42,
-            member_id: "member-c".into(),
-            ..Default::default()
-        };
-        assert!(matches!(
-            first_join_member_id(&server),
-            Err(ConsumerError::Server(42))
-        ));
-
-        let empty_member = JoinGroupResponse {
-            error_code: 0,
-            member_id: String::new(),
-            ..Default::default()
-        };
-        assert!(matches!(
-            first_join_member_id(&empty_member),
-            Err(ConsumerError::RebalanceFailed(_))
-        ));
+        enum Expected<'a> {
+            Member(&'a str),
+            Server(i16),
+            RebalanceFailed,
+        }
+        for (_name, error_code, member_id, expected) in [
+            (
+                "member id required",
+                79,
+                "member-a",
+                Expected::Member("member-a"),
+            ),
+            ("success", 0, "member-b", Expected::Member("member-b")),
+            ("server error", 42, "member-c", Expected::Server(42)),
+            ("empty member", 0, "", Expected::RebalanceFailed),
+        ] {
+            let response = JoinGroupResponse {
+                error_code,
+                member_id: member_id.into(),
+                ..Default::default()
+            };
+            let actual = first_join_member_id(&response);
+            let matches = match expected {
+                Expected::Member(expected) => matches!(actual, Ok(actual) if actual == expected),
+                Expected::Server(expected) => {
+                    matches!(actual, Err(ConsumerError::Server(code)) if code == expected)
+                }
+                Expected::RebalanceFailed => {
+                    matches!(actual, Err(ConsumerError::RebalanceFailed(_)))
+                }
+            };
+            assert2::assert!(matches);
+        }
     }
 
     #[test]
@@ -1049,24 +1055,18 @@ mod security_arg_tests {
             ("shipments", false),
             ("order", false),
         ] {
-            assert!(
-                is_subscribed_topic(&subscribe, name) == expected,
-                "name: {name}"
-            );
+            assert2::assert!(is_subscribed_topic(&subscribe, name) == expected);
         }
     }
 
     #[test]
     fn is_group_leader_matches_exact_member_id() {
-        for (leader, member_id, expected) in [
-            ("member-a", "member-a", true),
-            ("member-a", "member-b", false),
-            ("member-a", "", false),
+        for (_name, leader, member_id, expected) in [
+            ("exact leader", "member-a", "member-a", true),
+            ("different member", "member-a", "member-b", false),
+            ("empty member", "member-a", "", false),
         ] {
-            assert!(
-                is_group_leader(leader, member_id) == expected,
-                "leader: {leader}, member_id: {member_id}"
-            );
+            assert2::assert!(is_group_leader(leader, member_id) == expected);
         }
     }
 
@@ -1075,8 +1075,9 @@ mod security_arg_tests {
         let assignment = build_sync_assignment("member-a".into(), &[("orders".into(), 3)]);
         let decoded = decode_assignment(&assignment.assignment);
 
-        assert!(assignment.member_id == "member-a");
-        assert!(decoded == vec![("orders".into(), 3)]);
+        assert2::assert!(
+            (assignment.member_id.as_str(), decoded) == ("member-a", vec![("orders".into(), 3)])
+        );
     }
 
     #[test]
@@ -1091,7 +1092,7 @@ mod security_arg_tests {
             vec![assignment.clone()],
         );
 
-        assert!(
+        assert2::assert!(
             req == SyncGroupRequest {
                 group_id: "group-a".into(),
                 generation_id: 7,
@@ -1107,27 +1108,24 @@ mod security_arg_tests {
 
     #[test]
     fn offset_prime_helpers_preserve_assignment_presence_offsets_and_epochs() {
-        for (partitions, expected) in [(vec![], false), (vec![("orders".to_string(), 0)], true)] {
-            assert!(
-                has_assigned_partitions(&partitions) == expected,
-                "partitions: {partitions:?}"
-            );
+        for (_name, partitions, expected) in [
+            ("empty assignment", vec![], false),
+            ("assigned partition", vec![("orders".to_string(), 0)], true),
+        ] {
+            assert2::assert!(has_assigned_partitions(&partitions) == expected);
         }
 
-        for (committed, reset, expected) in [
-            (12, AutoOffsetReset::Earliest, 12),
-            (-1, AutoOffsetReset::Earliest, 0),
-            (-1, AutoOffsetReset::Latest, i64::MAX),
-            (-1, AutoOffsetReset::None, i64::MAX),
+        for (_name, committed, reset, expected) in [
+            ("committed offset", 12, AutoOffsetReset::Earliest, 12),
+            ("missing earliest", -1, AutoOffsetReset::Earliest, 0),
+            ("missing latest", -1, AutoOffsetReset::Latest, i64::MAX),
+            ("missing none", -1, AutoOffsetReset::None, i64::MAX),
         ] {
-            assert!(
-                starting_offset(committed, reset) == expected,
-                "committed: {committed}, reset: {reset:?}"
-            );
+            assert2::assert!(starting_offset(committed, reset) == expected);
         }
 
         let position = primed_position(9);
-        assert!(
+        assert2::assert!(
             position
                 == crate::position::PartitionPosition {
                     offset_epoch: crabka_ids::LeaderEpoch(9),
@@ -1157,14 +1155,11 @@ mod security_arg_tests {
         else {
             panic!("silent broker must time out during build")
         };
-        assert!(
-            matches!(
-                err,
-                ConsumerError::Client(ClientError::Timeout(d))
-                    if d == Duration::from_millis(100)
-            ),
-            "expected 100ms timeout, got {err:?}"
-        );
+        assert2::assert!(matches!(
+            err,
+            ConsumerError::Client(ClientError::Timeout(d))
+                if d == Duration::from_millis(100)
+        ));
     }
 
     #[tokio::test]
@@ -1176,7 +1171,7 @@ mod security_arg_tests {
             .fetch_max_bytes(0)
             .build()
             .await;
-        assert!(matches!(max_bytes, Err(ConsumerError::RebalanceFailed(_))));
+        assert2::assert!(matches!(max_bytes, Err(ConsumerError::RebalanceFailed(_))));
 
         let partition_max_bytes = Consumer::builder()
             .bootstrap("127.0.0.1:1")
@@ -1185,7 +1180,7 @@ mod security_arg_tests {
             .fetch_partition_max_bytes(0)
             .build()
             .await;
-        assert!(matches!(
+        assert2::assert!(matches!(
             partition_max_bytes,
             Err(ConsumerError::RebalanceFailed(_))
         ));
@@ -1227,14 +1222,24 @@ mod security_arg_tests {
     async fn accessors_return_consumer_identity_subscription_and_assignment() {
         let consumer = test_consumer().await;
 
-        check!(consumer.group_id() == "group-a");
-        check!(consumer.member_id() == "member-a");
-        check!(consumer.generation_id() == 7);
-        check!(consumer.subscribed_topics() == ["orders".to_string(), "payments".to_string()]);
-        check!(consumer.assignment().await == vec![("orders".into(), 0)]);
+        check!(
+            (
+                consumer.group_id(),
+                consumer.member_id(),
+                consumer.generation_id(),
+                consumer.subscribed_topics(),
+                consumer.assignment().await,
+            ) == (
+                "group-a",
+                "member-a",
+                7,
+                &["orders".to_string(), "payments".to_string()][..],
+                vec![("orders".into(), 0)],
+            )
+        );
 
         let metadata = consumer.group_metadata();
-        assert!(
+        assert2::assert!(
             metadata
                 == ConsumerGroupMetadata {
                     group_id: "group-a".into(),
@@ -1254,14 +1259,22 @@ mod security_arg_tests {
     #[tokio::test]
     async fn generation_tracks_coordinator_rejoins_via_shared_atomic() {
         let consumer = test_consumer().await;
-        assert!(consumer.generation_id() == 7);
-        assert!(consumer.group_metadata().generation_id == 7);
+        assert2::assert!(
+            (
+                consumer.generation_id(),
+                consumer.group_metadata().generation_id
+            ) == (7, 7)
+        );
 
         // Simulate the coordinator publishing a new generation on rejoin.
         consumer.current_generation.store(11, Ordering::Relaxed);
 
-        assert!(consumer.generation_id() == 11);
-        assert!(consumer.group_metadata().generation_id == 11);
+        assert2::assert!(
+            (
+                consumer.generation_id(),
+                consumer.group_metadata().generation_id
+            ) == (11, 11)
+        );
     }
 
     #[tokio::test]
@@ -1271,7 +1284,7 @@ mod security_arg_tests {
 
         consumer.close().await.unwrap();
 
-        assert!(shutdown.is_cancelled());
+        assert2::assert!(shutdown.is_cancelled());
     }
 
     // --- is_retriable_consumer_start_error ---
@@ -1285,36 +1298,41 @@ mod security_arg_tests {
         // Transient group-protocol server codes.
         let transient_codes: &[i16] = &[14, 15, 16, 22, 25, 27, 79];
         for &code in transient_codes {
-            assert!(
-                is_retriable_consumer_start_error(&ConsumerError::Server(code)),
-                "expected Server({code}) to be retriable"
-            );
+            assert2::assert!(is_retriable_consumer_start_error(&ConsumerError::Server(
+                code
+            )));
         }
 
         // Non-transient server code (e.g. INVALID_REQUEST = 42).
-        assert!(
-            !is_retriable_consumer_start_error(&ConsumerError::Server(42)),
-            "Server(42) should NOT be retriable"
-        );
+        assert2::assert!(!is_retriable_consumer_start_error(&ConsumerError::Server(
+            42
+        )));
 
-        for (error, expected) in [
+        for (_name, error, expected) in [
             // A connection dropped mid-join is transient — retry a fresh attempt.
-            (ConsumerError::Client(ClientError::Disconnected), true),
+            (
+                "disconnected",
+                ConsumerError::Client(ClientError::Disconnected),
+                true,
+            ),
             // Connect/Timeout are NOT retried: an unreachable or non-responding
             // broker is a genuine fault that must surface promptly (the lost-wakeup
             // hang the retry loop survives never returns Timeout — it is caught by
             // the per-attempt timeout, not classified here).
             (
+                "timeout",
                 ConsumerError::Client(ClientError::Timeout(Duration::from_secs(1))),
                 false,
             ),
             (
+                "startup after join",
                 ConsumerError::StartupAfterJoin(Box::new(ConsumerError::Client(
                     ClientError::Timeout(Duration::from_secs(1)),
                 ))),
                 true,
             ),
             (
+                "connect refused",
                 ConsumerError::Client(ClientError::Connect {
                     addr: SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), 9092),
                     source: std::io::Error::new(std::io::ErrorKind::ConnectionRefused, "refused"),
@@ -1322,12 +1340,14 @@ mod security_arg_tests {
                 false,
             ),
             // Permanent misconfig errors — must NOT be retriable.
-            (ConsumerError::NotSubscribed, false),
+            ("not subscribed", ConsumerError::NotSubscribed, false),
             (
+                "rebalance failed",
                 ConsumerError::RebalanceFailed("group_id required".into()),
                 false,
             ),
             (
+                "incompatible version",
                 ConsumerError::Client(ClientError::IncompatibleVersion {
                     api_key: 0,
                     broker_min: 0,
@@ -1338,10 +1358,7 @@ mod security_arg_tests {
                 false,
             ),
         ] {
-            assert!(
-                is_retriable_consumer_start_error(&error) == expected,
-                "error: {error:?}"
-            );
+            assert2::assert!(is_retriable_consumer_start_error(&error) == expected);
         }
     }
 
@@ -1366,6 +1383,6 @@ mod security_arg_tests {
             .security(security)
             .build()
             .await;
-        assert!(res.is_err(), "connect to closed port must fail");
+        assert2::assert!(res.is_err());
     }
 }

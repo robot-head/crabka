@@ -271,7 +271,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{MetadataRecord, NodeId, PartitionRecord, TopicRecord};
 
     use super::*;
@@ -357,11 +356,7 @@ mod tests {
             .iter()
             .find(|p| p.partition_index == 0)
             .expect("partition 0 row");
-        assert!(
-            part.leader_epoch == 9,
-            "response must echo the image leader_epoch (9), got {}",
-            part.leader_epoch
-        );
+        assert2::assert!(part.leader_epoch == 9);
         broker_handle.shutdown().await;
     }
 
@@ -377,7 +372,7 @@ mod tests {
             // No accidental prefix matching.
             ("__consumer_offsets-2", false),
         ] {
-            assert!(is_internal_topic(name) == want, "{name}");
+            assert2::assert!(is_internal_topic(name) == want);
         }
     }
 }

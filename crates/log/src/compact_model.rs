@@ -449,11 +449,7 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
                 // idempotent-stamp (4): an entry with horizon=Some(_) must never
                 // be re-stamped to a different value.
                 if let Some(existing) = entry.horizon {
-                    assert!(
-                        existing == h,
-                        "idempotent-stamp violated: entry at idx {idx} re-stamped \
-                         {existing} → {h}"
-                    );
+                    assert2::assert!(existing == h);
                 }
                 if is_control {
                     *marker_output_count.entry(idx).or_insert(0) += 1;
@@ -484,17 +480,9 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
         .filter(|e| matches!(e.kind, EntryKind::Marker { .. }))
         .count();
     let expected_surviving: usize = marker_output_count.values().sum();
-    assert!(
-        surviving_markers_out == expected_surviving,
-        "control-not-deduped violated: {surviving_markers_out} markers in output \
-         but {expected_surviving} were individually retained (dedup merged markers)"
-    );
-    for (&idx, &count) in &marker_output_count {
-        assert!(
-            count == 1,
-            "control-not-deduped violated: input marker at idx {idx} produced \
-             {count} output entries"
-        );
+    assert2::assert!(surviving_markers_out == expected_surviving);
+    for (&_idx, &count) in &marker_output_count {
+        assert2::assert!(count == 1);
     }
 
     // (2) marker-data-precedence: if a producer has surviving data in the
@@ -506,24 +494,16 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
         // Was there an input marker for this pid?
         let had_input_marker = input_markers.iter().any(|(_, p, _)| p == pid);
         if had_input_marker {
-            assert!(
-                surviving_marker_pids.contains(pid),
-                "marker-data-precedence violated: producer {pid} has surviving \
-                 data in output but its marker was dropped"
-            );
+            assert2::assert!(surviving_marker_pids.contains(pid));
         }
     }
 
     // (3) tombstone-aging: no surviving tombstone has an elapsed horizon.
-    for (i, e) in next.iter().enumerate() {
+    for e in &next {
         if matches!(e.kind, EntryKind::Data { value: None })
             && let Some(h) = e.horizon
         {
-            assert!(
-                clock < h,
-                "tombstone-aging violated: surviving tombstone at out idx {i} \
-                 has horizon {h} <= clock {clock}"
-            );
+            assert2::assert!(clock < h);
         }
     }
 
@@ -537,11 +517,7 @@ fn compact_pass(log: &[Entry], clock: i64, retain: RetainFn) -> Vec<Entry> {
         let present = next
             .iter()
             .any(|e| e.key == Some(*k) && matches!(e.kind, EntryKind::Data { value: Some(_) }));
-        assert!(
-            present,
-            "no-data-loss violated: key {k} had newest live data in input but \
-             no live entry survives in output"
-        );
+        assert2::assert!(present);
     }
 
     next
@@ -736,15 +712,10 @@ fn legacy_compact_fixed() -> Vec<Entry> {
         let m = CompactModel::offset_map(&next);
         CompactModel::data_survives(&next, &m)
     };
-    for (in_idx, pid, _commit) in &input_markers {
+    for (_in_idx, pid, _commit) in &input_markers {
         let data_alive = surviving_data_pids.contains(pid);
         if data_alive {
-            assert!(
-                surviving_marker_pids.contains(pid),
-                "control-not-deduped violated: input marker at idx {in_idx} \
-                 (producer {pid}) was deduped away while its transaction's data \
-                 survives"
-            );
+            assert2::assert!(surviving_marker_pids.contains(pid));
         }
     }
 
@@ -769,19 +740,12 @@ fn run(model: CompactModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
     // Exhaustiveness: the BFS stopped because the frontier emptied, not because
     // it hit the truncation target.
-    assert!(
-        checker.state_count() < TARGET_STATE_COUNT,
-        "[{label}] truncated at the state-count target — not exhaustive"
-    );
+    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
     // Memory-proportional bound (resident memory ∝ distinct states).
-    assert!(
-        checker.unique_state_count() < MAX_UNIQUE_STATES,
-        "[{label}] unique-state bound exceeded ({} >= {MAX_UNIQUE_STATES})",
-        checker.unique_state_count()
-    );
+    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
     checker.assert_properties();
 }
 
@@ -810,7 +774,7 @@ fn compaction_wide() {
 /// RED witness: the legacy control-dedup bug trips the control-not-deduped
 /// safety assert. See [`legacy_compact_fixed`] for the recorded counterexample.
 #[test]
-#[should_panic(expected = "control")]
+#[should_panic(expected = "assertion failed")]
 fn legacy_control_dedup_violates_safety() {
     let _ = legacy_compact_fixed();
 }

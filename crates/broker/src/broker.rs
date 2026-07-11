@@ -582,10 +582,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "share-state summary for {group}:{topic_id}:{partition} not present within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the share-partition SPSO (start_offset) >= `min`.
@@ -612,10 +609,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "share SPSO for {group}:{topic_id}:{partition} did not reach {min} within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the share-partition delivery-complete count >= `min`.
@@ -642,10 +636,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "share dcc for {group}:{topic_id}:{partition} did not reach {min} within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the live share-partition has exactly `n` Acquired
@@ -677,10 +668,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "share acquired-batch count for {group}:{topic_id}:{partition} did not reach {n} within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     // ── consumer/streams/share group awaiters ─────────────────────────────────
@@ -728,10 +716,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "group {group_id} did not settle at {n} members within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the group is empty/drained (no members).
@@ -792,10 +777,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "classic group {group_id} did not settle at {n} members within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     // ── streams-group awaiters ────────────────────────────────────────────────
@@ -847,10 +829,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "streams group {group_id} did not settle at {n} members within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the streams group is empty/drained (no members).
@@ -1051,12 +1030,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "group {group_id} did not settle at type {expected:?} within {TEST_AWAITER_TIMEOUT:?}; \
-             last={:?}",
-            self.group_type_for_test(group_id)
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
@@ -1248,7 +1222,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(res.is_ok(), "wait_for_image timed out after 30s");
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: borrow this broker's live [`crate::metrics::BrokerMetrics`]
@@ -1282,7 +1256,7 @@ impl BrokerHandle {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     #[allow(clippy::used_underscore_binding)]
-    pub async fn wait_for_metrics<F>(&self, what: &str, mut predicate: F)
+    pub async fn wait_for_metrics<F>(&self, _what: &str, mut predicate: F)
     where
         F: FnMut(&crate::metrics::BrokerMetrics) -> bool,
     {
@@ -1295,10 +1269,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "wait_for_metrics({what}) timed out after {TEST_AWAITER_TIMEOUT:?}"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until a non-zero controller leader is elected.
@@ -1321,10 +1292,7 @@ impl BrokerHandle {
         })
         .await;
         let id = res.expect("wait_until_controller_leader timed out after 30s");
-        assert!(
-            id != crabka_raft::NodeId(0),
-            "leader channel closed before a leader was elected"
-        );
+        assert2::assert!(id != crabka_raft::NodeId(0));
         id
     }
 
@@ -1408,10 +1376,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "local log_end_offset({topic}-{partition}) did not reach {min} within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the LOCAL high watermark for `topic-partition`
@@ -1442,10 +1407,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "high_watermark({topic}-{partition}) did not reach {min} within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: await until the LOCAL log end offset for `topic-partition` is
@@ -1492,10 +1454,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "local log_end_offset({topic}-{partition}) did not settle at {target} within 30s"
-        );
+        assert2::assert!(res.is_ok());
     }
 
     /// Test-only: number of `OffsetForLeaderEpoch` (`api_key` 23) requests this
@@ -4269,7 +4228,7 @@ fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::tempdir;
 
     use super::*;
@@ -4383,10 +4342,7 @@ mod tests {
             match tokio::net::TcpStream::connect(addr).await {
                 Ok(stream) => {
                     drop(stream);
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "listener at {addr} still accepts connections after shutdown"
-                    );
+                    assert2::assert!(std::time::Instant::now() < deadline);
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
                 Err(_) => return,
@@ -4394,13 +4350,13 @@ mod tests {
         }
     }
 
-    async fn wait_for_connection_count(broker: &Broker, expected: usize, message: &'static str) {
+    async fn wait_for_connection_count(broker: &Broker, expected: usize, _message: &'static str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if broker.connections.total() == expected {
                 return;
             }
-            assert!(std::time::Instant::now() < deadline, "{message}");
+            assert2::assert!(std::time::Instant::now() < deadline);
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
@@ -4566,7 +4522,7 @@ mod tests {
             )
             .await
             .expect("seed streams group");
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_streams_group_member_count(streams_group_id, 1),
@@ -4583,11 +4539,15 @@ mod tests {
             active.insert("subtopology-0".to_string(), vec![0, 1]);
             active
         };
-        check!(streams.group_id.as_str() == streams_group_id);
-        check!(streams.members.len() == 1);
-        check!(streams.members[0].member_id.as_str() == streams_member_id);
-        check!(streams.members[0].active == expected_active);
-        assert!(
+        check!(
+            (
+                streams.group_id.as_str(),
+                streams.members.len(),
+                streams.members[0].member_id.as_str(),
+                &streams.members[0].active,
+            ) == (streams_group_id, 1, streams_member_id, &expected_active)
+        );
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_streams_group_empty(streams_group_id),
@@ -4600,7 +4560,7 @@ mod tests {
         let _ = broker
             .group_coordinator
             .get_or_create_streams(empty_streams_group_id);
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_streams_group_empty(empty_streams_group_id),
@@ -4666,8 +4626,8 @@ mod tests {
             .expect("submit partition record");
 
         let image = handle.controller_image_for_test();
-        assert!(image.topic(topic).is_some());
-        assert!(image.partition(topic, partition) == Some(&partition_record));
+        assert2::assert!(image.topic(topic).is_some());
+        assert2::assert!(image.partition(topic, partition) == Some(&partition_record));
     }
 
     fn static_voter_test_config(
@@ -4726,9 +4686,12 @@ mod tests {
             .expect("controller endpoint");
         // Self keeps its real directory id; peers get the nil placeholder.
         check!(
-            ep0.host.as_str() == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local"
+            (ep0.host.as_str(), ep0.port)
+                == (
+                    "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local",
+                    9093,
+                )
         );
-        check!(ep0.port == 9093);
         check!(v0.directory_id == self_dir);
 
         let v1 = set.get(crabka_audit::NodeId(1)).expect("voter 1 present");
@@ -4737,8 +4700,10 @@ mod tests {
             .iter()
             .find(|e| e.name == "CONTROLLER")
             .expect("controller endpoint");
-        assert!(ep1.host == "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local");
-        assert!(v1.directory_id == uuid::Uuid::nil());
+        assert2::assert!(
+            ep1.host == "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local"
+        );
+        assert2::assert!(v1.directory_id == uuid::Uuid::nil());
     }
 
     #[test]
@@ -4753,13 +4718,12 @@ mod tests {
             self_dir,
             "192.168.1.5:9099".parse().unwrap(),
         );
-        assert!(set.len() == 1);
+        assert2::assert!(set.len() == 1);
         let v = set
             .get(crabka_audit::NodeId(3))
             .expect("self voter present");
         let ep = v.endpoints.iter().find(|e| e.name == "CONTROLLER").unwrap();
-        assert!(ep.host == "192.168.1.5");
-        assert!(ep.port == 9099);
+        assert2::assert!((ep.host.as_str(), ep.port) == ("192.168.1.5", 9099));
     }
 
     #[test]
@@ -4771,10 +4735,7 @@ mod tests {
             ("broker:not-a-port", ("localhost", 9092)),
         ];
         for (input, (host, port)) in cases {
-            assert!(
-                parse_advertised_host_port(input) == (host.to_string(), port),
-                "input {input:?}"
-            );
+            assert2::assert!(parse_advertised_host_port(input) == (host.to_string(), port));
         }
     }
 
@@ -4782,28 +4743,28 @@ mod tests {
     fn connection_guard_increments_and_decrements_global_and_per_ip() {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        assert!(limiter.total() == 0);
-        assert!(limiter.per_ip_count(ip) == 0);
+        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (0, 0));
 
         let g1 = limiter
             .try_acquire(ip)
             .expect("acquire under unlimited caps");
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(ip) == 1);
+        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (1, 1));
 
         let g2 = limiter.try_acquire(ip).expect("second acquire");
-        assert!(limiter.total() == 2);
-        assert!(limiter.per_ip_count(ip) == 2);
+        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (2, 2));
 
         drop(g1);
-        assert!(limiter.total() == 1);
-        assert!(limiter.per_ip_count(ip) == 1);
+        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (1, 1));
 
         drop(g2);
         // Per-IP entry must be removed (not left at 0) when it hits zero.
-        check!(limiter.total() == 0);
-        check!(limiter.per_ip_count(ip) == 0);
-        check!(limiter.per_ip.get(&ip).is_none());
+        check!(
+            (
+                limiter.total(),
+                limiter.per_ip_count(ip),
+                limiter.per_ip.get(&ip).is_none(),
+            ) == (0, 0, true)
+        );
     }
 
     #[test]
@@ -4815,9 +4776,13 @@ mod tests {
         // Global ceiling of 1 reached — a different IP is still rejected,
         // and the rejection reserves nothing (per-IP entry not created).
         check!(limiter.try_acquire(b).is_none());
-        check!(limiter.total() == 1);
-        check!(limiter.per_ip_count(b) == 0);
-        check!(limiter.per_ip.get(&b).is_none());
+        check!(
+            (
+                limiter.total(),
+                limiter.per_ip_count(b),
+                limiter.per_ip.get(&b).is_none(),
+            ) == (1, 0, true)
+        );
     }
 
     #[test]
@@ -4829,12 +4794,10 @@ mod tests {
         // Second from the same IP rejected; global must be rolled back so
         // the count reflects only the one live connection.
         check!(limiter.try_acquire(a).is_none());
-        check!(limiter.total() == 1);
-        check!(limiter.per_ip_count(a) == 1);
+        check!((limiter.total(), limiter.per_ip_count(a)) == (1, 1));
         // A different IP is still under its own per-IP ceiling.
         let _g2 = limiter.try_acquire(b).expect("first from b allowed");
-        assert!(limiter.total() == 2);
-        assert!(limiter.per_ip_count(b) == 1);
+        assert2::assert!((limiter.total(), limiter.per_ip_count(b)) == (2, 1));
     }
 
     #[test]
@@ -4842,9 +4805,9 @@ mod tests {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "2001:db8::1".parse().unwrap();
         let g = limiter.try_acquire(ip).expect("ipv6 acquire");
-        assert!(limiter.per_ip_count(ip) == 1);
+        assert2::assert!(limiter.per_ip_count(ip) == 1);
         drop(g);
-        assert!(limiter.per_ip_count(ip) == 0);
+        assert2::assert!(limiter.per_ip_count(ip) == 0);
     }
 
     #[tokio::test]
@@ -4874,8 +4837,12 @@ mod tests {
         // reports doubled values), so assert the portable invariant: tuning grows
         // each buffer above the explicit tiny baseline instead of pinning a host
         // sysctl-dependent absolute size.
-        check!(sock.send_buffer_size().expect("read send buffer") > send_before);
-        check!(sock.recv_buffer_size().expect("read recv buffer") > recv_before);
+        check!(
+            (
+                sock.send_buffer_size().expect("read send buffer") > send_before,
+                sock.recv_buffer_size().expect("read recv buffer") > recv_before,
+            ) == (true, true)
+        );
         drop(client);
     }
 
@@ -4889,10 +4856,7 @@ mod tests {
             ("[2001:db8::5]:9092", "[2001:db8::5]:9092"),
         ];
         for (listen, expected) in cases {
-            assert!(
-                loopback_bootstrap(listen.parse::<SocketAddr>().unwrap()) == expected,
-                "listen {listen}"
-            );
+            assert2::assert!(loopback_bootstrap(listen.parse::<SocketAddr>().unwrap()) == expected);
         }
     }
 
@@ -4912,10 +4876,10 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(8),
         };
-        assert!(crate::leader_rebalance::ControllerLike::is_leader(
+        assert2::assert!(crate::leader_rebalance::ControllerLike::is_leader(
             &leader_adapter
         ));
-        assert!(!crate::leader_rebalance::ControllerLike::is_leader(
+        assert2::assert!(!crate::leader_rebalance::ControllerLike::is_leader(
             &follower_adapter
         ));
 
@@ -4927,10 +4891,10 @@ mod tests {
             handle: source,
             node_id: crabka_raft::NodeId(8),
         };
-        assert!(crate::reassignment::ReassignmentController::is_leader(
+        assert2::assert!(crate::reassignment::ReassignmentController::is_leader(
             &leader_adapter
         ));
-        assert!(!crate::reassignment::ReassignmentController::is_leader(
+        assert2::assert!(!crate::reassignment::ReassignmentController::is_leader(
             &follower_adapter
         ));
     }
@@ -4948,7 +4912,7 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert!(
+        assert2::assert!(
             crate::leader_rebalance::ControllerLike::current_image(&leader).cluster_id()
                 == cluster_id
         );
@@ -4957,28 +4921,32 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert!(
+        assert2::assert!(
             crate::reassignment::ReassignmentController::current_image(&reassignment).cluster_id()
                 == cluster_id
         );
         let reassignment_rx =
             crate::reassignment::ReassignmentController::watch_image(&reassignment);
-        assert!(reassignment_rx.borrow().cluster_id() == cluster_id);
+        assert2::assert!(reassignment_rx.borrow().cluster_id() == cluster_id);
 
         let throttle = ThrottleControllerAdapter {
             handle: source.clone(),
         };
-        assert!(crate::throttle::ImageWatcher::current_image(&throttle).cluster_id() == cluster_id);
+        assert2::assert!(
+            crate::throttle::ImageWatcher::current_image(&throttle).cluster_id() == cluster_id
+        );
         let throttle_rx = crate::throttle::ImageWatcher::watch_image(&throttle);
-        assert!(throttle_rx.borrow().cluster_id() == cluster_id);
+        assert2::assert!(throttle_rx.borrow().cluster_id() == cluster_id);
 
         let quota = QuotaControllerAdapter {
             handle: source.clone(),
         };
-        assert!(crate::quota::ImageWatcher::current_image(&quota).cluster_id() == cluster_id);
+        assert2::assert!(
+            crate::quota::ImageWatcher::current_image(&quota).cluster_id() == cluster_id
+        );
 
         let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
-        assert!(
+        assert2::assert!(
             crate::delegation_token_cleanup::DelegationTokenController::current_image(&cleanup)
                 .cluster_id()
                 == cluster_id
@@ -4998,7 +4966,7 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert!(
+        assert2::assert!(
             crate::leader_rebalance::ControllerLike::submit_change(&leader, vec![record.clone()])
                 .await
                 .is_err()
@@ -5008,7 +4976,7 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert!(
+        assert2::assert!(
             crate::reassignment::ReassignmentController::submit_change(
                 &reassignment,
                 vec![record.clone()],
@@ -5018,7 +4986,7 @@ mod tests {
         );
 
         let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
-        assert!(
+        assert2::assert!(
             crate::delegation_token_cleanup::DelegationTokenController::submit_change(
                 &cleanup,
                 vec![record],
@@ -5034,8 +5002,8 @@ mod tests {
         shutdown.cancel();
         let mut backoff = std::time::Duration::from_mins(1);
 
-        assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
-        assert!(backoff == std::time::Duration::from_mins(1));
+        assert2::assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
+        assert2::assert!(backoff == std::time::Duration::from_mins(1));
     }
 
     #[tokio::test]
@@ -5050,8 +5018,8 @@ mod tests {
 
         tokio::time::advance(std::time::Duration::from_millis(250)).await;
         let (ok, backoff) = task.await.expect("backoff task");
-        assert!(ok);
-        assert!(backoff == std::time::Duration::from_millis(500));
+        assert2::assert!(ok);
+        assert2::assert!(backoff == std::time::Duration::from_millis(500));
     }
 
     #[tokio::test]
@@ -5073,20 +5041,14 @@ mod tests {
         spawn_rlmm_reconciler(manager.clone(), set_rx, shutdown.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while manager.assigned_metadata_partitions() != vec![0, 2] {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "initial assignment was not reconciled"
-            );
+            assert2::assert!(std::time::Instant::now() < deadline);
             tokio::task::yield_now().await;
         }
 
         set_tx.send(vec![1]).expect("send changed assignment");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while manager.assigned_metadata_partitions() != vec![1] {
-            assert!(
-                std::time::Instant::now() < deadline,
-                "changed assignment was not reconciled"
-            );
+            assert2::assert!(std::time::Instant::now() < deadline);
             tokio::task::yield_now().await;
         }
 
@@ -5108,10 +5070,10 @@ mod tests {
         broker
             .offset_for_leader_epoch_requests
             .store(2, std::sync::atomic::Ordering::Release);
-        assert!(handle.offset_for_leader_epoch_count_for_test() == 2);
-        assert!(!handle.rlmm_topic_backed_active_for_test());
+        assert2::assert!(handle.offset_for_leader_epoch_count_for_test() == 2);
+        assert2::assert!(!handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(1);
-        assert!(handle.rlmm_topic_backed_active_for_test());
+        assert2::assert!(handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(2);
         check!(!handle.rlmm_topic_backed_active_for_test());
         check!(handle.reload_tls().is_err());
@@ -5131,8 +5093,10 @@ mod tests {
         );
 
         let leader = handle.wait_until_controller_leader().await;
-        assert!(leader == crabka_raft::NodeId(handle.node_id()));
-        assert!(handle.controller_leader_id().await == Some(crabka_raft::NodeId(handle.node_id())));
+        assert2::assert!(leader == crabka_raft::NodeId(handle.node_id()));
+        assert2::assert!(
+            handle.controller_leader_id().await == Some(crabka_raft::NodeId(handle.node_id()))
+        );
 
         let mut endpoints = handle.self_registration_endpoints().await;
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
@@ -5140,7 +5104,7 @@ mod tests {
             tokio::task::yield_now().await;
             endpoints = handle.self_registration_endpoints().await;
         }
-        assert!(!endpoints.is_empty());
+        assert2::assert!(!endpoints.is_empty());
 
         handle
             .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1BrokerRegistration(
@@ -5161,14 +5125,14 @@ mod tests {
             ))
             .await
             .expect("submit peer broker registration");
-        assert!(
+        assert2::assert!(
             handle
                 .controller_image_for_test()
                 .broker(crabka_raft::NodeId(handle.node_id() + 1))
                 .is_some()
         );
         handle.wait_until_brokers_registered(2).await;
-        assert!(handle.broker_count().await == 2);
+        assert2::assert!(handle.broker_count().await == 2);
 
         let topic = "handle-mutant-topic";
         let partition_leader = handle.node_id() + 1;
@@ -5211,7 +5175,7 @@ mod tests {
             directories: vec![uuid::Uuid::nil(); partition_isr.len()],
             partition_epoch: 0,
         };
-        assert!(observed_partition == expected_partition);
+        assert2::assert!(observed_partition == expected_partition);
         check!(handle.partition_leader_for_test("missing-mutant-topic", 0) == None);
         check!(handle.partition_isr_for_test("missing-mutant-topic", 0) == None);
         check!(handle.partition_record_for_test("missing-mutant-topic", 0) == None);
@@ -5228,13 +5192,10 @@ mod tests {
             .is_ok()
         );
 
-        assert!(
-            matches!(
-                broker.controller.read_snapshot_range(0, 1),
-                crabka_raft::SnapshotRange::NoSnapshot
-            ),
-            "test should start without a metadata snapshot"
-        );
+        assert2::assert!(matches!(
+            broker.controller.read_snapshot_range(0, 1),
+            crabka_raft::SnapshotRange::NoSnapshot
+        ));
         handle
             .trigger_snapshot_for_test()
             .await
@@ -5244,21 +5205,20 @@ mod tests {
         else {
             panic!("trigger_snapshot_for_test should write a readable snapshot");
         };
-        assert!(snapshot.total_size > 0);
-        assert!(!snapshot.bytes.is_empty());
+        assert2::assert!((snapshot.total_size > 0, snapshot.bytes.is_empty()) == (true, false));
 
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
-        assert!(!handle.partition_exists_for_test(local_topic, 0));
+        assert2::assert!(!handle.partition_exists_for_test(local_topic, 0));
         broker.partitions.insert(
             local_topic.to_string(),
             PartitionIndex(0),
             Arc::clone(&local_part),
         );
-        assert!(handle.partition_exists_for_test(local_topic, 0));
-        assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
+        assert2::assert!(handle.partition_exists_for_test(local_topic, 0));
+        assert2::assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
         handle.test_set_leader_epoch(local_topic, 0, 7);
-        assert!(
+        assert2::assert!(
             local_part
                 .current_leader_epoch
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -5268,7 +5228,7 @@ mod tests {
             .test_truncate_local_log(local_topic, 0, 1)
             .await
             .expect("truncate local partition");
-        assert!(handle.local_log_end_offset(local_topic, 0).await == Some(0));
+        assert2::assert!(handle.local_log_end_offset(local_topic, 0).await == Some(0));
 
         let helper_topic = "handle-partition-helper-mutant-topic";
         let helper_part = local_partition_with_records(dir.path(), helper_topic, 0, &[]);
@@ -5291,16 +5251,18 @@ mod tests {
             .test_advance_log_start(helper_topic, 0, 2)
             .await
             .expect("advance helper partition log start");
-        assert!(handle.partition_log_start_for_test(helper_topic, 0) == Some(2));
-        assert!(
+        assert2::assert!(handle.partition_log_start_for_test(helper_topic, 0) == Some(2));
+        assert2::assert!(
             handle.partition_retention_ms_for_test(helper_topic, 0)
                 == Some(Some(std::time::Duration::from_secs(123)))
         );
         let observed_config = handle
             .partition_log_config_for_test(helper_topic, 0)
             .expect("helper partition log config");
-        assert!(observed_config.retention_ms == helper_config.retention_ms);
-        assert!(observed_config.segment_bytes == helper_config.segment_bytes);
+        assert2::assert!(
+            (observed_config.retention_ms, observed_config.segment_bytes)
+                == (helper_config.retention_ms, helper_config.segment_bytes)
+        );
         let last_offset = handle
             .produce_records_for_test(helper_topic, 0, 3)
             .await
@@ -5309,26 +5271,28 @@ mod tests {
             .local_log_end_offset(helper_topic, 0)
             .await
             .expect("helper partition log end offset");
-        assert!(last_offset >= 2);
-        assert!(last_offset + 1 == log_end);
+        assert2::assert!(last_offset >= 2);
+        assert2::assert!(last_offset + 1 == log_end);
         let read = helper_part
             .log
             .lock()
             .expect("helper partition log lock")
             .read(crabka_log::Offset(2), 1 << 20)
             .expect("read helper partition records");
-        assert!(read.start_offset == crabka_log::Offset(2));
-        assert!(!read.batches.is_empty());
+        assert2::assert!(
+            (read.start_offset, read.batches.is_empty()) == (crabka_log::Offset(2), false)
+        );
         let records: Vec<_> = read
             .batches
             .iter()
             .flat_map(|batch| batch.records.iter())
             .collect();
-        check!(records.len() == 1);
-        check!(records[0].offset_delta == 0);
         check!(
-            records[0].value.as_ref().map(bytes::Bytes::as_ref)
-                == Some(b"test-record-2".as_slice())
+            (
+                records.len(),
+                records[0].offset_delta,
+                records[0].value.as_ref().map(bytes::Bytes::as_ref),
+            ) == (1, 0, Some(b"test-record-2".as_slice()))
         );
         // Waiting for log_end + 1 must stay pending; waiting for the reached
         // log_end must resolve (both the >= and == variants).
@@ -5368,7 +5332,7 @@ mod tests {
         let share_group = "handle-share-summary-mutant-group";
         let share_topic_id = uuid::Uuid::from_u128(0xBEE5);
         let share_partition = 3;
-        assert!(
+        assert2::assert!(
             handle
                 .share_state_summary_for_test(share_group, share_topic_id, share_partition)
                 .await
@@ -5454,7 +5418,7 @@ mod tests {
             .share_partition_leaders
             .get_or_load(acquired_group, acquired_topic_id, 0)
             .await;
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
@@ -5473,9 +5437,9 @@ mod tests {
                 std::time::Duration::from_secs(30),
                 i16::MAX,
             );
-            assert!(!acquired.is_empty());
+            assert2::assert!(!acquired.is_empty());
         }
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
@@ -5495,7 +5459,7 @@ mod tests {
         )
         .await
         .expect("add_learner returned before timeout");
-        assert!(add_learner.is_err());
+        assert2::assert!(add_learner.is_err());
 
         let own_directory = handle
             .voter_directory_id_for_test(crabka_raft::NodeId(handle.node_id()))
@@ -5534,7 +5498,7 @@ mod tests {
             ))
             .await
             .expect("seed next-gen group");
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_group_member_count(group_id, 1),
@@ -5546,10 +5510,14 @@ mod tests {
             .group_describe_for_test(group_id)
             .await
             .expect("next-gen group describe");
-        check!(described.group_id.as_str() == group_id);
-        check!(described.members.len() == 1);
-        check!(described.members[0].member_id.as_str() == member_id);
-        assert!(
+        check!(
+            (
+                described.group_id.as_str(),
+                described.members.len(),
+                described.members[0].member_id.as_str(),
+            ) == (group_id, 1, member_id)
+        );
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_group_empty(group_id),
@@ -5563,7 +5531,7 @@ mod tests {
             empty_group_id,
             crate::coordinator::unified::actor::GroupKindTag::Consumer,
         );
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_group_empty(empty_group_id),
@@ -5574,7 +5542,7 @@ mod tests {
 
         let classic_group_id = "handle-classic-group-mutant";
         let classic_member_id = "classic-member-1";
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_classic_group_member_count(classic_group_id, 1),
@@ -5586,7 +5554,7 @@ mod tests {
             classic_group_id,
             classic_group_with_member(classic_group_id, classic_member_id),
         );
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_classic_group_member_count(classic_group_id, 1),
@@ -5598,12 +5566,16 @@ mod tests {
             .classic_group_inspect_for_test(classic_group_id)
             .await
             .expect("classic group inspect");
-        check!(classic.group_id.as_str() == classic_group_id);
-        check!(classic.members.len() == 1);
-        check!(classic.members[0].member_id.as_str() == classic_member_id);
+        check!(
+            (
+                classic.group_id.as_str(),
+                classic.members.len(),
+                classic.members[0].member_id.as_str(),
+            ) == (classic_group_id, 1, classic_member_id)
+        );
 
         let created_classic_group_id = "handle-create-classic-group-mutant";
-        assert!(
+        assert2::assert!(
             handle
                 .classic_group_inspect_for_test(created_classic_group_id)
                 .await
@@ -5614,11 +5586,13 @@ mod tests {
             .classic_group_inspect_for_test(created_classic_group_id)
             .await
             .expect("created classic group inspect");
-        assert!(created.group_id == created_classic_group_id);
-        assert!(created.members.is_empty());
+        assert2::assert!(
+            (created.group_id.as_str(), created.members.is_empty())
+                == (created_classic_group_id, true)
+        );
 
         let marked_classic_group_id = "handle-marked-classic-group-mutant";
-        assert!(
+        assert2::assert!(
             handle
                 .group_type_for_test(marked_classic_group_id)
                 .is_none()
@@ -5626,7 +5600,7 @@ mod tests {
         broker
             .group_coordinator
             .mark_classic(marked_classic_group_id);
-        assert!(
+        assert2::assert!(
             handle.group_type_for_test(marked_classic_group_id)
                 == Some(crate::coordinator::unified::GroupType::Classic)
         );
@@ -5686,7 +5660,7 @@ mod tests {
         })
         .await
         .expect("two-voter cluster leader");
-        assert!(leader == crabka_raft::NodeId(7) || leader == crabka_raft::NodeId(8));
+        assert2::assert!(leader == crabka_raft::NodeId(7) || leader == crabka_raft::NodeId(8));
         handle7.wait_for_image(|img| img.voters().len() == 2).await;
         handle8.wait_for_image(|img| img.voters().len() == 2).await;
 
@@ -5810,11 +5784,8 @@ mod tests {
                 }),
             ),
         ];
-        for (name, wait) in pending_waits {
-            assert!(
-                tokio::time::timeout(timeout, wait).await.is_err(),
-                "{name} resolved while its condition was unmet"
-            );
+        for (_name, wait) in pending_waits {
+            assert2::assert!(tokio::time::timeout(timeout, wait).await.is_err());
         }
 
         // wait_until_partition_leader_changed must stay pending for each of
@@ -5850,7 +5821,7 @@ mod tests {
                 leader_epoch,
             )
             .await;
-            assert!(
+            assert2::assert!(
                 tokio::time::timeout(
                     timeout,
                     handle.wait_until_partition_leader_changed(
@@ -5860,12 +5831,11 @@ mod tests {
                     ),
                 )
                 .await
-                .is_err(),
-                "{topic}: wait_until_partition_leader_changed resolved"
+                .is_err()
             );
         }
         // Leader 0 is also reported as "no leader" by the direct helper.
-        assert!(
+        assert2::assert!(
             handle
                 .partition_leader_for_test("leader-zero-mutant-topic", 0)
                 .is_none()
@@ -5882,7 +5852,7 @@ mod tests {
             3,
         )
         .await;
-        assert!(
+        assert2::assert!(
             tokio::time::timeout(
                 timeout,
                 handle.wait_until_isr_len("isr-len-mutant-topic", 0, 1)
@@ -5937,10 +5907,7 @@ mod tests {
         ];
         expected.sort_unstable();
         expected.dedup();
-        assert!(
-            got == expected,
-            "p2 (node 7 not a replica) must be excluded"
-        );
+        assert2::assert!(got == expected);
     }
 
     #[tokio::test]
@@ -5950,7 +5917,7 @@ mod tests {
         let handle = Broker::start(config).await.unwrap();
         let broker = handle.broker_arc_for_test();
         let addr = handle.listen_addr();
-        assert!(addr.port() != 0);
+        assert2::assert!(addr.port() != 0);
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("listener accepts before shutdown");
@@ -5971,7 +5938,7 @@ mod tests {
             .controlled_shutdown(std::time::Duration::ZERO)
             .await
             .expect_err("zero-timeout controlled shutdown should report drain timeout");
-        assert!(matches!(err, BrokerError::ShutdownTimeout(timeout) if timeout.is_zero()));
+        assert2::assert!(matches!(err, BrokerError::ShutdownTimeout(timeout) if timeout.is_zero()));
         assert_listener_stops_accepting(addr).await;
     }
 
@@ -5985,10 +5952,7 @@ mod tests {
             (max, max),
         ];
         for (current, expected) in cases {
-            assert!(
-                next_rlmm_backoff(current, max) == expected,
-                "current {current:?}"
-            );
+            assert2::assert!(next_rlmm_backoff(current, max) == expected);
         }
     }
 
@@ -6041,8 +6005,8 @@ mod tests {
 
         // One attempt was recorded, but the cancelled token stopped the
         // dial before anything could activate the topic-backed manager.
-        assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
-        assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
+        assert2::assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
+        assert2::assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
     }
 
     #[tokio::test]

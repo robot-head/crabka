@@ -504,7 +504,7 @@ pub fn register_over_time_udfs(ctx: &SessionContext) {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::Field;
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -527,7 +527,7 @@ mod tests {
         let mut eval = Vec::new();
         let mut offset = 0_u32;
         for (eval_ts, ts, val) in steps {
-            assert!(ts.len() == val.len());
+            assert2::assert!(ts.len() == val.len());
             let len = u32::try_from(ts.len()).unwrap();
             all_ts.extend_from_slice(ts);
             all_val.extend_from_slice(val);
@@ -618,10 +618,7 @@ mod tests {
             (OverTimeFamily::Present, 1.0),
         ] {
             let got = run_udf(family, window, 0.0)[0];
-            assert!(
-                approx_eq(got, want),
-                "case {family:?}: got {got}, want {want}"
-            );
+            assert2::assert!(approx_eq(got, want));
         }
     }
 
@@ -641,35 +638,32 @@ mod tests {
             (OverTimeFamily::Quantile, 0.5, 4.5),
         ] {
             let got = run_udf(family, window, phi)[0];
-            assert!(
-                approx_eq(got, want),
-                "case {family:?}: got {got}, want {want}"
-            );
+            assert2::assert!(approx_eq(got, want));
         }
     }
 
     #[test]
     fn extremum_ties_preserve_first_signed_zero() {
         let min = fold_extremum(&[0.0, -0.0], Extremum::Min);
-        assert!(min.to_bits() == 0.0_f64.to_bits());
+        assert2::assert!(min.to_bits() == 0.0_f64.to_bits());
 
         let max = fold_extremum(&[-0.0, 0.0], Extremum::Max);
-        assert!(max.to_bits() == (-0.0_f64).to_bits());
+        assert2::assert!(max.to_bits() == (-0.0_f64).to_bits());
     }
 
     #[test]
     fn variance_uses_compensated_welford_terms() {
         let small = over_time_variance(&[1.0, 1e-16, 1e-16, 1e-16]);
-        assert!(small.to_bits() == 0x3fc7_ffff_ffff_fffe);
+        assert2::assert!(small.to_bits() == 0x3fc7_ffff_ffff_fffe);
 
         let large = over_time_variance(&[1e-16, 1e16, 1e16, 5.0, 1e8, -1e8]);
-        assert!(large.to_bits() == 0x4671_87bd_f63d_b730);
+        assert2::assert!(large.to_bits() == 0x4671_87bd_f63d_b730);
     }
 
     #[test]
     fn mean_uses_compensated_updates() {
         let mean = over_time_mean(&[1e16, 1e-16, 1e-16, -1e16]);
-        assert!(mean.to_bits() == 0.25_f64.to_bits());
+        assert2::assert!(mean.to_bits() == 0.25_f64.to_bits());
     }
 
     #[test]
@@ -684,10 +678,7 @@ mod tests {
             (f64::INFINITY, f64::NAN, false),
             (1.0, 1.0, false),
         ] {
-            assert!(
-                keep_infinite_mean(mean, value) == want,
-                "case (mean={mean}, value={value})"
-            );
+            assert2::assert!(keep_infinite_mean(mean, value) == want);
         }
     }
 
@@ -697,14 +688,8 @@ mod tests {
         // recover the low bits into the compensation term.
         for (increment, initial_sum) in [(1e-16, 1.0), (1.0, 1e-16)] {
             let (sum, comp) = kahan_sum_inc(increment, initial_sum, 0.0);
-            assert!(
-                sum.to_bits() == 1.0_f64.to_bits(),
-                "sum for increment={increment}"
-            );
-            assert!(
-                comp.to_bits() == 1e-16_f64.to_bits(),
-                "comp for increment={increment}"
-            );
+            assert2::assert!(sum.to_bits() == 1.0_f64.to_bits());
+            assert2::assert!(comp.to_bits() == 1e-16_f64.to_bits());
         }
     }
 
@@ -725,7 +710,7 @@ mod tests {
             } else {
                 approx_eq(got, want)
             };
-            assert!(matches, "case phi={phi}: got {got}, want {want}");
+            assert2::assert!(matches);
         }
     }
 
@@ -791,7 +776,7 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("row-count mismatch"));
+        assert2::assert!(err.contains("row-count mismatch"));
 
         let err = invoke_sum_with_columns(
             2,
@@ -801,16 +786,16 @@ mod tests {
         )
         .unwrap_err()
         .to_string();
-        assert!(err.contains("row-count mismatch"));
+        assert2::assert!(err.contains("row-count mismatch"));
     }
 
     #[test]
     fn scalar_f64_rejects_empty_or_null_array_fallback() {
         let empty = ColumnarValue::Array(Arc::new(Float64Array::from(Vec::<f64>::new())));
-        assert!(scalar_f64(&empty, "phi", "prom_quantile_over_time").is_err());
+        assert2::assert!(scalar_f64(&empty, "phi", "prom_quantile_over_time").is_err());
 
         let null = ColumnarValue::Array(Arc::new(Float64Array::from(vec![None])));
-        assert!(scalar_f64(&null, "phi", "prom_quantile_over_time").is_err());
+        assert2::assert!(scalar_f64(&null, "phi", "prom_quantile_over_time").is_err());
     }
 
     /// `last_over_time` returns the latest sample's value even when the window
@@ -819,7 +804,7 @@ mod tests {
     fn last_uses_max_timestamp() {
         let window: &[(i64, &[i64], &[f64])] =
             &[(300_000, &[60_000, 300_000, 120_000], &[1.0, 9.0, 2.0])];
-        assert!(approx_eq(
+        assert2::assert!(approx_eq(
             run_udf(OverTimeFamily::Last, window, 0.0)[0],
             9.0
         ));
@@ -836,10 +821,7 @@ mod tests {
             (OverTimeFamily::Present, 0.0),
             (OverTimeFamily::Quantile, 0.5),
         ] {
-            assert!(
-                run_udf_nullable(family, window, phi)[0].is_none(),
-                "case {family:?}"
-            );
+            assert2::assert!(run_udf_nullable(family, window, phi)[0].is_none());
         }
     }
 
@@ -852,8 +834,8 @@ mod tests {
         // this is not the no-value case).
         let window: &[(i64, &[i64], &[f64])] = &[(120_000, &[60_000, 120_000], &[f64::NAN, 1.0])];
         let out = run_udf_nullable(OverTimeFamily::Sum, window, 0.0);
-        assert!(out[0].is_some());
-        assert!(out[0].unwrap().is_nan());
+        assert2::assert!(out[0].is_some());
+        assert2::assert!(out[0].unwrap().is_nan());
     }
 
     /// H9: `min`/`max_over_time` IGNORE NaN. A NaN sample never displaces a
@@ -884,10 +866,7 @@ mod tests {
                 } else {
                     approx_eq(got, want)
                 };
-                assert!(
-                    matches,
-                    "case {family:?} over {vals:?}: got {got}, want {want}"
-                );
+                assert2::assert!(matches);
             }
         }
     }
@@ -904,9 +883,9 @@ mod tests {
         // the exact positive value also rules out the cancellation failure
         // (a negative variance whose sqrt is NaN).
         let stdvar = run_udf(OverTimeFamily::Stdvar, window, 0.0)[0];
-        assert!(approx_eq(stdvar, 2.0 / 3.0), "stdvar == 2/3, got {stdvar}");
+        assert2::assert!(approx_eq(stdvar, 2.0 / 3.0));
         let stddev = run_udf(OverTimeFamily::Stddev, window, 0.0)[0];
-        assert!(approx_eq(stddev, (2.0_f64 / 3.0).sqrt()));
+        assert2::assert!(approx_eq(stddev, (2.0_f64 / 3.0).sqrt()));
     }
 
     /// M17: `avg_over_time` of very-large-magnitude samples must not overflow the
@@ -918,8 +897,8 @@ mod tests {
         let avg = run_udf(OverTimeFamily::Avg, window, 0.0)[0];
         // The naive `(MAX + MAX) / 2` overflows to +Inf; the mean of two equal
         // values is the value itself.
-        assert!(avg.is_finite(), "avg must stay finite, got {avg}");
-        assert!(approx_eq(avg, f64::MAX));
+        assert2::assert!(avg.is_finite());
+        assert2::assert!(approx_eq(avg, f64::MAX));
     }
 
     /// A multi-step window set yields one reduction per step.
@@ -958,7 +937,7 @@ mod tests {
             "prom_present_over_time",
             "prom_quantile_over_time",
         ] {
-            assert!(ctx.udf(name).is_ok());
+            assert2::assert!(ctx.udf(name).is_ok());
         }
     }
 

@@ -188,8 +188,6 @@ mod tests {
             reason: Some("authentication failed".into()),
             time_ms: 1_700_000_000_000,
         };
-        check!(authn.class() == AuditEventClass::Authentication);
-
         let denied = AuditEvent::AuthorizationDenied {
             principal: AuditPrincipal {
                 name: "bob".into(),
@@ -204,8 +202,6 @@ mod tests {
             operation: "Write".into(),
             time_ms: 1,
         };
-        check!(denied.class() == AuditEventClass::Authorization);
-
         let admin = AuditEvent::AdminOperation {
             outcome: AuditOutcome::Success,
             principal: AuditPrincipal {
@@ -223,13 +219,19 @@ mod tests {
             }],
             time_ms: 2,
         };
-        check!(admin.class() == AuditEventClass::ApiActivity);
-
         let life = AuditEvent::Lifecycle {
             kind: LifecycleKind::BrokerStarted,
             node_id: 1,
             time_ms: 3,
         };
-        check!(life.class() == AuditEventClass::ApplicationLifecycle);
+        check!(
+            (authn.class(), denied.class(), admin.class(), life.class())
+                == (
+                    AuditEventClass::Authentication,
+                    AuditEventClass::Authorization,
+                    AuditEventClass::ApiActivity,
+                    AuditEventClass::ApplicationLifecycle,
+                )
+        );
     }
 }

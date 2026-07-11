@@ -364,7 +364,6 @@ fn escape(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -477,15 +476,15 @@ mod tests {
             "Producer throughput",
             "seconds into run",
         ] {
-            assert!(html.contains(needle), "missing {needle:?}");
+            assert2::assert!(html.contains(needle));
         }
     }
 
     #[test]
     fn render_html_empty_runs_is_a_valid_page() {
         let html = render_html(&[], "Empty");
-        assert!(html.contains("<html") && html.contains("Empty"));
-        assert!(html.contains("No runs"));
+        assert2::assert!(html.contains("<html") && html.contains("Empty"));
+        assert2::assert!(html.contains("No runs"));
     }
 
     #[test]
@@ -546,12 +545,12 @@ mod tests {
             "crabka",
             "kafka",
         ] {
-            assert!(html.contains(needle), "missing {needle:?}");
+            assert2::assert!(html.contains(needle));
         }
     }
 
     #[test]
     fn web_fragment_empty_is_graceful() {
-        assert!(render_web_fragment(&[]).contains("No benchmark runs"));
+        assert2::assert!(render_web_fragment(&[]).contains("No benchmark runs"));
     }
 }

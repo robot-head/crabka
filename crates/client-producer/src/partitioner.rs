@@ -24,7 +24,7 @@ impl UniformStickyPartitioner {
         fields(topic = %topic, keyed = key.is_some(), num_partitions),
     )]
     pub fn pick(&self, topic: &str, key: Option<&[u8]>, num_partitions: i32) -> i32 {
-        assert!(num_partitions > 0, "num_partitions must be > 0");
+        assert2::assert!(num_partitions > 0);
         if let Some(k) = key {
             let h = murmur2(k);
             // Result is always in [0, num_partitions) which fits i32
@@ -105,7 +105,7 @@ fn murmur2(data: &[u8]) -> i32 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -114,9 +114,7 @@ mod tests {
         let p = UniformStickyPartitioner::new();
         let a = p.pick("t", Some(b"my-key"), 12);
         let b = p.pick("t", Some(b"my-key"), 12);
-        check!(a == b);
-        check!(a == 9);
-        check!((0..12).contains(&a));
+        check!((a, b) == (9, 9));
     }
 
     #[test]
@@ -125,8 +123,7 @@ mod tests {
         let a = p.pick("t", None, 4);
         let b = p.pick("t", None, 4);
         let c = p.pick("t", None, 4);
-        assert!(a == b);
-        assert!(b == c);
+        assert2::assert!((a, b, c) == (a, a, a));
     }
 
     #[test]
@@ -135,22 +132,21 @@ mod tests {
         let a = p.pick("t", None, 4);
         p.rotate("t", 4);
         let b = p.pick("t", None, 4);
-        assert!(a != b);
-        assert!(b == (a + 1) % 4);
+        assert2::assert!((a != b, b) == (true, (a + 1) % 4));
     }
 
     #[test]
     fn rotate_wraps_at_partition_count() {
         let p = UniformStickyPartitioner::new();
 
-        assert!(p.pick("t", None, 3) == 0);
+        assert2::assert!(p.pick("t", None, 3) == 0);
         p.rotate("t", 3);
-        assert!(p.pick("t", None, 3) == 1);
+        assert2::assert!(p.pick("t", None, 3) == 1);
         p.rotate("t", 3);
-        assert!(p.pick("t", None, 3) == 2);
+        assert2::assert!(p.pick("t", None, 3) == 2);
         p.rotate("t", 3);
-        assert!(p.pick("t", None, 3) == 0);
-        assert!(*p.sticky.lock().unwrap().get("t").unwrap() == 0);
+        assert2::assert!(p.pick("t", None, 3) == 0);
+        assert2::assert!(*p.sticky.lock().unwrap().get("t").unwrap() == 0);
     }
 
     #[test]
@@ -159,22 +155,22 @@ mod tests {
         let _ = p.pick("a", None, 4);
         p.rotate("a", 4);
         // Topic "b"'s sticky is still 0.
-        assert!(p.pick("b", None, 4) == 0);
+        assert2::assert!(p.pick("b", None, 4) == 0);
     }
 
     #[test]
     fn murmur2_matches_kafka_golden_vectors() {
-        for (input, want) in [
-            (b"".as_slice(), 275_646_681),
-            (b"a".as_slice(), -1_563_381_124),
-            (b"ab".as_slice(), 316_155_434),
-            (b"abc".as_slice(), 479_470_107),
-            (b"abcd".as_slice(), -1_323_649_548),
-            (b"abcde".as_slice(), 461_995_741),
-            (b"kafka".as_slice(), -798_503_068),
-            (b"my-key".as_slice(), 1_748_425_209),
+        for (_name, input, want) in [
+            ("empty", b"".as_slice(), 275_646_681),
+            ("one byte", b"a".as_slice(), -1_563_381_124),
+            ("two bytes", b"ab".as_slice(), 316_155_434),
+            ("three bytes", b"abc".as_slice(), 479_470_107),
+            ("four bytes", b"abcd".as_slice(), -1_323_649_548),
+            ("five bytes", b"abcde".as_slice(), 461_995_741),
+            ("kafka", b"kafka".as_slice(), -798_503_068),
+            ("my key", b"my-key".as_slice(), 1_748_425_209),
         ] {
-            assert!(murmur2(input) == want);
+            assert2::assert!(murmur2(input) == want);
         }
     }
 }

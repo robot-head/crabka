@@ -246,7 +246,7 @@ mod tests {
                     .$finish()
                     .await
                     .expect_err("broker reported CONCURRENT_TRANSACTIONS");
-                assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+                assert2::assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
 
                 end_txn_error.store(0, Ordering::SeqCst);
                 err.transaction.$finish().await.expect("retry succeeds");
@@ -269,7 +269,7 @@ mod tests {
                     .$finish()
                     .await
                     .expect_err("broker reported CONCURRENT_TRANSACTIONS");
-                assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
+                assert2::assert!(matches!(err.source, ProducerError::ConcurrentTransactions));
 
                 end_txn_error.store(0, Ordering::SeqCst);
                 err.transaction.$finish().await.expect("retry succeeds");

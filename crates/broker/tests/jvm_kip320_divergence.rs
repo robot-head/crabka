@@ -269,7 +269,7 @@ async fn kip320_wire_conformance_offset_for_leader_epoch() {
             BOOTSTRAP,
         ],
     );
-    assert!(out.status.success(), "create topic failed");
+    assert2::assert!(out.status.success());
 
     // 2. Produce a first batch at the current (epoch 0) leadership.
     produce_lines_via_jvm(
@@ -311,17 +311,7 @@ async fn kip320_wire_conformance_offset_for_leader_epoch() {
             .await
             .expect("offset_for_leader_epoch");
         eprintln!("CRABKA[kip320] OffsetForLeaderEpoch(epoch=0) => {answer:?}");
-        assert!(
-            answer.error_code == 0,
-            "OffsetForLeaderEpoch returned error {}",
-            answer.error_code
-        );
-        assert!(
-            answer.end_offset == epoch0_end,
-            "OffsetForLeaderEpoch(epoch=0).end_offset {} != epoch-0 boundary {}",
-            answer.end_offset,
-            epoch0_end,
-        );
+        assert2::assert!((answer.error_code, answer.end_offset) == (0, epoch0_end));
     }
 
     // 5. Compile + run the Java helper inside the cp-kafka container. It drives
@@ -365,15 +355,11 @@ async fn kip320_wire_conformance_offset_for_leader_epoch() {
 
     // The JVM consumer must NOT have hit a deserialization / truncation fault
     // decoding Crabka's OffsetForLeaderEpoch + diverging_epoch bytes.
-    assert!(
+    assert2::assert!(
         !stderr.contains("RecordDeserializationException")
-            && !stdout.contains("RecordDeserializationException"),
-        "JVM consumer hit a deserialization error decoding Crabka Fetch v12+: {stderr}"
+            && !stdout.contains("RecordDeserializationException")
     );
-    assert!(
-        stdout.contains("KIP320PROBE OK"),
-        "JVM OffsetForLeaderEpoch / Fetch v12 conformance probe did not pass: stdout={stdout} stderr={stderr}"
-    );
+    assert2::assert!(stdout.contains("KIP320PROBE OK"));
 
     docker_rm(CONTAINER);
     broker.shutdown().await;
@@ -411,12 +397,7 @@ fn produce_lines_via_jvm(bootstrap: &str, topic: &str, lines: &[String]) {
     }
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("wait producer");
-    assert!(
-        out.status.success(),
-        "JVM producer failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -606,7 +587,7 @@ async fn start_mixed_cluster(container: &str) -> MixedCluster {
         ])
         .status()
         .expect("docker run JVM broker");
-    assert!(status.success(), "docker run JVM broker failed");
+    assert2::assert!(status.success());
 
     // Wait for the Crabka voters to elect a shared leader (event-driven: each
     // awaiter resolves once that voter observes a non-zero controller leader).
@@ -652,11 +633,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     //    — the dominant Mac-vs-Linux difference here) we cannot build an RF=3
     //    topic, so we surface that explicitly rather than fail opaquely inside
     //    CreateTopics.
-    assert!(
-        cluster.wait_for_brokers(3, Duration::from_mins(2)).await,
-        "JVM broker never joined the mixed cluster (only the 2 Crabka brokers \
-         registered); the cross-impl KRaft data-plane join is Linux-bound"
-    );
+    assert2::assert!(cluster.wait_for_brokers(3, Duration::from_mins(2)).await);
 
     // 1. Create an RF=3 topic placed on the two Crabka brokers + JVM. With 3
     //    registered brokers the controller assigns replicas across all three;
@@ -678,11 +655,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
             &bootstrap_all,
         ],
     );
-    assert!(
-        out.status.success(),
-        "create topic failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
 
     // 2. Wait for the partition to materialize on the Crabka leader and for the
     //    JVM follower to join the ISR.
@@ -705,10 +678,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
         if s.contains("Isr:") && s.contains('3') {
             break;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "JVM follower never joined ISR: {s}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: polls an EXTERNAL kafka-topics --describe CLI for the
         // JVM follower (id 3) to catch up and join the ISR; driven by the JVM
         // broker's fetch, with a 2-min bound the 30s image awaiter can't match.
@@ -822,10 +792,7 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     // the JVM follower's highest offset == the Crabka leader's highest offset.
     let crabka_max = max_offset_in_dump(&crabka_dump);
     let jvm_max = max_offset_in_dump(&jvm_dump);
-    assert!(
-        jvm_max.is_some() && jvm_max == crabka_max,
-        "JVM follower did not converge to Crabka leader after truncation: jvm_max={jvm_max:?} crabka_max={crabka_max:?}"
-    );
+    assert2::assert!(jvm_max.is_some() && jvm_max == crabka_max);
 
     // 7. ASSERTION (b): a kafka-console-consumer recovers — it reads the
     //    truncated/converged log to completion without a fatal
@@ -850,15 +817,11 @@ async fn kip320_jvm_follower_truncates_from_crabka_leader() {
     let cstdout = String::from_utf8_lossy(&consume.stdout);
     let cstderr = String::from_utf8_lossy(&consume.stderr);
     eprintln!("CRABKA[kip320] consumer recover stdout={cstdout} stderr={cstderr}");
-    assert!(
+    assert2::assert!(
         !cstderr.contains("LogTruncationException")
-            && !cstderr.contains("RecordDeserializationException"),
-        "consumer hit a fatal truncation/deserialization error: {cstderr}"
+            && !cstderr.contains("RecordDeserializationException")
     );
-    assert!(
-        cstdout.lines().filter(|l| !l.trim().is_empty()).count() >= 1,
-        "consumer read no records after truncation recovery: stdout={cstdout} stderr={cstderr}"
-    );
+    assert2::assert!(cstdout.lines().filter(|l| !l.trim().is_empty()).count() >= 1);
 
     cluster.shutdown().await;
 }
@@ -887,10 +850,7 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
 
     // 0. Gate on the JVM broker registering (see scenario 2); RF=3 needs all
     //    three brokers in the cluster view. Linux-bound.
-    assert!(
-        cluster.wait_for_brokers(3, Duration::from_mins(2)).await,
-        "JVM broker never joined the mixed cluster; cross-impl KRaft join is Linux-bound"
-    );
+    assert2::assert!(cluster.wait_for_brokers(3, Duration::from_mins(2)).await);
 
     // 1. Create the topic and wait for replicas to converge across all three
     //    brokers.
@@ -910,11 +870,7 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
             &bootstrap_all,
         ],
     );
-    assert!(
-        out.status.success(),
-        "create topic failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
 
     let deadline = Instant::now() + Duration::from_mins(2);
     loop {
@@ -933,7 +889,7 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
         if s.contains("Isr:") && s.contains('1') && s.contains('3') {
             break;
         }
-        assert!(Instant::now() <= deadline, "replicas never converged: {s}");
+        assert2::assert!(Instant::now() <= deadline);
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
 
@@ -1005,11 +961,7 @@ async fn kip320_crabka_follower_truncates_from_jvm_leader() {
     // and we skip the hard assert — recording the limitation rather than
     // fabricating a pass.
     if leader == Some(3) {
-        assert!(
-            converged,
-            "Crabka follower did not truncate its divergent suffix against the JVM leader \
-             (LEO stayed at {final_leo}, expected < {crabka_leo_diverged})"
-        );
+        assert2::assert!(converged);
     } else {
         eprintln!(
             "CRABKA[kip320] reverse: Crabka was not a follower of the JVM leader (leader={leader:?}); \

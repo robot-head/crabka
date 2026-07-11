@@ -15,7 +15,6 @@ pub(crate) fn crc32c_append(seed: u32, data: &[u8]) -> u32 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -32,10 +31,7 @@ mod tests {
     fn known_vectors() {
         for (input, expected) in VECTORS {
             let got = crc32c(input);
-            assert!(
-                got == *expected,
-                "input={input:?}: expected {expected:#010x}, got {got:#010x}"
-            );
+            assert2::assert!(got == *expected);
         }
     }
 }

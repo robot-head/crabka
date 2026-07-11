@@ -270,7 +270,6 @@ impl UsageStore {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -286,8 +285,8 @@ mod tests {
     #[test]
     fn empty_store_returns_none() {
         let s = UsageStore::default();
-        assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 0).is_none());
-        assert!(s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 0).is_none());
+        assert2::assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 0) == None);
+        assert2::assert!(s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 0) == None);
     }
 
     #[test]
@@ -298,7 +297,7 @@ mod tests {
         // (3000 - 1000) / 1.0s = 2000 bytes/sec. Query at now_ms=1000 so
         // the latest sample is on the window's upper bound.
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).unwrap();
-        assert!((rate - 2000.0).abs() < 1e-6, "got {rate}");
+        assert2::assert!((rate - 2000.0).abs() < 1e-6);
     }
 
     #[test]
@@ -319,7 +318,7 @@ mod tests {
         let rate = s
             .cpu_micros_rate(1, "t", 0, Window::FiveMin, now_ms)
             .unwrap();
-        assert!((rate - 2_000_000.0).abs() < 1e-3, "got {rate}");
+        assert2::assert!((rate - 2_000_000.0).abs() < 1e-3);
     }
 
     #[test]
@@ -327,7 +326,7 @@ mod tests {
         let s = UsageStore::default();
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 5000.0)], 0);
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 1000);
-        assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).is_none());
+        assert2::assert!(s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1000).is_none());
     }
 
     #[test]
@@ -338,7 +337,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::DiskBytes, "t", 0, 300.0)], 2000);
         // Query at now_ms=2000 (latest sample). Average of [100, 200, 300] = 200.
         let avg = s.disk_bytes_avg(1, "t", 0, Window::FiveMin, 2000).unwrap();
-        assert!((avg - 200.0).abs() < 1e-6, "got {avg}");
+        assert2::assert!((avg - 200.0).abs() < 1e-6);
     }
 
     #[test]
@@ -354,7 +353,7 @@ mod tests {
         // Only samples at 30_000 and 90_000 remain.
         // The 5-min window includes both. Rate = (300-200)/60s = ~1.67/sec.
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 90_000).unwrap();
-        assert!((rate - 100.0 / 60.0).abs() < 1e-3, "got {rate}");
+        assert2::assert!((rate - 100.0 / 60.0).abs() < 1e-3);
     }
 
     #[test]
@@ -370,7 +369,7 @@ mod tests {
         let rate = s
             .bytes_in_rate(1, "t", 0, Window::FiveMin, 120_000)
             .unwrap();
-        assert!((rate - 5.0).abs() < 1e-6, "got {rate}");
+        assert2::assert!((rate - 5.0).abs() < 1e-6);
     }
 
     #[test]
@@ -388,7 +387,7 @@ mod tests {
         let avg = s
             .disk_bytes_avg(1, "t", 0, Window::FiveMin, 300_000)
             .unwrap();
-        assert!((avg - 150.0).abs() < 1e-6, "got {avg}");
+        assert2::assert!((avg - 150.0).abs() < 1e-6);
     }
 
     #[test]
@@ -406,7 +405,7 @@ mod tests {
         let rate = s
             .bytes_in_rate(1, "t", 0, Window::FiveMin, 300_000)
             .unwrap();
-        assert!((rate - 200.0).abs() < 1e-6, "got {rate}");
+        assert2::assert!((rate - 200.0).abs() < 1e-6);
     }
 
     #[test]
@@ -415,7 +414,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 10);
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 200.0)], 11);
 
-        assert!(
+        assert2::assert!(
             s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000_000)
                 .is_none()
         );
@@ -429,7 +428,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 300.0)], 1_000);
 
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
-        assert!((rate - 200.0).abs() < 1e-6, "got {rate}");
+        assert2::assert!((rate - 200.0).abs() < 1e-6);
     }
 
     #[test]
@@ -439,7 +438,7 @@ mod tests {
         s.insert(1, vec![sample(MetricKind::BytesIn, "t", 0, 100.0)], 1_000);
 
         let rate = s.bytes_in_rate(1, "t", 0, Window::FiveMin, 1_000).unwrap();
-        assert!(rate.abs() < f64::EPSILON);
+        assert2::assert!(rate.abs() < f64::EPSILON);
     }
 
     /// Regression: a broker that stops emitting must not keep producing
@@ -456,10 +455,9 @@ mod tests {
         // means latest is 999_000ms (≈16.6 min) old — well past the
         // 5-min window. Must return None.
         let now_ms = 1_000_000;
-        assert!(
+        assert2::assert!(
             s.bytes_in_rate(1, "t", 0, Window::FiveMin, now_ms)
-                .is_none(),
-            "stale broker must not keep producing a rate"
+                .is_none()
         );
     }
 
@@ -471,10 +469,9 @@ mod tests {
         // 5 minutes = 300_000ms. now_ms=10_000_000 means latest sample
         // is ~166 minutes old — well past the window. Returns None.
         let now_ms = 10_000_000;
-        assert!(
+        assert2::assert!(
             s.disk_bytes_avg(1, "t", 0, Window::FiveMin, now_ms)
-                .is_none(),
-            "stale broker must not keep producing a disk average"
+                .is_none()
         );
     }
 

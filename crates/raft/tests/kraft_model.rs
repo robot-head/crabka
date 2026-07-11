@@ -48,14 +48,8 @@ fn run(model: ConsensusModel, label: &str) {
     // Guard against silent incompleteness: if we hit the depth or state cap, the
     // `always` properties were only partially verified — fail loudly so the
     // bounds get retuned rather than passing a non-exhaustive check.
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "[{label}] hit depth cap {MAX_DEPTH}: search is depth-truncated, not exhaustive"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] hit state cap {MAX_STATES}: search is truncated, not exhaustive"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

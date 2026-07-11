@@ -184,8 +184,12 @@ mod tests {
             references: &[],
         };
         let j = serde_json::to_string(&p).unwrap();
-        check!(j.contains(r#""schemaType":"PROTOBUF""#));
-        check!(j.contains(r#""messageType":"demo.Order""#));
+        check!(
+            (
+                j.contains(r#""schemaType":"PROTOBUF""#),
+                j.contains(r#""messageType":"demo.Order""#),
+            ) == (true, true)
+        );
     }
 
     #[tokio::test]

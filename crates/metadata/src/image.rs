@@ -971,16 +971,16 @@ mod tests {
             partitions: 3,
             replication_factor: 2,
         });
-        assert!(record_variant(&topic) == "V1Topic");
+        assert2::assert!(record_variant(&topic) == "V1Topic");
 
         let feature = MetadataRecord::V1FeatureLevel(crate::records::FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 1,
         });
-        assert!(record_variant(&feature) == "V1FeatureLevel");
+        assert2::assert!(record_variant(&feature) == "V1FeatureLevel");
     }
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use crate::{
         acl::{AclEntryFilter, AclOperation, PermissionType},
@@ -998,19 +998,19 @@ mod tests {
     #[test]
     fn fresh_image_has_no_features_and_unknown_epoch() {
         let m = img();
-        assert!(m.finalized_features().is_empty());
-        assert!(m.finalized_features_epoch() == -1);
+        assert2::assert!(m.finalized_features().is_empty());
+        assert2::assert!(m.finalized_features_epoch() == -1);
     }
 
     #[test]
     fn finalized_feature_reads_arbitrary_name() {
         let mut m = MetadataImage::new(uuid::Uuid::nil());
-        assert!(m.finalized_feature("transaction.version").is_none());
+        assert2::assert!(m.finalized_feature("transaction.version").is_none());
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "transaction.version".into(),
             level: 2,
         }));
-        assert!(m.finalized_feature("transaction.version") == Some(2));
+        assert2::assert!(m.finalized_feature("transaction.version") == Some(2));
     }
 
     #[test]
@@ -1020,15 +1020,15 @@ mod tests {
             name: "metadata.version".into(),
             level: 1,
         }));
-        assert!(m.finalized_features().get("metadata.version") == Some(&1));
-        assert!(m.finalized_features_epoch() == 0);
+        assert2::assert!(m.finalized_features().get("metadata.version") == Some(&1));
+        assert2::assert!(m.finalized_features_epoch() == 0);
 
         // A second apply bumps the epoch again (monotonic).
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 1,
         }));
-        assert!(m.finalized_features_epoch() == 1);
+        assert2::assert!(m.finalized_features_epoch() == 1);
     }
 
     #[test]
@@ -1042,9 +1042,12 @@ mod tests {
             name: "metadata.version".into(),
             level: 0,
         }));
-        assert!(m.finalized_features().get("metadata.version").is_none());
-        // Epoch still advanced — it is monotonic, not a count of live features.
-        assert!(m.finalized_features_epoch() == 1);
+        assert2::assert!(
+            (
+                m.finalized_features().get("metadata.version"),
+                m.finalized_features_epoch(),
+            ) == (None, 1)
+        );
     }
 
     #[test]
@@ -1057,7 +1060,7 @@ mod tests {
             partitions: 3,
             replication_factor: 2,
         }));
-        assert!(MetadataImage::from_records(cid, &image.to_records()) == image);
+        assert2::assert!(MetadataImage::from_records(cid, &image.to_records()) == image);
     }
 
     /// Exercises every stored variant the image can hold (the 9
@@ -1320,10 +1323,10 @@ mod tests {
             name: "group.version".into(),
             level: 1,
         }));
-        assert!(image.finalized_features_epoch() == 2);
+        assert2::assert!(image.finalized_features_epoch() == 2);
 
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
-        assert!(rebuilt == image);
+        assert2::assert!(rebuilt == image);
     }
 
     /// Finalized features and their epoch must survive a `to_records` /
@@ -1355,15 +1358,19 @@ mod tests {
             name: "metadata.version".into(),
             level: 25,
         }));
-        assert!(image.finalized_features_epoch() == 3);
+        assert2::assert!(image.finalized_features_epoch() == 3);
 
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
-        assert!(rebuilt == image);
+        assert2::assert!(rebuilt == image);
         // Belt-and-suspenders beyond derived PartialEq: the two fields the
         // snapshot path used to lose.
-        check!(rebuilt.finalized_features().get("metadata.version") == Some(&25));
-        check!(rebuilt.finalized_features().get("group.version") == Some(&1));
-        check!(rebuilt.finalized_features_epoch() == 3);
+        check!(
+            (
+                rebuilt.finalized_features().get("metadata.version"),
+                rebuilt.finalized_features().get("group.version"),
+                rebuilt.finalized_features_epoch(),
+            ) == (Some(&25), Some(&1), 3)
+        );
     }
 
     /// KIP-853 voter set + finalized cluster `kraft.version` must survive
@@ -1413,9 +1420,7 @@ mod tests {
 
         let rebuilt = MetadataImage::from_records(cid, &image.to_records());
 
-        assert_eq!(rebuilt.kraft_version(), 1);
-        assert_eq!(rebuilt.voters(), &voters);
-        assert_eq!(rebuilt, image);
+        assert2::assert!(rebuilt == image);
     }
 
     fn topic(name: &str, partitions: i32) -> MetadataRecord {
@@ -1431,7 +1436,7 @@ mod tests {
     fn apply_topic_inserts() {
         let mut m = img();
         m.apply(&topic("t", 3));
-        assert!(m.topic("t").is_some());
+        assert2::assert!(m.topic("t").is_some());
     }
 
     #[test]
@@ -1465,7 +1470,7 @@ mod tests {
         let pr = m.partition("t", 0).unwrap();
         // Slot 1 (replica 2) set; slots 0 and 2 untouched. The delta did NOT
         // clobber the in-flight reassignment.
-        assert!(
+        assert2::assert!(
             *pr == PartitionRecord {
                 topic: "t".to_string(),
                 partition: 0,
@@ -1509,12 +1514,12 @@ mod tests {
             directories: vec![],
             partition_epoch: 0,
         }));
-        assert!(m.partitions_of("t").count() == 2);
+        assert2::assert!(m.partitions_of("t").count() == 2);
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "t".into(),
         }));
-        assert!(m.topic("t").is_none());
-        assert!(m.partitions_of("t").count() == 0);
+        assert2::assert!(m.topic("t").is_none());
+        assert2::assert!(m.partitions_of("t").count() == 0);
     }
 
     #[test]
@@ -1522,7 +1527,7 @@ mod tests {
         let mut m = img();
         m.apply(&topic("t", 1));
         let err = m.validate(&topic("t", 1)).unwrap_err();
-        assert!(matches!(err, MetadataError::TopicExists(_)));
+        assert2::assert!(matches!(err, MetadataError::TopicExists(_)));
     }
 
     /// Apply `count` partition records (indices `0..count`) for `topic` so
@@ -1558,7 +1563,7 @@ mod tests {
             partitions: 3,
             replication_factor: existing.replication_factor,
         });
-        assert!(m.validate(&updated).is_ok());
+        assert2::assert!(m.validate(&updated).is_ok());
     }
 
     #[test]
@@ -1574,7 +1579,7 @@ mod tests {
             replication_factor: existing.replication_factor,
         });
         let err = m.validate(&updated).unwrap_err();
-        assert!(matches!(err, MetadataError::TopicExists(_)));
+        assert2::assert!(matches!(err, MetadataError::TopicExists(_)));
     }
 
     #[test]
@@ -1585,7 +1590,7 @@ mod tests {
                 name: "ghost".into(),
             }))
             .unwrap_err();
-        assert!(matches!(err, MetadataError::UnknownTopic(_)));
+        assert2::assert!(matches!(err, MetadataError::UnknownTopic(_)));
     }
 
     #[test]
@@ -1604,7 +1609,7 @@ mod tests {
             partition_epoch: 0,
         });
         let err = m.validate(&p).unwrap_err();
-        assert!(matches!(err, MetadataError::UnknownTopic(_)));
+        assert2::assert!(matches!(err, MetadataError::UnknownTopic(_)));
     }
 
     #[test]
@@ -1621,7 +1626,7 @@ mod tests {
         });
         m.apply(&b);
         m.apply(&b);
-        assert!(m.brokers().count() == 1);
+        assert2::assert!(m.brokers().count() == 1);
     }
 
     #[test]
@@ -1636,7 +1641,7 @@ mod tests {
                 overrides: overrides.clone(),
             },
         ));
-        assert!(m.topic_config("t") == Some(&overrides));
+        assert2::assert!(m.topic_config("t") == Some(&overrides));
     }
 
     #[test]
@@ -1664,7 +1669,7 @@ mod tests {
         ));
 
         // segment.bytes is GONE — last-write-wins is authoritative.
-        assert!(m.topic_config("t") == Some(&second));
+        assert2::assert!(m.topic_config("t") == Some(&second));
     }
 
     #[test]
@@ -1682,7 +1687,7 @@ mod tests {
         m.apply(&MetadataRecord::V1DeleteTopic(
             crate::records::DeleteTopicRecord { name: "t".into() },
         ));
-        assert!(m.topic_config("t").is_none());
+        assert2::assert!(m.topic_config("t").is_none());
     }
 
     #[test]
@@ -1693,7 +1698,7 @@ mod tests {
             overrides: std::collections::BTreeMap::new(),
         });
         let err = m.validate(&r).unwrap_err();
-        assert!(matches!(err, MetadataError::UnknownTopic(_)));
+        assert2::assert!(matches!(err, MetadataError::UnknownTopic(_)));
     }
 
     #[test]
@@ -1708,8 +1713,7 @@ mod tests {
             iterations: 4096,
         }));
         let got = m.scram_credential("alice", crabka_security::SaslMechanism::ScramSha512);
-        assert!(got.is_some());
-        assert!(got.unwrap().iterations == 4096);
+        assert2::assert!(got.map(|credential| credential.iterations) == Some(4096));
     }
 
     #[test]
@@ -1733,8 +1737,7 @@ mod tests {
             iterations: 8192,
         }));
         let got = m.scram_credential("alice", mech).unwrap();
-        assert!(got.iterations == 8192);
-        assert!(got.salt == vec![9; 16]);
+        assert2::assert!((got.iterations, &got.salt) == (8192, &vec![9; 16]));
     }
 
     #[test]
@@ -1755,7 +1758,7 @@ mod tests {
                 mechanism: mech,
             },
         ));
-        assert!(m.scram_credential("alice", mech).is_none());
+        assert2::assert!(m.scram_credential("alice", mech).is_none());
     }
 
     fn topic_read_for_alice() -> AclEntry {
@@ -1786,9 +1789,13 @@ mod tests {
     fn apply_v1_access_control_entry_literal_stores_in_literal_map() {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
-        let mut hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
-        assert!(hits.len() == 1);
-        assert!(hits.pop().unwrap().resource_name == "foo");
+        let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
+        assert2::assert!(
+            hits.iter()
+                .map(|entry| entry.resource_name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["foo"]
+        );
     }
 
     #[test]
@@ -1799,7 +1806,7 @@ mod tests {
         m.apply(&MetadataRecord::V1AccessControlEntry(acl));
 
         let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
-        assert!(hits.len() == 1);
+        assert2::assert!(hits.len() == 1);
     }
 
     #[test]
@@ -1807,11 +1814,15 @@ mod tests {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "team-foo").collect();
-        assert!(hits.len() == 1);
-        assert!(hits[0].resource_name == "team-");
+        assert2::assert!(
+            hits.iter()
+                .map(|entry| entry.resource_name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["team-"]
+        );
         // Non-matching resource: empty.
         let none: Vec<_> = m.matching_acls(ResourceType::Topic, "other").collect();
-        assert!(none.is_empty());
+        assert2::assert!(none.is_empty());
     }
 
     #[test]
@@ -1821,8 +1832,7 @@ mod tests {
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
         let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
-        assert!(hits_foo.len() == 1);
-        assert!(hits_team.len() == 1);
+        assert2::assert!((hits_foo.len(), hits_team.len()) == (1, 1));
     }
 
     fn topic_wildcard_allow() -> AclEntry {
@@ -1857,10 +1867,10 @@ mod tests {
         let hits: Vec<_> = m
             .matching_acls(ResourceType::Topic, "some-random-topic")
             .collect();
-        assert!(hits == vec![&topic_wildcard_allow()]);
+        assert2::assert!(hits == vec![&topic_wildcard_allow()]);
         // Requesting "*" itself must not double-count the wildcard entry.
         let star: Vec<_> = m.matching_acls(ResourceType::Topic, "*").collect();
-        assert!(star.len() == 1);
+        assert2::assert!(star.len() == 1);
     }
 
     #[test]
@@ -1870,7 +1880,7 @@ mod tests {
         let hits: Vec<_> = m
             .matching_acls(ResourceType::Topic, "another-random-topic")
             .collect();
-        assert!(hits == vec![&topic_wildcard_deny()]);
+        assert2::assert!(hits == vec![&topic_wildcard_deny()]);
     }
 
     #[test]
@@ -1886,8 +1896,7 @@ mod tests {
         m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
         let hits_foo: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
         let hits_team: Vec<_> = m.matching_acls(ResourceType::Topic, "team-x").collect();
-        assert!(hits_foo.len() == 0); // literal removed
-        assert!(hits_team.len() == 1); // prefixed survives
+        assert2::assert!((hits_foo.len(), hits_team.len()) == (0, 1));
     }
 
     #[test]
@@ -1900,7 +1909,7 @@ mod tests {
         };
         m.apply(&MetadataRecord::V1DeleteAccessControlEntry(filter));
         let hits: Vec<_> = m.matching_acls(ResourceType::Topic, "foo").collect();
-        assert!(hits.len() == 1);
+        assert2::assert!(hits.len() == 1);
     }
 
     #[test]
@@ -1908,7 +1917,7 @@ mod tests {
         let mut m = img();
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_read_for_alice()));
         m.apply(&MetadataRecord::V1AccessControlEntry(topic_prefixed_team()));
-        assert!(m.all_acls().count() == 2);
+        assert2::assert!(m.all_acls().count() == 2);
     }
 
     #[test]
@@ -1943,8 +1952,8 @@ mod tests {
             partition_epoch: 0,
         }));
         // 3 partitions for "t" + 1 for "u" = 4, one walk, no per-topic filter.
-        assert!(m.all_partitions().count() == 4);
-        assert!(
+        assert2::assert!(m.all_partitions().count() == 4);
+        assert2::assert!(
             m.all_partitions().count()
                 == m.partitions_of("t").count() + m.partitions_of("u").count()
         );
@@ -2004,7 +2013,7 @@ mod tests {
             }));
         }
         let idxs: Vec<i32> = m.partitions_of("t").map(|p| p.partition).collect();
-        assert!(idxs == vec![0, 1, 2]);
+        assert2::assert!(idxs == vec![0, 1, 2]);
     }
 
     /// Deleting one topic must not disturb another topic's partitions in
@@ -2032,11 +2041,15 @@ mod tests {
         m.apply(&MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "doomed".into(),
         }));
-        check!(m.partitions_of("doomed").count() == 0);
-        check!(m.topic_partition_count("doomed") == 0);
-        check!(m.partitions_of("survivor").count() == 1);
-        check!(m.partition("survivor", 0).is_some());
-        check!(m.all_partitions().count() == 1);
+        check!(
+            (
+                m.partitions_of("doomed").count(),
+                m.topic_partition_count("doomed"),
+                m.partitions_of("survivor").count(),
+                m.partition("survivor", 0).is_some(),
+                m.all_partitions().count(),
+            ) == (0, 0, 1, true, 1)
+        );
     }
 
     #[test]
@@ -2060,7 +2073,7 @@ mod tests {
             directories: vec![],
             partition_epoch: 0,
         }));
-        assert!(img.reassignments_in_flight().count() == 0);
+        assert2::assert!(img.reassignments_in_flight().count() == 0);
     }
 
     #[test]
@@ -2085,8 +2098,12 @@ mod tests {
             partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
-        assert!(rows.len() == 1);
-        assert!(rows[0].adding_replicas == vec![NodeId(4)]);
+        assert2::assert!(
+            rows.iter()
+                .map(|row| row.adding_replicas.clone())
+                .collect::<Vec<_>>()
+                == vec![vec![NodeId(4)]]
+        );
     }
 
     #[test]
@@ -2111,8 +2128,12 @@ mod tests {
             partition_epoch: 0,
         }));
         let rows: Vec<_> = img.reassignments_in_flight().collect();
-        assert!(rows.len() == 1);
-        assert!(rows[0].removing_replicas == vec![NodeId(3)]);
+        assert2::assert!(
+            rows.iter()
+                .map(|row| row.removing_replicas.clone())
+                .collect::<Vec<_>>()
+                == vec![vec![NodeId(3)]]
+        );
     }
 
     #[test]
@@ -2138,7 +2159,7 @@ mod tests {
                 partition_epoch: 0,
             }));
         }
-        assert!(img.reassignments_in_flight().count() == 2);
+        assert2::assert!(img.reassignments_in_flight().count() == 2);
     }
 
     #[test]
@@ -2150,7 +2171,7 @@ mod tests {
             config_value: Some("2048".into()),
         }));
         let bc = img.broker_config(NodeId(1)).expect("broker config");
-        assert!(bc.get("leader.replication.throttled.rate") == Some(&"2048".to_string()));
+        assert2::assert!(bc.get("leader.replication.throttled.rate") == Some(&"2048".to_string()));
     }
 
     #[test]
@@ -2169,7 +2190,7 @@ mod tests {
         let bc = img
             .broker_config(NodeId(1))
             .expect("broker_configs entry retained");
-        assert!(bc.get("leader.replication.throttled.rate").is_none());
+        assert2::assert!(bc.get("leader.replication.throttled.rate").is_none());
     }
 
     #[test]
@@ -2180,7 +2201,7 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         }));
-        assert!(img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader) == Some(2048));
+        assert2::assert!(img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader) == Some(2048));
     }
 
     #[test]
@@ -2191,7 +2212,7 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("-1".into()),
         }));
-        assert!(
+        assert2::assert!(
             img.broker_throttle_rate(NodeId(1), ThrottleKind::Leader)
                 .is_none()
         );
@@ -2223,7 +2244,7 @@ mod tests {
             .client_quotas()
             .get(&key)
             .expect("entry under canonical key");
-        assert!(configs.get("producer_byte_rate") == Some(&1024.0));
+        assert2::assert!(configs.get("producer_byte_rate") == Some(&1024.0));
     }
 
     #[test]
@@ -2247,7 +2268,7 @@ mod tests {
         }));
         let key: EntityKey = vec![("user".into(), Some("alice".into()))];
         let configs = img.client_quotas().get(&key).expect("entry retained");
-        assert!(configs.get("producer_byte_rate").is_none());
+        assert2::assert!(configs.get("producer_byte_rate").is_none());
     }
 
     #[test]
@@ -2262,7 +2283,7 @@ mod tests {
             config_value: Some(512.0),
         }));
         let key: EntityKey = vec![("user".into(), None)];
-        assert!(img.client_quotas().contains_key(&key));
+        assert2::assert!(img.client_quotas().contains_key(&key));
     }
 
     #[test]
@@ -2272,8 +2293,13 @@ mod tests {
             ("client-id".to_string(), Some("app1".to_string())),
         ];
         let canon = canonicalize_entity(input);
-        assert!(canon[0].0 == "client-id");
-        assert!(canon[1].0 == "user");
+        assert2::assert!(
+            canon
+                .iter()
+                .map(|(kind, _)| kind.as_str())
+                .collect::<Vec<_>>()
+                == vec!["client-id", "user"]
+        );
     }
 
     #[test]
@@ -2297,7 +2323,7 @@ mod tests {
         }));
         let mut users = img.scram_credentials_users();
         users.sort();
-        assert!(users == vec!["alice".to_string(), "bob".to_string()]);
+        assert2::assert!(users == vec!["alice".to_string(), "bob".to_string()]);
     }
 
     fn principal(pt: &str, name: &str) -> KafkaPrincipal {
@@ -2331,14 +2357,14 @@ mod tests {
 
         img.apply(&dt_record("tok-1", alice.clone(), 5_000, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert!(got.expiry_timestamp_ms == 5_000);
-        assert!(got.owner == alice);
+        assert2::assert!(got.expiry_timestamp_ms == 5_000);
+        assert2::assert!(&got.owner == &alice);
 
         // Same token_id, different expiry — replace, not duplicate.
         img.apply(&dt_record("tok-1", alice.clone(), 7_500, vec![]));
         let got = img.delegation_token_by_id("tok-1").expect("token present");
-        assert!(got.expiry_timestamp_ms == 7_500);
-        assert!(img.all_delegation_tokens().count() == 1);
+        assert2::assert!(got.expiry_timestamp_ms == 7_500);
+        assert2::assert!(img.all_delegation_tokens().count() == 1);
     }
 
     #[test]
@@ -2347,15 +2373,15 @@ mod tests {
         let alice = principal("User", "alice");
 
         img.apply(&dt_record("tok-1", alice, 5_000, vec![]));
-        assert!(img.delegation_token_by_id("tok-1").is_some());
+        assert2::assert!(img.delegation_token_by_id("tok-1").is_some());
 
         img.apply(&MetadataRecord::V1DeleteDelegationToken(
             DeleteDelegationTokenRecord {
                 token_id: "tok-1".into(),
             },
         ));
-        assert!(img.delegation_token_by_id("tok-1").is_none());
-        assert!(img.all_delegation_tokens().count() == 0);
+        assert2::assert!(img.delegation_token_by_id("tok-1").is_none());
+        assert2::assert!(img.all_delegation_tokens().count() == 0);
     }
 
     #[test]
@@ -2388,12 +2414,12 @@ mod tests {
         let found_a = img
             .delegation_token_by_hmac(&hmac_a)
             .expect("hmac_a present");
-        assert!(found_a.token_id == "tok-a");
         let found_b = img
             .delegation_token_by_hmac(&hmac_b)
             .expect("hmac_b present");
-        assert!(found_b.token_id == "tok-b");
-        assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
+        assert2::assert!(found_a.token_id.as_str() == "tok-a");
+        assert2::assert!(found_b.token_id.as_str() == "tok-b");
+        assert2::assert!(img.delegation_token_by_hmac(&[0xCC; 32]).is_none());
     }
 
     #[test]
@@ -2407,19 +2433,24 @@ mod tests {
         img.apply(&dt_record("b-1", bob.clone(), 7_000, vec![]));
 
         let alice_tokens = img.delegation_tokens_by_owner(&alice);
-        assert!(alice_tokens.len() == 2);
-        assert!(alice_tokens.iter().all(|t| t.owner == alice));
+        assert2::assert!(alice_tokens.len() == 2);
+        assert2::assert!(alice_tokens.iter().all(|token| token.owner == alice));
 
         let bob_tokens = img.delegation_tokens_by_owner(&bob);
-        assert!(bob_tokens.len() == 1);
-        assert!(bob_tokens[0].token_id == "b-1");
+        assert2::assert!(
+            bob_tokens
+                .iter()
+                .map(|token| token.token_id.as_str())
+                .collect::<Vec<_>>()
+                == vec!["b-1"]
+        );
 
         // visible_to: bob owns b-1 and is renewer on a-2 → 2 tokens.
         let bob_visible = img.delegation_tokens_visible_to(&bob);
-        assert!(bob_visible.len() == 2);
+        assert2::assert!(bob_visible.len() == 2);
         let mut ids: Vec<&str> = bob_visible.iter().map(|t| t.token_id.as_str()).collect();
         ids.sort_unstable();
-        assert!(ids == vec!["a-2", "b-1"]);
+        assert2::assert!(ids == vec!["a-2", "b-1"]);
     }
 
     #[test]
@@ -2436,8 +2467,8 @@ mod tests {
                 kraft_version: crate::voters::KRaftVersionRange::default(),
             }]),
         }));
-        assert!(image.kraft_version() == 1);
-        assert!(image.voters().contains(NodeId(1)));
+        assert2::assert!(image.kraft_version() == 1);
+        assert2::assert!(image.voters().contains(NodeId(1)));
     }
 
     #[test]
@@ -2452,27 +2483,27 @@ mod tests {
             iterations: 8192,
         }));
         let pairs = img.scram_credentials_for_user("alice");
-        assert!(pairs == vec![(SaslMechanism::ScramSha512, 8192)]);
-        assert!(img.scram_credentials_for_user("ghost").is_empty());
+        assert2::assert!(pairs == vec![(SaslMechanism::ScramSha512, 8192)]);
+        assert2::assert!(img.scram_credentials_for_user("ghost").is_empty());
     }
 
     #[test]
     fn finalized_metadata_version_reads_feature_map() {
         use crate::records::FeatureLevelRecord;
         let mut m = img();
-        assert!(m.finalized_metadata_version() == None);
+        assert2::assert!(m.finalized_metadata_version() == None);
         m.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 19,
         }));
-        assert!(m.finalized_metadata_version() == Some(19));
+        assert2::assert!(m.finalized_metadata_version() == Some(19));
     }
 
     #[test]
     fn min_required_metadata_version_baseline_is_min() {
         use crate::metadata_version::METADATA_VERSION_MIN;
         let m = img();
-        assert!(m.min_required_metadata_version() == METADATA_VERSION_MIN);
+        assert2::assert!(m.min_required_metadata_version() == METADATA_VERSION_MIN);
     }
 
     #[test]
@@ -2487,21 +2518,21 @@ mod tests {
                 configs: cfgs,
             },
         ));
-        assert_eq!(
+        assert2::assert!(
             img.client_metrics_config("sub-a")
                 .and_then(|m| m.get("interval.ms"))
-                .map(String::as_str),
-            Some("60000")
+                .map(String::as_str)
+                == Some("60000")
         );
-        assert_eq!(img.client_metrics_subscriptions().count(), 1);
+        assert2::assert!(img.client_metrics_subscriptions().count() == 1);
         img.apply(&MetadataRecord::V1ClientMetricsConfig(
             ClientMetricsConfigRecord {
                 name: "sub-a".into(),
                 configs: std::collections::BTreeMap::new(),
             },
         ));
-        assert!(img.client_metrics_config("sub-a").is_none());
-        assert_eq!(img.client_metrics_subscriptions().count(), 0);
+        assert2::assert!(img.client_metrics_config("sub-a").is_none());
+        assert2::assert!(img.client_metrics_subscriptions().count() == 0);
     }
 
     #[test]
@@ -2520,7 +2551,7 @@ mod tests {
                 iterations: 4096,
             },
         ));
-        assert!(m.min_required_metadata_version() == SCRAM_MIN_LEVEL);
+        assert2::assert!(m.min_required_metadata_version() == SCRAM_MIN_LEVEL);
         m.apply(&MetadataRecord::V1DelegationToken(
             crate::records::DelegationTokenRecord {
                 token_id: "t1".into(),
@@ -2535,7 +2566,7 @@ mod tests {
                 renewers: vec![],
             },
         ));
-        assert!(m.min_required_metadata_version() == DELEGATION_TOKEN_MIN_LEVEL);
+        assert2::assert!(m.min_required_metadata_version() == DELEGATION_TOKEN_MIN_LEVEL);
     }
 
     #[test]
@@ -2551,8 +2582,8 @@ mod tests {
         }));
 
         // Resolves by id to the same record `topic(name)` returns.
-        assert!(img.topic_by_id(&id).map(|t| t.name.as_str()) == Some("orders"));
-        assert!(img.topic_name_by_id(&id) == Some("orders"));
+        assert2::assert!(img.topic_by_id(&id).map(|t| t.name.as_str()) == Some("orders"));
+        assert2::assert!(img.topic_name_by_id(&id) == Some("orders"));
 
         // After delete the id no longer resolves and the name index is gone.
         img.apply(&MetadataRecord::V1DeleteTopic(
@@ -2560,8 +2591,8 @@ mod tests {
                 name: "orders".into(),
             },
         ));
-        assert!(img.topic_by_id(&id).is_none());
-        assert!(img.topic_name_by_id(&id).is_none());
+        assert2::assert!(img.topic_by_id(&id).is_none());
+        assert2::assert!(img.topic_name_by_id(&id).is_none());
     }
 
     #[test]
@@ -2578,8 +2609,8 @@ mod tests {
                 endpoints: vec![],
             },
         ));
-        assert!(image.broker_epoch(NodeId(5)) == Some(99));
-        assert!(image.broker_epoch(NodeId(404)) == None);
+        assert2::assert!(image.broker_epoch(NodeId(5)) == Some(99));
+        assert2::assert!(image.broker_epoch(NodeId(404)) == None);
     }
 
     // --- mutation-coverage tests --------------------------------------------
@@ -2588,8 +2619,8 @@ mod tests {
     fn fresh_image_accessors() {
         let id = Uuid::from_u128(0xABCD);
         let image = MetadataImage::new(id);
-        assert!(image.cluster_id() == id); // not Uuid::default()
-        assert!(image.kraft_version() == 0); // fresh image has kraft_version 0
+        assert2::assert!(image.cluster_id() == id);
+        assert2::assert!(image.kraft_version() == 0);
     }
 
     #[test]
@@ -2609,8 +2640,7 @@ mod tests {
         let b = image
             .broker(NodeId(7))
             .expect("registered broker resolvable");
-        assert!(b.node_id == 7);
-        assert!(image.broker(NodeId(404)).is_none());
+        assert2::assert!((b.node_id, image.broker(NodeId(404)).is_none()) == (NodeId(7), true));
     }
 
     #[test]
@@ -2627,12 +2657,12 @@ mod tests {
             })
         };
         image.apply(&topic(old_id));
-        assert!(image.topic_by_id(&old_id).is_some());
+        assert2::assert!(image.topic_by_id(&old_id).is_some());
         // Re-apply the same NAME with a different id: the stale id index entry
         // must be dropped (the `prev.topic_id != t.topic_id` guard).
         image.apply(&topic(new_id));
-        assert!(image.topic_by_id(&new_id).is_some());
-        assert!(image.topic_by_id(&old_id).is_none());
+        assert2::assert!(image.topic_by_id(&new_id).is_some());
+        assert2::assert!(image.topic_by_id(&old_id).is_none());
     }
 
     #[test]
@@ -2645,7 +2675,7 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("0".into()),
         }));
-        assert!(image.broker_throttle_rate(NodeId(3), ThrottleKind::Leader) == Some(0));
+        assert2::assert!(image.broker_throttle_rate(NodeId(3), ThrottleKind::Leader) == Some(0));
     }
 
     #[test]
@@ -2675,7 +2705,7 @@ mod tests {
         ));
         let pr = image.partition("t", 0).expect("partition present");
         // Replica 10 is slot 0; replica 20 still unassigned.
-        assert!(pr.directories == vec![dir, Uuid::nil()]);
+        assert2::assert!(pr.directories == vec![dir, Uuid::nil()]);
     }
 
     #[test]
@@ -2702,6 +2732,6 @@ mod tests {
         ));
 
         let pr = image.partition("t", 0).expect("partition present");
-        assert!(pr.directories == vec![old, dir]);
+        assert2::assert!(pr.directories == vec![old, dir]);
     }
 }

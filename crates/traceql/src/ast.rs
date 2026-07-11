@@ -182,8 +182,6 @@ pub enum Aggregate {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
-
     use super::*;
 
     #[test]
@@ -200,7 +198,8 @@ mod tests {
             pipeline: vec![Pipeline::Aggregate(Aggregate::Count)],
             hints: QueryHints::default(),
         };
-        assert!(matches!(q.root, SpansetExpr::Selector(_)));
-        assert!(q.pipeline == vec![Pipeline::Aggregate(Aggregate::Count)]);
+        assert2::assert!(matches!(q.root, SpansetExpr::Selector(_)));
+        assert2::assert!(&q.pipeline == &vec![Pipeline::Aggregate(Aggregate::Count)]);
+        assert2::assert!(&q.hints == &QueryHints::default());
     }
 }

@@ -7,7 +7,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -60,18 +60,18 @@ async fn remote_write_v1_lands_as_block() {
         .await
         .expect("push response");
 
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 
     let wal_record = inspect_wal_record(&bootstrap).await;
     let fingerprint = wal_record.series_fingerprint();
-    check!(wal_record.tenant == "tenant-a");
-    check!(
+    assert2::assert!(wal_record.tenant.as_str() == "tenant-a");
+    assert2::assert!(
         wal_record
             .labels
             .iter()
             .any(|(name, value)| name == "__name__" && value == "up")
     );
-    assert!(matches!(
+    assert2::assert!(matches!(
         wal_record.payload,
         SamplePayload::Float {
             timestamp_ms: 100,
@@ -99,9 +99,9 @@ async fn remote_write_v1_lands_as_block() {
     .await
     .expect("run compactor");
 
-    check!(result.compacted_records == 1);
-    check!(result.writes == 1);
-    check!(
+    assert2::assert!(result.compacted_records == 1);
+    assert2::assert!(result.writes == 1);
+    assert2::assert!(
         result.committed_offsets
             == vec![CompactionPartitionOffset {
                 partition: PartitionIndex(0),
@@ -123,7 +123,7 @@ async fn remote_write_v1_lands_as_block() {
         .iter()
         .map(arrow::record_batch::RecordBatch::num_rows)
         .sum();
-    assert!(rows == 1);
+    assert2::assert!(rows == 1);
 
     let expected_manifest_key = block_key.replace(".parquet", ".index");
     let manifest = runtime
@@ -131,9 +131,9 @@ async fn remote_write_v1_lands_as_block() {
         .read_manifest(&expected_manifest_key)
         .await
         .expect("read compaction manifest");
-    check!(manifest.tenant == "tenant-a");
-    check!(manifest.block_key == block_key);
-    check!(manifest.row_count == 1);
+    assert2::assert!(manifest.tenant.as_str() == "tenant-a");
+    assert2::assert!(manifest.block_key.as_str() == block_key.as_str());
+    assert2::assert!(manifest.row_count == 1);
     check!(fingerprint != 0);
 }
 
@@ -172,8 +172,8 @@ async fn inspect_wal_record(bootstrap: &str) -> WalRecord {
             .await
             .expect("poll inspect consumer");
         if let Some(record) = records.into_iter().find(|record| record.topic == WAL_TOPIC) {
-            assert!(record.partition == 0);
-            assert!(record.offset == 0);
+            assert2::assert!(record.partition == 0);
+            assert2::assert!(record.offset == 0);
             let value = record.value.expect("wal record value");
             return WalRecord::decode(&value).expect("decode wal record");
         }

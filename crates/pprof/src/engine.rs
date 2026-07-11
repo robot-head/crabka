@@ -1089,7 +1089,7 @@ fn validate_range(start_ms: i64, end_ms: i64) -> Result<(), ProfileError> {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{FunctionRec, InMemoryProfileStore, LineRec, LocationRec, SeriesAgg};
@@ -1246,7 +1246,7 @@ mod tests {
 
     #[test]
     fn default_max_nodes_is_2048() {
-        assert!(EngineOpts::default().default_max_nodes == 2048);
+        assert2::assert!(EngineOpts::default().default_max_nodes == 2048);
     }
 
     #[tokio::test]
@@ -1300,9 +1300,9 @@ mod tests {
             .await
             .unwrap();
 
-        check!(diff.left_ticks == 10);
-        check!(diff.right_ticks == 15);
-        check!(diff.names.iter().any(|name| name == "b"));
+        assert2::assert!(diff.left_ticks == 10);
+        assert2::assert!(diff.right_ticks == 15);
+        assert2::assert!(diff.names.iter().any(|name| name == "b"));
     }
 
     #[tokio::test]
@@ -1319,7 +1319,7 @@ mod tests {
             .map(|sample| sample.value.iter().sum::<i64>())
             .sum();
 
-        assert!(total == 15);
+        assert2::assert!(total == 15);
     }
 
     #[tokio::test]
@@ -1360,8 +1360,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 6);
-        assert!(
+        assert2::assert!(fg.total == 6);
+        assert2::assert!(
             engine
                 .select_merge_span_profile("tenant-a", PT, "{}", &[], 0, 60_000, 0)
                 .await
@@ -1417,7 +1417,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(sharded == whole);
+        assert2::assert!(sharded == whole);
     }
 
     #[tokio::test]
@@ -1460,8 +1460,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(heatmap.counts[0][0] == 1);
-        assert!(heatmap.counts[1][1] == 1);
+        assert2::assert!(heatmap.counts[0][0] == 1);
+        assert2::assert!(heatmap.counts[1][1] == 1);
     }
 
     #[tokio::test]
@@ -1476,7 +1476,7 @@ mod tests {
                 db.intern_stacktrace(1, &[beta]),
             )
         };
-        assert!(alpha_stack == beta_stack);
+        assert2::assert!(alpha_stack == beta_stack);
         store.push_sample("tenant-a", PT, Vec::new(), 0, alpha_stack, 5, 0);
         store.push_sample("tenant-a", PT, Vec::new(), 1, beta_stack, 7, 0);
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
@@ -1486,9 +1486,9 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.names.iter().any(|name| name == "alpha"));
-        check!(fg.names.iter().any(|name| name == "beta"));
-        check!(fg.total == 12);
+        assert2::assert!(fg.names.iter().any(|name| name == "alpha"));
+        assert2::assert!(fg.names.iter().any(|name| name == "beta"));
+        assert2::assert!(fg.total == 12);
     }
 
     #[tokio::test]
@@ -1498,9 +1498,9 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.total == 18);
-        check!(fg.levels[0].values == vec![0, 18, 0, 0]);
-        check!(self_value_for(&fg, "work") == 15);
+        assert2::assert!(fg.total == 18);
+        assert2::assert!(&fg.levels[0].values == &vec![0, 18, 0, 0]);
+        assert2::assert!(self_value_for(&fg, "work") == 15);
     }
 
     #[tokio::test]
@@ -1510,10 +1510,10 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.total == 15);
-        check!(fg.names[0] == "total");
-        check!(self_value_for(&fg, "work") == 15);
-        check!(!fg.names.iter().any(|name| name == "other"));
+        assert2::assert!(fg.total == 15);
+        assert2::assert!(fg.names[0].as_str() == "total");
+        assert2::assert!(self_value_for(&fg, "work") == 15);
+        assert2::assert!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1531,9 +1531,9 @@ mod tests {
             .await
             .unwrap();
 
-        check!(fg.total == 15);
-        check!(fg.names.iter().any(|name| name == "work"));
-        check!(!fg.names.iter().any(|name| name == "other"));
+        assert2::assert!(fg.total == 15);
+        assert2::assert!(fg.names.iter().any(|name| name == "work"));
+        assert2::assert!(!fg.names.iter().any(|name| name == "other"));
     }
 
     #[tokio::test]
@@ -1567,8 +1567,8 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(has_name(&selected_default, "other"));
-        assert!(!has_name(&selected_limited, "other"));
+        assert2::assert!(has_name(&selected_default, "other"));
+        assert2::assert!(!has_name(&selected_limited, "other"));
 
         let sharded_default = engine
             .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(0, 0), (30_000, 30_000)], 0)
@@ -1620,8 +1620,8 @@ mod tests {
             .diff("tenant-a", (PT, "{}", 0, 0), (PT, "{}", 30_000, 30_000), 16)
             .await
             .unwrap();
-        assert!(diff_has_name(&diff_default, "other"));
-        assert!(!diff_has_name(&diff_limited, "other"));
+        assert2::assert!(diff_has_name(&diff_default, "other"));
+        assert2::assert!(!diff_has_name(&diff_limited, "other"));
 
         let span_default = engine
             .select_merge_span_profile("tenant-a", PT, "{}", &[111], 0, 60_000, 0)
@@ -1780,7 +1780,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(sharded == whole);
+        assert2::assert!(sharded == whole);
     }
 
     #[tokio::test]
@@ -1800,7 +1800,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             got == vec![Series {
                 labels: Vec::new(),
                 points: vec![(0, 15.0)],
@@ -1824,7 +1824,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             got == vec![Series {
                 labels: Vec::new(),
                 points: vec![(0, 9.5)],
@@ -1834,7 +1834,7 @@ mod tests {
 
     #[tokio::test]
     async fn sharded_queries_reject_reversed_ranges() {
-        assert!(
+        assert2::assert!(
             branchy_fixture(16)
                 .select_merge_stacktraces_sharded("tenant-a", PT, "{}", &[(10, 0)], 0)
                 .await
@@ -1881,9 +1881,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(got.len() == 1);
-        check!(got[0].labels == vec![("service".to_string(), "api".to_string())]);
-        check!(got[0].heatmap.counts.iter().flatten().sum::<u64>() == 1);
+        check!(
+            (
+                got.len(),
+                got[0].labels.as_slice(),
+                got[0].heatmap.counts.iter().flatten().sum::<u64>(),
+            ) == (1, &[("service".to_string(), "api".to_string())][..], 1,)
+        );
     }
 
     fn series_fixture() -> FlameEngine<InMemoryProfileStore> {
@@ -1960,7 +1964,7 @@ mod tests {
             .unwrap();
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
-        assert!(
+        assert2::assert!(
             got == vec![
                 Series {
                     labels: vec![("service".to_string(), "api".to_string())],
@@ -2023,7 +2027,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             got == vec![Series {
                 labels: vec![("service".to_string(), "api".to_string())],
                 points: vec![(0, 30.0), (15_000, 5.0)],
@@ -2047,7 +2051,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             got == vec![Series {
                 labels: Vec::new(),
                 points: vec![(0, 75.0)],
@@ -2071,7 +2075,7 @@ mod tests {
             .unwrap();
         got.sort_by(|left, right| left.labels.cmp(&right.labels));
 
-        assert!(
+        assert2::assert!(
             got == vec![
                 Series {
                     labels: vec![("service".to_string(), "api".to_string())],

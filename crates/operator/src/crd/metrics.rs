@@ -44,14 +44,13 @@ monitor_spec!(ServiceMonitorSpec);
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn metrics_config_defaults_type_prometheus() {
         let cfg: MetricsConfig = serde_json::from_str("{}").unwrap();
-        assert!(
+        assert2::assert!(
             cfg == MetricsConfig {
                 r#type: MetricsType::Prometheus,
                 pod_monitor: None,
@@ -72,15 +71,19 @@ mod tests {
             service_monitor: None,
         };
         let j = serde_json::to_string(&cfg).unwrap();
-        assert!(j.contains("\"podMonitor\""));
-        assert!(j.contains("\"interval\":\"15s\""));
+        for (_name, expected) in [
+            ("pod monitor object", "\"podMonitor\""),
+            ("scrape interval", "\"interval\":\"15s\""),
+        ] {
+            assert2::assert!(j.contains(expected));
+        }
         let back: MetricsConfig = serde_json::from_str(&j).unwrap();
-        assert!(back == cfg);
+        assert2::assert!(back == cfg);
     }
 
     #[test]
     fn metrics_type_rejects_unknown() {
         let err = serde_json::from_str::<MetricsType>("\"jmxExporter\"").unwrap_err();
-        assert!(err.to_string().contains("prometheus"), "got: {err}");
+        assert2::assert!(err.to_string().contains("prometheus"));
     }
 }

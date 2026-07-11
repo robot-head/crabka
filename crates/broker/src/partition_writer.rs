@@ -553,7 +553,7 @@ fn swap_future_log(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_compression::CompressionType;
     use crabka_log::LogConfig;
     use crabka_protocol::records::{Record, RecordBatch};
@@ -591,14 +591,14 @@ mod tests {
         let log_dir = ArcSwap::from_pointee(dir.path().to_path_buf());
         let err = storage_failure_error("append failed", "synthetic EIO");
 
-        assert!(flag_storage_failure(&err, &log_dir, &status));
+        assert2::assert!(flag_storage_failure(&err, &log_dir, &status));
 
-        assert!(status.is_offline(dir.path()));
+        assert2::assert!(status.is_offline(dir.path()));
         let expected_offline = vec![(
             dir.path().to_path_buf(),
             "partition write/fsync failed: append failed: synthetic EIO".to_string(),
         )];
-        assert!(status.offline() == expected_offline);
+        assert2::assert!(status.offline() == expected_offline);
     }
 
     #[test]
@@ -648,7 +648,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == 0);
+        assert2::assert!(assigned == 0);
 
         // Second append assigns offset 3.
         let (ack, ack_rx) = oneshot::channel();
@@ -658,7 +658,7 @@ mod tests {
         }))
         .await
         .expect("send job 2");
-        assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
+        assert2::assert!(ack_rx.await.expect("ack recv 2").expect("append 2 ok") == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -702,15 +702,15 @@ mod tests {
 
         let mut acks = acks.into_iter();
         let first = acks.next().expect("first ack");
-        assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
+        assert2::assert!(first.await.expect("ack 0").expect("append 0 ok") == 0);
         for (idx, mut ack) in acks.enumerate() {
             let assigned = ack
                 .try_recv()
                 .expect("same group ack is ready")
                 .expect("append ok");
-            assert!(assigned == i64::try_from(idx + 1).unwrap());
+            assert2::assert!(assigned == i64::try_from(idx + 1).unwrap());
         }
-        assert!(
+        assert2::assert!(
             log.lock().unwrap().log_end_offset()
                 == Offset(i64::try_from(MAX_PRODUCE_GROUP).unwrap())
         );
@@ -751,7 +751,7 @@ mod tests {
         .expect("send job");
 
         let assigned = ack_rx.await.expect("ack recv").expect("append ok");
-        assert!(assigned == 0);
+        assert2::assert!(assigned == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -807,7 +807,7 @@ mod tests {
         .await
         .expect("send verbatim job");
         let assigned = ack_rx.await.expect("ack").expect("append ok");
-        assert!(assigned == 0);
+        assert2::assert!(assigned == 0);
 
         // Read back: bytes 21.. must equal the producer's, only offset+epoch changed.
         let r = log
@@ -815,13 +815,12 @@ mod tests {
             .unwrap()
             .read_raw(Offset(0), Offset(1), 10 * 1024 * 1024)
             .unwrap();
-        assert!(&r.bytes[21..] == &wire[21..], "CRC-covered region verbatim");
-        assert!(&r.bytes[17..21] == &wire[17..21], "CRC unchanged");
+        assert2::assert!(&r.bytes[21..] == &wire[21..]);
+        assert2::assert!(&r.bytes[17..21] == &wire[17..21]);
         // Decodes with the assigned offset + stamped epoch.
         let mut cur: &[u8] = &r.bytes;
         let decoded = ProtoBatch::decode(&mut cur).unwrap();
-        assert!(decoded.base_offset == 0);
-        assert!(decoded.partition_leader_epoch == 5);
+        assert2::assert!((decoded.base_offset, decoded.partition_leader_epoch) == (0, 5));
 
         drop(tx);
         writer.await.expect("writer join");
@@ -842,22 +841,26 @@ mod tests {
         );
 
         let original = sample_batch(2);
-        assert!(original.attributes.compression() == CompressionType::None);
+        assert2::assert!(original.attributes.compression() == CompressionType::None);
 
         let (results, leo) = append_produce_batch(&log, vec![ProduceData::Owned(original)]);
-        assert!(results.len() == 1);
+        assert2::assert!(results.len() == 1);
         let assigned = results.into_iter().next().unwrap().expect("append ok");
-        assert!(assigned == 0);
-        assert!(leo == 2);
+        assert2::assert!(assigned == 0);
+        assert2::assert!(leo == 2);
 
         let read = log
             .lock()
             .unwrap()
             .read(Offset(0), 10 * 1024 * 1024)
             .unwrap();
-        assert!(read.batches.len() == 1);
-        check!(read.batches[0].attributes.compression() == CompressionType::Lz4);
-        check!(read.batches[0].records.len() == 2);
+        assert2::assert!(
+            (
+                read.batches.len(),
+                read.batches[0].attributes.compression(),
+                read.batches[0].records.len(),
+            ) == (1, CompressionType::Lz4, 2)
+        );
     }
 
     #[tokio::test]
@@ -936,7 +939,7 @@ mod tests {
             .await
             .expect("send replicate");
         ack_rx.await.expect("ack recv").expect("replicate ok");
-        assert!(log.lock().unwrap().log_end_offset() == 3);
+        assert2::assert!(log.lock().unwrap().log_end_offset() == 3);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -976,9 +979,9 @@ mod tests {
             .await
             .expect("ack recv")
             .expect_err("expected offset mismatch");
-        assert!(matches!(err, crate::error::BrokerError::Log(_)));
+        assert2::assert!(matches!(err, crate::error::BrokerError::Log(_)));
         // Local log must not have advanced.
-        assert!(log.lock().unwrap().log_end_offset() == 0);
+        assert2::assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1018,7 +1021,7 @@ mod tests {
             .expect("send produce");
             ack_rx.await.expect("ack").expect("ok");
         }
-        assert!(log.lock().unwrap().log_end_offset() == 4);
+        assert2::assert!(log.lock().unwrap().log_end_offset() == 4);
 
         let (ack, ack_rx) = oneshot::channel();
         tx.send(WriterMessage::Truncate {
@@ -1028,7 +1031,7 @@ mod tests {
         .await
         .expect("send truncate");
         ack_rx.await.expect("ack").expect("truncate ok");
-        assert!(log.lock().unwrap().log_end_offset() == 0);
+        assert2::assert!(log.lock().unwrap().log_end_offset() == 0);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1083,7 +1086,7 @@ mod tests {
             .await
             .expect("hw_advance_notify did not fire");
 
-        assert!(replica_state.lock().await.hw == 2);
+        assert2::assert!(replica_state.lock().await.hw == 2);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1135,8 +1138,8 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == 0);
-        assert!(
+        assert2::assert!(replica_state.lock().await.hw == 0);
+        assert2::assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), waiter)
                 .await
                 .is_err()
@@ -1186,7 +1189,7 @@ mod tests {
         ack_rx.await.expect("ack");
 
         let observed = log.lock().expect("lock").config_snapshot();
-        assert!(observed.retention_ms == new_cfg.retention_ms);
+        assert2::assert!(observed.retention_ms == new_cfg.retention_ms);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1234,8 +1237,8 @@ mod tests {
         .await
         .expect("send");
         let new_start = ack_rx.await.expect("ack").expect("trim ok");
-        assert!(new_start >= 3);
-        assert!(log.lock().expect("lock").log_start_offset() == new_start);
+        assert2::assert!(new_start >= 3);
+        assert2::assert!(log.lock().expect("lock").log_start_offset() == new_start);
 
         drop(tx);
         writer.await.expect("writer join");
@@ -1292,7 +1295,7 @@ mod tests {
         .expect("send job");
         ack_rx.await.expect("ack").expect("append ok");
 
-        assert!(replica_state.lock().await.hw == 0);
+        assert2::assert!(replica_state.lock().await.hw == 0);
 
         drop(tx);
         writer.await.expect("writer join");

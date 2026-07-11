@@ -379,13 +379,17 @@ mod tests {
         let pubkey = build_partition(tmp.path());
         let trusted = TrustedKeys::single("k1".into(), pubkey);
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
-        check!(report.ok);
-        check!(report.records == 3);
-        check!(report.checkpoints == 1);
-        check!(report.first_break.is_none());
-        // build_partition writes 3 records (seq 0..2) + 1 checkpoint (seq_high=2)
-        // → all records are covered → 0 unanchored
-        check!(report.unanchored_records == 0);
+        // build_partition writes 3 records (seq 0..2) + 1 checkpoint (seq_high=2),
+        // so all records are covered.
+        check!(
+            (
+                report.ok,
+                report.records.0,
+                report.checkpoints.0,
+                report.first_break.is_none(),
+                report.unanchored_records.0,
+            ) == (true, 3, 1, true, 0)
+        );
     }
 
     #[test]
@@ -450,10 +454,14 @@ mod tests {
 
         let trusted = TrustedKeys::single("k1".into(), pubkey);
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
-        check!(report.ok);
-        check!(report.checkpoints == 1);
-        check!(report.records == 5);
-        check!(report.unanchored_records == 2);
+        check!(
+            (
+                report.ok,
+                report.checkpoints.0,
+                report.records.0,
+                report.unanchored_records.0,
+            ) == (true, 1, 5, 2)
+        );
     }
 
     /// Chain-only partition (no signing key, no checkpoints) — all records are unanchored.
@@ -478,10 +486,14 @@ mod tests {
         // No trusted key needed — no checkpoints present
         let trusted = TrustedKeys::default();
         let report = verify_partition_dir(tmp.path(), &trusted).unwrap();
-        check!(report.ok);
-        check!(report.checkpoints == 0);
-        check!(report.records == 3);
-        check!(report.unanchored_records == 3);
+        check!(
+            (
+                report.ok,
+                report.checkpoints.0,
+                report.records.0,
+                report.unanchored_records.0,
+            ) == (true, 0, 3, 3)
+        );
     }
 
     // ── Fix 2 tests: direct tamper-detection (chain-inconsistent fixtures) ────

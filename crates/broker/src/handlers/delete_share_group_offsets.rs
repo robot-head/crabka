@@ -173,7 +173,6 @@ fn encode_top_level(version: i16, error_code: i16) -> Result<Bytes, BrokerError>
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -238,7 +237,7 @@ mod tests {
             responses: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -298,7 +297,7 @@ mod tests {
                 },
             ),
         ];
-        for (case, authorizer, share_enabled, topics, expected) in cases {
+        for (_case, authorizer, share_enabled, topics, expected) in cases {
             let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
             let broker = broker_handle.broker_arc_for_test();
             let principal = principal();
@@ -311,7 +310,7 @@ mod tests {
                 .expect("handle");
             let resp = decode_response(&resp);
 
-            assert!(resp == expected, "case: {case}");
+            assert2::assert!(resp == expected);
             broker_handle.shutdown().await;
         }
     }

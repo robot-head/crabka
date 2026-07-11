@@ -45,26 +45,30 @@ pub enum ClientError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
-    fn display_is_useful() {
-        let e = ClientError::Timeout(Duration::from_secs(5));
-        assert!(e.to_string() == "request timed out after 5s");
-    }
-
-    #[test]
-    fn incompatible_version_displays_full_range() {
-        let e = ClientError::IncompatibleVersion {
-            api_key: 0,
-            broker_min: 0,
-            broker_max: 5,
-            client_min: 7,
-            client_max: 10,
-        };
-        assert!(e.to_string().contains("api_key 0"));
-        assert!(e.to_string().contains("broker supports 0..=5"));
+    fn display_messages() {
+        for (_name, error, expected) in [
+            (
+                "timeout",
+                ClientError::Timeout(Duration::from_secs(5)),
+                "request timed out after 5s",
+            ),
+            (
+                "incompatible version",
+                ClientError::IncompatibleVersion {
+                    api_key: 0,
+                    broker_min: 0,
+                    broker_max: 5,
+                    client_min: 7,
+                    client_max: 10,
+                },
+                "incompatible version: broker supports 0..=5, client wants 7..=10 for api_key 0",
+            ),
+        ] {
+            assert2::assert!(error.to_string() == expected);
+        }
     }
 }

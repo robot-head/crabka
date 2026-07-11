@@ -694,7 +694,6 @@ fn attr_value_string(value: &AttrValue) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::span::{EventRecord, KeyValue, LinkRecord, SpanKind, StatusCode};
@@ -761,7 +760,7 @@ mod tests {
             // The span now belongs to the producer's trace (shares its trace id).
             // A no-op mutant leaves the span in its own fresh trace, so this fails.
             let sc = span.context().span().span_context().clone();
-            assert!(
+            assert2::assert!(
                 sc.trace_id() == TraceId::from_hex("0af7651916cd43dd8448eb211c80319c").unwrap()
             );
         });
@@ -805,7 +804,7 @@ mod tests {
 
         collect_tags(&[span()], &mut tag_names, &mut tag_values);
 
-        assert!(
+        assert2::assert!(
             tag_names
                 == BTreeSet::from([
                     "event:name".to_string(),
@@ -815,7 +814,7 @@ mod tests {
                     "service.name".to_string(),
                 ])
         );
-        assert!(
+        assert2::assert!(
             tag_values
                 == BTreeMap::from([
                     (
@@ -858,7 +857,7 @@ mod tests {
 
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
-        assert!(
+        assert2::assert!(
             tag_names
                 == BTreeSet::from([
                     "cache.key".to_string(),
@@ -870,7 +869,7 @@ mod tests {
                     "service.name".to_string(),
                 ])
         );
-        assert!(
+        assert2::assert!(
             tag_values
                 == BTreeMap::from([
                     (
@@ -915,7 +914,7 @@ mod tests {
 
         collect_tags(&[span], &mut tag_names, &mut tag_values);
 
-        assert!(
+        assert2::assert!(
             tag_names
                 == BTreeSet::from([
                     "event:name".to_string(),
@@ -927,7 +926,7 @@ mod tests {
                     "service.name".to_string(),
                 ])
         );
-        assert!(
+        assert2::assert!(
             tag_values
                 == BTreeMap::from([
                     (

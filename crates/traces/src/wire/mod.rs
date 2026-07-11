@@ -33,7 +33,6 @@ pub fn negotiate(path: &str, content_type: Option<&str>) -> Result<WireFormat, W
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -53,17 +52,13 @@ mod tests {
             ),
             ("/api/traces", None, WireFormat::Jaeger),
         ] {
-            assert_eq!(
-                negotiate(path, content_type).unwrap(),
-                want,
-                "case {path:?}"
-            );
+            assert2::assert!(negotiate(path, content_type).unwrap() == want);
         }
     }
 
     #[test]
     fn negotiate_unknown_path_is_415() {
         let err = negotiate("/nope", Some("text/plain")).unwrap_err();
-        assert!(err.status_code() == 415);
+        assert2::assert!(err.status_code() == 415);
     }
 }

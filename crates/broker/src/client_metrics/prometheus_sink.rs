@@ -166,11 +166,10 @@ mod tests {
         reg.register_collector(Box::new(sink));
         let mut buf = String::new();
         prometheus_client::encoding::text::encode(&mut buf, &reg).unwrap();
-        assert!(
-            buf.contains("client_instance_id=\"11111111-1111-1111-1111-111111111111\""),
-            "got:\n{buf}"
+        assert2::assert!(
+            buf.contains("client_instance_id=\"11111111-1111-1111-1111-111111111111\"")
         );
-        assert!(buf.contains("42"), "value missing:\n{buf}");
+        assert2::assert!(buf.contains("42"));
     }
 
     #[test]
@@ -200,15 +199,9 @@ mod tests {
         let help_count = buf
             .matches("# HELP crabka_client_org_apache_kafka_consumer_fetch_size")
             .count();
-        assert!(
-            help_count == 1,
-            "expected exactly one HELP line, got {help_count}:\n{buf}"
-        );
+        assert2::assert!(help_count == 1);
         // Both series present.
-        assert!(
-            buf.contains("c1") && buf.contains("c2"),
-            "both series must render:\n{buf}"
-        );
+        assert2::assert!(buf.contains("c1") && buf.contains("c2"));
     }
 
     #[test]
@@ -220,6 +213,6 @@ mod tests {
             client_id: "c".into(),
             value: 1.0,
         }]);
-        assert_eq!(sink.live_point_count(), 0);
+        assert2::assert!(sink.live_point_count() == 0);
     }
 }

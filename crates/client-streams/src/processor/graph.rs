@@ -493,9 +493,10 @@ mod tests {
         };
         graph.pipe("in", Some(b"k"), b"hi", 7).await.unwrap();
         let out = graph.take_output();
-        check!(out.len() == 1);
-        check!(out[0].topic == "out-topic");
-        check!(out[0].value.as_ref().unwrap().as_ref() == b"HI");
+        check!(
+            (out.len(), out[0].topic.as_str(), out[0].value.as_deref())
+                == (1, "out-topic", Some(b"HI".as_slice()))
+        );
     }
 
     #[tokio::test]
@@ -596,9 +597,11 @@ mod tests {
         graph.pipe("in", Some(b"k"), b"a", 2).await.unwrap();
 
         let out = graph.take_output();
-        check!(out.len() == 2);
         // last output value bytes should be big-endian i64(2) = [0,0,0,0,0,0,0,2]
-        check!(out[1].value.as_ref().unwrap().as_ref() == [0u8, 0, 0, 0, 0, 0, 0, 2]);
+        check!(
+            (out.len(), out[1].value.as_deref())
+                == (2, Some([0u8, 0, 0, 0, 0, 0, 0, 2].as_slice()))
+        );
     }
 
     #[tokio::test]
@@ -685,10 +688,11 @@ mod tests {
         graph.punctuate_stream_time(25).await.unwrap();
 
         let out = graph.take_output();
-        check!(out.len() == 1);
-        check!(out[0].topic == "out-topic");
         // value = i64(25) big-endian
-        check!(out[0].value.as_ref().unwrap().as_ref() == 25i64.to_be_bytes());
+        check!(
+            (out.len(), out[0].topic.as_str(), out[0].value.as_deref())
+                == (1, "out-topic", Some(25i64.to_be_bytes().as_slice()))
+        );
     }
 
     #[tokio::test]
@@ -793,13 +797,9 @@ mod tests {
 
         let got = recorded.lock().unwrap();
         // One emit per dirty key (a, b), each a deduped Change forwarded to the child.
-        check!(got.len() == 2);
         let by_key = |k: &str| got.iter().find(|(key, _, _)| key.as_deref() == Some(k));
         let a = by_key("a").expect("change for key a");
-        check!(a.1.old == None); // never committed before this flush
-        check!(a.1.new == Some(3)); // deduped latest
-        check!(a.2 == 7); // forwarded with the dirty entry's context timestamp
         let b = by_key("b").expect("change for key b");
-        check!(b.1.new == Some(9));
+        check!((got.len(), a.1.old, a.1.new, a.2, b.1.new) == (2, None, Some(3), 7, Some(9)));
     }
 }

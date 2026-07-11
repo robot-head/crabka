@@ -731,11 +731,7 @@ mod tests {
             }
             old_bytes.extend_from_slice(&body);
 
-            assert_eq!(
-                &new_bytes[..],
-                &old_bytes[..],
-                "plan != legacy encode at version {version}"
-            );
+            assert2::assert!(&new_bytes[..] == &old_bytes[..]);
         }
     }
 
@@ -743,7 +739,7 @@ mod tests {
     fn plan_total_len_matches_frame_prefix() {
         // The 4-byte frame prefix the writer emits must equal the actual bytes
         // following it (header + body). Off-by-one here corrupts every frame.
-        for version in [4i16, 12, 18] {
+        for (_case, version) in [("legacy", 4i16), ("flexible", 12), ("latest", 18)] {
             let resp = sample_response(version);
             let ops =
                 build_fetch_plan(&resp, version, 1, version >= 12, resolve_records_inline).unwrap();
@@ -753,7 +749,7 @@ mod tests {
             let declared = u32::from_be_bytes([head[0], head[1], head[2], head[3]]) as usize;
             let header_after_len = head.len() - 4;
             let tail_len: usize = ops[1..].iter().map(WriteOp::len).sum();
-            assert_eq!(declared, header_after_len + tail_len);
+            assert2::assert!(declared == header_after_len + tail_len);
         }
     }
 
@@ -847,18 +843,12 @@ mod tests {
                 .unwrap();
 
                 // The file plan must actually contain a File op (zero-copy).
-                assert!(
-                    file_ops.iter().any(|o| matches!(o, WriteOp::File(_))),
-                    "sendfile resolver must emit a File op at v{version}"
-                );
+                assert2::assert!(file_ops.iter().any(|o| matches!(o, WriteOp::File(_))));
 
                 // Resolve both plans to bytes (pread the file ops) and compare.
                 let raw_bytes = resolve_ops_to_bytes(&raw_ops);
                 let file_bytes = resolve_ops_to_bytes(&file_ops);
-                assert_eq!(
-                    raw_bytes, file_bytes,
-                    "sendfile plan wire bytes must equal raw plan at v{version}"
-                );
+                assert2::assert!(raw_bytes == file_bytes);
             }
         }
 
@@ -877,7 +867,7 @@ mod tests {
                         let mut off = region.offset;
                         while filled < buf.len() {
                             let n = region.file.read_at(&mut buf[filled..], off).unwrap();
-                            assert!(n > 0);
+                            assert2::assert!(n > 0);
                             filled += n;
                             off += n as u64;
                         }
@@ -901,11 +891,11 @@ mod tests {
             };
             let (_tf, payload) = file_payload(&records);
             let ops = resolve_records_inline(&payload).unwrap();
-            assert_eq!(ops.len(), 1);
+            assert2::assert!(ops.len() == 1);
             let WriteOp::Inline(ref b) = ops[0] else {
                 panic!("fallback must produce an inline op");
             };
-            assert_eq!(&b[..], &records[..]);
+            assert2::assert!(&b[..] == &records[..]);
         }
 
         /// End-to-end `sendfile` over a real loopback TCP socket: the bytes the
@@ -935,7 +925,7 @@ mod tests {
                 let mut stream = TcpStream::connect(addr).await.unwrap();
                 let mut got = vec![0u8; expected.len()];
                 stream.read_exact(&mut got).await.unwrap();
-                assert_eq!(got, &expected[..], "sendfile'd bytes must match file");
+                assert2::assert!(got == &expected[..]);
             });
 
             let (mut server, _) = listener.accept().await.unwrap();
@@ -946,7 +936,7 @@ mod tests {
                 let _ = sr.set_send_buffer_size(8 * 1024);
             }
             let ops = resolve_records_sendfile(&payload).unwrap();
-            assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
+            assert2::assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
             write_fetch_plan(&mut server, ops).await.unwrap();
             drop(server); // EOF for the client's read_exact tail
             client.await.unwrap();
@@ -1055,13 +1045,13 @@ mod tests {
             // reads the Fetch request before writing the response.
             let mut req = vec![0u8; REQ.len()];
             ktls_stream.read_exact(&mut req).await.unwrap();
-            assert_eq!(req, REQ, "kTLS RX must deliver the request bytes intact");
+            assert2::assert!(req == REQ);
 
             // The KtlsStream must report itself sendfile-capable, and the
             // resolver must emit a File op (true zero-copy over TLS).
-            assert!(SendfileSink::is_sendfile_capable(&ktls_stream));
+            assert2::assert!(SendfileSink::is_sendfile_capable(&ktls_stream));
             let ops = resolve_records_sendfile(&payload).unwrap();
-            assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
+            assert2::assert!(ops.iter().any(|o| matches!(o, WriteOp::File(_))));
 
             // sendfile the file region onto the kTLS socket — the kernel
             // encrypts it into TLS records on the way out.
@@ -1070,11 +1060,7 @@ mod tests {
             drop(ktls_stream); // sends close_notify; EOF for the client tail
 
             let got = client.await.unwrap();
-            assert_eq!(
-                got,
-                &records[..],
-                "client-decrypted kTLS bytes must equal the file region (wire byte-exact)"
-            );
+            assert2::assert!(got == &records[..]);
         }
     }
 }

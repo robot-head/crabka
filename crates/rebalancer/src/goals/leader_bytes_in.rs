@@ -106,7 +106,7 @@ impl Goal for LeaderBytesIn {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -195,7 +195,7 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(Arc::new(UsageStore::default()));
-        assert!(LeaderBytesIn.propose(&s, &ctx).is_empty());
+        assert2::assert!(LeaderBytesIn.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -211,10 +211,12 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(store);
         let mvs = LeaderBytesIn.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected leader-only swaps");
+        assert2::assert!(!mvs.is_empty());
         for m in &mvs {
-            check!(m.old_replicas == m.new_replicas, "leader-only");
-            check!(m.new_leader == 2, "cold broker becomes new leader");
+            check!(
+                (&m.old_replicas, &m.new_replicas, m.new_leader)
+                    == (&m.new_replicas, &m.new_replicas, 2)
+            );
         }
     }
 
@@ -237,17 +239,14 @@ mod tests {
         let ctx = ctx_with(store);
         let mvs = LeaderBytesIn.propose(&s, &ctx);
         for m in &mvs {
-            assert!(
-                m.new_leader != 2,
-                "broker 2 not in ISR must not be promoted"
-            );
+            assert2::assert!(m.new_leader != 2);
         }
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert!(LeaderBytesIn::imbalance_pct(&totals) == 50);
+        assert2::assert!(LeaderBytesIn::imbalance_pct(&totals) == 50);
     }
 
     #[test]
@@ -266,7 +265,7 @@ mod tests {
 
         let mvs = LeaderBytesIn.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "hot".into(),
                 partition: 0,
@@ -292,6 +291,6 @@ mod tests {
 
         let mvs = LeaderBytesIn.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

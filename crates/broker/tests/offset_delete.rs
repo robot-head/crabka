@@ -7,7 +7,7 @@
 //! file only uses `support::start` which is cross-platform — no gate
 //! needed).
 
-use assert2::{assert, check};
+use assert2::check;
 mod support;
 
 use bytes::BufMut;
@@ -69,7 +69,7 @@ async fn create_topic(p: &support::InProcess, name: &str, num_partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0, "CreateTopics for {name}");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32, off: i64) {
@@ -96,10 +96,7 @@ async fn commit_offset(p: &support::InProcess, group: &str, topic: &str, partiti
         })
         .await
         .expect("OffsetCommit");
-    assert!(
-        resp.topics[0].partitions[0].error_code == 0,
-        "OffsetCommit({group},{topic},{partition})"
-    );
+    assert2::assert!(resp.topics[0].partitions[0].error_code == 0);
 }
 
 async fn fetch_offset(p: &support::InProcess, group: &str, topic: &str, partition: i32) -> i64 {
@@ -151,12 +148,14 @@ async fn delete_offsets_from_empty_group_round_trip() {
         })
         .await
         .expect("OffsetDelete");
-    check!(resp.error_code == 0, "top-level NONE");
-    assert!(resp.topics.len() == 1);
-    assert!(resp.topics[0].partitions.len() == 1);
     check!(
-        resp.topics[0].partitions[0].error_code == 0,
-        "partition 0 NONE"
+        (
+            resp.error_code,
+            resp.topics.len(),
+            resp.topics[0].partitions.len(),
+            resp.topics[0].partitions[0].error_code,
+        ) == (0, 1, 1, 0),
+        "OffsetDelete response shape mismatch: {resp:?}"
     );
 
     // Verify partition 0 is gone, partition 1 still has its offset.
@@ -195,7 +194,7 @@ async fn delete_offsets_unknown_group_returns_group_id_not_found() {
         })
         .await
         .expect("OffsetDelete");
-    assert!(resp.error_code == 69, "top-level GROUP_ID_NOT_FOUND (69)");
+    assert2::assert!(resp.error_code == 69);
 
     p.broker.shutdown().await;
 }
@@ -224,11 +223,7 @@ async fn delete_offsets_missing_topic_returns_unknown_topic_or_partition() {
         })
         .await
         .expect("OffsetDelete");
-    assert!(resp.error_code == 0, "top-level NONE");
-    assert!(
-        resp.topics[0].partitions[0].error_code == 3,
-        "UNKNOWN_TOPIC_OR_PARTITION (3) for missing topic"
-    );
+    assert2::assert!((resp.error_code, resp.topics[0].partitions[0].error_code) == (0, 3));
 
     p.broker.shutdown().await;
 }
@@ -264,10 +259,12 @@ async fn delete_offsets_partition_out_of_range_returns_unknown_topic_or_partitio
         })
         .await
         .expect("OffsetDelete");
-    check!(resp.error_code == 0);
-    check!(resp.topics[0].partitions[0].error_code == 0, "p=0 deleted");
     check!(
-        resp.topics[0].partitions[1].error_code == 3,
+        (
+            resp.error_code,
+            resp.topics[0].partitions[0].error_code,
+            resp.topics[0].partitions[1].error_code
+        ) == (0, 0, 3),
         "p=99 UNKNOWN_TOPIC_OR_PARTITION"
     );
 
@@ -312,9 +309,9 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         .await
         .expect("JoinGroup1");
     // First JoinGroup with empty member_id returns MEMBER_ID_REQUIRED (79).
-    assert!(r1.error_code == 79);
+    assert2::assert!(r1.error_code == 79);
     let mid = r1.member_id.clone();
-    assert!(!mid.is_empty());
+    assert2::assert!(!mid.is_empty());
 
     // Re-join with the assigned member_id → become an actual member.
     let r2 = p
@@ -334,7 +331,7 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         })
         .await
         .expect("JoinGroup2");
-    assert!(r2.error_code == 0);
+    assert2::assert!(r2.error_code == 0);
 
     // OffsetDelete on the subscribed topic → GROUP_SUBSCRIBED_TO_TOPIC.
     let resp = p
@@ -353,9 +350,8 @@ async fn delete_offsets_for_subscribed_topic_returns_group_subscribed() {
         })
         .await
         .expect("OffsetDelete");
-    check!(resp.error_code == 0, "top-level NONE");
     check!(
-        resp.topics[0].partitions[0].error_code == 86,
+        (resp.error_code, resp.topics[0].partitions[0].error_code) == (0, 86),
         "GROUP_SUBSCRIBED_TO_TOPIC (86)"
     );
 

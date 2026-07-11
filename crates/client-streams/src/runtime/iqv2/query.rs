@@ -322,11 +322,11 @@ mod tests {
     #[test]
     fn lowering_picks_the_right_variant_and_kind() {
         let kq = KeyQuery::<String, i64>::with_key("a".into());
-        assert_eq!(kq.store_kind(), StoreKind::KeyValue);
-        assert!(matches!(kq.lower(), Iq2Query::Key { .. }));
+        assert2::assert!(kq.store_kind() == StoreKind::KeyValue);
+        assert2::assert!(matches!(kq.lower(), Iq2Query::Key { .. }));
 
         let rq = RangeQuery::<String, i64>::with_lower_bound("a".into()).with_descending_keys();
-        assert!(matches!(
+        assert2::assert!(matches!(
             rq.lower(),
             Iq2Query::Range {
                 lo: Some(_),
@@ -338,8 +338,8 @@ mod tests {
         let wk = WindowKeyQuery::<String, i64>::with_key("a".into())
             .from_time(0)
             .to_time(9);
-        assert_eq!(wk.store_kind(), StoreKind::Window);
-        assert!(matches!(
+        assert2::assert!(wk.store_kind() == StoreKind::Window);
+        assert2::assert!(matches!(
             wk.lower(),
             Iq2Query::WindowKey {
                 from_ts: 0,
@@ -349,7 +349,7 @@ mod tests {
         ));
 
         let wr = WindowRangeQuery::<String, i64>::with_all_keys();
-        assert!(matches!(
+        assert2::assert!(matches!(
             wr.lower(),
             Iq2Query::WindowRange {
                 lo: None,
@@ -362,8 +362,8 @@ mod tests {
     #[test]
     fn versioned_queries_lower_correctly() {
         let vk = VersionedKeyQuery::<String, i64>::with_key("k".into()).as_of(250);
-        assert_eq!(vk.store_kind(), StoreKind::Versioned);
-        assert!(matches!(
+        assert2::assert!(vk.store_kind() == StoreKind::Versioned);
+        assert2::assert!(matches!(
             vk.lower(),
             Iq2Query::VersionedKey {
                 as_of: Some(250),
@@ -372,7 +372,7 @@ mod tests {
         ));
 
         let vk_latest = VersionedKeyQuery::<String, i64>::with_key("k".into());
-        assert!(matches!(
+        assert2::assert!(matches!(
             vk_latest.lower(),
             Iq2Query::VersionedKey { as_of: None, .. }
         ));
@@ -381,8 +381,8 @@ mod tests {
             .from_time(150)
             .to_time(250)
             .with_descending_timestamps();
-        assert_eq!(mv.store_kind(), StoreKind::Versioned);
-        assert!(matches!(
+        assert2::assert!(mv.store_kind() == StoreKind::Versioned);
+        assert2::assert!(matches!(
             mv.lower(),
             Iq2Query::MultiVersionedKey {
                 from_ts: Some(150),
@@ -393,7 +393,7 @@ mod tests {
         ));
 
         let mv_all = MultiVersionedKeyQuery::<String, i64>::with_key("k".into());
-        assert!(matches!(
+        assert2::assert!(matches!(
             mv_all.lower(),
             Iq2Query::MultiVersionedKey {
                 from_ts: None,
@@ -408,7 +408,7 @@ mod tests {
         let mv_asc = MultiVersionedKeyQuery::<String, i64>::with_key("k".into())
             .with_descending_timestamps()
             .with_ascending_timestamps();
-        assert!(matches!(
+        assert2::assert!(matches!(
             mv_asc.lower(),
             Iq2Query::MultiVersionedKey {
                 descending: false,
@@ -420,8 +420,8 @@ mod tests {
     #[test]
     fn range_query_bound_variants_lower_correctly() {
         let both = RangeQuery::<String, i64>::with_range("a".into(), "b".into());
-        assert_eq!(both.store_kind(), StoreKind::KeyValue);
-        assert!(matches!(
+        assert2::assert!(both.store_kind() == StoreKind::KeyValue);
+        assert2::assert!(matches!(
             both.lower(),
             Iq2Query::Range {
                 lo: Some(_),
@@ -431,7 +431,7 @@ mod tests {
         ));
 
         let upper = RangeQuery::<String, i64>::with_upper_bound("b".into());
-        assert!(matches!(
+        assert2::assert!(matches!(
             upper.lower(),
             Iq2Query::Range {
                 lo: None,
@@ -441,7 +441,7 @@ mod tests {
         ));
 
         let none = RangeQuery::<String, i64>::with_no_bounds().with_ascending_keys();
-        assert!(matches!(
+        assert2::assert!(matches!(
             none.lower(),
             Iq2Query::Range {
                 lo: None,
@@ -454,7 +454,7 @@ mod tests {
     #[test]
     fn window_key_query_default_and_explicit_bounds() {
         let dflt = WindowKeyQuery::<String, i64>::with_key("a".into());
-        assert!(matches!(
+        assert2::assert!(matches!(
             dflt.lower(),
             Iq2Query::WindowKey {
                 from_ts: i64::MIN,
@@ -466,7 +466,7 @@ mod tests {
         let bounded = WindowKeyQuery::<String, i64>::with_key("a".into())
             .from_time(5)
             .to_time(9);
-        assert!(matches!(
+        assert2::assert!(matches!(
             bounded.lower(),
             Iq2Query::WindowKey {
                 from_ts: 5,
@@ -481,8 +481,8 @@ mod tests {
         let ranged = WindowRangeQuery::<String, i64>::with_key_range("a".into(), "b".into())
             .from_time(1)
             .to_time(2);
-        assert_eq!(ranged.store_kind(), StoreKind::Window);
-        assert!(matches!(
+        assert2::assert!(ranged.store_kind() == StoreKind::Window);
+        assert2::assert!(matches!(
             ranged.lower(),
             Iq2Query::WindowRange {
                 lo: Some(_),
@@ -493,7 +493,7 @@ mod tests {
         ));
 
         let all = WindowRangeQuery::<String, i64>::with_all_keys();
-        assert!(matches!(
+        assert2::assert!(matches!(
             all.lower(),
             Iq2Query::WindowRange {
                 lo: None,

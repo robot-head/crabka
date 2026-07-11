@@ -644,7 +644,10 @@ mod tests {
     use crate::{
         PgLsn, PostgresConnectError,
         ids::{RelationId, TransactionId},
-        model::{ColumnSchema, ColumnValue, Operation, ScalarValue, TableSchema},
+        model::{
+            ColumnSchema, ColumnValue, EntityDifference, EntityKey, Operation, ScalarValue,
+            TableSchema,
+        },
     };
 
     fn orders_relation(type_name: &str) -> RelationEvent {
@@ -664,6 +667,15 @@ mod tests {
                     key: false,
                 },
             ],
+        }
+    }
+
+    fn orders_schema(type_name: &str) -> TableSchema {
+        let relation = orders_relation(type_name);
+        TableSchema {
+            schema: relation.schema,
+            table: relation.table,
+            columns: relation.columns,
         }
     }
 
@@ -731,17 +743,23 @@ mod tests {
             })
             .expect("relation should translate");
 
-        check!(difference.table == "public.orders");
-        check!(difference.key.table == "public.orders");
-        check!(difference.key.columns == vec![id(42)]);
-        check!(difference.op == Operation::Insert);
-        check!(difference.before == Vec::new());
-        check!(difference.after == values);
-        check!(difference.lsn == PgLsn(0x16_b374_d848));
-        check!(difference.txid == Some(TransactionId(99)));
-        check!(difference.commit_timestamp_ms == Some(1_700_000_000_000));
-        check!(difference.schema.table == "orders");
-        check!(difference.schema.columns[0].key);
+        check!(
+            difference
+                == EntityDifference {
+                    table: "public.orders".to_owned(),
+                    key: EntityKey {
+                        table: "public.orders".to_owned(),
+                        columns: vec![id(42)],
+                    },
+                    op: Operation::Insert,
+                    before: Vec::new(),
+                    after: values,
+                    lsn: PgLsn(0x16_b374_d848),
+                    txid: Some(TransactionId(99)),
+                    commit_timestamp_ms: Some(1_700_000_000_000),
+                    schema: orders_schema("text"),
+                }
+        );
     }
 
     #[test]
@@ -764,11 +782,23 @@ mod tests {
             })
             .expect("relation should translate");
 
-        check!(difference.table == "public.orders");
-        check!(difference.key.columns == vec![id(42)]);
-        check!(difference.op == Operation::Delete);
-        check!(difference.before == values);
-        check!(difference.after == Vec::new());
+        check!(
+            difference
+                == EntityDifference {
+                    table: "public.orders".to_owned(),
+                    key: EntityKey {
+                        table: "public.orders".to_owned(),
+                        columns: vec![id(42)],
+                    },
+                    op: Operation::Delete,
+                    before: values,
+                    after: Vec::new(),
+                    lsn: PgLsn(0x2a),
+                    txid: None,
+                    commit_timestamp_ms: None,
+                    schema: orders_schema("text"),
+                }
+        );
     }
 
     #[test]
@@ -859,10 +889,23 @@ mod tests {
             })
             .expect("relation should translate");
 
-        check!(difference.op == Operation::Update);
-        check!(difference.before == old);
-        check!(difference.after == new);
-        check!(difference.key.columns == vec![id(42)]);
+        check!(
+            difference
+                == EntityDifference {
+                    table: "public.orders".to_owned(),
+                    key: EntityKey {
+                        table: "public.orders".to_owned(),
+                        columns: vec![id(42)],
+                    },
+                    op: Operation::Update,
+                    before: old,
+                    after: new,
+                    lsn: PgLsn(0x2e),
+                    txid: Some(TransactionId(100)),
+                    commit_timestamp_ms: Some(1_700_000_000_001),
+                    schema: orders_schema("text"),
+                }
+        );
     }
 
     #[test]
@@ -918,9 +961,10 @@ mod tests {
             })
             .expect("decoded placeholders should bind to relation schema");
 
-        check!(difference.key.columns[0].name == "id");
-        check!(difference.key.columns[0].value == ScalarValue::Int(42));
-        check!(difference.after[1].name == "status");
+        check!(
+            (difference.key.columns, difference.after)
+                == (vec![id(42)], vec![id(42), status("paid")],)
+        );
     }
 
     #[test]
@@ -980,22 +1024,28 @@ mod tests {
 
     #[test]
     fn pgoutput_text_scalars_are_coerced_to_declared_column_types() {
-        check!(
-            coerce_value(ScalarValue::Text("t".to_owned()), "bool").expect("true bool")
-                == ScalarValue::Bool(true)
-        );
-        check!(
-            coerce_value(ScalarValue::Text("f".to_owned()), "bool").expect("false bool")
-                == ScalarValue::Bool(false)
-        );
-        check!(
-            coerce_value(ScalarValue::Text("12.50".to_owned()), "numeric").expect("numeric")
-                == ScalarValue::Float("12.50".to_owned())
-        );
-        check!(
-            coerce_value(ScalarValue::Text("\\xDEad".to_owned()), "bytea").expect("bytea")
-                == ScalarValue::Bytes(vec![0xde, 0xad])
-        );
+        for (name, text, ty, expected) in [
+            ("true-bool", "t", "bool", ScalarValue::Bool(true)),
+            ("false-bool", "f", "bool", ScalarValue::Bool(false)),
+            (
+                "numeric",
+                "12.50",
+                "numeric",
+                ScalarValue::Float("12.50".to_owned()),
+            ),
+            (
+                "bytea",
+                "\\xDEad",
+                "bytea",
+                ScalarValue::Bytes(vec![0xde, 0xad]),
+            ),
+        ] {
+            check!(
+                coerce_value(ScalarValue::Text(text.to_owned()), ty).expect("value coerces")
+                    == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1014,8 +1064,15 @@ mod tests {
 
     #[test]
     fn bytea_text_supports_escape_and_raw_forms() {
-        check!(coerce_bytea("\\x0001ff").expect("hex bytea") == vec![0, 1, 255]);
-        check!(coerce_bytea("raw").expect("raw bytea") == b"raw".to_vec());
+        for (name, input, expected) in [
+            ("hex", "\\x0001ff", vec![0, 1, 255]),
+            ("raw", "raw", b"raw".to_vec()),
+        ] {
+            check!(
+                coerce_bytea(input).expect("bytea coerces") == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -1058,8 +1115,7 @@ mod tests {
             })
             .expect("missing old tuple should translate");
 
-        check!(difference.key.columns == vec![id(42)]);
-        check!(difference.before == Vec::new());
+        check!((difference.key.columns, difference.before) == (vec![id(42)], Vec::new()));
     }
 
     #[test]
@@ -1099,11 +1155,14 @@ mod tests {
 mod decode_tests {
     use assert2::check;
 
-    use super::{DecodedMessage, RowEventKind, RowTupleKind, decode_pgoutput_message};
+    use super::{
+        DecodedMessage, RelationEvent, RowEvent, RowEventKind, RowTupleKind,
+        decode_pgoutput_message,
+    };
     use crate::{
         PgLsn, PostgresConnectError,
         ids::{CommitLsn, EndLsn, RelationId, TransactionId},
-        model::{ColumnSchema, ScalarValue},
+        model::{ColumnSchema, ColumnValue, ScalarValue},
     };
 
     fn put_i16(bytes: &mut Vec<u8>, value: i16) {
@@ -1174,19 +1233,26 @@ mod decode_tests {
         let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(TransactionId(99)))
             .expect("relation message should decode");
 
-        let DecodedMessage::Relation(relation) = decoded else {
-            panic!("expected relation message");
-        };
-        check!(relation.relation_id == RelationId(7));
-        check!(relation.schema == "public");
-        check!(relation.table == "orders");
-        check!(relation.columns.len() == 2);
-        check!(relation.columns[0].name == "id");
-        check!(relation.columns[0].type_name == "int8");
-        check!(relation.columns[0].key);
-        check!(relation.columns[1].name == "status");
-        check!(relation.columns[1].type_name == "text");
-        check!(!relation.columns[1].key);
+        check!(
+            decoded
+                == DecodedMessage::Relation(RelationEvent {
+                    relation_id: RelationId(7),
+                    schema: "public".to_owned(),
+                    table: "orders".to_owned(),
+                    columns: vec![
+                        ColumnSchema {
+                            name: "id".to_owned(),
+                            type_name: "int8".to_owned(),
+                            key: true,
+                        },
+                        ColumnSchema {
+                            name: "status".to_owned(),
+                            type_name: "text".to_owned(),
+                            key: false,
+                        },
+                    ],
+                })
+        );
     }
 
     #[test]
@@ -1201,17 +1267,27 @@ mod decode_tests {
         let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2a), Some(TransactionId(99)))
             .expect("insert message should decode");
 
-        let DecodedMessage::Row(row) = decoded else {
-            panic!("expected row message");
-        };
-        check!(row.relation_id == RelationId(7));
-        check!(row.lsn == PgLsn(0x2a));
-        check!(row.txid == Some(TransactionId(99)));
-        check!(row.commit_timestamp_ms == None);
-        check!(row.kind == RowEventKind::Insert);
-        check!(row.values.len() == 2);
-        check!(row.values[0].name == "col0");
-        check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
+        check!(
+            decoded
+                == DecodedMessage::Row(RowEvent {
+                    relation_id: RelationId(7),
+                    lsn: PgLsn(0x2a),
+                    commit_lsn: None,
+                    txid: Some(TransactionId(99)),
+                    commit_timestamp_ms: None,
+                    kind: RowEventKind::Insert,
+                    values: vec![
+                        ColumnValue {
+                            name: "col0".to_owned(),
+                            value: ScalarValue::Text("42".to_owned()),
+                        },
+                        ColumnValue {
+                            name: "col1".to_owned(),
+                            value: ScalarValue::Text("paid".to_owned()),
+                        },
+                    ],
+                })
+        );
     }
 
     #[test]
@@ -1257,9 +1333,25 @@ mod decode_tests {
             .translate(row)
             .expect("decoded insert should translate");
 
-        check!(difference.key.columns[0].name == "id");
-        check!(difference.key.columns[0].value == ScalarValue::Int(42));
-        check!(difference.after[1].name == "status");
+        check!(
+            (difference.key.columns, difference.after)
+                == (
+                    vec![ColumnValue {
+                        name: "id".to_owned(),
+                        value: ScalarValue::Int(42),
+                    }],
+                    vec![
+                        ColumnValue {
+                            name: "id".to_owned(),
+                            value: ScalarValue::Int(42),
+                        },
+                        ColumnValue {
+                            name: "status".to_owned(),
+                            value: ScalarValue::Text("paid".to_owned()),
+                        },
+                    ],
+                )
+        );
     }
 
     #[test]
@@ -1284,8 +1376,13 @@ mod decode_tests {
             .translate(row)
             .expect("decoded insert should translate");
 
-        check!(difference.key.columns[0].name == "id");
-        check!(difference.key.columns[0].value == ScalarValue::Int(42));
+        check!(
+            difference.key.columns
+                == vec![ColumnValue {
+                    name: "id".to_owned(),
+                    value: ScalarValue::Int(42),
+                }]
+        );
     }
 
     #[test]
@@ -1309,9 +1406,11 @@ mod decode_tests {
             .translate(row)
             .expect("decoded delete should translate");
 
-        check!(difference.key.columns[0].name == "id");
-        check!(difference.before[0].name == "id");
-        check!(difference.before[0].value == ScalarValue::Int(42));
+        let expected = vec![ColumnValue {
+            name: "id".to_owned(),
+            value: ScalarValue::Int(42),
+        }];
+        check!((difference.key.columns, difference.before) == (expected.clone(), expected));
     }
 
     #[test]
@@ -1339,10 +1438,25 @@ mod decode_tests {
             .translate(row)
             .expect("decoded update should translate");
 
-        check!(difference.before[0].name == "id");
-        check!(difference.before[0].value == ScalarValue::Int(42));
-        check!(difference.after[1].name == "status");
-        check!(difference.after[1].value == ScalarValue::Text("paid".to_owned()));
+        check!(
+            (difference.before, difference.after)
+                == (
+                    vec![ColumnValue {
+                        name: "id".to_owned(),
+                        value: ScalarValue::Int(42),
+                    }],
+                    vec![
+                        ColumnValue {
+                            name: "id".to_owned(),
+                            value: ScalarValue::Int(42),
+                        },
+                        ColumnValue {
+                            name: "status".to_owned(),
+                            value: ScalarValue::Text("paid".to_owned()),
+                        },
+                    ],
+                )
+        );
     }
 
     #[test]
@@ -1356,20 +1470,23 @@ mod decode_tests {
         let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2b), None)
             .expect("delete message should decode");
 
-        let DecodedMessage::Row(row) = decoded else {
-            panic!("expected row message");
-        };
-        check!(row.relation_id == RelationId(7));
-        check!(row.lsn == PgLsn(0x2b));
-        check!(row.txid == None);
         check!(
-            row.kind
-                == RowEventKind::Delete {
-                    tuple_kind: RowTupleKind::Key,
-                }
+            decoded
+                == DecodedMessage::Row(RowEvent {
+                    relation_id: RelationId(7),
+                    lsn: PgLsn(0x2b),
+                    commit_lsn: None,
+                    txid: None,
+                    commit_timestamp_ms: None,
+                    kind: RowEventKind::Delete {
+                        tuple_kind: RowTupleKind::Key,
+                    },
+                    values: vec![ColumnValue {
+                        name: "col0".to_owned(),
+                        value: ScalarValue::Text("42".to_owned()),
+                    }],
+                })
         );
-        check!(row.values.len() == 1);
-        check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
     }
 
     #[test]
@@ -1387,22 +1504,33 @@ mod decode_tests {
         let decoded = decode_pgoutput_message(&bytes, PgLsn(0x2c), Some(TransactionId(100)))
             .expect("update message should decode");
 
-        let DecodedMessage::Row(row) = decoded else {
-            panic!("expected row message");
-        };
-        check!(row.relation_id == RelationId(7));
-        let RowEventKind::Update {
-            old,
-            old_tuple_kind,
-        } = row.kind
-        else {
-            panic!("expected update event");
-        };
-        check!(old_tuple_kind == RowTupleKind::Key);
-        check!(old.len() == 1);
-        check!(old[0].value == ScalarValue::Text("41".to_owned()));
-        check!(row.values.len() == 2);
-        check!(row.values[0].value == ScalarValue::Text("42".to_owned()));
+        check!(
+            decoded
+                == DecodedMessage::Row(RowEvent {
+                    relation_id: RelationId(7),
+                    lsn: PgLsn(0x2c),
+                    commit_lsn: None,
+                    txid: Some(TransactionId(100)),
+                    commit_timestamp_ms: None,
+                    kind: RowEventKind::Update {
+                        old: vec![ColumnValue {
+                            name: "col0".to_owned(),
+                            value: ScalarValue::Text("41".to_owned()),
+                        }],
+                        old_tuple_kind: RowTupleKind::Key,
+                    },
+                    values: vec![
+                        ColumnValue {
+                            name: "col0".to_owned(),
+                            value: ScalarValue::Text("42".to_owned()),
+                        },
+                        ColumnValue {
+                            name: "col1".to_owned(),
+                            value: ScalarValue::Text("paid".to_owned()),
+                        },
+                    ],
+                })
+        );
     }
 
     #[test]

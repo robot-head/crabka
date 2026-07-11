@@ -64,7 +64,7 @@ fn protocol_invalid(message: &'static str) -> BrokerError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{BufMut, BytesMut};
 
     use super::*;
@@ -101,12 +101,16 @@ mod tests {
 
         let parsed = parse_request(&frame, |_, _| false).expect("parse request");
 
-        check!(parsed.api_key == 3);
-        check!(parsed.api_version == 8);
-        check!(parsed.correlation_id == 42);
-        check!(parsed.client_id == Some("client-a"));
-        check!(!parsed.body_flexible);
-        check!(parsed.body == b"body".as_slice());
+        check!(
+            (
+                parsed.api_key,
+                parsed.api_version,
+                parsed.correlation_id,
+                parsed.client_id,
+                parsed.body_flexible,
+                parsed.body,
+            ) == (3, 8, 42, Some("client-a"), false, b"body".as_slice())
+        );
     }
 
     #[test]
@@ -116,12 +120,16 @@ mod tests {
         let parsed =
             parse_request(&frame, |key, version| key == 18 && version >= 3).expect("parse request");
 
-        check!(parsed.api_key == 18);
-        check!(parsed.api_version == 3);
-        check!(parsed.correlation_id == 7);
-        check!(parsed.client_id == Some("client-a"));
-        check!(parsed.body_flexible);
-        check!(parsed.body == b"body".as_slice());
+        check!(
+            (
+                parsed.api_key,
+                parsed.api_version,
+                parsed.correlation_id,
+                parsed.client_id,
+                parsed.body_flexible,
+                parsed.body,
+            ) == (18, 3, 7, Some("client-a"), true, b"body".as_slice())
+        );
     }
 
     #[test]
@@ -138,9 +146,10 @@ mod tests {
         let parsed =
             parse_request(&frame, |key, version| key == 18 && version >= 3).expect("parse request");
 
-        check!(parsed.client_id == Some("client-a"));
-        check!(parsed.body_flexible);
-        check!(parsed.body == b"body".as_slice());
+        check!(
+            (parsed.client_id, parsed.body_flexible, parsed.body)
+                == (Some("client-a"), true, b"body".as_slice())
+        );
     }
 
     #[test]
@@ -149,8 +158,7 @@ mod tests {
 
         let parsed = parse_request(&frame, |_, _| false).expect("parse request");
 
-        check!(parsed.client_id == Some(""));
-        check!(parsed.body == b"body".as_slice());
+        check!((parsed.client_id, parsed.body) == (Some(""), b"body".as_slice()));
     }
 
     #[test]
@@ -159,7 +167,7 @@ mod tests {
 
         let err = parse_request(&frame, |_, _| false).expect_err("invalid utf8 client id");
 
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             BrokerError::Protocol(crabka_protocol::ProtocolError::InvalidUtf8(_))
         ));
@@ -188,10 +196,9 @@ mod tests {
             ),
         ];
 
-        for (case, frame) in cases {
-            assert!(
-                parse_request(&frame, |key, version| key == 18 && version >= 3).is_err(),
-                "{case}"
+        for (_case, frame) in cases {
+            assert2::assert!(
+                parse_request(&frame, |key, version| key == 18 && version >= 3).is_err()
             );
         }
     }
@@ -200,6 +207,6 @@ mod tests {
     fn peek_api_key_matches_existing_dispatch_behavior() {
         let present = request_frame(3, 8, 42, Some(b"client-a"), None, b"body");
 
-        assert!(peek_api_key(&present).expect("api key") == 3);
+        assert2::assert!(peek_api_key(&present).expect("api key") == 3);
     }
 }

@@ -81,9 +81,8 @@ mod tests {
     #[test]
     fn defaults_match_tempo() {
         let c = MetricsGenConfig::default();
-        assert_eq!(
-            c,
-            MetricsGenConfig {
+        assert2::assert!(
+            c == MetricsGenConfig {
                 collection_interval: Duration::from_secs(15),
                 histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
                 latency_native_schema: 8,
@@ -103,9 +102,8 @@ mod tests {
         let c: MetricsGenConfig =
             serde_yaml::from_str("collection_interval_secs: 30\nmax_exemplars_per_series: 5\n")
                 .unwrap();
-        assert_eq!(
-            c,
-            MetricsGenConfig {
+        assert2::assert!(
+            c == MetricsGenConfig {
                 collection_interval: Duration::from_secs(30),
                 histogram_buckets_ns: DEFAULT_LATENCY_BUCKETS_NS.to_vec(),
                 latency_native_schema: 8,

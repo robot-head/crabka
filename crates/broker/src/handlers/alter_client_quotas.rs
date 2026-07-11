@@ -253,7 +253,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::owned::alter_client_quotas_request::{EntityData, EntryData, OpData};
     use crabka_security::{AuthMethod, Principal};
 
@@ -311,12 +310,15 @@ mod tests {
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let records = process_one_entry(&e).expect("ok");
-        assert!(records.len() == 1);
-        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
-            panic!("wrong variant")
-        };
-        assert!(r.config_key == "producer_byte_rate");
-        assert!(r.config_value == Some(1024.0));
+        let expected = vec![MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+            }],
+            config_key: "producer_byte_rate".into(),
+            config_value: Some(1024.0),
+        })];
+        assert2::assert!(records == expected);
     }
 
     #[test]
@@ -327,7 +329,7 @@ mod tests {
             vec![("user", Some("alice"))],
             vec![("producer_byte_rate", 1024.0, false)],
         );
-        assert!(process_one_entry(&e).is_ok());
+        assert2::assert!(process_one_entry(&e).is_ok());
     }
 
     #[test]
@@ -337,10 +339,15 @@ mod tests {
             vec![("producer_byte_rate", 0.0, true)],
         );
         let records = process_one_entry(&e).expect("ok");
-        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
-            panic!()
-        };
-        assert!(r.config_value == None);
+        let expected = vec![MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+            }],
+            config_key: "producer_byte_rate".into(),
+            config_value: None,
+        })];
+        assert2::assert!(records == expected);
     }
 
     #[test]
@@ -370,7 +377,7 @@ mod tests {
                 config_value: Some(100.0),
             }),
         ];
-        assert!(records == expected);
+        assert2::assert!(records == expected);
     }
 
     #[test]
@@ -380,7 +387,7 @@ mod tests {
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert!(err.0 == INVALID_REQUEST);
+        assert2::assert!(err.0 == INVALID_REQUEST);
     }
 
     #[test]
@@ -390,23 +397,23 @@ mod tests {
             vec![("producer_byte_rate", 1024.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert!(err.0 == INVALID_REQUEST);
+        assert2::assert!(err.0 == INVALID_REQUEST);
     }
 
     #[test]
     fn out_of_range_value_rejected() {
         let cases = [
-            ("producer_byte_rate", -100.0),   // negative
-            ("request_percentage", 250.0),    // > 100.0 cap
-            ("producer_byte_rate", f64::NAN), // non-finite
+            ("negative byte rate", "producer_byte_rate", -100.0),
+            ("percentage above cap", "request_percentage", 250.0),
+            ("non-finite byte rate", "producer_byte_rate", f64::NAN),
         ];
-        for (quota_key, value) in cases {
+        for (_case, quota_key, value) in cases {
             let e = entry(
                 vec![("user", Some("alice"))],
                 vec![(quota_key, value, false)],
             );
             let err = process_one_entry(&e).unwrap_err();
-            assert!(err.0 == INVALID_CONFIG, "key {quota_key}, value {value}");
+            assert2::assert!(err.0 == INVALID_CONFIG);
         }
     }
 
@@ -417,12 +424,15 @@ mod tests {
             vec![("connection_creation_rate", 1.0, false)],
         );
         let records = process_one_entry(&e).expect("ok");
-        assert!(records.len() == 1);
-        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
-            panic!()
-        };
-        assert!(r.config_key == "connection_creation_rate");
-        assert!(r.config_value == Some(1.0));
+        let expected = vec![MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "ip".into(),
+                entity_name: Some("10.0.0.1".into()),
+            }],
+            config_key: "connection_creation_rate".into(),
+            config_value: Some(1.0),
+        })];
+        assert2::assert!(records == expected);
     }
 
     #[test]
@@ -432,7 +442,7 @@ mod tests {
             vec![("connection_creation_rate", 1.0, false)],
         );
         let err = process_one_entry(&e).unwrap_err();
-        assert!(err.0 == INVALID_REQUEST);
+        assert2::assert!(err.0 == INVALID_REQUEST);
     }
 
     #[test]
@@ -442,12 +452,15 @@ mod tests {
             vec![("controller_mutation_rate", 2.0, false)],
         );
         let records = process_one_entry(&e).expect("ok");
-        assert!(records.len() == 1);
-        let MetadataRecord::V1ClientQuota(r) = &records[0] else {
-            panic!("wrong variant");
-        };
-        assert!(r.config_key == "controller_mutation_rate");
-        assert!(r.config_value == Some(2.0));
+        let expected = vec![MetadataRecord::V1ClientQuota(ClientQuotaRecord {
+            entity: vec![QuotaEntity {
+                entity_type: "user".into(),
+                entity_name: Some("alice".into()),
+            }],
+            config_key: "controller_mutation_rate".into(),
+            config_value: Some(2.0),
+        })];
+        assert2::assert!(records == expected);
     }
 
     #[test]
@@ -469,7 +482,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(ok == expected_ok);
+        assert2::assert!(ok == expected_ok);
 
         let err = err_entry(&entity, INVALID_CONFIG, "bad quota".into());
         let expected_err = RespEntry {
@@ -482,7 +495,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(err == expected_err);
+        assert2::assert!(err == expected_err);
     }
 
     #[test]
@@ -528,7 +541,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert!(results == expected);
+        assert2::assert!(results == expected);
     }
 
     #[test]
@@ -573,7 +586,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -610,7 +623,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(decoded == expected);
+        assert2::assert!(decoded == expected);
     }
 
     #[tokio::test]
@@ -650,8 +663,8 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(quota_value(&broker_handle, "alice", "producer_byte_rate") == None);
+        assert2::assert!(resp == expected);
+        assert2::assert!(quota_value(&broker_handle, "alice", "producer_byte_rate") == None);
         broker_handle.shutdown().await;
     }
 
@@ -711,15 +724,12 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         for (user, quota_key, want) in [
             ("alice", "producer_byte_rate", Some(1024.0)),
             ("bob", "unknown_quota_key", None),
         ] {
-            assert!(
-                quota_value(&broker_handle, user, quota_key) == want,
-                "user {user}"
-            );
+            assert2::assert!(quota_value(&broker_handle, user, quota_key) == want);
         }
         broker_handle.shutdown().await;
     }
@@ -762,8 +772,8 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(quota_value(&broker_handle, "carol", "producer_byte_rate") == None);
+        assert2::assert!(resp == expected);
+        assert2::assert!(quota_value(&broker_handle, "carol", "producer_byte_rate") == None);
         broker_handle.shutdown().await;
     }
 }

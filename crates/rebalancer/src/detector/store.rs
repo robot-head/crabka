@@ -216,7 +216,7 @@ fn write_atomic(path: &Path, on_disk: &OnDisk) -> Result<(), StoreError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -256,7 +256,7 @@ mod tests {
         check!(!new2);
         check!(id1 == id2);
         let all = s.list(0, false);
-        assert!(
+        assert2::assert!(
             all == vec![Anomaly {
                 id: id1,
                 kind: AnomalyKind::BrokerDeath,
@@ -313,9 +313,9 @@ mod tests {
             3,
         );
         let listed = s.list(0, true);
-        assert!(listed.len() == 2);
+        assert2::assert!(listed.len() == 2);
         let keys: Vec<_> = listed.into_iter().map(|a| a.key).collect();
-        assert!(keys == vec![AnomalyKey::Broker(3), AnomalyKey::Broker(2)]);
+        assert2::assert!(keys == vec![AnomalyKey::Broker(3), AnomalyKey::Broker(2)]);
     }
 
     #[test]
@@ -342,7 +342,7 @@ mod tests {
         let s2 = AnomalyStore::open(dir.path(), 4).unwrap();
         let got_a = s2.get(&id_a).expect("a persisted");
         let got_b = s2.get(&id_b).expect("b persisted");
-        assert!(
+        assert2::assert!(
             got_a
                 == Anomaly {
                     id: id_a,
@@ -357,7 +357,7 @@ mod tests {
                     details: "a".into(),
                 }
         );
-        assert!(
+        assert2::assert!(
             got_b
                 == Anomaly {
                     id: id_b,
@@ -381,7 +381,7 @@ mod tests {
         let bogus = r#"{"version":99,"capacity":4,"items":[]}"#;
         fs::write(&path, bogus).unwrap();
         let err = AnomalyStore::open(dir.path(), 4).unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             err,
             StoreError::UnsupportedVersion {
                 found: 99,
@@ -395,7 +395,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir(dir.path().join(DEFAULT_FILENAME)).unwrap();
         let err = AnomalyStore::open(dir.path(), 4).unwrap_err();
-        assert!(matches!(err, StoreError::Io(_)), "got {err:?}");
+        assert2::assert!(matches!(err, StoreError::Io(_)));
     }
 
     #[test]
@@ -420,7 +420,7 @@ mod tests {
 
         let a1 = s.get(&id1).expect("updated anomaly");
         let a2 = s.get(&id2).expect("other anomaly");
-        assert!(
+        assert2::assert!(
             a1 == Anomaly {
                 id: id1,
                 kind: AnomalyKind::BrokerDeath,
@@ -434,7 +434,7 @@ mod tests {
                 details: "down".into(),
             }
         );
-        assert!(
+        assert2::assert!(
             a2 == Anomaly {
                 id: id2,
                 kind: AnomalyKind::DiskPressure,
@@ -461,7 +461,7 @@ mod tests {
             1,
         );
         s.mark_resolved(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5), 2);
-        assert!(
+        assert2::assert!(
             s.find_open(AnomalyKind::SlowBroker, &AnomalyKey::Broker(5))
                 .is_none()
         );
@@ -488,7 +488,7 @@ mod tests {
         let found = s
             .find_open(AnomalyKind::BrokerDeath, &AnomalyKey::Broker(5))
             .expect("broker-death anomaly");
-        assert!(
+        assert2::assert!(
             found
                 == Anomaly {
                     id: death_id,

@@ -12,7 +12,7 @@
 //!    group_instance_id: Some(...) }` resolves the static slot and
 //!    removes it.
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_protocol::owned::{
     heartbeat_request::HeartbeatRequest,
@@ -58,17 +58,16 @@ async fn bootstrap_static_member(
         .send(join_request(group_id, "", Some(instance_id)))
         .await
         .expect("JoinGroup #1");
-    assert!(r1.error_code == MEMBER_ID_REQUIRED);
+    assert2::assert!(r1.error_code == MEMBER_ID_REQUIRED);
     let mid = r1.member_id.clone();
-    assert!(!mid.is_empty());
+    assert2::assert!(!mid.is_empty());
 
     // 2. Rejoin with assigned member_id → become leader.
     let r2 = client
         .send(join_request(group_id, &mid, Some(instance_id)))
         .await
         .expect("JoinGroup #2");
-    assert!(r2.error_code == 0);
-    assert!(r2.leader == mid);
+    assert2::assert!((r2.error_code, &r2.leader) == (0, &mid));
     let generation = r2.generation_id;
 
     // 3. Leader SyncGroup installs an assignment for itself.
@@ -89,8 +88,7 @@ async fn bootstrap_static_member(
         })
         .await
         .expect("SyncGroup");
-    assert!(r3.error_code == 0);
-    assert!(r3.assignment == assignment);
+    assert2::assert!((r3.error_code, &r3.assignment) == (0, &assignment));
 
     (mid, generation, assignment)
 }
@@ -119,7 +117,7 @@ async fn static_rejoin_preserves_assignment_and_generation() {
         })
         .await
         .expect("Heartbeat");
-    assert!(hb.error_code == 0);
+    assert2::assert!(hb.error_code == 0);
 
     // A "restart" — same instance id, but the client picks up via the
     // KIP-394 bootstrap dance and gets back the same member_id (since
@@ -129,11 +127,7 @@ async fn static_rejoin_preserves_assignment_and_generation() {
         .send(join_request("g-static-1", "", Some("instance-A")))
         .await
         .expect("rebootstrap JoinGroup");
-    assert!(boot.error_code == MEMBER_ID_REQUIRED);
-    assert!(
-        boot.member_id == mid1,
-        "static bootstrap returns the existing slot's member_id"
-    );
+    assert2::assert!((boot.error_code, &boot.member_id) == (MEMBER_ID_REQUIRED, &mid1));
 
     // Rejoin with the recovered id. Group is Stable → no rebalance →
     // generation_id unchanged and the cached assignment is reachable.
@@ -142,12 +136,7 @@ async fn static_rejoin_preserves_assignment_and_generation() {
         .send(join_request("g-static-1", &mid1, Some("instance-A")))
         .await
         .expect("static rejoin");
-    check!(rejoin.error_code == 0);
-    check!(
-        rejoin.generation_id == gen1,
-        "static rejoin must NOT advance generation_id"
-    );
-    check!(rejoin.member_id == mid1);
+    check!((rejoin.error_code, rejoin.generation_id, &rejoin.member_id) == (0, gen1, &mid1));
     drop(assignment);
 
     p.broker.shutdown().await;
@@ -176,7 +165,7 @@ async fn second_client_with_same_instance_id_is_fenced() {
         ))
         .await
         .expect("intruder JoinGroup");
-    assert!(intruder.error_code == FENCED_INSTANCE_ID);
+    assert2::assert!(intruder.error_code == FENCED_INSTANCE_ID);
 
     // Heartbeat with a wrong member_id but the right instance id is also
     // fenced. (Defense-in-depth: a client whose `member_id` was reset
@@ -193,7 +182,7 @@ async fn second_client_with_same_instance_id_is_fenced() {
         })
         .await
         .expect("Heartbeat (fenced)");
-    assert!(hb_fenced.error_code == FENCED_INSTANCE_ID);
+    assert2::assert!(hb_fenced.error_code == FENCED_INSTANCE_ID);
 
     // The original member is unaffected.
     let hb_ok = p
@@ -207,7 +196,7 @@ async fn second_client_with_same_instance_id_is_fenced() {
         })
         .await
         .expect("Heartbeat (incumbent)");
-    assert!(hb_ok.error_code == 0);
+    assert2::assert!(hb_ok.error_code == 0);
 
     p.broker.shutdown().await;
 }
@@ -241,10 +230,14 @@ async fn leave_group_resolves_static_member_by_instance_id() {
         })
         .await
         .expect("LeaveGroup");
-    check!(resp.error_code == 0);
-    assert!(resp.members.len() == 1);
-    check!(resp.members[0].error_code == 0);
-    check!(resp.members[0].group_instance_id.as_deref() == Some("instance-C"));
+    check!(
+        (
+            resp.error_code,
+            resp.members.len(),
+            resp.members[0].error_code,
+            resp.members[0].group_instance_id.as_deref()
+        ) == (0, 1, 0, Some("instance-C"))
+    );
 
     // A subsequent Heartbeat from the old member id should be rejected —
     // the slot is gone.
@@ -258,7 +251,7 @@ async fn leave_group_resolves_static_member_by_instance_id() {
         })
         .await
         .expect("Heartbeat after leave");
-    assert!(hb.error_code != 0);
+    assert2::assert!(hb.error_code != 0);
 
     p.broker.shutdown().await;
 }

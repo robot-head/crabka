@@ -5,7 +5,7 @@ use arrow::{
     datatypes::{Field, Int64Type, Schema},
     record_batch::RecordBatch,
 };
-use assert2::{assert, check};
+use assert2::check;
 use crabka_metrics::{
     BucketSpan, NativeHistogram, ResetHint, decode_native_histograms, encode_native_histograms,
 };
@@ -21,17 +21,16 @@ fn windows_slice_the_backing_array() {
     let values = Arc::new(builder.finish()) as ArrayRef;
 
     let range_array = RangeArray::from_ranges(values, [(0_u32, 3_u32), (2, 3)]).unwrap();
-    assert!(range_array.len() == 2);
+    assert2::assert!(range_array.len() == 2);
 
     for (index, want) in [(0, vec![10.0, 11.0, 12.0]), (1, vec![12.0, 13.0, 14.0])] {
         let window = range_array.get(index).unwrap();
         let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!(
+        assert2::assert!(
             (0..window.len())
                 .map(|i| window.value(i))
                 .collect::<Vec<_>>()
-                == want,
-            "case {index}"
+                == want
         );
     }
 }
@@ -39,21 +38,20 @@ fn windows_slice_the_backing_array() {
 #[test]
 fn out_of_bounds_window_is_rejected() {
     let values = Arc::new(Float64Array::from(vec![1.0, 2.0])) as ArrayRef;
-    assert!(RangeArray::from_ranges(values, [(1_u32, 5_u32)]).is_err());
+    assert2::assert!(RangeArray::from_ranges(values, [(1_u32, 5_u32)]).is_err());
 }
 
 #[test]
 fn basic_accessors_report_empty_state_and_exact_ranges() {
     let values = Arc::new(Float64Array::from(vec![1.0, 2.0, 3.0])) as ArrayRef;
     let empty = RangeArray::from_ranges(values.clone(), []).unwrap();
-    check!(empty.len() == 0);
-    check!(empty.is_empty());
-    check!(empty.ranges().is_empty());
-
     let range_array = RangeArray::from_ranges(values, [(1_u32, 0_u32), (0, 2), (2, 1)]).unwrap();
-    check!(range_array.len() == 3);
-    check!(!range_array.is_empty());
-    check!(range_array.ranges() == [(1, 0), (0, 2), (2, 1)]);
+    assert2::assert!(empty.len() == 0);
+    assert2::assert!(empty.is_empty());
+    assert2::assert!(empty.ranges() == &[][..]);
+    assert2::assert!(range_array.len() == 3);
+    assert2::assert!(!range_array.is_empty());
+    assert2::assert!(range_array.ranges() == &[(1, 0), (0, 2), (2, 1)][..]);
 }
 
 #[test]
@@ -62,17 +60,16 @@ fn dict_array_round_trips_through_recordbatch_column() {
     let range_array = RangeArray::from_ranges(values, [(0_u32, 2_u32), (1, 3)]).unwrap();
     let dict = range_array.clone().into_dict_array().unwrap();
     let back = RangeArray::try_from_dict_array(&dict).unwrap();
-    assert!(back.len() == range_array.len());
+    assert2::assert!(back.len() == range_array.len());
 
     for (index, want) in [(0, vec![1.0, 2.0]), (1, vec![2.0, 3.0, 4.0])] {
         let window = back.get(index).unwrap();
         let window = window.as_any().downcast_ref::<Float64Array>().unwrap();
-        assert!(
+        assert2::assert!(
             (0..window.len())
                 .map(|i| window.value(i))
                 .collect::<Vec<_>>()
-                == want,
-            "case {index}"
+                == want
         );
     }
 }
@@ -84,21 +81,15 @@ fn paired_builder_shares_window_offsets_across_value_and_timestamp() {
     let (value_ranges, ts_ranges) =
         RangeArray::from_paired_ranges(values, timestamps, [(0_u32, 3_u32), (2, 3)]).unwrap();
 
-    assert!(value_ranges.ranges() == ts_ranges.ranges());
-    assert!(value_ranges.len() == 2);
+    assert2::assert!(value_ranges.ranges() == ts_ranges.ranges());
+    assert2::assert!(value_ranges.len() == 2);
 
     for (index, want_values, want_timestamps) in [
         (0, [10.0, 11.0, 12.0], [0_i64, 15, 30]),
         (1, [12.0, 13.0, 14.0], [30, 45, 60]),
     ] {
-        assert!(
-            value_ranges.value_slice(index).unwrap() == want_values,
-            "case {index}"
-        );
-        assert!(
-            ts_ranges.timestamp_slice(index).unwrap() == want_timestamps,
-            "case {index}"
-        );
+        assert2::assert!(value_ranges.value_slice(index).unwrap() == want_values);
+        assert2::assert!(ts_ranges.timestamp_slice(index).unwrap() == want_timestamps);
     }
 }
 
@@ -106,7 +97,7 @@ fn paired_builder_shares_window_offsets_across_value_and_timestamp() {
 fn paired_builder_rejects_length_mismatch() {
     let values = Float64Array::from(vec![1.0, 2.0, 3.0]);
     let timestamps = Int64Array::from(vec![0_i64, 1]);
-    assert!(RangeArray::from_paired_ranges(values, timestamps, [(0_u32, 2_u32)]).is_err());
+    assert2::assert!(RangeArray::from_paired_ranges(values, timestamps, [(0_u32, 2_u32)]).is_err());
 }
 
 #[test]
@@ -119,10 +110,10 @@ fn value_slice_reads_typed_float_cells() {
         (1, Some(&[2.0, 3.0, 4.0][..])),
         (2, None),
     ] {
-        assert!(range_array.value_slice(index) == want, "case {index}");
+        assert2::assert!(range_array.value_slice(index) == want);
     }
     // A timestamp accessor on a float backing yields None (wrong type).
-    assert!(range_array.timestamp_slice(0).is_none());
+    assert2::assert!(range_array.timestamp_slice(0).is_none());
 }
 
 #[test]
@@ -135,7 +126,7 @@ fn timestamp_slice_reads_typed_int_cells() {
         (1, Some(&[30, 45][..])),
         (2, None),
     ] {
-        assert!(range_array.timestamp_slice(index) == want, "case {index}");
+        assert2::assert!(range_array.timestamp_slice(index) == want);
     }
 }
 
@@ -145,11 +136,11 @@ fn cell_len_and_empty_cells() {
     let range_array = RangeArray::from_ranges(values, [(0_u32, 2_u32), (2, 0), (1, 1)]).unwrap();
 
     for (index, want) in [(0, Some(2)), (1, Some(0)), (2, Some(1)), (3, None)] {
-        assert!(range_array.cell_len(index) == want, "case {index}");
+        assert2::assert!(range_array.cell_len(index) == want);
     }
 
     // An empty cell yields an empty slice, not None.
-    assert!(range_array.value_slice(1).unwrap().is_empty());
+    assert2::assert!(range_array.value_slice(1).unwrap().is_empty());
 }
 
 #[test]
@@ -165,8 +156,8 @@ fn typed_accessor_matches_get_over_a_pre_sliced_backing_array() {
     let via_get = (0..via_get.len())
         .map(|index| via_get.value(index))
         .collect::<Vec<_>>();
-    assert!(via_get == vec![3.0, 4.0]);
-    assert!(range_array.value_slice(1).unwrap() == via_get.as_slice());
+    assert2::assert!(via_get == vec![3.0, 4.0]);
+    assert2::assert!(range_array.value_slice(1).unwrap() == via_get.as_slice());
 }
 
 #[test]
@@ -179,7 +170,7 @@ fn iter_float_cells_visits_every_window() {
         .unwrap()
         .map(<[f64]>::to_vec)
         .collect::<Vec<_>>();
-    assert!(collected == vec![vec![1.0, 2.0], vec![2.0, 3.0, 4.0]]);
+    assert2::assert!(collected == vec![vec![1.0, 2.0], vec![2.0, 3.0, 4.0]]);
 }
 
 #[test]
@@ -192,7 +183,7 @@ fn iter_int_cells_visits_every_window() {
         .unwrap()
         .map(<[i64]>::to_vec)
         .collect::<Vec<_>>();
-    assert!(collected == vec![vec![0, 15], vec![30, 45]]);
+    assert2::assert!(collected == vec![vec![0, 15], vec![30, 45]]);
 }
 
 #[test]
@@ -244,7 +235,7 @@ fn histogram_cell_reads_native_histogram_windows() {
     check!(range_array.value_slice(0).is_none());
 
     let decoded = decode_native_histograms(&batch).unwrap();
-    assert!(decoded == rows);
+    assert2::assert!(decoded == rows);
 }
 
 #[test]
@@ -269,7 +260,7 @@ fn histogram_cell_matches_get_over_a_pre_sliced_backing_array() {
     let decoded = decode_native_histograms(&via_get_batch).unwrap();
     let cell = range_array.histogram_cell(0).unwrap();
 
-    assert!(decoded == vec![rows[1].clone()]);
+    assert2::assert!(decoded == vec![rows[1].clone()]);
     check!(cell.schema_slice() == [rows[1].2.schema]);
     check!(cell.count_slice() == [rows[1].2.count]);
     check!(cell.positive_counts(0) == Some(rows[1].2.positive_counts.as_slice()));
@@ -317,7 +308,7 @@ async fn survives_datafusion_projection_as_a_column() {
     let value_back = RangeArray::try_from_dict_array(value_dict).unwrap();
     let ts_back = RangeArray::try_from_dict_array(ts_dict).unwrap();
 
-    assert!(
+    assert2::assert!(
         value_back
             .iter_value_slices()
             .unwrap()
@@ -325,7 +316,7 @@ async fn survives_datafusion_projection_as_a_column() {
             .collect::<Vec<_>>()
             == vec![vec![1.0, 2.0], vec![2.0, 3.0, 4.0]]
     );
-    assert!(
+    assert2::assert!(
         ts_back
             .iter_timestamp_slices()
             .unwrap()

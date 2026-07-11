@@ -232,7 +232,7 @@ fn current_epoch_ms() -> i64 {
 mod tests {
     use std::net::SocketAddr;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use qubit_clock::{
         MockWaiterKind,
         sleep::{MockSleeper, SystemSleeper},
@@ -308,7 +308,7 @@ mod tests {
         let jwks = fetch_jwks(&client, &format!("http://{addr}/jwks"), false)
             .await
             .unwrap();
-        assert!(jwks.len() == 1);
+        assert2::assert!(jwks.len() == 1);
         shutdown.cancel();
     }
 
@@ -320,14 +320,14 @@ mod tests {
             .build()
             .unwrap();
         let err = fetch_jwks(&client, "http://127.0.0.1:1/jwks", false).await;
-        assert!(err.is_err());
+        assert2::assert!(err.is_err());
     }
 
     #[tokio::test]
     async fn refresher_populates_handle_then_stops_on_shutdown() {
         let (addr, srv_shutdown) = serve_jwks(JWKS_BODY).await;
         let handle = JwksHandle::default();
-        assert!(handle.load().is_empty());
+        assert2::assert!(handle.load().is_empty());
         let shutdown = CancellationToken::new();
         let refresher = test_refresher(
             format!("http://{addr}/jwks"),
@@ -344,7 +344,7 @@ mod tests {
             !handle.load().is_empty()
         })
         .await;
-        assert!(handle.load().len() == 1);
+        assert2::assert!(handle.load().len() == 1);
 
         shutdown.cancel();
         task.await.unwrap();
@@ -448,7 +448,7 @@ mod tests {
             !handle.load().is_empty()
         })
         .await;
-        assert!(handle.load().len() == 1);
+        assert2::assert!(handle.load().len() == 1);
         shutdown.cancel();
         task.await.unwrap();
         srv_shutdown.cancel();
@@ -500,14 +500,8 @@ mod tests {
             })
             .await
             .unwrap();
-            assert!(
-                parked,
-                "refresher should park on the interval sleep between fetches",
-            );
-            assert!(
-                handle.load().is_empty(),
-                "fetch should fail verification and leave handle empty",
-            );
+            assert2::assert!(parked);
+            assert2::assert!(handle.load().is_empty());
             timeline.advance(interval);
         }
 
@@ -644,21 +638,32 @@ mod tests {
             make_signal_refresher(endpoint, Duration::from_mins(1));
         let task = tokio::spawn(refresher.run());
 
-        // First signal: fires. Wait on the HTTP counter (the strict
-        // happens-after of refresh_and_swap) rather than the timestamp
-        // store, which the select! arm performs BEFORE the HTTP call —
-        // otherwise CI races between timestamp-set and request-arrival.
-        signal_tx.send(()).await.unwrap();
+        // The refresher performs an immediate periodic fetch at startup. Wait
+        // for it to finish before measuring the on-demand requests so the
+        // initial fetch cannot race the first signal on a slower runner.
         for _ in 0..100 {
             if count.load(Ordering::Relaxed) >= 1 {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
+        let count_after_initial_fetch = count.load(Ordering::Relaxed);
+        assert2::assert!(count_after_initial_fetch >= 1);
+
+        // First signal: fires. Wait on the HTTP counter (the strict
+        // happens-after of refresh_and_swap) rather than the timestamp store,
+        // which the select! arm updates before making the HTTP call.
+        signal_tx.send(()).await.unwrap();
+        for _ in 0..100 {
+            if count.load(Ordering::Relaxed) > count_after_initial_fetch {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
         let first_ts = last_on_demand.load(Ordering::Relaxed);
-        assert!(first_ts > 0, "first signal must have fired a refresh");
+        assert2::assert!(first_ts > 0);
         let count_after_first = count.load(Ordering::Relaxed);
-        assert!(count_after_first >= 1);
+        assert2::assert!(count_after_first > count_after_initial_fetch);
 
         // Second signal within the 60s pause: dropped.
         signal_tx.send(()).await.unwrap();
@@ -667,14 +672,8 @@ mod tests {
             tokio::task::yield_now().await;
             tokio::time::sleep(Duration::from_millis(20)).await;
         }
-        assert!(
-            last_on_demand.load(Ordering::Relaxed) == first_ts,
-            "second signal within min_pause must not advance timestamp"
-        );
-        assert!(
-            count.load(Ordering::Relaxed) == count_after_first,
-            "server must not see a second on-demand HTTP request"
-        );
+        assert2::assert!(last_on_demand.load(Ordering::Relaxed) == first_ts);
+        assert2::assert!(count.load(Ordering::Relaxed) == count_after_first);
 
         shutdown.cancel();
         let _ = task.await;
@@ -689,17 +688,14 @@ mod tests {
             make_signal_refresher(endpoint, Duration::from_millis(0));
         let task = tokio::spawn(refresher.run());
 
-        assert!(last_successful.load(Ordering::Relaxed) == 0);
+        assert2::assert!(last_successful.load(Ordering::Relaxed) == 0);
         signal_tx.send(()).await.unwrap();
         await_until(
             "successful fetch advances last_successful timestamp",
             || last_successful.load(Ordering::Relaxed) > 0,
         )
         .await;
-        assert!(
-            last_successful.load(Ordering::Relaxed) > 0,
-            "last_successful_fetch_ms must advance after a successful fetch",
-        );
+        assert2::assert!(last_successful.load(Ordering::Relaxed) > 0);
 
         shutdown.cancel();
         let _ = task.await;
@@ -742,14 +738,8 @@ mod tests {
         .await;
         // On-demand timestamp advances regardless (rate-limit accounting);
         // success timestamp must stay at 0.
-        assert!(
-            last_on_demand.load(Ordering::Relaxed) > 0,
-            "on-demand rate-limit timestamp updates even when the fetch itself fails",
-        );
-        assert!(
-            last_successful.load(Ordering::Relaxed) == 0,
-            "failed fetch must leave last_successful_fetch_ms at sentinel 0"
-        );
+        assert2::assert!(last_on_demand.load(Ordering::Relaxed) > 0);
+        assert2::assert!(last_successful.load(Ordering::Relaxed) == 0);
 
         shutdown.cancel();
         let _ = task.await;
@@ -775,10 +765,7 @@ mod tests {
             !handle.load().is_empty()
         })
         .await;
-        assert!(
-            handle.load().len() == 1,
-            "ignore_key_use=true must keep the use=enc key in the installed set"
-        );
+        assert2::assert!(handle.load().len() == 1);
 
         shutdown.cancel();
         let _ = task.await;

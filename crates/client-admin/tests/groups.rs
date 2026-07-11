@@ -1,4 +1,3 @@
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_admin::AdminClient;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
@@ -63,15 +62,9 @@ async fn lists_groups_and_committed_offsets() {
     consumer.commit_sync().await.unwrap();
 
     let groups = admin.list_groups().await.unwrap();
-    assert!(
-        groups.iter().any(|g| g == "g1"),
-        "g1 not listed: {groups:?}"
-    );
+    assert2::assert!(groups.iter().any(|g| g == "g1"));
 
     let offsets = admin.list_consumer_group_offsets("g1").await.unwrap();
     let committed = offsets.get(&("t1".to_string(), 0)).copied();
-    assert!(
-        committed == Some(1),
-        "expected committed offset 1, got {committed:?}"
-    );
+    assert2::assert!(committed == Some(1));
 }

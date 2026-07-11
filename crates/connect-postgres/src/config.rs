@@ -31,16 +31,16 @@ mod tests {
             .map(|key| (key.name.as_str(), key.kind, key.required))
             .collect::<Vec<_>>();
 
-        for expected in [
-            ("database_url", ConfigKind::Secret, true),
-            ("slot_name", ConfigKind::String, true),
-            ("publication_name", ConfigKind::String, false),
-            ("schema", ConfigKind::String, false),
-            ("tables", ConfigKind::StringList, true),
-            ("max_messages_per_poll", ConfigKind::UnsignedInteger, false),
-        ] {
-            assert!(keys.contains(&expected), "missing key {expected:?}");
-        }
+        assert2::assert!(
+            keys == vec![
+                ("database_url", ConfigKind::Secret, true),
+                ("max_messages_per_poll", ConfigKind::UnsignedInteger, false),
+                ("publication_name", ConfigKind::String, false),
+                ("schema", ConfigKind::String, false),
+                ("slot_name", ConfigKind::String, true),
+                ("tables", ConfigKind::StringList, true),
+            ]
+        );
 
         let raw = serde_json::Map::from_iter([
             (
@@ -63,14 +63,14 @@ mod tests {
             .unwrap();
         let config = PostgresSourceConfig::from_resolved(&resolved).unwrap();
 
-        assert_eq!(
-            config.database_url.expose_secret(),
-            "postgres://localhost/app"
+        assert2::assert!(config.database_url.expose_secret() == "postgres://localhost/app");
+        assert2::assert!(config.slot_name.as_str() == "crabka_slot");
+        assert2::assert!(config.publication_name.as_str() == "crabka_connect");
+        assert2::assert!(config.schema.as_str() == "public");
+        assert2::assert!(
+            config.table_names.as_slice()
+                == ["accounts".to_string(), "transactions".to_string()].as_slice()
         );
-        assert_eq!(config.slot_name, "crabka_slot");
-        assert_eq!(config.publication_name, "crabka_connect");
-        assert_eq!(config.schema, "public");
-        assert_eq!(config.table_names, vec!["accounts", "transactions"]);
-        assert_eq!(config.max_messages_per_poll, 1000);
+        assert2::assert!(config.max_messages_per_poll == 1000);
     }
 }

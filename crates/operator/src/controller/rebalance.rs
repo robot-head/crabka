@@ -663,7 +663,6 @@ async fn remove_command_annotation(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -699,90 +698,117 @@ mod tests {
     // ----- decide() matrix --------------------------------------------
 
     #[test]
-    fn decide_new_creates_proposal() {
-        assert!(decide(RebalanceState::New, None, false) == RebalanceAction::CreateProposal);
-    }
-
-    #[test]
-    fn decide_proposal_ready_idles_without_command() {
-        assert!(decide(RebalanceState::ProposalReady, None, true) == RebalanceAction::Idle);
-    }
-
-    #[test]
-    fn decide_approve_executes_when_ready_with_session() {
-        assert!(
-            decide(
+    fn decide_initial_and_approval_cases() {
+        for (_name, state, command, has_session, expected) in [
+            (
+                "new creates proposal",
+                RebalanceState::New,
+                None,
+                false,
+                RebalanceAction::CreateProposal,
+            ),
+            (
+                "ready proposal idles",
+                RebalanceState::ProposalReady,
+                None,
+                true,
+                RebalanceAction::Idle,
+            ),
+            (
+                "approve executes",
                 RebalanceState::ProposalReady,
                 Some(RebalanceCommand::Approve),
-                true
-            ) == RebalanceAction::Execute
-        );
-    }
-
-    #[test]
-    fn decide_approve_ignored_without_session() {
-        assert!(
-            decide(
+                true,
+                RebalanceAction::Execute,
+            ),
+            (
+                "approve without session idles",
                 RebalanceState::ProposalReady,
                 Some(RebalanceCommand::Approve),
-                false
-            ) == RebalanceAction::Idle
-        );
-    }
-
-    #[test]
-    fn decide_approve_ignored_when_not_ready() {
-        assert!(
-            decide(RebalanceState::Ready, Some(RebalanceCommand::Approve), true)
-                == RebalanceAction::Idle
-        );
-    }
-
-    #[test]
-    fn decide_refresh_recomputes_from_any_state() {
-        for st in [
-            RebalanceState::ProposalReady,
-            RebalanceState::Ready,
-            RebalanceState::NotReady,
-            RebalanceState::Stopped,
-            RebalanceState::Rebalancing,
+                false,
+                RebalanceAction::Idle,
+            ),
+            (
+                "approve outside proposal-ready idles",
+                RebalanceState::Ready,
+                Some(RebalanceCommand::Approve),
+                true,
+                RebalanceAction::Idle,
+            ),
         ] {
-            assert!(
-                decide(st, Some(RebalanceCommand::Refresh), true)
-                    == RebalanceAction::CreateProposal,
-                "refresh from {st:?}"
-            );
+            assert2::assert!(decide(state, command, has_session) == expected);
         }
     }
 
     #[test]
-    fn decide_stop_cancels_only_while_rebalancing() {
-        assert!(
-            decide(
+    fn decide_refresh_stop_and_poll_cases() {
+        for (_name, state, command, has_session, expected) in [
+            (
+                "refresh proposal-ready",
+                RebalanceState::ProposalReady,
+                Some(RebalanceCommand::Refresh),
+                true,
+                RebalanceAction::CreateProposal,
+            ),
+            (
+                "refresh ready",
+                RebalanceState::Ready,
+                Some(RebalanceCommand::Refresh),
+                true,
+                RebalanceAction::CreateProposal,
+            ),
+            (
+                "refresh not-ready",
+                RebalanceState::NotReady,
+                Some(RebalanceCommand::Refresh),
+                true,
+                RebalanceAction::CreateProposal,
+            ),
+            (
+                "refresh stopped",
+                RebalanceState::Stopped,
+                Some(RebalanceCommand::Refresh),
+                true,
+                RebalanceAction::CreateProposal,
+            ),
+            (
+                "refresh rebalancing",
+                RebalanceState::Rebalancing,
+                Some(RebalanceCommand::Refresh),
+                true,
+                RebalanceAction::CreateProposal,
+            ),
+            (
+                "stop rebalancing",
                 RebalanceState::Rebalancing,
                 Some(RebalanceCommand::Stop),
-                true
-            ) == RebalanceAction::Cancel
-        );
-        assert!(
-            decide(
+                true,
+                RebalanceAction::Cancel,
+            ),
+            (
+                "stop proposal-ready idles",
                 RebalanceState::ProposalReady,
                 Some(RebalanceCommand::Stop),
-                true
-            ) == RebalanceAction::Idle
-        );
-    }
-
-    #[test]
-    fn decide_rebalancing_polls_when_session_present() {
-        assert!(decide(RebalanceState::Rebalancing, None, true) == RebalanceAction::PollExecution);
-    }
-
-    #[test]
-    fn decide_rebalancing_without_session_recomputes() {
-        assert!(
-            decide(RebalanceState::Rebalancing, None, false) == RebalanceAction::CreateProposal
-        );
+                true,
+                RebalanceAction::Idle,
+            ),
+            (
+                "rebalancing polls",
+                RebalanceState::Rebalancing,
+                None,
+                true,
+                RebalanceAction::PollExecution,
+            ),
+            (
+                "rebalancing without session recomputes",
+                RebalanceState::Rebalancing,
+                None,
+                false,
+                RebalanceAction::CreateProposal,
+            ),
+        ] {
+            assert2::assert!(decide(state, command, has_session) == expected);
+        }
     }
 
     // ----- outcome mapping --------------------------------------------
@@ -790,7 +816,7 @@ mod tests {
     #[test]
     fn create_computed_becomes_proposal_ready() {
         let o = Outcome::from_create(&proposal("p1", ProposalStatus::Computed));
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::ProposalReady,
                 reason: "ProposalReady".into(),
@@ -815,7 +841,7 @@ mod tests {
     fn poll_executing_stays_rebalancing_with_short_requeue() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Executing));
         // `new_session: None` — poll must not rewrite the session.
-        assert!(
+        assert2::assert!(
             o == Outcome {
                 state: RebalanceState::Rebalancing,
                 reason: "Rebalancing".into(),
@@ -831,7 +857,17 @@ mod tests {
     #[test]
     fn poll_completed_becomes_ready() {
         let o = Outcome::from_execute_or_poll(&proposal("p", ProposalStatus::Completed));
-        assert!(o.state == RebalanceState::Ready);
+        assert2::assert!(
+            o == Outcome {
+                state: RebalanceState::Ready,
+                reason: "Ready".into(),
+                message: "proposal p completed".into(),
+                requeue: Duration::from_mins(5),
+                new_session: None,
+                new_optimization: None,
+                advance_generation: false,
+            }
+        );
     }
 
     #[test]
@@ -839,108 +875,122 @@ mod tests {
         let mut p = proposal("p", ProposalStatus::Failed);
         p.failure_reason = Some("broker 2 down".into());
         let o = Outcome::from_execute_or_poll(&p);
-        assert!(o.state == RebalanceState::NotReady);
-        assert!(o.message == "broker 2 down");
+        assert2::assert!(
+            o == Outcome {
+                state: RebalanceState::NotReady,
+                reason: "RebalanceFailed".into(),
+                message: "broker 2 down".into(),
+                requeue: Duration::from_mins(5),
+                new_session: None,
+                new_optimization: None,
+                advance_generation: false,
+            }
+        );
     }
 
     #[test]
     fn cancel_becomes_stopped() {
         let o = Outcome::from_cancel(&proposal("p", ProposalStatus::Cancelled));
-        assert!(o.state == RebalanceState::Stopped);
+        assert2::assert!(
+            o == Outcome {
+                state: RebalanceState::Stopped,
+                reason: "Stopped".into(),
+                message: "execution of proposal p cancelled".into(),
+                requeue: Duration::from_mins(5),
+                new_session: None,
+                new_optimization: None,
+                advance_generation: false,
+            }
+        );
     }
 
     // ----- current_state ----------------------------------------------
 
     #[test]
-    fn current_state_defaults_to_new() {
-        assert!(current_state(&cr("x")) == RebalanceState::New);
-    }
-
-    #[test]
-    fn current_state_reads_active_condition() {
-        let mut k = cr("x");
-        k.status = Some(KafkaRebalanceStatus {
-            conditions: vec![KafkaCondition {
-                type_: "Rebalancing".into(),
-                status: "True".into(),
-                reason: "Rebalancing".into(),
-                message: String::new(),
-                last_transition_time: "2026-05-22T00:00:00Z".into(),
-            }],
-            ..Default::default()
-        });
-        assert!(current_state(&k) == RebalanceState::Rebalancing);
-    }
-
-    #[test]
-    fn current_state_ignores_false_conditions() {
-        let mut k = cr("x");
-        k.status = Some(KafkaRebalanceStatus {
-            conditions: vec![KafkaCondition {
-                type_: "Ready".into(),
-                status: "False".into(),
-                reason: "x".into(),
-                message: String::new(),
-                last_transition_time: "2026-05-22T00:00:00Z".into(),
-            }],
-            ..Default::default()
-        });
-        assert!(current_state(&k) == RebalanceState::New);
+    fn current_state_cases() {
+        for (_name, status, expected) in [
+            ("missing status", None, RebalanceState::New),
+            (
+                "active condition",
+                Some(KafkaRebalanceStatus {
+                    conditions: vec![KafkaCondition {
+                        type_: "Rebalancing".into(),
+                        status: "True".into(),
+                        reason: "Rebalancing".into(),
+                        message: String::new(),
+                        last_transition_time: "2026-05-22T00:00:00Z".into(),
+                    }],
+                    ..Default::default()
+                }),
+                RebalanceState::Rebalancing,
+            ),
+            (
+                "false condition",
+                Some(KafkaRebalanceStatus {
+                    conditions: vec![KafkaCondition {
+                        type_: "Ready".into(),
+                        status: "False".into(),
+                        reason: "x".into(),
+                        message: String::new(),
+                        last_transition_time: "2026-05-22T00:00:00Z".into(),
+                    }],
+                    ..Default::default()
+                }),
+                RebalanceState::New,
+            ),
+        ] {
+            let mut kafka = cr("x");
+            kafka.status = status;
+            assert2::assert!(current_state(&kafka) == expected);
+        }
     }
 
     // ----- read_command -----------------------------------------------
 
     #[test]
-    fn read_command_parses_annotation() {
-        let mut k = cr("x");
-        k.metadata.annotations = Some(
-            [("crabka.io/rebalance".to_string(), "approve".to_string())]
-                .into_iter()
-                .collect(),
-        );
-        assert!(read_command(&k) == Some(RebalanceCommand::Approve));
-    }
-
-    #[test]
-    fn read_command_none_for_unknown_value() {
-        let mut k = cr("x");
-        k.metadata.annotations = Some(
-            [("crabka.io/rebalance".to_string(), "yolo".to_string())]
-                .into_iter()
-                .collect(),
-        );
-        assert!(read_command(&k) == None);
+    fn read_command_cases() {
+        for (_name, value, expected) in [
+            ("approve", "approve", Some(RebalanceCommand::Approve)),
+            ("unknown", "yolo", None),
+        ] {
+            let mut kafka = cr("x");
+            kafka.metadata.annotations = Some(
+                [("crabka.io/rebalance".to_string(), value.to_string())]
+                    .into_iter()
+                    .collect(),
+            );
+            assert2::assert!(read_command(&kafka) == expected);
+        }
     }
 
     // ----- resolve_endpoint -------------------------------------------
 
     #[test]
-    fn resolve_endpoint_prefers_valid_spec() {
-        let mut k = cr("x");
-        k.spec.endpoint = Some("http://other-rebalancer.kafka.svc.cluster.local:9300".into());
-        assert!(
-            resolve_endpoint(&k, "kafka").unwrap().as_deref()
-                == Some("http://other-rebalancer.kafka.svc.cluster.local:9300")
-        );
-    }
-
-    #[test]
-    fn resolve_endpoint_derives_from_cluster_label() {
-        let mut k = cr("x");
-        k.metadata.labels = Some(
+    fn resolve_endpoint_cases() {
+        let mut explicit = cr("x");
+        explicit.spec.endpoint =
+            Some("http://other-rebalancer.kafka.svc.cluster.local:9300".into());
+        let mut labeled = cr("x");
+        labeled.metadata.labels = Some(
             [("crabka.io/cluster".to_string(), "demo".to_string())]
                 .into_iter()
                 .collect(),
         );
-        assert!(
-            resolve_endpoint(&k, "kafka").unwrap().as_deref()
-                == Some("http://demo-rebalancer.kafka.svc.cluster.local:9300")
-        );
-    }
-
-    #[test]
-    fn resolve_endpoint_none_without_spec_or_label() {
-        assert!(resolve_endpoint(&cr("x"), "kafka").unwrap() == None);
+        for (_name, kafka, expected) in [
+            (
+                "explicit",
+                explicit,
+                Some("http://other-rebalancer.kafka.svc.cluster.local:9300"),
+            ),
+            (
+                "cluster label",
+                labeled,
+                Some("http://demo-rebalancer.kafka.svc.cluster.local:9300"),
+            ),
+            ("missing", cr("x"), None),
+        ] {
+            assert2::assert!(resolve_endpoint(&kafka, "kafka").unwrap().as_deref() == expected);
+        }
     }
 
     // ----- spec.endpoint SSRF validation (finding L-5) -----------------
@@ -960,53 +1010,47 @@ mod tests {
             "http://demo-rebalancer.kafka.svc.cluster.local",
             "HTTP://Demo-Rebalancer.Kafka.SVC.Cluster.Local:9300",
         ] {
-            assert!(validate_endpoint(ep).is_ok(), "should accept {ep:?}");
+            assert2::assert!(validate_endpoint(ep).is_ok());
         }
     }
 
     #[test]
-    fn endpoint_rejects_cloud_metadata_ip() {
-        let err = resolve_with_endpoint("http://169.254.169.254/latest/meta-data/").unwrap_err();
-        assert!(err.message.contains("IP literal"), "{}", err.message);
-    }
-
-    #[test]
-    fn endpoint_rejects_loopback_ip() {
-        let err = resolve_with_endpoint("http://127.0.0.1:9300").unwrap_err();
-        assert!(err.message.contains("IP literal"), "{}", err.message);
-    }
-
-    #[test]
-    fn endpoint_rejects_ipv6_literal() {
-        let err = resolve_with_endpoint("http://[::1]:9300").unwrap_err();
-        assert!(err.message.contains("IP literal"), "{}", err.message);
-    }
-
-    #[test]
-    fn endpoint_rejects_external_host() {
-        let err = resolve_with_endpoint("http://attacker.example.com/").unwrap_err();
-        assert!(err.message.contains("cluster-internal"), "{}", err.message);
-    }
-
-    #[test]
-    fn endpoint_rejects_bare_internal_name() {
-        // A short name with no cluster suffix (e.g. the K8s API "kubernetes")
-        // must not slip through.
-        let err = resolve_with_endpoint("http://kubernetes:443").unwrap_err();
-        assert!(err.message.contains("cluster-internal"), "{}", err.message);
-    }
-
-    #[test]
-    fn endpoint_rejects_disallowed_scheme() {
-        let err = resolve_with_endpoint("file:///etc/passwd").unwrap_err();
-        assert!(err.message.contains("scheme") || err.message.contains("http(s)"));
-    }
-
-    #[test]
-    fn endpoint_rejects_userinfo_smuggling() {
-        // "host" in userinfo must not be mistaken for the real host.
-        let err =
-            resolve_with_endpoint("http://demo.svc.cluster.local@169.254.169.254/").unwrap_err();
-        assert!(err.message.contains("IP literal"), "{}", err.message);
+    fn endpoint_rejection_cases() {
+        for (_name, endpoint, message_fragments) in [
+            (
+                "cloud metadata IP",
+                "http://169.254.169.254/latest/meta-data/",
+                &["IP literal"][..],
+            ),
+            ("loopback IP", "http://127.0.0.1:9300", &["IP literal"]),
+            ("IPv6 literal", "http://[::1]:9300", &["IP literal"]),
+            (
+                "external host",
+                "http://attacker.example.com/",
+                &["cluster-internal"],
+            ),
+            (
+                "bare internal name",
+                "http://kubernetes:443",
+                &["cluster-internal"],
+            ),
+            (
+                "disallowed scheme",
+                "file:///etc/passwd",
+                &["scheme", "http(s)"],
+            ),
+            (
+                "userinfo smuggling",
+                "http://demo.svc.cluster.local@169.254.169.254/",
+                &["IP literal"],
+            ),
+        ] {
+            let err = resolve_with_endpoint(endpoint).unwrap_err();
+            assert2::assert!(
+                message_fragments
+                    .iter()
+                    .any(|fragment| err.message.contains(fragment))
+            );
+        }
     }
 }

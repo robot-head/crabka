@@ -11,7 +11,6 @@
 
 use std::time::Duration;
 
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{ShareAckMode, ShareAckType, ShareConsumer, ShareConsumerRecord};
 use crabka_client_core::Client;
@@ -48,7 +47,7 @@ async fn create_topic_with_partitions(client: &Client, name: &str, num_partition
         })
         .await
         .expect("CreateTopics");
-    assert!(cr.topics[0].error_code == 0, "create_topic failed: {cr:?}");
+    assert2::assert!(cr.topics[0].error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -79,11 +78,8 @@ async fn share_consumer_joins_and_closes() {
         .await
         .expect("ShareConsumer build");
 
-    assert!(
-        !consumer.member_id().is_empty(),
-        "broker must assign a member id on join"
-    );
-    assert!(consumer.group_id() == "share-group-1");
+    assert2::assert!(!consumer.member_id().is_empty());
+    assert2::assert!(consumer.group_id() == "share-group-1");
 
     consumer.close().await.expect("close");
 }
@@ -120,10 +116,7 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
         })
         .await
         .expect("FindCoordinator(SHARE)");
-    assert!(
-        resp.coordinators[0].error_code == 0,
-        "FindCoordinator(SHARE)"
-    );
+    assert2::assert!(resp.coordinators[0].error_code == 0);
     // All SHARE_STATE_PARTITIONS must materialize a leader (subject to KIP-595
     // election jitter) so SPSO writes land. `wait_until_partition_present` is
     // internally bounded.
@@ -347,27 +340,15 @@ async fn poll_acquires_and_implicit_accept_advances() {
         let recs = consumer.poll(Duration::from_millis(300)).await.unwrap();
         first.extend(recs);
     }
-    assert!(
-        first.len() == 3,
-        "must acquire all 3 records, got {first:?}"
-    );
-    assert!(
-        first.iter().all(|r| r.delivery_count == 1),
-        "first delivery_count must be 1, got {first:?}"
-    );
+    assert2::assert!(first.len() == 3);
+    assert2::assert!(first.iter().all(|r| r.delivery_count == 1));
     let mut values: Vec<String> = first
         .iter()
         .map(|r| String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned())
         .collect();
     values.sort();
-    assert!(
-        values == vec!["v0", "v1", "v2"],
-        "record values: {values:?}"
-    );
-    assert!(
-        first.iter().all(|r| r.topic == "t" && r.partition == 0),
-        "records must carry the topic name + partition"
-    );
+    assert2::assert!(values == vec!["v0", "v1", "v2"]);
+    assert2::assert!(first.iter().all(|r| r.topic == "t" && r.partition == 0));
 
     // Second poll: the implicit auto-Accept (piggybacked on this ShareFetch)
     // advances the SPSO past 0..2, so nothing is re-acquired. Poll a few times
@@ -380,10 +361,7 @@ async fn poll_acquires_and_implicit_accept_advances() {
             .unwrap()
             .len();
     }
-    assert!(
-        second == 0,
-        "implicit accept must advance SPSO; expected no redelivery, got {second}"
-    );
+    assert2::assert!(second == 0);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -441,11 +419,8 @@ async fn explicit_release_redelivers() {
     wait_for_share_init(&broker, "relg", tid, 0).await;
 
     let first = poll_until(&mut consumer, 3, Duration::from_secs(15)).await;
-    assert!(first.len() == 3, "must acquire all 3, got {first:?}");
-    assert!(
-        first.iter().all(|r| r.delivery_count == 1),
-        "first delivery_count must be 1, got {first:?}"
-    );
+    assert2::assert!(first.len() == 3);
+    assert2::assert!(first.iter().all(|r| r.delivery_count == 1));
 
     // Release every record back to the queue.
     for r in &first {
@@ -457,22 +432,13 @@ async fn explicit_release_redelivers() {
     // The Release flushes (piggybacked) on the next poll; the released offsets
     // are then re-acquired with an incremented delivery_count.
     let second = poll_until(&mut consumer, 3, Duration::from_secs(15)).await;
-    assert!(
-        second.len() == 3,
-        "released records must be redelivered, got {second:?}"
-    );
-    assert!(
-        second.iter().all(|r| r.delivery_count == 2),
-        "redelivery must bump delivery_count to 2, got {second:?}"
-    );
+    assert2::assert!(second.len() == 3);
+    assert2::assert!(second.iter().all(|r| r.delivery_count == 2));
     let mut a: Vec<String> = first.iter().map(val).collect();
     let mut b: Vec<String> = second.iter().map(val).collect();
     a.sort();
     b.sort();
-    assert!(
-        a == b,
-        "redelivery must return the same values: {a:?} vs {b:?}"
-    );
+    assert2::assert!(a == b);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -514,7 +480,7 @@ async fn explicit_reject_not_redelivered() {
     wait_for_share_init(&broker, "rejg", tid, 0).await;
 
     let first = poll_until(&mut consumer, 3, Duration::from_secs(15)).await;
-    assert!(first.len() == 3, "must acquire all 3, got {first:?}");
+    assert2::assert!(first.len() == 3);
 
     // Reject all three, then commit (standalone ShareAcknowledge).
     for r in &first {
@@ -529,15 +495,8 @@ async fn explicit_reject_not_redelivered() {
     produce_one_to(&broker, &admin, "rej", tid, 0, "v3").await;
 
     let next = poll_until(&mut consumer, 1, Duration::from_secs(15)).await;
-    assert!(
-        next.len() == 1,
-        "rejected records must not redeliver; expected only the new record, got {next:?}"
-    );
-    assert!(
-        val(&next[0]) == "v3",
-        "the only delivered record must be the new one, got {:?}",
-        val(&next[0])
-    );
+    assert2::assert!(next.len() == 1);
+    assert2::assert!(val(&next[0]) == "v3");
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -612,17 +571,11 @@ async fn two_consumers_share_topic() {
     // Disjoint: no value delivered to both consumers.
     let v1: std::collections::HashSet<&String> = got1.iter().map(|(_, v)| v).collect();
     let v2: std::collections::HashSet<&String> = got2.iter().map(|(_, v)| v).collect();
-    assert!(
-        v1.is_disjoint(&v2),
-        "members must not share records: c1={got1:?} c2={got2:?}"
-    );
+    assert2::assert!(v1.is_disjoint(&v2));
     // Each member owns whole partitions, so a member never sees both partitions.
     let p1: std::collections::HashSet<i32> = got1.iter().map(|(p, _)| *p).collect();
     let p2: std::collections::HashSet<i32> = got2.iter().map(|(p, _)| *p).collect();
-    assert!(
-        p1.is_disjoint(&p2),
-        "partitions must be owned by a single member: c1={p1:?} c2={p2:?}"
-    );
+    assert2::assert!(p1.is_disjoint(&p2));
     // Complete: together they cover all four records.
     let mut all: Vec<String> = got1
         .iter()
@@ -630,10 +583,7 @@ async fn two_consumers_share_topic() {
         .map(|(_, v)| v.clone())
         .collect();
     all.sort();
-    assert!(
-        all == vec!["p0a", "p0b", "p1a", "p1b"],
-        "the two members together must cover everything produced, got {all:?}"
-    );
+    assert2::assert!(all == vec!["p0a", "p0b", "p1a", "p1b"]);
 
     c1.close().await.unwrap();
     c2.close().await.unwrap();
@@ -672,7 +622,7 @@ async fn close_leaves_group() {
         .await
         .unwrap();
     let member_id = consumer.member_id().to_string();
-    assert!(!member_id.is_empty(), "broker must assign a member id");
+    assert2::assert!(!member_id.is_empty());
 
     wait_for_share_init(&broker, "leaveg", tid, 0).await;
     let _ = poll_until(&mut consumer, 1, Duration::from_secs(10)).await;
@@ -756,14 +706,8 @@ async fn explicit_renew_prevents_redelivery() {
             first = recs;
         }
     }
-    assert!(
-        first.len() == 1,
-        "must acquire the single record, got {first:?}"
-    );
-    assert!(
-        first[0].delivery_count == 1,
-        "first delivery_count must be 1"
-    );
+    assert2::assert!(first.len() == 1);
+    assert2::assert!(first[0].delivery_count == 1);
 
     // Renew ~400ms after acquire, before the 1000ms lock expires → resets the
     // deadline to renew-time + 1000ms (≈ T_acq+1400ms).
@@ -801,10 +745,7 @@ async fn explicit_renew_prevents_redelivery() {
             .unwrap()
             .len();
     }
-    assert!(
-        redelivered == 0,
-        "renew must keep the lock; the record must NOT be redelivered, got {redelivered}"
-    );
+    assert2::assert!(redelivered == 0);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -848,16 +789,10 @@ async fn renew_errors_in_implicit_mode() {
     wait_for_share_init(&broker, "impg", tid, 0).await;
 
     let first = poll_until(&mut consumer, 1, Duration::from_secs(15)).await;
-    assert!(
-        first.len() == 1,
-        "must acquire the single record, got {first:?}"
-    );
+    assert2::assert!(first.len() == 1);
 
     let err = consumer.renew(&first[0]).await;
-    assert!(
-        matches!(err, Err(ConsumerError::IllegalState(_))),
-        "renew() in implicit mode must be IllegalState, got {err:?}"
-    );
+    assert2::assert!(matches!(err, Err(ConsumerError::IllegalState(_))));
 
     consumer.close().await.unwrap();
     broker.shutdown().await;

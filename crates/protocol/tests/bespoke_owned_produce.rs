@@ -1,7 +1,6 @@
 // Bespoke tests for the owned Produce wrappers (checks beyond default min/max).
 // Relocated from hand-written wrappers.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     Decode, Encode, UnknownTaggedFields,
@@ -16,11 +15,11 @@ fn owned_produce_request_min_version_empty_topics() {
     let req = ProduceRequest::default();
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MIN_VERSION).unwrap();
-    assert!(req.encoded_len(MIN_VERSION) == buf.len());
+    assert2::assert!(req.encoded_len(MIN_VERSION) == buf.len());
     let mut cur = &buf[..];
     let decoded = ProduceRequest::decode(&mut cur, MIN_VERSION).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded == req);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded == req);
 }
 
 #[test]
@@ -34,10 +33,10 @@ fn owned_produce_request_max_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MAX_VERSION).unwrap();
-    assert!(req.encoded_len(MAX_VERSION) == buf.len());
+    assert2::assert!(req.encoded_len(MAX_VERSION) == buf.len());
     let mut cur = &buf[..];
-    assert!(ProduceRequest::decode(&mut cur, MAX_VERSION).unwrap() == req);
-    assert!(cur.is_empty());
+    assert2::assert!(ProduceRequest::decode(&mut cur, MAX_VERSION).unwrap() == req);
+    assert2::assert!(cur.is_empty());
 }
 
 #[test]
@@ -45,11 +44,11 @@ fn owned_produce_response_min_version_empty_responses() {
     let resp = ProduceResponse::default();
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MIN).unwrap();
-    assert!(resp.encoded_len(RESP_MIN) == buf.len());
+    assert2::assert!(resp.encoded_len(RESP_MIN) == buf.len());
     let mut cur = &buf[..];
     let decoded = ProduceResponse::decode(&mut cur, RESP_MIN).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
-    assert!(decoded.responses.len() == 0);
+    assert2::assert!(cur.is_empty());
+    assert2::assert!(decoded.responses.len() == 0);
 }
 
 #[test]
@@ -62,8 +61,8 @@ fn owned_produce_response_max_version_roundtrips() {
     };
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MAX).unwrap();
-    assert!(resp.encoded_len(RESP_MAX) == buf.len());
+    assert2::assert!(resp.encoded_len(RESP_MAX) == buf.len());
     let mut cur = &buf[..];
-    assert!(ProduceResponse::decode(&mut cur, RESP_MAX).unwrap() == resp);
-    assert!(cur.is_empty());
+    assert2::assert!(ProduceResponse::decode(&mut cur, RESP_MAX).unwrap() == resp);
+    assert2::assert!(cur.is_empty());
 }

@@ -7,7 +7,6 @@
 
 use std::{net::SocketAddr, time::Duration};
 
-use assert2::assert;
 use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig, BrokerHandle,
     config::{InterBrokerCredentials, ListenerSpec},
@@ -235,10 +234,7 @@ async fn controller_listener_sasl_plaintext_rejects_mismatched_creds() {
     // intentional: negative test — observe that no convergence happens within a
     // fixed window; there is no awaiter for "state stays put".
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(
-        b1.broker_count().await < 2,
-        "mismatched creds must not converge"
-    );
+    assert2::assert!(b1.broker_count().await < 2);
     let _ = &b2;
 
     b2.shutdown().await;
@@ -308,10 +304,7 @@ async fn controller_listener_sasl_denies_unauthorized_principal() {
     // intentional: negative test — observe that no convergence happens within a
     // fixed window; there is no awaiter for "state stays put".
     tokio::time::sleep(Duration::from_secs(3)).await;
-    assert!(
-        b1.broker_count().await < 2,
-        "unauthorized principal must not be able to drive controller RPCs"
-    );
+    assert2::assert!(b1.broker_count().await < 2);
     let _ = &b2;
 
     b2.shutdown().await;

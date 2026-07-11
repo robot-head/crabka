@@ -704,7 +704,7 @@ impl Consumer {
 mod offset_advance_tests {
     use std::collections::HashMap;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         owned::fetch_request::ReplicaState,
         primitives::uuid::Uuid as WireUuid,
@@ -725,11 +725,22 @@ mod offset_advance_tests {
         check!(BOOTSTRAP_LEADER == -1);
         check!(UNKNOWN_LEADER_ID == -1);
         check!(UNKNOWN_FETCH_OFFSET == -1);
-        check!(fetch_leader_id(3, true) == 3);
-        check!(fetch_leader_id(-1, true) == BOOTSTRAP_LEADER);
-        check!(fetch_leader_id(3, false) == BOOTSTRAP_LEADER);
-        check!(should_use_bootstrap_leader(BOOTSTRAP_LEADER));
-        check!(!should_use_bootstrap_leader(3));
+        for (name, leader, known, expected) in [
+            ("known non-negative", 3, true, 3),
+            ("negative leader", -1, true, BOOTSTRAP_LEADER),
+            ("unknown broker", 3, false, BOOTSTRAP_LEADER),
+        ] {
+            check!(fetch_leader_id(leader, known) == expected, "case {name}");
+        }
+        for (name, leader, expected) in [
+            ("bootstrap sentinel", BOOTSTRAP_LEADER, true),
+            ("broker leader", 3, false),
+        ] {
+            check!(
+                should_use_bootstrap_leader(leader) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -737,19 +748,37 @@ mod offset_advance_tests {
         let key = ("topic-a".to_string(), 2);
         let mut offsets = HashMap::new();
 
-        assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
+        assert2::assert!(fetch_offset_or_unknown(&offsets, &key) == UNKNOWN_FETCH_OFFSET);
         offsets.insert(key.clone(), 42);
         check!(fetch_offset_or_unknown(&offsets, &key) == 42);
 
-        check!(is_read_committed(IsolationLevel::ReadCommitted));
-        check!(!is_read_committed(IsolationLevel::ReadUncommitted));
-        check!(aborted_txn_started(10, 10));
-        check!(aborted_txn_started(10, 11));
-        check!(!aborted_txn_started(11, 10));
-        check!(should_drop_aborted_batch(true, true, true));
-        check!(!should_drop_aborted_batch(false, true, true));
-        check!(!should_drop_aborted_batch(true, false, true));
-        check!(!should_drop_aborted_batch(true, true, false));
+        for (name, isolation, expected) in [
+            ("read committed", IsolationLevel::ReadCommitted, true),
+            ("read uncommitted", IsolationLevel::ReadUncommitted, false),
+        ] {
+            check!(is_read_committed(isolation) == expected, "case {name}");
+        }
+        for (name, first, offset, expected) in [
+            ("at first offset", 10, 10, true),
+            ("after first offset", 10, 11, true),
+            ("before first offset", 11, 10, false),
+        ] {
+            check!(
+                aborted_txn_started(first, offset) == expected,
+                "case {name}"
+            );
+        }
+        for (name, committed, aborted, started, expected) in [
+            ("drop aborted", true, true, true, true),
+            ("uncommitted isolation", false, true, true, false),
+            ("not aborted", true, false, true, false),
+            ("transaction not started", true, true, false, false),
+        ] {
+            check!(
+                should_drop_aborted_batch(committed, aborted, started) == expected,
+                "case {name}"
+            );
+        }
         check!(record_offset(100, 7) == 107);
         check!(record_timestamp(1000, 33) == 1033);
     }
@@ -760,36 +789,59 @@ mod offset_advance_tests {
 
         use crabka_client_core::ClientError;
 
-        check!(is_transient_transport_error(&ClientError::Disconnected));
-        check!(is_transient_transport_error(&ClientError::Timeout(
-            Duration::from_millis(10)
-        )));
-        check!(is_transient_transport_error(&ClientError::Io(
-            io::Error::new(io::ErrorKind::ConnectionReset, "reset")
-        )));
-        check!(is_transient_transport_error(&ClientError::Connect {
-            addr: "127.0.0.1:9092".parse().unwrap(),
-            source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
-        }));
-        check!(is_transient_poll_error(&ConsumerError::Client(
-            ClientError::Connect {
-                addr: "127.0.0.1:9092".parse().unwrap(),
-                source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
-            }
-        )));
-        check!(!is_transient_transport_error(&ClientError::Server {
-            error_code: 6
-        }));
-        check!(!is_transient_poll_error(&ConsumerError::Server(6)));
-        check!(!is_transient_transport_error(
-            &ClientError::IncompatibleVersion {
-                api_key: 1,
-                broker_min: 0,
-                broker_max: 1,
-                client_min: 2,
-                client_max: 3,
-            }
-        ));
+        let transport_cases = vec![
+            ("disconnected", ClientError::Disconnected, true),
+            (
+                "timeout",
+                ClientError::Timeout(Duration::from_millis(10)),
+                true,
+            ),
+            (
+                "connection reset",
+                ClientError::Io(io::Error::new(io::ErrorKind::ConnectionReset, "reset")),
+                true,
+            ),
+            (
+                "connect refused",
+                ClientError::Connect {
+                    addr: "127.0.0.1:9092".parse().unwrap(),
+                    source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+                },
+                true,
+            ),
+            ("server error", ClientError::Server { error_code: 6 }, false),
+            (
+                "incompatible version",
+                ClientError::IncompatibleVersion {
+                    api_key: 1,
+                    broker_min: 0,
+                    broker_max: 1,
+                    client_min: 2,
+                    client_max: 3,
+                },
+                false,
+            ),
+        ];
+        for (name, error, expected) in &transport_cases {
+            check!(
+                is_transient_transport_error(error) == *expected,
+                "case {name}"
+            );
+        }
+        let poll_cases = vec![
+            (
+                "client connect",
+                ConsumerError::Client(ClientError::Connect {
+                    addr: "127.0.0.1:9092".parse().unwrap(),
+                    source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+                }),
+                true,
+            ),
+            ("server", ConsumerError::Server(6), false),
+        ];
+        for (name, error, expected) in &poll_cases {
+            check!(is_transient_poll_error(error) == *expected, "case {name}");
+        }
     }
 
     #[test]
@@ -800,7 +852,7 @@ mod offset_advance_tests {
             vec![(2, 42, LeaderEpoch(5), LeaderEpoch(4))],
             128 * 1024,
         );
-        assert!(
+        assert2::assert!(
             topic
                 == FetchTopic {
                     topic: "topic-a".into(),
@@ -826,7 +878,7 @@ mod offset_advance_tests {
             2 * 1024 * 1024,
             vec![topic.clone()],
         );
-        assert!(
+        assert2::assert!(
             req == FetchRequest {
                 replica_id: -1,
                 max_wait_ms: 123,
@@ -855,7 +907,7 @@ mod offset_advance_tests {
         by_topic.insert("topic-a".to_string(), vec![3]);
         let req = build_latest_offsets_request(by_topic);
 
-        assert!(
+        assert2::assert!(
             req == ListOffsetsRequest {
                 replica_id: -1,
                 isolation_level: 0,
@@ -887,12 +939,12 @@ mod offset_advance_tests {
         };
         let payload = RecordsPayload::V2(vec![batch]);
         let batches = payload.as_v2().unwrap();
-        assert!(super::next_offset_after(batches) == Some(15));
+        assert2::assert!(super::next_offset_after(batches) == Some(15));
     }
 
     #[test]
     fn advance_target_none_for_empty() {
         let payload = RecordsPayload::V2(vec![]);
-        assert!(super::next_offset_after(payload.as_v2().unwrap()) == None);
+        assert2::assert!(super::next_offset_after(payload.as_v2().unwrap()) == None);
     }
 }

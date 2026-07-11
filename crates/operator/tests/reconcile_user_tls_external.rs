@@ -5,7 +5,7 @@
 
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_client_admin::{
     AclEntry, AclOperation, PatternType, PermissionType, QuotaOp, ResourceType,
 };
@@ -167,33 +167,26 @@ async fn tls_external_user_creates_no_secret() {
         })
         .map(|r| r.uri().to_string())
         .collect();
-    assert!(
-        secret_touches.is_empty(),
-        "tls-external must not PATCH/POST any Secret, got: {secret_touches:?}",
-    );
+    assert2::assert!(secret_touches.is_empty());
 
     // The FIFO admin mock must NOT have seen any SCRAM call.
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. })),
-        "tls-external must not call AlterUserScramCredentials: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. }))
     );
     // The only admin calls expected are ACL describe + (when the spec
     // declares ACLs) create.
     for call in &calls {
-        assert!(
-            matches!(
-                call,
-                RecordedCall::DescribeAcls(_)
-                    | RecordedCall::CreateAcls(_)
-                    | RecordedCall::DeleteAcls(_)
-                    | RecordedCall::DescribeUserQuotas(_)
-                    | RecordedCall::AlterUserQuotas { .. }
-            ),
-            "unexpected admin call for tls-external: {call:?}",
-        );
+        assert2::assert!(matches!(
+            call,
+            RecordedCall::DescribeAcls(_)
+                | RecordedCall::CreateAcls(_)
+                | RecordedCall::DeleteAcls(_)
+                | RecordedCall::DescribeUserQuotas(_)
+                | RecordedCall::AlterUserQuotas { .. }
+        ));
     }
 }
 
@@ -218,13 +211,10 @@ async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
 
     let calls = fake_for_assert.lock().await.calls();
     // DescribeAcls must filter by the bare-name principal.
-    assert!(
-        calls.iter().any(|c| matches!(
-            c,
-            RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:alice")
-        )),
-        "expected DescribeAcls filtered by User:alice, got {calls:?}",
-    );
+    assert2::assert!(calls.iter().any(|c| matches!(
+        c,
+        RecordedCall::DescribeAcls(f) if f.principal.as_deref() == Some("User:alice")
+    )));
     // CreateAcls must use the bare-name principal on every entry.
     let create = calls
         .iter()
@@ -236,7 +226,7 @@ async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
     // Read+Describe fan out into two entries (the BTreeSet diff hands
     // them over in Ord order: Read before Describe), each under the
     // bare-name principal `User:alice`.
-    assert!(
+    assert2::assert!(
         create
             == vec![
                 AclEntry {
@@ -257,8 +247,7 @@ async fn tls_external_user_reconciles_acls_under_bare_name_principal() {
                     operation: AclOperation::Describe,
                     permission_type: PermissionType::Allow,
                 },
-            ],
-        "tls-external must fan Read+Describe out under the bare-name principal",
+            ]
     );
 }
 
@@ -285,11 +274,10 @@ async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
 
     let calls = fake_for_assert.lock().await.calls();
     // DescribeUserQuotas must be keyed by `alice`, not `User:alice` or `CN=alice`.
-    assert!(
+    assert2::assert!(
         calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == USER)),
-        "expected DescribeUserQuotas keyed by `{USER}`, got {calls:?}",
+            .any(|c| matches!(c, RecordedCall::DescribeUserQuotas(u) if u == USER))
     );
     // AlterUserQuotas must be keyed by `alice` and carry the Set op.
     let (username, ops) = calls
@@ -301,17 +289,12 @@ async fn tls_external_user_reconciles_quotas_under_bare_name_principal() {
             _ => None,
         })
         .expect("AlterUserQuotas must have been issued");
-    assert!(
-        username == USER,
-        "tls-external quotas must be keyed by bare name, got `{username}`"
-    );
-    assert!(
-        ops.iter().any(|op| matches!(
-            op,
-            QuotaOp::Set { key, value }
-                if key == "producer_byte_rate" && (*value - 1_048_576.0).abs() < f64::EPSILON
-        )),
-        "expected Set producer_byte_rate=1048576, got {ops:?}",
+    assert2::assert!(username == USER.to_string());
+    assert2::assert!(
+        ops == vec![QuotaOp::Set {
+            key: "producer_byte_rate".to_string(),
+            value: 1_048_576.0,
+        }]
     );
 }
 
@@ -343,16 +326,13 @@ async fn tls_external_user_status_reports_external_true_and_tls_principal_and_no
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     let s = &body["status"];
-    check!(s["conditions"][0]["status"] == "True");
-    check!(s["conditions"][0]["reason"] == "Ready");
-    check!(s["external"] == true, "external must be true: {body}");
-    check!(
-        s["tlsPrincipal"] == "User:alice",
-        "tlsPrincipal must pin the bare-name principal: {body}"
-    );
-    check!(s["secret"] == serde_json::Value::Null, "no Secret: {body}");
-    check!(s["scramSha512"] == false, "no SCRAM: {body}");
-    check!(s["tls"] == false, "no operator-issued TLS cert: {body}");
+    assert2::assert!(s["conditions"][0]["status"].as_str() == Some("True"));
+    assert2::assert!(s["conditions"][0]["reason"].as_str() == Some("Ready"));
+    assert2::assert!(s["external"].as_bool() == Some(true));
+    assert2::assert!(s["tlsPrincipal"].as_str() == Some("User:alice"));
+    assert2::assert!(s["secret"].is_null());
+    assert2::assert!(s["scramSha512"].as_bool() == Some(false));
+    assert2::assert!(s["tls"].as_bool() == Some(false));
 }
 
 /// 5. A minimal `tls-external` user (no authorization, no quotas)
@@ -410,9 +390,9 @@ async fn tls_external_user_with_no_authorization_and_no_quotas_still_reaches_rea
         })
         .expect("status PATCH must have been captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    check!(body["status"]["conditions"][0]["status"] == "True");
-    check!(body["status"]["conditions"][0]["reason"] == "Ready");
-    check!(body["status"]["external"] == true);
+    assert2::assert!(body["status"]["conditions"][0]["status"].as_str() == Some("True"));
+    assert2::assert!(body["status"]["conditions"][0]["reason"].as_str() == Some("Ready"));
+    assert2::assert!(body["status"]["external"].as_bool() == Some(true));
 }
 
 /// 6. Finalizer cleanup for a `tls-external` user must not call
@@ -446,11 +426,10 @@ async fn tls_external_user_finalizer_does_not_call_alter_user_scram_credentials(
     reconcile(Arc::new(ku), ctx).await.unwrap();
 
     let calls = fake_for_assert.lock().await.calls();
-    assert!(
+    assert2::assert!(
         !calls
             .iter()
-            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. })),
-        "tls-external finalizer must not call AlterUserScramCredentials: {calls:?}",
+            .any(|c| matches!(c, RecordedCall::AlterUserScramCredentials { .. }))
     );
 
     // ACL delete filter must scope by the bare-name principal.
@@ -461,10 +440,11 @@ async fn tls_external_user_finalizer_does_not_call_alter_user_scram_credentials(
             _ => None,
         })
         .expect("DeleteAcls must have been issued during finalizer");
-    assert!(!filters.is_empty(), "at least one filter expected");
-    assert!(
-        filters[0].principal.as_deref() == Some("User:alice"),
-        "tls-external finalizer must filter ACLs by `User:<name>`: {filters:?}"
+    assert2::assert!(
+        filters
+            .first()
+            .and_then(|filter| filter.principal.as_deref())
+            == Some("User:alice")
     );
 
     // The kube observation log must show the finalizer-removal PATCH on
@@ -475,8 +455,5 @@ async fn tls_external_user_finalizer_does_not_call_alter_user_scram_credentials(
         .filter(|r| r.uri().to_string().contains("/secrets/"))
         .map(|r| format!("{} {}", r.method(), r.uri()))
         .collect();
-    assert!(
-        secret_touches.is_empty(),
-        "tls-external finalizer must not touch any Secret, got: {secret_touches:?}",
-    );
+    assert2::assert!(secret_touches.is_empty());
 }

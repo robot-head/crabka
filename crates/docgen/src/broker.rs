@@ -159,7 +159,7 @@ pub fn protocol_apis_md() -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     #[test]
@@ -173,14 +173,14 @@ mod tests {
             "\n---\n",
             "## tls_config",
         ] {
-            assert!(md.contains(needle), "missing {needle:?} in {md}");
+            assert2::assert!(md.contains(needle));
         }
     }
     #[test]
     fn topic_configs_page_lists_retention_ms() {
         let md = topic_configs_md();
-        assert!(md.contains("`retention.ms`"));
-        assert!(md.contains("| Key | Type | Default | KIP | Description |"));
+        assert2::assert!(md.contains("`retention.ms`"));
+        assert2::assert!(md.contains("| Key | Type | Default | KIP | Description |"));
     }
     #[test]
     fn protocol_apis_page_lists_named_apis() {
@@ -199,19 +199,19 @@ mod tests {
             "[KIP-",
             "cwiki.apache.org/confluence/display/KAFKA/KIP-",
         ] {
-            assert!(md.contains(needle), "missing {needle:?} in {md}");
+            assert2::assert!(md.contains(needle));
         }
         // Consumer-group heartbeat (68) maps to KIP-848.
         let row = md
             .lines()
             .find(|l| l.contains("| 68 |"))
             .expect("ConsumerGroupHeartbeat row");
-        assert!(row.contains("[KIP-848]"), "{row}");
+        assert2::assert!(row.contains("[KIP-848]"));
         // Share-group fetch (78) maps to KIP-932.
         let share = md
             .lines()
             .find(|l| l.contains("| 78 |"))
             .expect("ShareFetch row");
-        assert!(share.contains("[KIP-932]"), "{share}");
+        assert2::assert!(share.contains("[KIP-932]"));
     }
 }

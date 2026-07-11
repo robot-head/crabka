@@ -1,17 +1,39 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::{assert, check};
 use crabka_blockstore::{
     BlockKey, LogBlockTableProvider, LogRow, TimeRange, labels, register_log_blocks,
     register_log_blocks_from_object_store, series_fingerprint, write_log_block,
     write_log_block_to_object_store,
 };
 use datafusion::{
-    arrow::array::{Int64Array, StringArray},
+    arrow::{
+        array::{Int64Array, StringArray},
+        record_batch::RecordBatch,
+    },
     datasource::{TableProvider, provider::TableProviderFilterPushDown},
     prelude::{SessionContext, col, lit},
 };
 use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
+
+fn assert_single_api_error(batches: &[RecordBatch]) {
+    let [batch] = batches else {
+        panic!("expected one result batch, got {}", batches.len());
+    };
+    let timestamps = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .unwrap();
+    let lines = batch
+        .column(1)
+        .as_any()
+        .downcast_ref::<StringArray>()
+        .unwrap();
+
+    assert2::assert!(batch.num_rows() == 1);
+    assert2::assert!(timestamps.value(0) == 19);
+    assert2::assert!(lines.value(0) == "api error");
+}
 
 #[tokio::test]
 async fn datafusion_table_scans_only_planned_log_blocks() {
@@ -51,22 +73,7 @@ async fn datafusion_table_scans_only_planned_log_blocks() {
         .await
         .unwrap();
 
-    assert!(batches.len() == 1);
-    let batch = &batches[0];
-    let timestamps = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    let lines = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-
-    assert!(batch.num_rows() == 1);
-    check!(timestamps.value(0) == 19);
-    check!(lines.value(0) == "api error");
+    assert_single_api_error(&batches);
 }
 
 #[tokio::test]
@@ -97,7 +104,7 @@ async fn log_block_table_provider_exposes_planned_filter_pushdown() {
     let line_filter = col("line").eq(lit("api error"));
     let unsupported_filter = col("structured_metadata").eq(lit("api error"));
 
-    assert!(
+    assert2::assert!(
         provider
             .supports_filters_pushdown(&[
                 &timestamp_filter,
@@ -130,22 +137,7 @@ async fn log_block_table_provider_exposes_planned_filter_pushdown() {
         .await
         .unwrap();
 
-    assert!(batches.len() == 1);
-    let batch = &batches[0];
-    let timestamps = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    let lines = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-
-    assert!(batch.num_rows() == 1);
-    check!(timestamps.value(0) == 19);
-    check!(lines.value(0) == "api error");
+    assert_single_api_error(&batches);
 }
 
 #[tokio::test]
@@ -176,8 +168,10 @@ async fn log_block_table_provider_scans_planned_object_store_blocks() {
     .await
     .unwrap();
 
-    let provider = LogBlockTableProvider::try_new_object_store(store, prefix, &[planned]).unwrap();
-    assert!(provider.planned_blocks().len() == 1);
+    let provider =
+        LogBlockTableProvider::try_new_object_store(store, prefix, std::slice::from_ref(&planned))
+            .unwrap();
+    assert2::assert!(provider.planned_blocks() == std::slice::from_ref(&planned));
 
     let ctx = SessionContext::new();
     ctx.register_table("logs", Arc::new(provider)).unwrap();
@@ -194,22 +188,7 @@ async fn log_block_table_provider_scans_planned_object_store_blocks() {
         .await
         .unwrap();
 
-    assert!(batches.len() == 1);
-    let batch = &batches[0];
-    let timestamps = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    let lines = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-
-    assert!(batch.num_rows() == 1);
-    check!(timestamps.value(0) == 19);
-    check!(lines.value(0) == "api error");
+    assert_single_api_error(&batches);
 }
 
 #[tokio::test]
@@ -246,22 +225,7 @@ async fn registers_planned_object_store_blocks_as_datafusion_table() {
         .await
         .unwrap();
 
-    assert!(batches.len() == 1);
-    let batch = &batches[0];
-    let timestamps = batch
-        .column(0)
-        .as_any()
-        .downcast_ref::<Int64Array>()
-        .unwrap();
-    let lines = batch
-        .column(1)
-        .as_any()
-        .downcast_ref::<StringArray>()
-        .unwrap();
-
-    assert!(batch.num_rows() == 1);
-    check!(timestamps.value(0) == 19);
-    check!(lines.value(0) == "api error");
+    assert_single_api_error(&batches);
 }
 
 #[tokio::test]
@@ -270,5 +234,5 @@ async fn datafusion_table_rejects_empty_block_list() {
 
     let error = register_log_blocks(&ctx, "logs", "/", &[]).unwrap_err();
 
-    assert!(error.to_string().contains("no log blocks"));
+    assert2::assert!(error.to_string().contains("no log blocks"));
 }

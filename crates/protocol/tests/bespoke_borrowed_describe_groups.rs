@@ -2,7 +2,6 @@
 // checked .groups.len() which the generated min/max test doesn't assert on.
 // Relocated from hand-written wrappers.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     DecodeBorrow, Encode,
@@ -15,53 +14,29 @@ use crabka_protocol::{
 };
 
 #[test]
-fn borrowed_describe_groups_request_min_version_groups_empty() {
-    let req = DescribeGroupsRequest::default();
-    let mut buf = BytesMut::new();
-    req.encode(&mut buf, MIN_VERSION).unwrap();
-    assert!(req.encoded_len(MIN_VERSION) == buf.len());
-    let frozen = buf.freeze();
-    let mut cur = &frozen[..];
-    let decoded = DescribeGroupsRequest::decode_borrow(&mut cur, MIN_VERSION).unwrap();
-    assert!(cur.is_empty());
-    assert!(decoded.groups.len() == req.groups.len());
+fn borrowed_describe_groups_request_cases() {
+    for (_case, version) in [("minimum", MIN_VERSION), ("maximum", MAX_VERSION)] {
+        let request = DescribeGroupsRequest::default();
+        let mut buf = BytesMut::new();
+        request.encode(&mut buf, version).unwrap();
+        assert2::assert!(request.encoded_len(version) == buf.len());
+        let frozen = buf.freeze();
+        let mut cur = &frozen[..];
+        let decoded = DescribeGroupsRequest::decode_borrow(&mut cur, version).unwrap();
+        assert2::assert!((decoded, cur.is_empty()) == (request, true));
+    }
 }
 
 #[test]
-fn borrowed_describe_groups_request_max_version_groups_empty() {
-    let req = DescribeGroupsRequest::default();
-    let mut buf = BytesMut::new();
-    req.encode(&mut buf, MAX_VERSION).unwrap();
-    assert!(req.encoded_len(MAX_VERSION) == buf.len());
-    let frozen = buf.freeze();
-    let mut cur = &frozen[..];
-    let decoded = DescribeGroupsRequest::decode_borrow(&mut cur, MAX_VERSION).unwrap();
-    assert!(cur.is_empty());
-    assert!(decoded.groups.len() == req.groups.len());
-}
-
-#[test]
-fn borrowed_describe_groups_response_min_version_groups_empty() {
-    let resp = DescribeGroupsResponse::default();
-    let mut buf = BytesMut::new();
-    resp.encode(&mut buf, RESP_MIN).unwrap();
-    assert!(resp.encoded_len(RESP_MIN) == buf.len());
-    let frozen = buf.freeze();
-    let mut cur = &frozen[..];
-    let decoded = DescribeGroupsResponse::decode_borrow(&mut cur, RESP_MIN).unwrap();
-    assert!(cur.is_empty());
-    assert!(decoded.groups.len() == resp.groups.len());
-}
-
-#[test]
-fn borrowed_describe_groups_response_max_version_groups_empty() {
-    let resp = DescribeGroupsResponse::default();
-    let mut buf = BytesMut::new();
-    resp.encode(&mut buf, RESP_MAX).unwrap();
-    assert!(resp.encoded_len(RESP_MAX) == buf.len());
-    let frozen = buf.freeze();
-    let mut cur = &frozen[..];
-    let decoded = DescribeGroupsResponse::decode_borrow(&mut cur, RESP_MAX).unwrap();
-    assert!(cur.is_empty());
-    assert!(decoded.groups.len() == resp.groups.len());
+fn borrowed_describe_groups_response_cases() {
+    for (_case, version) in [("minimum", RESP_MIN), ("maximum", RESP_MAX)] {
+        let response = DescribeGroupsResponse::default();
+        let mut buf = BytesMut::new();
+        response.encode(&mut buf, version).unwrap();
+        assert2::assert!(response.encoded_len(version) == buf.len());
+        let frozen = buf.freeze();
+        let mut cur = &frozen[..];
+        let decoded = DescribeGroupsResponse::decode_borrow(&mut cur, version).unwrap();
+        assert2::assert!((decoded, cur.is_empty()) == (response, true));
+    }
 }

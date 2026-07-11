@@ -148,7 +148,6 @@ pub const fn retain_decision(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -166,9 +165,13 @@ mod tests {
 
     #[test]
     fn compute_horizon_saturates_at_i64_bounds() {
-        assert!(compute_horizon(100, 50) == 150);
-        assert!(compute_horizon(i64::MAX - 1, 50) == i64::MAX);
-        assert!(compute_horizon(i64::MIN + 1, -50) == i64::MIN);
+        for (_name, timestamp, lag, expected) in [
+            ("ordinary addition", 100, 50, 150),
+            ("upper saturation", i64::MAX - 1, 50, i64::MAX),
+            ("lower saturation", i64::MIN + 1, -50, i64::MIN),
+        ] {
+            assert2::assert!(compute_horizon(timestamp, lag) == expected);
+        }
     }
 
     #[test]
@@ -176,7 +179,7 @@ mod tests {
         let tombstone = record(true, false);
         let live_value = record(true, true);
 
-        assert!(
+        assert2::assert!(
             retain_decision(
                 tombstone,
                 batch(false, Some(10)),
@@ -186,7 +189,7 @@ mod tests {
                 50
             ) == RetainDecision::Delete
         );
-        assert!(
+        assert2::assert!(
             retain_decision(
                 tombstone,
                 batch(false, Some(10)),
@@ -196,7 +199,7 @@ mod tests {
                 50
             ) == RetainDecision::Keep
         );
-        assert!(
+        assert2::assert!(
             retain_decision(
                 live_value,
                 batch(false, None),
@@ -206,7 +209,7 @@ mod tests {
                 50
             ) == RetainDecision::Keep
         );
-        assert!(
+        assert2::assert!(
             retain_decision(
                 record(false, true),
                 batch(false, None),
@@ -220,7 +223,7 @@ mod tests {
 
     #[test]
     fn retain_decision_stamps_new_tombstone_and_expired_control_marker() {
-        assert!(
+        assert2::assert!(
             retain_decision(
                 record(true, false),
                 batch(false, None),
@@ -230,7 +233,7 @@ mod tests {
                 50
             ) == RetainDecision::SetHorizon(150)
         );
-        assert!(
+        assert2::assert!(
             retain_decision(
                 record(true, false),
                 batch(true, Some(10)),
@@ -240,7 +243,7 @@ mod tests {
                 50
             ) == RetainDecision::Delete
         );
-        assert!(
+        assert2::assert!(
             retain_decision(
                 record(true, false),
                 batch(true, Some(10)),
@@ -250,7 +253,7 @@ mod tests {
                 50
             ) == RetainDecision::Keep
         );
-        assert!(
+        assert2::assert!(
             retain_decision(
                 record(true, false),
                 batch(true, Some(10)),

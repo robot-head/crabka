@@ -473,7 +473,6 @@ pub fn topic_config_docs() -> Vec<TopicConfigDoc> {
 
 #[cfg(test)]
 mod doc_tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -483,16 +482,10 @@ mod doc_tests {
         let docs = topic_config_docs();
         let doc_keys: HashSet<&str> = docs.iter().map(|d| d.key).collect();
         // No duplicate keys in the doc table.
-        assert!(
-            doc_keys.len() == docs.len(),
-            "duplicate key in topic_config_docs"
-        );
+        assert2::assert!(doc_keys.len() == docs.len());
         // Every documented key is recognized by the validator.
         for k in &doc_keys {
-            assert!(
-                is_recognized(k),
-                "documented key `{k}` not recognized by validator"
-            );
+            assert2::assert!(is_recognized(k));
         }
         // Every recognized key is documented.
         for k in [
@@ -512,18 +505,14 @@ mod doc_tests {
             crate::throttle::LEADER_THROTTLED_REPLICAS_KEY,
             crate::throttle::FOLLOWER_THROTTLED_REPLICAS_KEY,
         ] {
-            assert!(
-                doc_keys.contains(k),
-                "recognized key `{k}` missing from topic_config_docs"
-            );
+            assert2::assert!(doc_keys.contains(k));
         }
-        assert!(docs.iter().all(|d| !d.description.is_empty()));
+        assert2::assert!(docs.iter().all(|d| !d.description.is_empty()));
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -536,33 +525,34 @@ mod tests {
             ("abc", false),  // non-integer rejected
         ];
         for (value, want_ok) in cases {
-            assert!(
-                validate_topic_config(RETENTION_MS, value).is_ok() == want_ok,
-                "retention.ms={value}"
+            assert2::assert!(validate_topic_config(RETENTION_MS, value).is_ok() == want_ok);
+        }
+    }
+
+    #[test]
+    fn validate_segment_bytes_boundary_cases() {
+        for (_case, value, expected) in [
+            ("zero rejected", "0", Err(())),
+            ("minimum accepted", "1", Ok(())),
+        ] {
+            assert2::assert!(
+                validate_topic_config(SEGMENT_BYTES, value).map_err(|_| ()) == expected
             );
         }
     }
 
     #[test]
-    fn validate_segment_bytes_rejects_zero() {
-        assert!(validate_topic_config(SEGMENT_BYTES, "0").is_err());
-    }
-
-    #[test]
-    fn validate_segment_bytes_accepts_minimum_one() {
-        assert!(validate_topic_config(SEGMENT_BYTES, "1").is_ok());
-    }
-
-    #[test]
-    fn validate_cleanup_policy_accepts_delete_and_compact() {
-        assert!(validate_topic_config(CLEANUP_POLICY, "delete").is_ok());
-        assert!(validate_topic_config(CLEANUP_POLICY, "compact").is_ok());
-    }
-
-    #[test]
-    fn validate_cleanup_policy_rejects_unknown() {
-        assert!(validate_topic_config(CLEANUP_POLICY, "compact,delete").is_err());
-        assert!(validate_topic_config(CLEANUP_POLICY, "junk").is_err());
+    fn validate_cleanup_policy_cases() {
+        for (_case, value, expected) in [
+            ("delete accepted", "delete", Ok(())),
+            ("compact accepted", "compact", Ok(())),
+            ("combined rejected", "compact,delete", Err(())),
+            ("unknown rejected", "junk", Err(())),
+        ] {
+            assert2::assert!(
+                validate_topic_config(CLEANUP_POLICY, value).map_err(|_| ()) == expected
+            );
+        }
     }
 
     #[test]
@@ -576,22 +566,19 @@ mod tests {
             "lz4",
             "zstd",
         ] {
-            assert!(
-                validate_topic_config(COMPRESSION_TYPE, v).is_ok(),
-                "compression.type={v} should be accepted",
-            );
+            assert2::assert!(validate_topic_config(COMPRESSION_TYPE, v).is_ok());
         }
     }
 
     #[test]
     fn validate_compression_bogus_rejected() {
         let err = validate_topic_config(COMPRESSION_TYPE, "bzip3").unwrap_err();
-        assert!(err.contains("compression.type"), "got: {err}");
+        assert2::assert!(err.contains("compression.type"));
     }
 
     #[test]
     fn parse_compression_type_maps_producer_to_none() {
-        assert!(parse_compression_type("producer") == Ok(None));
+        assert2::assert!(parse_compression_type("producer") == Ok(None));
     }
 
     #[test]
@@ -605,10 +592,7 @@ mod tests {
             ("uncompressed", CompressionType::None),
         ];
         for (input, want) in cases {
-            assert!(
-                parse_compression_type(input) == Ok(Some(want)),
-                "compression.type={input}"
-            );
+            assert2::assert!(parse_compression_type(input) == Ok(Some(want)));
         }
     }
 
@@ -618,7 +602,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(COMPRESSION_TYPE.into(), "zstd".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.compression_type == Some(CompressionType::Zstd));
+        assert2::assert!(out.compression_type == Some(CompressionType::Zstd));
     }
 
     #[test]
@@ -631,55 +615,55 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(COMPRESSION_TYPE.into(), "producer".into());
         let out = apply_to_log_config(&o, &base);
-        assert!(out.compression_type == None);
+        assert2::assert!(out.compression_type == None);
     }
 
     #[test]
     fn validate_min_isr_positive_accepted() {
-        assert!(validate_topic_config(MIN_INSYNC_REPLICAS, "2").is_ok());
+        assert2::assert!(validate_topic_config(MIN_INSYNC_REPLICAS, "2").is_ok());
     }
 
     #[test]
     fn validate_unknown_key_rejected() {
         let err = validate_topic_config("flush.ms", "1000").unwrap_err();
-        assert!(err.contains("unrecognized"));
+        assert2::assert!(err.contains("unrecognized"));
     }
 
     #[test]
     fn validate_qos_tier_accepts_ascii_identifiers() {
         for v in ["default", "gold", "bulk_1", "critical-prod", "tier.2"] {
-            assert!(validate_topic_config(QOS_TIER, v).is_ok(), "qos.tier={v}");
+            assert2::assert!(validate_topic_config(QOS_TIER, v).is_ok());
         }
     }
 
     #[test]
     fn validate_qos_tier_rejects_empty_or_unsafe_values() {
         for v in ["", "has space", "../escape", "ümlaut"] {
-            assert!(validate_topic_config(QOS_TIER, v).is_err(), "qos.tier={v}");
+            assert2::assert!(validate_topic_config(QOS_TIER, v).is_err());
         }
     }
 
     #[test]
     fn resolve_qos_tier_defaults_when_unset() {
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
-        assert!(resolve_qos_tier(&image, "t") == DEFAULT_QOS_TIER);
+        assert2::assert!(resolve_qos_tier(&image, "t") == DEFAULT_QOS_TIER);
     }
 
     #[test]
     fn validate_remote_storage_enable_accepts_bools() {
-        assert!(validate_topic_config(REMOTE_STORAGE_ENABLE, "true").is_ok());
-        assert!(validate_topic_config(REMOTE_STORAGE_ENABLE, "false").is_ok());
+        assert2::assert!(validate_topic_config(REMOTE_STORAGE_ENABLE, "true").is_ok());
+        assert2::assert!(validate_topic_config(REMOTE_STORAGE_ENABLE, "false").is_ok());
     }
 
     #[test]
     fn validate_remote_storage_enable_rejects_junk() {
         let err = validate_topic_config(REMOTE_STORAGE_ENABLE, "yes").unwrap_err();
-        assert!(err.contains("remote.storage.enable"), "got: {err}");
+        assert2::assert!(err.contains("remote.storage.enable"));
     }
 
     #[test]
     fn is_recognized_includes_remote_storage_enable() {
-        assert!(is_recognized(REMOTE_STORAGE_ENABLE));
+        assert2::assert!(is_recognized(REMOTE_STORAGE_ENABLE));
     }
 
     #[test]
@@ -687,7 +671,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(REMOTE_STORAGE_ENABLE.into(), "true".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.remote_storage_enable);
+        assert2::assert!(out.remote_storage_enable);
 
         let mut off = BTreeMap::new();
         off.insert(REMOTE_STORAGE_ENABLE.into(), "false".into());
@@ -696,7 +680,7 @@ mod tests {
             ..LogConfig::default()
         };
         let out = apply_to_log_config(&off, &base);
-        assert!(!out.remote_storage_enable);
+        assert2::assert!(!out.remote_storage_enable);
     }
 
     #[test]
@@ -712,74 +696,53 @@ mod tests {
             ("", false),
         ];
         for (key, want) in cases {
-            assert!(is_recognized(key) == want, "key {key:?}");
+            assert2::assert!(is_recognized(key) == want);
         }
     }
 
     #[test]
     fn validate_unclean_leader_election_enable_accepts_bools() {
-        assert!(validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "true").is_ok());
-        assert!(validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "false").is_ok());
+        assert2::assert!(validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "true").is_ok());
+        assert2::assert!(validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "false").is_ok());
     }
 
     #[test]
     fn validate_unclean_leader_election_enable_rejects_junk() {
         let err = validate_topic_config(UNCLEAN_LEADER_ELECTION_ENABLE, "yes").unwrap_err();
-        assert!(err.contains("unclean.leader.election.enable"), "got: {err}");
+        assert2::assert!(err.contains("unclean.leader.election.enable"));
     }
 
     #[test]
     fn is_recognized_includes_unclean_leader_election_enable() {
-        assert!(is_recognized(UNCLEAN_LEADER_ELECTION_ENABLE));
+        assert2::assert!(is_recognized(UNCLEAN_LEADER_ELECTION_ENABLE));
     }
 
     #[test]
-    fn apply_retention_ms_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_MS.into(), "60000".into());
-        let base = LogConfig::default();
-        let out = apply_to_log_config(&o, &base);
-        assert!(out.retention_ms == Some(Duration::from_mins(1)));
+    fn apply_retention_ms_cases() {
+        for (_case, value, expected) in [
+            ("positive", "60000", Some(Duration::from_mins(1))),
+            ("unlimited", "-1", None),
+            ("zero", "0", Some(Duration::from_millis(0))),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(RETENTION_MS.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert2::assert!(out.retention_ms == expected);
+        }
     }
 
     #[test]
-    fn apply_retention_ms_minus_one_means_unlimited() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_MS.into(), "-1".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_ms == None);
-    }
-
-    #[test]
-    fn apply_retention_ms_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_MS.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_ms == Some(Duration::from_millis(0)));
-    }
-
-    #[test]
-    fn apply_retention_bytes_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_BYTES.into(), "1048576".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == Some(1_048_576));
-    }
-
-    #[test]
-    fn apply_retention_bytes_minus_one_means_unlimited() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_BYTES.into(), "-1".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == None);
-    }
-
-    #[test]
-    fn apply_retention_bytes_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(RETENTION_BYTES.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.retention_bytes == Some(0));
+    fn apply_retention_bytes_cases() {
+        for (_case, value, expected) in [
+            ("positive", "1048576", Some(1_048_576)),
+            ("unlimited", "-1", None),
+            ("zero", "0", Some(0)),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(RETENTION_BYTES.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert2::assert!(out.retention_bytes == expected);
+        }
     }
 
     #[test]
@@ -787,7 +750,7 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(SEGMENT_BYTES.into(), "1048576".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.segment_bytes == 1_048_576);
+        assert2::assert!(out.segment_bytes == 1_048_576);
     }
 
     #[test]
@@ -797,117 +760,94 @@ mod tests {
             ..LogConfig::default()
         };
         let out = apply_to_log_config(&BTreeMap::new(), &base);
-        assert!(out.retention_ms == base.retention_ms);
+        assert2::assert!(out.retention_ms == base.retention_ms);
     }
 
     #[test]
-    fn apply_cleanup_policy_compact_propagates() {
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(CLEANUP_POLICY.to_string(), "compact".to_string());
-        let out = apply_to_log_config(&overrides, &crabka_log::LogConfig::default());
-        assert!(out.cleanup_policy == crabka_log::CleanupPolicy::Compact);
-    }
-
-    #[test]
-    fn apply_cleanup_policy_delete_propagates() {
-        let mut overrides = std::collections::BTreeMap::new();
-        overrides.insert(CLEANUP_POLICY.to_string(), "delete".to_string());
-        let base = crabka_log::LogConfig {
-            cleanup_policy: crabka_log::CleanupPolicy::Compact,
-            ..crabka_log::LogConfig::default()
-        };
-        let out = apply_to_log_config(&overrides, &base);
-        assert!(out.cleanup_policy == crabka_log::CleanupPolicy::Delete);
+    fn apply_cleanup_policy_cases() {
+        for (_case, value, base_policy, expected) in [
+            (
+                "compact",
+                "compact",
+                crabka_log::CleanupPolicy::Delete,
+                crabka_log::CleanupPolicy::Compact,
+            ),
+            (
+                "delete",
+                "delete",
+                crabka_log::CleanupPolicy::Compact,
+                crabka_log::CleanupPolicy::Delete,
+            ),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(CLEANUP_POLICY.to_string(), value.to_string());
+            let base = LogConfig {
+                cleanup_policy: base_policy,
+                ..LogConfig::default()
+            };
+            let out = apply_to_log_config(&overrides, &base);
+            assert2::assert!(out.cleanup_policy == expected);
+        }
     }
 
     #[test]
     fn validate_local_retention_ms_accepts_minus_one_minus_two_and_positive() {
         for value in ["-2", "-1", "60000"] {
-            assert!(
-                validate_topic_config(LOCAL_RETENTION_MS, value) == Ok(()),
-                "local.retention.ms={value}"
-            );
+            assert2::assert!(validate_topic_config(LOCAL_RETENTION_MS, value) == Ok(()));
         }
     }
 
     #[test]
     fn validate_local_retention_ms_rejects_below_minus_two() {
-        assert!(validate_topic_config(LOCAL_RETENTION_MS, "-3").is_err());
+        assert2::assert!(validate_topic_config(LOCAL_RETENTION_MS, "-3").is_err());
     }
 
     #[test]
     fn is_recognized_includes_local_retention_keys() {
-        assert!(is_recognized(LOCAL_RETENTION_MS));
-        assert!(is_recognized(LOCAL_RETENTION_BYTES));
+        assert2::assert!(is_recognized(LOCAL_RETENTION_MS));
+        assert2::assert!(is_recognized(LOCAL_RETENTION_BYTES));
     }
 
     #[test]
-    fn apply_local_retention_ms_minus_two_means_inherit() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_MS.into(), "-2".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == None);
-
-        let mut unlimited = BTreeMap::new();
-        unlimited.insert(LOCAL_RETENTION_MS.into(), "-1".into());
-        let out = apply_to_log_config(&unlimited, &LogConfig::default());
-        assert!(out.local_retention_ms == None);
+    fn apply_local_retention_ms_cases() {
+        for (_case, value, expected) in [
+            ("inherit", "-2", None),
+            ("unlimited", "-1", None),
+            ("zero", "0", Some(Duration::from_millis(0))),
+            ("positive", "60000", Some(Duration::from_mins(1))),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(LOCAL_RETENTION_MS.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert2::assert!(out.local_retention_ms == expected);
+        }
     }
 
     #[test]
-    fn apply_local_retention_ms_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_MS.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == Some(Duration::from_millis(0)));
-    }
-
-    #[test]
-    fn apply_local_retention_ms_positive_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_MS.into(), "60000".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_ms == Some(Duration::from_mins(1)));
-    }
-
-    #[test]
-    fn apply_local_retention_bytes_propagates() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_BYTES.into(), "1048576".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == Some(1_048_576));
-    }
-
-    #[test]
-    fn apply_local_retention_bytes_minus_two_means_inherit() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_BYTES.into(), "-2".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == None);
-    }
-
-    #[test]
-    fn apply_local_retention_bytes_zero_is_retained() {
-        let mut o = BTreeMap::new();
-        o.insert(LOCAL_RETENTION_BYTES.into(), "0".into());
-        let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.local_retention_bytes == Some(0));
+    fn apply_local_retention_bytes_cases() {
+        for (_case, value, expected) in [
+            ("positive", "1048576", Some(1_048_576)),
+            ("inherit", "-2", None),
+            ("zero", "0", Some(0)),
+        ] {
+            let mut overrides = BTreeMap::new();
+            overrides.insert(LOCAL_RETENTION_BYTES.into(), value.into());
+            let out = apply_to_log_config(&overrides, &LogConfig::default());
+            assert2::assert!(out.local_retention_bytes == expected);
+        }
     }
 
     #[test]
     fn validate_delete_retention_ms_accepts_nonneg_rejects_negative() {
         let cases = [("0", true), ("86400000", true), ("-1", false)];
         for (value, want_ok) in cases {
-            assert!(
-                validate_topic_config(DELETE_RETENTION_MS, value).is_ok() == want_ok,
-                "delete.retention.ms={value}"
-            );
+            assert2::assert!(validate_topic_config(DELETE_RETENTION_MS, value).is_ok() == want_ok);
         }
     }
 
     #[test]
     fn is_recognized_includes_delete_retention_ms() {
-        assert!(is_recognized(DELETE_RETENTION_MS));
+        assert2::assert!(is_recognized(DELETE_RETENTION_MS));
     }
 
     #[test]
@@ -915,27 +855,26 @@ mod tests {
         let mut o = BTreeMap::new();
         o.insert(DELETE_RETENTION_MS.into(), "12345".into());
         let out = apply_to_log_config(&o, &LogConfig::default());
-        assert!(out.delete_retention_ms == std::time::Duration::from_millis(12345));
+        assert2::assert!(out.delete_retention_ms == std::time::Duration::from_millis(12345));
     }
 
     #[test]
-    fn recovery_strategy_accepts_valid_values() {
-        for v in ["None", "Balanced", "Aggressive"] {
-            assert!(
-                validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, v).is_ok(),
-                "{v}"
+    fn recovery_strategy_validation_cases() {
+        for (_case, value, expected) in [
+            ("none accepted", "None", Ok(())),
+            ("balanced accepted", "Balanced", Ok(())),
+            ("aggressive accepted", "Aggressive", Ok(())),
+            ("unknown rejected", "fast", Err(())),
+        ] {
+            assert2::assert!(
+                validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, value).map_err(|_| ()) == expected
             );
         }
     }
 
     #[test]
-    fn recovery_strategy_rejects_garbage() {
-        assert!(validate_topic_config(UNCLEAN_RECOVERY_STRATEGY, "fast").is_err());
-    }
-
-    #[test]
     fn recovery_strategy_recognized() {
-        assert!(is_recognized(UNCLEAN_RECOVERY_STRATEGY));
+        assert2::assert!(is_recognized(UNCLEAN_RECOVERY_STRATEGY));
     }
 
     #[test]
@@ -947,7 +886,7 @@ mod tests {
             ("bogus", None),
         ];
         for (input, want) in cases {
-            assert!(RecoveryStrategy::parse(input) == want, "input {input:?}");
+            assert2::assert!(RecoveryStrategy::parse(input) == want);
         }
     }
 
@@ -958,13 +897,13 @@ mod tests {
         use crabka_metadata::{MetadataImage, MetadataRecord, TopicConfigRecord};
         use uuid::Uuid;
         let mut img = MetadataImage::new(Uuid::nil());
-        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::None);
+        assert2::assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::None);
         let mut overrides = BTreeMap::new();
         overrides.insert(UNCLEAN_RECOVERY_STRATEGY.into(), "Balanced".into());
         img.apply(&MetadataRecord::V1TopicConfig(TopicConfigRecord {
             topic: "t".into(),
             overrides,
         }));
-        assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::Balanced);
+        assert2::assert!(resolve_recovery_strategy(&img, "t") == RecoveryStrategy::Balanced);
     }
 }

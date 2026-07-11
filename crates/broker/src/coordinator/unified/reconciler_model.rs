@@ -301,13 +301,7 @@ fn advertised_of(step: &HeartbeatStep) -> Vec<i32> {
 fn assert_epoch_monotonic(pre: &ReconState, post: &GroupState) {
     for pm in &pre.members {
         if let Some(m) = post.members.get(&pm.id) {
-            assert!(
-                m.member_epoch >= pm.member_epoch,
-                "member_epoch regressed for {}: {} -> {}",
-                pm.id,
-                pm.member_epoch,
-                m.member_epoch
-            );
+            assert2::assert!(m.member_epoch >= pm.member_epoch);
         }
     }
 }
@@ -532,14 +526,8 @@ fn run(model: ReconModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

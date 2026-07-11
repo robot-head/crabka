@@ -9,7 +9,6 @@
 //! the broker stores the up-converted records, then fetches them back
 //! in the modern v2 form.
 
-use assert2::assert;
 mod support;
 
 use bytes::{Bytes, BytesMut};
@@ -41,7 +40,7 @@ async fn create_topic(p: &support::InProcess, name: &str) {
         })
         .await
         .expect("CreateTopics");
-    assert!(resp.topics[0].error_code == 0);
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn topic_id_for(p: &support::InProcess, name: &str) -> Uuid {
@@ -106,10 +105,7 @@ async fn produce_v1_message_set_is_upconverted_and_round_trips() {
     };
     let resp = p.client.send(req).await.expect("Produce");
     let pr = &resp.responses[0].partition_responses[0];
-    assert!(
-        pr.error_code == 0,
-        "Produce up-conversion must succeed: {pr:?}"
-    );
+    assert2::assert!(pr.error_code == 0);
 
     // Fetch the stored records back and verify they survived the
     // up-conversion. The wire response is v2, so the fetched batch
@@ -137,20 +133,20 @@ async fn produce_v1_message_set_is_upconverted_and_round_trips() {
         .await
         .expect("Fetch");
     let part = &fr.responses[0].partitions[0];
-    assert!(part.error_code == 0);
+    assert2::assert!(part.error_code == 0);
     let batch = part
         .records
         .as_ref()
         .and_then(|p| p.as_v2())
         .and_then(<[_]>::first)
         .expect("Fetch returned a v2 batch");
-    assert!(batch.records.len() == 3);
+    assert2::assert!(batch.records.len() == 3);
     let values: Vec<&[u8]> = batch
         .records
         .iter()
         .map(|r| r.value.as_deref().unwrap_or(&[]))
         .collect();
-    assert!(values == vec![&b"alpha"[..], &b"beta"[..], &b"gamma"[..]]);
+    assert2::assert!(values == vec![&b"alpha"[..], &b"beta"[..], &b"gamma"[..]]);
 
     p.broker.shutdown().await;
 }
@@ -184,10 +180,7 @@ async fn produce_malformed_legacy_bytes_returns_invalid_record() {
     };
     let resp = p.client.send(req).await.expect("Produce");
     let pr = &resp.responses[0].partition_responses[0];
-    assert!(
-        pr.error_code == 87,
-        "malformed legacy bytes must surface INVALID_RECORD (87): {pr:?}"
-    );
+    assert2::assert!(pr.error_code == 87);
 
     p.broker.shutdown().await;
 }

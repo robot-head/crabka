@@ -109,7 +109,7 @@ fn first_matching_quota(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::{ClientQuotaRecord, MetadataImage};
 
     use super::*;
@@ -130,7 +130,7 @@ mod tests {
             "producer_byte_rate",
             1024.0,
         )]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(1024.0));
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(1024.0));
     }
 
     #[test]
@@ -141,7 +141,7 @@ mod tests {
             "producer_byte_rate",
             1024.0,
         )]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(1024.0));
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(1024.0));
     }
 
     #[test]
@@ -151,7 +151,9 @@ mod tests {
             "producer_byte_rate",
             2048.0,
         )]);
-        assert!(lookup_quota(&img, "alice", "anyclient", "producer_byte_rate") == Some(2048.0));
+        assert2::assert!(
+            lookup_quota(&img, "alice", "anyclient", "producer_byte_rate") == Some(2048.0)
+        );
     }
 
     #[test]
@@ -161,7 +163,9 @@ mod tests {
             "producer_byte_rate",
             512.0,
         )]);
-        assert!(lookup_quota(&img, "anyuser", "app1", "producer_byte_rate") == Some(512.0));
+        assert2::assert!(
+            lookup_quota(&img, "anyuser", "app1", "producer_byte_rate") == Some(512.0)
+        );
     }
 
     #[test]
@@ -171,13 +175,13 @@ mod tests {
             "producer_byte_rate",
             256.0,
         )]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(256.0));
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(256.0));
     }
 
     #[test]
     fn default_user_alone() {
         let img = img_with(vec![rec(vec![("user", None)], "producer_byte_rate", 128.0)]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(128.0));
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(128.0));
     }
 
     #[test]
@@ -187,13 +191,13 @@ mod tests {
             "producer_byte_rate",
             64.0,
         )]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(64.0));
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(64.0));
     }
 
     #[test]
     fn no_match_returns_none() {
         let img = img_with(vec![]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == None);
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == None);
     }
 
     #[test]
@@ -206,7 +210,7 @@ mod tests {
                 512.0,
             ),
         ]);
-        assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(512.0));
+        assert2::assert!(lookup_quota(&img, "alice", "app1", "producer_byte_rate") == Some(512.0));
     }
 
     fn rec_ip(ip: Option<&str>, key: &str, value: f64) -> ClientQuotaRecord {
@@ -225,14 +229,14 @@ mod tests {
             1.0,
         )]);
         let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(1.0));
+        assert2::assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(1.0));
     }
 
     #[test]
     fn ip_default_fallback() {
         let img = img_with_ip(vec![rec_ip(None, "connection_creation_rate", 2.0)]);
         let ip: std::net::IpAddr = "10.0.0.7".parse().unwrap();
-        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(2.0));
+        assert2::assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(2.0));
     }
 
     #[test]
@@ -242,14 +246,14 @@ mod tests {
             rec_ip(Some("127.0.0.1"), "connection_creation_rate", 1.0),
         ]);
         let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(1.0));
+        assert2::assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(1.0));
     }
 
     #[test]
     fn ip_no_match_returns_none() {
         let img = img_with_ip(vec![]);
         let ip: std::net::IpAddr = "127.0.0.1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate").is_none());
+        assert2::assert!(lookup_ip_quota(&img, ip, "connection_creation_rate").is_none());
     }
 
     #[test]
@@ -258,7 +262,7 @@ mod tests {
         // IPv6 peer keyed by its canonical string form, not just IPv4.
         let img = img_with_ip(vec![rec_ip(Some("::1"), "connection_creation_rate", 3.0)]);
         let ip: std::net::IpAddr = "::1".parse().unwrap();
-        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(3.0));
+        assert2::assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(3.0));
     }
 
     #[test]
@@ -267,7 +271,7 @@ mod tests {
         // default, proving IPv6 is no longer skipped by the quota path.
         let img = img_with_ip(vec![rec_ip(None, "connection_creation_rate", 5.0)]);
         let ip: std::net::IpAddr = "2001:db8::42".parse().unwrap();
-        assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(5.0));
+        assert2::assert!(lookup_ip_quota(&img, ip, "connection_creation_rate") == Some(5.0));
     }
 
     // ── precedence verification: exhaustive enumeration + proptest ────────────
@@ -315,23 +319,16 @@ mod tests {
             let img = img_with(records);
             let got = lookup_quota_with_key(&img, "u", "c", "k");
             match (0..8usize).find(|i| mask & (1 << i) != 0) {
-                None => assert!(
-                    got.is_none(),
-                    "mask {mask:#010b}: expected None, got {got:?}"
-                ),
+                None => assert2::assert!(got.is_none()),
                 Some(j) => {
                     let (_key, val) = got.expect("a candidate is present");
                     // Exact sentinel values, stored and retrieved verbatim —
                     // compare bit patterns to sidestep float_cmp.
-                    assert!(
-                        val.to_bits() == CAND_VALS[j].to_bits(),
-                        "mask {mask:#010b}: expected candidate {j} (value {}), got {val}",
-                        CAND_VALS[j]
-                    );
+                    assert2::assert!(val.to_bits() == CAND_VALS[j].to_bits());
                 }
             }
             // A quota_key no candidate carries never resolves.
-            assert!(lookup_quota_with_key(&img, "u", "c", "absent_key").is_none());
+            assert2::assert!(lookup_quota_with_key(&img, "u", "c", "absent_key").is_none());
         }
     }
 
@@ -350,9 +347,9 @@ mod tests {
             let img = img_with(records);
             let got = lookup_ip_quota_with_key(&img, ip, "connection_creation_rate");
             match (0..2usize).find(|i| mask & (1 << i) != 0) {
-                None => assert!(got.is_none(), "mask {mask:#04b}: expected None"),
+                None => assert2::assert!(got.is_none()),
                 Some(j) => {
-                    assert!(got.expect("present").1.to_bits() == CAND_VALS[j].to_bits());
+                    assert2::assert!(got.expect("present").1.to_bits() == CAND_VALS[j].to_bits());
                 }
             }
         }

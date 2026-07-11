@@ -268,7 +268,6 @@ mod tests {
     use arrow::array::{
         Array, BooleanArray, FixedSizeBinaryArray, Int32Array, ListArray, StringArray,
     };
-    use assert2::{assert, check};
     use crabka_blockstore::{
         SCOL_ATTR_IS_ARRAY, SCOL_ATTR_KEYS, SCOL_ATTR_VALUE, SCOL_NESTED_SET_LEFT,
         SCOL_NESTED_SET_RIGHT, SCOL_PARENT_ID, SCOL_ROOT_SERVICE_NAME, SCOL_SPAN_ID, SCOL_TRACE_ID,
@@ -319,25 +318,25 @@ mod tests {
     fn builds_batch_with_identity_and_nested_set() {
         let spans = vec![span(1, None, "api"), span(2, Some(1), "api")];
         let batch = span_batch(&spans).unwrap();
-        assert!(batch.schema() == span_block_schema());
-        assert!(batch.num_rows() == 2);
+        assert2::assert!(batch.schema() == span_block_schema());
+        assert2::assert!(batch.num_rows() == 2);
 
         let trace_ids = col::<FixedSizeBinaryArray>(&batch, SCOL_TRACE_ID);
-        assert!(trace_ids.value(0) == [1; 16]);
+        assert2::assert!(trace_ids.value(0) == [1; 16]);
         let span_ids = col::<FixedSizeBinaryArray>(&batch, SCOL_SPAN_ID);
-        assert!(span_ids.value(0) == [1; 8]);
+        assert2::assert!(span_ids.value(0) == [1; 8]);
 
         let left = col::<Int32Array>(&batch, SCOL_NESTED_SET_LEFT);
         let right = col::<Int32Array>(&batch, SCOL_NESTED_SET_RIGHT);
         let parent_id = col::<Int32Array>(&batch, SCOL_PARENT_ID);
-        assert_eq!(left.values().as_ref(), &[1, 2]);
-        assert_eq!(right.values().as_ref(), &[4, 3]);
+        assert2::assert!(left.values().as_ref() == &[1, 2]);
+        assert2::assert!(right.values().as_ref() == &[4, 3]);
         // Root parent is -1 (Tempo nestedSetParent sentinel); the child's
         // parent_id equals the root's left value.
-        assert_eq!(parent_id.values().as_ref(), &[-1, 1]);
+        assert2::assert!(parent_id.values().as_ref() == &[-1, 1]);
 
         let service = col::<StringArray>(&batch, SCOL_ROOT_SERVICE_NAME);
-        assert!(service.value(0) == "api");
+        assert2::assert!(service.value(0) == "api");
     }
 
     #[test]
@@ -362,7 +361,7 @@ mod tests {
         let methods_idx = (0..keys.len())
             .find(|idx| keys.value(*idx) == "http.method")
             .unwrap();
-        assert!(
+        assert2::assert!(
             (0..keys.len())
                 .filter(|idx| keys.value(*idx) == "http.method")
                 .count()
@@ -375,7 +374,7 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert!(is_array.value(methods_idx));
+        assert2::assert!(is_array.value(methods_idx));
 
         let values = col::<ListArray>(&batch, SCOL_ATTR_VALUE);
         let row_values = values.value(0);
@@ -388,8 +387,8 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert!(method_values.value(0) == "GET");
-        assert!(method_values.value(1) == "POST");
+        assert2::assert!(method_values.value(0) == "GET");
+        assert2::assert!(method_values.value(1) == "POST");
     }
 
     fn attr_keys_of_row(batch: &RecordBatch, row: usize) -> Vec<String> {
@@ -416,7 +415,7 @@ mod tests {
         let counts = col::<Int32Array>(&batch, SCOL_CHILD_COUNT);
         // Rows are index-aligned with input order: root has children 2 and 3,
         // span 2 has child 4, spans 3 and 4 are leaves.
-        assert_eq!(counts.values().as_ref(), &[2, 1, 0, 0]);
+        assert2::assert!(counts.values().as_ref() == &[2, 1, 0, 0]);
     }
 
     #[test]
@@ -438,10 +437,10 @@ mod tests {
         let keys = attr_keys_of_row(&batch, 0);
 
         // The real resource attr is present under the resource namespace.
-        assert!(keys.contains(&format!("{RESOURCE_ATTR_PREFIX}deployment.environment")));
+        assert2::assert!(keys.contains(&format!("{RESOURCE_ATTR_PREFIX}deployment.environment")));
         // The legitimate resource service.name is present exactly once.
         let resource_service_key = format!("{RESOURCE_ATTR_PREFIX}service.name");
-        assert!(
+        assert2::assert!(
             keys.iter()
                 .filter(|key| **key == resource_service_key)
                 .count()
@@ -462,8 +461,8 @@ mod tests {
             .as_any()
             .downcast_ref::<StringArray>()
             .unwrap();
-        assert!(service_values.len() == 1);
-        assert!(service_values.value(0) == "api");
+        assert2::assert!(service_values.len() == 1);
+        assert2::assert!(service_values.value(0) == "api");
     }
 
     #[test]
@@ -484,15 +483,15 @@ mod tests {
         });
 
         let batch = span_batch(&[s]).unwrap();
-        check!(batch.num_rows() == 1);
-        check!(
+        assert2::assert!(batch.num_rows() == 1);
+        assert2::assert!(
             batch
                 .column_by_name(crabka_blockstore::SCOL_EVENTS)
                 .unwrap()
                 .len()
                 == 1
         );
-        check!(
+        assert2::assert!(
             batch
                 .column_by_name(crabka_blockstore::SCOL_LINKS)
                 .unwrap()

@@ -49,7 +49,6 @@ pub fn sorted_labels(mut pairs: Vec<(String, String)>) -> Vec<(String, String)> 
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -61,7 +60,7 @@ mod tests {
             ("service".into(), "api".into()),
         ]);
 
-        assert!(
+        assert2::assert!(
             labels
                 == vec![
                     ("service".into(), "api".into()),
@@ -96,7 +95,7 @@ mod tests {
             }],
         };
 
-        assert!(payload.tenant == "acme");
-        assert!((payload.series[0].exemplars[0].value - 0.25).abs() < 1e-9);
+        assert2::assert!(payload.tenant.as_str() == "acme");
+        assert2::assert!((payload.series[0].exemplars[0].value - 0.25).abs() < 1e-9);
     }
 }

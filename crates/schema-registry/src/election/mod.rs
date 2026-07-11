@@ -71,17 +71,27 @@ mod tests {
     use super::parse_identity;
 
     #[test]
-    fn parses_advertised_url() {
-        let i = parse_identity("http://10.0.0.5:8081", true).unwrap();
-        assert_eq!(
+    fn advertised_url_cases() {
+        for (_name, input, expected) in [
             (
-                i.host.as_str(),
-                i.port,
-                i.scheme.as_str(),
-                i.master_eligibility
+                "valid",
+                "http://10.0.0.5:8081",
+                Some(("10.0.0.5", 8081, "http", true)),
             ),
-            ("10.0.0.5", 8081, "http", true)
-        );
-        assert!(parse_identity("nohost", true).is_err());
+            ("missing_host", "nohost", None),
+        ] {
+            let actual = parse_identity(input, true).ok().map(|identity| {
+                (
+                    identity.host,
+                    identity.port,
+                    identity.scheme,
+                    identity.master_eligibility,
+                )
+            });
+            let expected = expected.map(|(host, port, scheme, eligible)| {
+                (host.to_owned(), port, scheme.to_owned(), eligible)
+            });
+            assert2::assert!(actual == expected);
+        }
     }
 }

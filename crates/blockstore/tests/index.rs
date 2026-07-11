@@ -1,6 +1,5 @@
 use std::collections::BTreeSet;
 
-use assert2::{assert, check};
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LabelPredicate, LogBlockIndex as BlockIndex,
     LogMatchOp as MatchOp, TimeRange, labels, series_fingerprint,
@@ -11,14 +10,14 @@ fn series_fingerprint_is_stable_across_label_ordering() {
     let left = labels([("env", "prod"), ("app", "api")]);
     let right = labels([("app", "api"), ("env", "prod")]);
 
-    assert!(series_fingerprint(&left) == series_fingerprint(&right));
+    assert2::assert!(series_fingerprint(&left) == series_fingerprint(&right));
 }
 
 #[test]
 fn label_index_is_tenant_scoped_and_applies_all_matcher_ops() {
     let mut index = LabelIndex::default();
     let api_prod = index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let api_dev = index.insert_series("tenant-a", labels([("app", "api"), ("env", "dev")]));
+    index.insert_series("tenant-a", labels([("app", "api"), ("env", "dev")]));
     let worker_prod = index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
     index.insert_series("tenant-b", labels([("app", "api"), ("env", "prod")]));
 
@@ -31,8 +30,7 @@ fn label_index_is_tenant_scoped_and_applies_all_matcher_ops() {
         ],
     );
 
-    assert!(matched == BTreeSet::from([api_prod, worker_prod]));
-    assert!(!matched.contains(&api_dev));
+    assert2::assert!(matched == BTreeSet::from([api_prod, worker_prod]));
 }
 
 #[test]
@@ -41,12 +39,12 @@ fn label_predicate_equal_matches_only_identical_label_value() {
     let matching = labels([("app", "api"), ("env", "prod")]);
     let different = labels([("app", "worker"), ("env", "prod")]);
 
-    for (candidate, want) in [
-        (matching, true),
-        (different, false),
-        (labels([("env", "prod")]), false),
+    for (_name, candidate, want) in [
+        ("identical value", matching, true),
+        ("different value", different, false),
+        ("missing label", labels([("env", "prod")]), false),
     ] {
-        assert!(predicate.matches(&candidate) == want, "for {candidate:?}");
+        assert2::assert!(predicate.matches(&candidate) == want);
     }
 }
 
@@ -54,15 +52,14 @@ fn label_predicate_equal_matches_only_identical_label_value() {
 fn label_index_exact_match_requires_posting_candidate_set() {
     let mut index = LabelIndex::default();
     let api = index.insert_series("tenant-a", labels([("app", "api"), ("env", "prod")]));
-    let worker = index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
+    index.insert_series("tenant-a", labels([("app", "worker"), ("env", "prod")]));
 
     let matched = index.match_series(
         "tenant-a",
         &[LabelPredicate::new("app", MatchOp::Equal, "api").unwrap()],
     );
 
-    assert!(matched == BTreeSet::from([api]));
-    assert!(!matched.contains(&worker));
+    assert2::assert!(matched == BTreeSet::from([api]));
 }
 
 #[test]
@@ -74,10 +71,12 @@ fn label_metadata_is_tenant_scoped() {
         labels([("service", "billing"), ("env", "prod")]),
     );
 
-    check!(index.label_names("tenant-a") == BTreeSet::from(["app".into(), "env".into()]));
-    check!(index.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
-    check!(index.label_names("tenant-b") == BTreeSet::from(["env".into(), "service".into()]));
-    check!(index.label_values("tenant-b", "app").is_empty());
+    assert2::assert!(index.label_names("tenant-a") == BTreeSet::from(["app".into(), "env".into()]));
+    assert2::assert!(index.label_values("tenant-a", "app") == BTreeSet::from(["api".into()]));
+    assert2::assert!(
+        index.label_names("tenant-b") == BTreeSet::from(["env".into(), "service".into()])
+    );
+    assert2::assert!(index.label_values("tenant-b", "app") == BTreeSet::new());
 }
 
 #[test]
@@ -89,23 +88,24 @@ fn label_index_returns_labels_and_tenant_series() {
     let worker = index.insert_series("tenant-a", worker_labels.clone());
     index.insert_series("tenant-b", labels([("app", "api")]));
 
-    for (tenant, series_id, want) in [
-        ("tenant-a", api, Some(&api_labels)),
-        ("tenant-a", worker, Some(&worker_labels)),
-        ("tenant-a", 0, None),
-        ("tenant-b", api, None),
+    for (_name, tenant, series_id, want) in [
+        ("first tenant api", "tenant-a", api, Some(&api_labels)),
+        (
+            "first tenant worker",
+            "tenant-a",
+            worker,
+            Some(&worker_labels),
+        ),
+        ("unknown series", "tenant-a", 0, None),
+        ("other tenant", "tenant-b", api, None),
     ] {
-        assert!(
-            index.labels_for(tenant, series_id) == want,
-            "labels_for({tenant}, {series_id})"
-        );
+        assert2::assert!(index.labels_for(tenant, series_id) == want);
     }
 
-    let series = index.tenant_series("tenant-a");
-    check!(series.len() == 2);
-    check!(series.contains(&(api, api_labels)));
-    check!(series.contains(&(worker, worker_labels)));
-    check!(index.tenant_series("missing").is_empty());
+    let mut expected = vec![(api, api_labels), (worker, worker_labels)];
+    expected.sort_by_key(|(fingerprint, _)| *fingerprint);
+    assert2::assert!(index.tenant_series("tenant-a") == expected);
+    assert2::assert!(index.tenant_series("missing") == Vec::new());
 }
 
 #[test]
@@ -131,10 +131,12 @@ fn block_index_prunes_by_tenant_time_and_fingerprint() {
 
     let matched = blocks.match_blocks("tenant-a", TimeRange::new(150, 350).unwrap(), &[api]);
 
-    assert!(matched.len() == 1);
-    assert!(
-        matched[0].key.object_key()
-            == "tenant=tenant-a/partition=0/offsets=10-20/time=100-199.parquet"
+    assert2::assert!(
+        matched
+            == vec![BlockDescriptor::new(
+                BlockKey::new("tenant-a", 0, 10, 20, TimeRange::new(100, 199).unwrap()),
+                BTreeSet::from([api]),
+            )]
     );
 }
 
@@ -153,12 +155,14 @@ fn block_index_blocks_exposes_inserted_descriptors_in_key_order() {
     blocks.insert(second.clone());
     blocks.insert(first.clone());
 
-    assert!(blocks.blocks() == &[first, second]);
+    assert2::assert!(blocks.blocks() == &[first, second]);
 }
 
 #[test]
 fn deterministic_block_keys_encode_compactor_idempotency_fields() {
     let key = BlockKey::new("tenant-a", 2, 42, 99, TimeRange::new(1_000, 2_000).unwrap());
 
-    assert!(key.object_key() == "tenant=tenant-a/partition=2/offsets=42-99/time=1000-2000.parquet");
+    assert2::assert!(
+        key.object_key() == "tenant=tenant-a/partition=2/offsets=42-99/time=1000-2000.parquet"
+    );
 }

@@ -18,7 +18,6 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -366,21 +365,13 @@ async fn describe_all_users_round_trip() {
         drive_describe_user_scram_credentials_sasl(addr, "admin", &admin_test_password(), None)
             .await;
 
-    assert!(top_err == 0, "top-level error should be 0");
+    assert2::assert!(top_err == 0);
 
     let alice_row = per_user
         .iter()
         .find(|(u, _, _)| u == "alice")
         .expect("alice must appear in response");
-    assert!(
-        alice_row.1 == 0,
-        "per-user error_code should be 0 for alice"
-    );
-    assert!(
-        alice_row.2.iter().any(|(mech, _)| *mech == 2),
-        "expected mechanism=2 (SCRAM-SHA-512) in credential_infos; got {:?}",
-        alice_row.2,
-    );
+    assert2::assert!((alice_row.1, alice_row.2.iter().any(|(mech, _)| *mech == 2),) == (0, true));
 }
 
 /// Test 2: describe a user that does not exist (`ghost`); assert that the
@@ -401,17 +392,13 @@ async fn describe_unknown_user_returns_error() {
     )
     .await;
 
-    assert!(top_err == 0, "top-level error_code should be 0");
+    assert2::assert!(top_err == 0);
 
     let row = per_user
         .iter()
         .find(|(u, _, _)| u == "ghost")
         .expect("ghost must appear in response");
-    assert!(
-        row.1 == 91, /* RESOURCE_NOT_FOUND */
-        "expected RESOURCE_NOT_FOUND (91) for unknown user ghost; got {}",
-        row.1
-    );
+    assert2::assert!(row.1 == 91);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -438,29 +425,26 @@ async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row
     .await;
 
     handle.shutdown().await;
-    assert!(top_err == 0, "top-level error_code should be 0");
-    assert!(
-        per_user.len() == 2,
-        "duplicate request users collapse: {per_user:?}"
-    );
+    assert2::assert!(top_err == 0);
+    assert2::assert!(per_user.len() == 2);
 
     let alice_rows: Vec<_> = per_user
         .iter()
         .filter(|(user, _, _)| user == "alice")
         .collect();
-    assert!(
-        alice_rows.len() == 1,
-        "alice should appear once: {per_user:?}"
+    assert2::assert!(
+        (
+            alice_rows.len(),
+            alice_rows[0].1,
+            alice_rows[0].2.is_empty(),
+        ) == (1, KAFKA_DUPLICATE_RESOURCE, true)
     );
-    assert!(alice_rows[0].1 == KAFKA_DUPLICATE_RESOURCE);
-    assert!(alice_rows[0].2.is_empty());
 
     let bob = per_user
         .iter()
         .find(|(user, _, _)| user == "bob")
         .expect("distinct users remain successful");
-    assert!(bob.1 == 0);
-    assert!(bob.2 == vec![(WIRE_MECH_SCRAM_SHA_512, 8192)]);
+    assert2::assert!((bob.1, bob.2.as_slice()) == (0, &[(WIRE_MECH_SCRAM_SHA_512, 8192)][..]));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -477,8 +461,8 @@ async fn describe_allows_cluster_describe_acl() {
             .await;
 
     handle.shutdown().await;
-    assert!(top_err == 0, "Cluster Describe ACL should authorize");
-    assert!(per_user.is_empty());
+    assert2::assert!(top_err == 0);
+    assert2::assert!(per_user.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -495,9 +479,6 @@ async fn describe_rejects_without_cluster_describe_acl() {
             .await;
 
     handle.shutdown().await;
-    assert!(
-        top_err == 31,
-        "missing Cluster Describe ACL should be rejected"
-    );
-    assert!(per_user.is_empty());
+    assert2::assert!(top_err == 31);
+    assert2::assert!(per_user.is_empty());
 }

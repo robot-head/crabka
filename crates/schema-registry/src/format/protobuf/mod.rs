@@ -291,12 +291,12 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(a.canonical_form(), b.canonical_form());
+        assert2::assert!(a.canonical_form() == b.canonical_form());
     }
 
     #[test]
     fn rejects_invalid_proto() {
-        assert!(parse("this is not protobuf", &[]).is_err());
+        assert2::assert!(parse("this is not protobuf", &[]).is_err());
     }
 
     fn p(body: &str) -> String {
@@ -304,136 +304,135 @@ mod tests {
     }
 
     #[test]
-    fn field_added_is_backward_compatible() {
-        assert!(
-            check(
-                &p("int32 id = 1; int32 x = 2;"),
-                &p("int32 id = 1;"),
-                &[],
-                &[]
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn field_removed_is_backward_compatible() {
-        assert!(
-            check(
-                &p("int32 id = 1;"),
-                &p("int32 id = 1; int32 x = 2;"),
-                &[],
-                &[]
-            )
-            .is_ok()
-        );
-    }
-
-    #[test]
-    fn scalar_change_within_group_ok_across_group_bad() {
-        assert!(check(&p("int64 id = 1;"), &p("int32 id = 1;"), &[], &[]).is_ok());
-        assert!(check(&p("string id = 1;"), &p("int32 id = 1;"), &[], &[]).is_err());
-    }
-
-    #[test]
-    fn label_change_singular_to_repeated_is_compatible() {
-        // cp is authority: singular ↔ repeated of the same type is compatible
-        // (matching the golden matrix; this is compatible in cp).
-        assert!(check(&p("repeated int32 id = 1;"), &p("int32 id = 1;"), &[], &[]).is_ok());
-    }
-
-    #[test]
-    fn kind_change_scalar_to_message_is_incompatible() {
-        let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
-        let r = "syntax = \"proto3\"; message M {} message U { M id = 1; }";
-        assert!(check(r, w, &[], &[]).is_err());
-    }
-
-    // ── oneof rules ───────────────────────────────────────────────────────────
-
-    #[test]
-    fn moving_field_into_oneof_is_incompatible_out_is_compatible() {
-        // cp is authority: a reader that moved fields INTO
-        // a oneof cannot read a writer that had them as plain fields → incompatible.
-        // The reverse (oneof → plain) is compatible.
+    fn compatibility_basic_cases_are_named_and_table_driven() {
         let plain = "syntax = \"proto3\"; message U { int32 a = 1; int32 b = 2; }";
         let oneof = "syntax = \"proto3\"; message U { oneof x { int32 a = 1; int32 b = 2; } }";
-        assert!(
-            check(oneof, plain, &[], &[]).is_err(),
-            "reader moved fields into oneof"
-        );
-        assert!(
-            check(plain, oneof, &[], &[]).is_ok(),
-            "reader moved fields out of oneof"
-        );
+        let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        for (_name, reader, writer, compatible) in [
+            (
+                "field-added",
+                p("int32 id = 1; int32 x = 2;"),
+                p("int32 id = 1;"),
+                true,
+            ),
+            (
+                "field-removed",
+                p("int32 id = 1;"),
+                p("int32 id = 1; int32 x = 2;"),
+                true,
+            ),
+            (
+                "scalar-same-wire-group",
+                p("int64 id = 1;"),
+                p("int32 id = 1;"),
+                true,
+            ),
+            (
+                "scalar-cross-wire-group",
+                p("string id = 1;"),
+                p("int32 id = 1;"),
+                false,
+            ),
+            (
+                "singular-to-repeated",
+                p("repeated int32 id = 1;"),
+                p("int32 id = 1;"),
+                true,
+            ),
+            (
+                "scalar-to-message",
+                "syntax = \"proto3\"; message M {} message U { M id = 1; }".to_string(),
+                small.to_string(),
+                false,
+            ),
+            (
+                "move-into-oneof",
+                oneof.to_string(),
+                plain.to_string(),
+                false,
+            ),
+            (
+                "move-out-of-oneof",
+                plain.to_string(),
+                oneof.to_string(),
+                true,
+            ),
+            (
+                "proto3-optional",
+                "syntax = \"proto3\"; message U { optional int32 a = 1; }".to_string(),
+                "syntax = \"proto3\"; message U { int32 a = 1; }".to_string(),
+                true,
+            ),
+        ] {
+            assert2::assert!(check(&reader, &writer, &[], &[]).is_ok() == compatible);
+        }
     }
 
     #[test]
-    fn proto3_optional_is_not_a_oneof_change() {
-        let w = "syntax = \"proto3\"; message U { int32 a = 1; }";
-        let r = "syntax = \"proto3\"; message U { optional int32 a = 1; }";
-        assert!(
-            check(r, w, &[], &[]).is_ok(),
-            "proto3 optional is not a oneof migration"
-        );
-    }
+    fn compatibility_extended_cases_are_named_and_table_driven() {
+        let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
+        let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
 
-    // ── reserved + map ────────────────────────────────────────────────────────
-
-    #[test]
-    fn reserving_a_number_is_compatible() {
-        let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
-        let r = "syntax = \"proto3\"; message U { reserved 2; int32 id = 1; }";
-        assert!(check(r, w, &[], &[]).is_ok());
-    }
-
-    #[test]
-    fn map_value_type_change_across_group_is_incompatible() {
-        let w = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
-        let r = "syntax = \"proto3\"; message U { map<string, string> m = 1; }";
-        assert!(check(r, w, &[], &[]).is_err());
-    }
-
-    #[test]
-    fn identical_map_is_compatible() {
-        let s = "syntax = \"proto3\"; message U { map<string, int32> m = 1; }";
-        assert!(check(s, s, &[], &[]).is_ok());
-    }
-
-    // ── enum + nested + package ──────────────────────────────────────────────
-
-    #[test]
-    fn enum_const_added_compatible() {
-        let w = "syntax = \"proto3\"; enum E { A = 0; } message U { E e = 1; }";
-        let r = "syntax = \"proto3\"; enum E { A = 0; B = 1; } message U { E e = 1; }";
-        assert!(check(r, w, &[], &[]).is_ok());
-    }
-
-    #[test]
-    fn nested_message_field_change_detected() {
-        let w = "syntax = \"proto3\"; message U { message N { int32 a = 1; } N n = 1; }";
-        let r = "syntax = \"proto3\"; message U { message N { string a = 1; } N n = 1; }";
-        assert!(
-            check(r, w, &[], &[]).is_err(),
-            "nested int32->string is across-group"
-        );
-    }
-
-    #[test]
-    fn package_change_is_compatible() {
-        // cp is authority: a package rename is compatible.
-        let w = "syntax = \"proto3\"; package a; message U { int32 id = 1; }";
-        let r = "syntax = \"proto3\"; package b; message U { int32 id = 1; }";
-        assert!(check(r, w, &[], &[]).is_ok());
-    }
-
-    #[test]
-    fn int_to_enum_is_compatible_within_varint_group() {
-        // cp is authority: int32 ↔ enum is a compatible scalar-kind change (both
-        // are varints on the wire). scalar → message stays incompatible.
-        let w = "syntax = \"proto3\"; message U { int32 id = 1; }";
-        let r = "syntax = \"proto3\"; enum E { A = 0; } message U { E id = 1; }";
-        assert!(check(r, w, &[], &[]).is_ok());
+        for (_name, reader, writer, compatible) in [
+            (
+                "reserve-number",
+                "syntax = \"proto3\"; message U { reserved 2; int32 id = 1; }".to_string(),
+                small.to_string(),
+                true,
+            ),
+            (
+                "map-cross-wire-group",
+                "syntax = \"proto3\"; message U { map<string, string> m = 1; }".to_string(),
+                "syntax = \"proto3\"; message U { map<string, int32> m = 1; }".to_string(),
+                false,
+            ),
+            (
+                "identical-map",
+                "syntax = \"proto3\"; message U { map<string, int32> m = 1; }".to_string(),
+                "syntax = \"proto3\"; message U { map<string, int32> m = 1; }".to_string(),
+                true,
+            ),
+            (
+                "enum-constant-added",
+                "syntax = \"proto3\"; enum E { A = 0; B = 1; } message U { E e = 1; }".to_string(),
+                "syntax = \"proto3\"; enum E { A = 0; } message U { E e = 1; }".to_string(),
+                true,
+            ),
+            (
+                "nested-field-cross-group",
+                "syntax = \"proto3\"; message U { message N { string a = 1; } N n = 1; }"
+                    .to_string(),
+                "syntax = \"proto3\"; message U { message N { int32 a = 1; } N n = 1; }"
+                    .to_string(),
+                false,
+            ),
+            (
+                "package-renamed",
+                "syntax = \"proto3\"; package b; message U { int32 id = 1; }".to_string(),
+                "syntax = \"proto3\"; package a; message U { int32 id = 1; }".to_string(),
+                true,
+            ),
+            (
+                "int-to-enum",
+                "syntax = \"proto3\"; enum E { A = 0; } message U { E id = 1; }".to_string(),
+                small.to_string(),
+                true,
+            ),
+            (
+                "reader-message-added",
+                big.to_string(),
+                small.to_string(),
+                true,
+            ),
+            (
+                "reader-message-removed",
+                small.to_string(),
+                big.to_string(),
+                false,
+            ),
+        ] {
+            assert2::assert!(check(&reader, &writer, &[], &[]).is_ok() == compatible);
+        }
     }
 
     // ── reference resolution ─────────────────────────────────────────────────
@@ -445,14 +444,20 @@ mod tests {
         let candidate =
             "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
         // With the import provided as a reference (name = import path), it links.
-        let refs = vec![ResolvedReference {
-            name: "money.proto".into(),
-            ty: SchemaType::Protobuf,
-            schema: dep.into(),
-        }];
-        assert!(parse(candidate, &refs).is_ok(), "import resolves");
-        // An import with NO matching reference must error (unresolved import).
-        assert!(parse(candidate, &[]).is_err(), "unresolved import rejected");
+        for (_name, refs, expected) in [
+            (
+                "resolved_import",
+                vec![ResolvedReference {
+                    name: "money.proto".into(),
+                    ty: SchemaType::Protobuf,
+                    schema: dep.into(),
+                }],
+                true,
+            ),
+            ("unresolved_import", vec![], false),
+        ] {
+            assert2::assert!(parse(candidate, &refs).is_ok() == expected);
+        }
     }
 
     #[test]
@@ -461,24 +466,29 @@ mod tests {
         // Packaged schema: `package` follows `syntax` with no blank line, then a
         // blank line precedes the message (verified against cp-schema-registry 7.4.0).
         let money = "syntax = \"proto3\"; package m; message Money { int64 cents = 1; }";
-        let m = parse(money, &[]).unwrap();
-        assert_eq!(
-            m.normalized_form(),
-            "syntax = \"proto3\";\npackage m;\n\nmessage Money {\n  int64 cents = 1;\n}\n"
-        );
         // Importing schema: blank line, `import`, blank line, message (cp-exact).
         let order =
             "syntax = \"proto3\"; import \"money.proto\"; message Order { m.Money price = 1; }";
-        let refs = vec![ResolvedReference {
-            name: "money.proto".into(),
-            ty: SchemaType::Protobuf,
-            schema: money.into(),
-        }];
-        let o = parse(order, &refs).unwrap();
-        assert_eq!(
-            o.normalized_form(),
-            "syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n"
-        );
+        for (_name, schema, refs, expected) in [
+            (
+                "package",
+                money,
+                vec![],
+                "syntax = \"proto3\";\npackage m;\n\nmessage Money {\n  int64 cents = 1;\n}\n",
+            ),
+            (
+                "import",
+                order,
+                vec![ResolvedReference {
+                    name: "money.proto".into(),
+                    ty: SchemaType::Protobuf,
+                    schema: money.into(),
+                }],
+                "syntax = \"proto3\";\n\nimport \"money.proto\";\n\nmessage Order {\n  m.Money price = 1;\n}\n",
+            ),
+        ] {
+            assert2::assert!(parse(schema, &refs).unwrap().normalized_form() == expected);
+        }
     }
 
     #[test]
@@ -521,33 +531,19 @@ mod tests {
             ..Default::default()
         };
 
-        assert_eq!(
-            normalize(&fdp),
-            "syntax = \"proto3\";\n\nmessage Outer {\n  enum Kind {\n    KIND_UNSPECIFIED = 0;\n    KIND_READY = 1;\n  }\n  message Inner {\n    string id = 1;\n  }\n}\n"
+        assert2::assert!(
+            normalize(&fdp)
+                == "syntax = \"proto3\";\n\nmessage Outer {\n  enum Kind {\n    KIND_UNSPECIFIED = 0;\n    KIND_READY = 1;\n  }\n  message Inner {\n    string id = 1;\n  }\n}\n"
         );
     }
 
     #[test]
     fn proto_ref_name_does_not_treat_empty_package_as_local_prefix() {
-        assert_eq!(proto_ref_name("...Money", ""), "Money");
-        assert_eq!(proto_ref_name(".m.Money", "m"), "Money");
-    }
-
-    #[test]
-    fn message_add_remove_is_asymmetric() {
-        // cp is authority: adding a message the reader has (writer lacks) is
-        // BACKWARD-ok; removing a message the writer had (reader lacks) is not.
-        let small = "syntax = \"proto3\"; message U { int32 id = 1; }";
-        let big = "syntax = \"proto3\"; message U { int32 id = 1; } message V { int32 a = 1; }";
-        // reader=big, writer=small → reader has an extra message → compatible.
-        assert!(
-            check(big, small, &[], &[]).is_ok(),
-            "reader-only message is fine"
-        );
-        // reader=small, writer=big → reader is missing a writer message → incompatible.
-        assert!(
-            check(small, big, &[], &[]).is_err(),
-            "reader missing a writer message"
-        );
+        for (_name, reference, package, expected) in [
+            ("empty_package", "...Money", "", "Money"),
+            ("local_package", ".m.Money", "m", "Money"),
+        ] {
+            assert2::assert!(proto_ref_name(reference, package) == expected);
+        }
     }
 }

@@ -40,10 +40,7 @@ pub struct AwaitingServerFinal {
 impl ScramClientExchange {
     #[must_use]
     pub fn new(username: String, password: Vec<u8>, mechanism: SaslMechanism) -> Self {
-        assert!(
-            mechanism.is_scram(),
-            "ScramClientExchange::new called with non-SCRAM mechanism {mechanism:?}"
-        );
+        assert2::assert!(mechanism.is_scram());
         Self {
             username,
             password,

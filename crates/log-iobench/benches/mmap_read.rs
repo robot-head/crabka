@@ -95,7 +95,7 @@ fn build_log() -> (TempDir, Log, PathBuf, u64) {
         .next()
         .expect("at least one sealed segment");
     let size = std::fs::metadata(&chosen).unwrap().len();
-    assert!(size >= READ_LEN as u64, "sealed segment too small: {size}");
+    assert2::assert!(size >= READ_LEN as u64);
     (dir, log, chosen, size)
 }
 

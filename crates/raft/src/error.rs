@@ -56,7 +56,6 @@ pub enum RaftError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -65,7 +64,7 @@ mod tests {
         let e = RaftError::NotLeader {
             current_leader: Some(NodeId(7)),
         };
-        assert!(e.to_string().contains("Some(NodeId(7))"));
+        assert2::assert!(e.to_string().contains("Some(NodeId(7))"));
     }
 
     #[test]
@@ -73,6 +72,6 @@ mod tests {
         let e = RaftError::NotLeader {
             current_leader: None,
         };
-        assert!(e.to_string().contains("None"));
+        assert2::assert!(e.to_string().contains("None"));
     }
 }

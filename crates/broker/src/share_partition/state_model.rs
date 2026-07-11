@@ -224,26 +224,13 @@ fn lock_consistency(sm: &AcquisitionState) -> bool {
 /// monotonicity / durability violation. Kept OUT of the fingerprinted state so
 /// no path-history ghost can explode the space (Phase-1 OOM lesson).
 fn assert_transition(parent: &AcquisitionState, child: &AcquisitionState) {
-    assert!(
-        child.start_offset >= parent.start_offset,
-        "SPSO regressed: {} -> {}",
-        parent.start_offset,
-        child.start_offset
-    );
-    assert!(
-        child.delivery_complete_count >= parent.delivery_complete_count,
-        "delivery_complete_count regressed: {} -> {}",
-        parent.delivery_complete_count,
-        child.delivery_complete_count
-    );
+    assert2::assert!(child.start_offset >= parent.start_offset);
+    assert2::assert!(child.delivery_complete_count >= parent.delivery_complete_count);
     // Per-offset delivery_count never regresses for offsets live in both.
     for raw in child.start_offset.0..child.end_offset.0 {
         let off = Offset(raw);
         if let (Some(pc), Some(cc)) = (offset_dc(parent, off), offset_dc(child, off)) {
-            assert!(
-                cc >= pc,
-                "delivery_count regressed at offset {off}: {pc} -> {cc}"
-            );
+            assert2::assert!(cc >= pc);
         }
     }
     // An Acknowledged offset is terminal: in the child it is still Acknowledged
@@ -252,14 +239,8 @@ fn assert_transition(parent: &AcquisitionState, child: &AcquisitionState) {
         let off = Offset(raw);
         if offset_state(parent, off) == Some(RecordState::Acknowledged) {
             match offset_state(child, off) {
-                None => assert!(
-                    off < child.start_offset,
-                    "acknowledged offset {off} vanished while still in window"
-                ),
-                Some(s) => assert!(
-                    s == RecordState::Acknowledged,
-                    "acknowledged offset {off} reverted to {s:?}"
-                ),
+                None => assert2::assert!(off < child.start_offset),
+                Some(s) => assert2::assert!(s == RecordState::Acknowledged),
             }
         }
     }
@@ -503,14 +484,8 @@ fn run(model: ShareModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "[{label}] hit depth cap {MAX_DEPTH}: search is depth-truncated, not exhaustive"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] hit state cap {MAX_STATES}: search is truncated, not exhaustive"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

@@ -39,7 +39,7 @@ pub fn consume_producer_quota(
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_metadata::MetadataImage;
 
     use super::consume_producer_quota;
@@ -77,8 +77,8 @@ mod tests {
         let other_client =
             consume_producer_quota(&img, &buckets, "alice", "other", "default", 4096);
 
-        assert!(matching > Duration::ZERO);
-        assert!(other_client == Duration::ZERO);
+        assert2::assert!(matching > Duration::ZERO);
+        assert2::assert!(other_client == Duration::ZERO);
     }
 
     #[test]
@@ -88,6 +88,6 @@ mod tests {
 
         let delay = consume_producer_quota(&img, &buckets, "alice", "app", "default", 1_250);
 
-        assert!(delay == Duration::from_millis(250));
+        assert2::assert!(delay == Duration::from_millis(250));
     }
 }

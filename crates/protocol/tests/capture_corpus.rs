@@ -79,11 +79,7 @@ fn docker_run_broker() {
         ])
         .output()
         .expect("docker run");
-    assert!(
-        out.status.success(),
-        "docker run failed: {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(out.status.success());
 }
 
 fn tap_upstream() -> String {
@@ -248,10 +244,7 @@ fn capture_and_generate_corpus() {
             let committed = std::fs::read_to_string(corpus_dir().join(format!("{stem}.hex")))
                 .unwrap_or_default();
             let committed: String = committed.chars().filter(|c| !c.is_whitespace()).collect();
-            assert!(
-                committed == hex_encode(&body),
-                "DRIFT: {name} v{version} {dirn} differs from committed corpus"
-            );
+            assert2::assert!(committed == hex_encode(&body));
             covered.insert((api_key, version, is_request));
             continue;
         }
@@ -287,12 +280,7 @@ fn capture_and_generate_corpus() {
             let jval = default_json_for(c.name, c.version);
             let body = o.encode(c.api_key, c.version, is_request, &jval);
             let re = roundtrip(c.name, c.version, &body);
-            assert!(
-                re == body,
-                "synthetic {} v{} does not round-trip",
-                c.name,
-                c.version
-            );
+            assert2::assert!(re == body);
             write_entry(
                 c.api_key,
                 c.version,

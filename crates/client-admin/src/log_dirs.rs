@@ -152,7 +152,6 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use assert2::assert;
     use bytes::{Buf, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
@@ -207,10 +206,10 @@ mod tests {
 
     fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
         let client_id_len = body.get_i16();
-        assert!(client_id_len >= 0);
+        assert2::assert!(client_id_len >= 0);
         body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
         if flexible_header {
-            assert!(body.get_u8() == 0);
+            assert2::assert!(body.get_u8() == 0);
         }
         body
     }
@@ -233,7 +232,7 @@ mod tests {
                 );
                 let request = AlterReplicaLogDirsRequest::decode(&mut body, version)
                     .expect("alter log dirs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &AlterReplicaLogDirsResponse {
@@ -267,20 +266,25 @@ mod tests {
             .await
             .expect("alter log dirs response maps");
 
-        assert!(outcomes.len() == 1);
-        assert!(outcomes[0].topic == "orders");
-        assert!(outcomes[0].partition == 2);
         let error = outcomes[0]
             .error
             .as_ref()
             .expect("broker error is surfaced");
-        assert!(error.code == 56);
+        assert2::assert!(
+            (
+                outcomes.len(),
+                &outcomes[0].topic,
+                outcomes[0].partition,
+                error.code,
+                &error.message
+            ) == (1, &"orders".to_string(), 2, 56, &None)
+        );
         let request = seen_request
             .lock()
             .expect("request capture lock")
             .take()
             .expect("alter log dirs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == AlterReplicaLogDirsRequest {
                     dirs: vec![AlterReplicaLogDir {
@@ -313,7 +317,7 @@ mod tests {
                 );
                 let request = DescribeLogDirsRequest::decode(&mut body, version)
                     .expect("describe log dirs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &DescribeLogDirsResponse {
@@ -350,21 +354,26 @@ mod tests {
             .await
             .expect("describe log dirs response maps");
 
-        assert!(dirs.len() == 1);
-        assert!(dirs[0].log_dir == "/data/kafka");
-        assert!(dirs[0].topics.len() == 1);
-        assert!(dirs[0].topics[0].name == "orders");
         let partition = &dirs[0].topics[0].partitions[0];
-        assert!(partition.partition_index == 4);
-        assert!(partition.partition_size == 123);
-        assert!(partition.offset_lag == 7);
-        assert!(partition.is_future_key);
+        assert2::assert!(
+            (
+                dirs.len(),
+                dirs[0].log_dir.as_str(),
+                dirs[0].error.as_ref(),
+                dirs[0].topics.len(),
+                dirs[0].topics[0].name.as_str(),
+                partition.partition_index,
+                partition.partition_size,
+                partition.offset_lag,
+                partition.is_future_key,
+            ) == (1, "/data/kafka", None, 1, "orders", 4, 123, 7, true)
+        );
         let request = seen_request
             .lock()
             .expect("request capture lock")
             .take()
             .expect("describe log dirs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == DescribeLogDirsRequest {
                     topics: Some(vec![DescribableLogDirTopic {

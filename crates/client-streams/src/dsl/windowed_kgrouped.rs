@@ -596,22 +596,17 @@ mod tests {
             );
         }
         let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
-        assert_eq!(
-            d.read_output("out", p()),
-            Some((
-                Some(Windowed {
-                    key: "a".into(),
-                    window: Window { start: 0, end: 10 }
-                }),
-                2
-            )),
-            "emit-final forwards window [0,10) with final count 2 on close"
+        assert2::assert!(
+            d.read_output("out", p())
+                == Some((
+                    Some(Windowed {
+                        key: "a".into(),
+                        window: Window { start: 0, end: 10 }
+                    }),
+                    2
+                ))
         );
         // No per-update emits and the still-open window [10,20) is not emitted.
-        assert_eq!(
-            d.read_output("out", p()),
-            None,
-            "exactly one emit-final record"
-        );
+        assert2::assert!(d.read_output("out", p()) == None);
     }
 }

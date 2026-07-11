@@ -61,23 +61,22 @@ impl ShareAckType {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn ack_wire_codes() {
-        for (ack, expected) in [
-            (ShareAckType::Accept, 1),
-            (ShareAckType::Release, 2),
-            (ShareAckType::Reject, 3),
+        for (_name, ack, expected) in [
+            ("accept", ShareAckType::Accept, 1),
+            ("release", ShareAckType::Release, 2),
+            ("reject", ShareAckType::Reject, 3),
         ] {
-            assert!(ack.wire() == expected, "ack: {ack:?}");
+            assert2::assert!(ack.wire() == expected);
         }
     }
 
     #[test]
     fn ack_mode_default_is_implicit() {
-        assert!(ShareAckMode::default() == ShareAckMode::Implicit);
+        assert2::assert!(ShareAckMode::default() == ShareAckMode::Implicit);
     }
 }

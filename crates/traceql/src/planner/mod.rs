@@ -844,7 +844,7 @@ fn structural_is_union(op: StructuralOp) -> bool {
 #[cfg(test)]
 mod tests {
     use arrow::{array::Array, record_batch::RecordBatch};
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::arrow::array::AsArray;
 
     use super::*;
@@ -962,7 +962,7 @@ mod tests {
         let matchers = pipeline_nested_projection_matchers(&[Pipeline::Aggregate(Aggregate::Avg(
             test_field(Scope::Event, "http.method"),
         ))]);
-        assert!(
+        assert2::assert!(
             matchers
                 == vec![SpanMatcher {
                     scope: MatchScope::Event,
@@ -973,7 +973,7 @@ mod tests {
                 }]
         );
 
-        assert!(
+        assert2::assert!(
             pipeline_nested_projection_matchers(&[Pipeline::Aggregate(Aggregate::Count)])
                 .is_empty()
         );
@@ -1002,12 +1002,12 @@ mod tests {
         let mut selectors = Vec::new();
         collect_nested_selectors(&root, &mut selectors);
 
-        assert!(selectors == vec![nested]);
+        assert2::assert!(selectors == vec![nested]);
     }
 
     #[test]
     fn pipeline_to_sql_empty_pipeline_uses_passthrough_query() {
-        assert!(
+        assert2::assert!(
             pipeline_to_sql("SELECT * FROM spans", &[]).unwrap()
                 == "SELECT * FROM (SELECT * FROM spans) AS q"
         );
@@ -1020,7 +1020,7 @@ mod tests {
             Pipeline::Aggregate(Aggregate::Count),
             Pipeline::By(by.clone()),
         ];
-        assert!(grouped_no_filter_by(&passing).unwrap() == by.as_slice());
+        assert2::assert!(grouped_no_filter_by(&passing).unwrap() == by.as_slice());
 
         let non_preserving = vec![
             Pipeline::Aggregate(Aggregate::CountOverTime),
@@ -1040,14 +1040,14 @@ mod tests {
             (Aggregate::Min(field.clone()), "MIN("),
             (Aggregate::Max(field), "MAX("),
         ] {
-            assert!(aggregate_expr_sql(&aggregate).unwrap().starts_with(prefix));
-            assert!(
+            assert2::assert!(aggregate_expr_sql(&aggregate).unwrap().starts_with(prefix));
+            assert2::assert!(
                 aggregate_rank_expr_sql(&aggregate)
                     .unwrap()
                     .starts_with(prefix)
             );
         }
-        assert!(aggregate_rank_expr_sql(&Aggregate::CountOverTime).is_err());
+        assert2::assert!(aggregate_rank_expr_sql(&Aggregate::CountOverTime).is_err());
     }
 
     #[tokio::test]
@@ -1073,8 +1073,8 @@ mod tests {
             ],
         );
         let out = planned("{ .http.method = \"GET\" }", &store).await.unwrap();
-        assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
-        assert!(first_name(&out) == "root");
+        assert2::assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
+        assert2::assert!(first_name(&out) == "root");
     }
 
     #[tokio::test]
@@ -1087,8 +1087,8 @@ mod tests {
             vec![span(1, "short", 50, vec![]), span(2, "long", 150, vec![])],
         );
         let out = planned("{ span:duration > 100 }", &store).await.unwrap();
-        assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
-        assert!(first_name(&out) == "long");
+        assert2::assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
+        assert2::assert!(first_name(&out) == "long");
     }
 
     #[tokio::test]
@@ -1121,7 +1121,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(names(&out) == vec!["miss-one".to_string(), "miss-two".to_string()]);
+        assert2::assert!(names(&out) == vec!["miss-one".to_string(), "miss-two".to_string()]);
     }
 
     #[tokio::test]
@@ -1160,7 +1160,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(names(&out) == vec!["one".to_string(), "two".to_string()]);
+        assert2::assert!(names(&out) == vec!["one".to_string(), "two".to_string()]);
     }
 
     #[tokio::test]
@@ -1182,8 +1182,8 @@ mod tests {
             ],
         );
         let out = planned("{ .a = 1 && .b = 2 }", &store).await.unwrap();
-        assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
-        assert!(first_name(&out) == "both");
+        assert2::assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
+        assert2::assert!(first_name(&out) == "both");
     }
 
     #[tokio::test]
@@ -1199,8 +1199,8 @@ mod tests {
             ],
         );
         let out = planned("{ .name =~ \"ab.*\" }", &store).await.unwrap();
-        assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
-        assert!(first_name(&out) == "one");
+        assert2::assert!(out.iter().map(RecordBatch::num_rows).sum::<usize>() == 1);
+        assert2::assert!(first_name(&out) == "one");
     }
 
     #[tokio::test]
@@ -1244,7 +1244,7 @@ mod tests {
         );
 
         let out = planned("{ .a = 1 } && { .b = 2 }", &store).await.unwrap();
-        assert!(names(&out) == vec!["a-only".to_string(), "b-only".to_string()]);
+        assert2::assert!(names(&out) == vec!["a-only".to_string(), "b-only".to_string()]);
     }
 
     fn structural_store() -> InMemorySpanStore {
@@ -1320,7 +1320,7 @@ mod tests {
         let out = planned("{ .svc = \"a\" } >> { .svc = \"c\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[4; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[4; 8]]);
     }
 
     #[tokio::test]
@@ -1329,7 +1329,7 @@ mod tests {
         let out = planned("{ .svc = \"a\" } > { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
     }
 
     #[tokio::test]
@@ -1338,7 +1338,7 @@ mod tests {
         let out = planned("{ .svc = \"b\" } ~ { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
     }
 
     #[tokio::test]
@@ -1347,7 +1347,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } << { .svc = \"a\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[1; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[1; 8]]);
     }
 
     #[tokio::test]
@@ -1356,7 +1356,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } < { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8]]);
     }
 
     #[tokio::test]
@@ -1365,7 +1365,7 @@ mod tests {
         let out = planned("{ .svc = \"a\" } >> { .svc = \"d\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[6; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[6; 8]]);
     }
 
     #[tokio::test]
@@ -1374,7 +1374,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } !<< { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[3; 8]]);
     }
 
     #[tokio::test]
@@ -1383,7 +1383,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } !>> { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
     }
 
     #[tokio::test]
@@ -1392,7 +1392,7 @@ mod tests {
         let out = planned("{ .svc = \"a\" } !> { .svc = \"c\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[4; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[4; 8]]);
     }
 
     #[tokio::test]
@@ -1401,7 +1401,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } !< { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[3; 8]]);
     }
 
     #[tokio::test]
@@ -1410,7 +1410,7 @@ mod tests {
         let out = planned("{ .svc = \"b\" } &>> { .svc = \"c\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
     }
 
     #[tokio::test]
@@ -1419,7 +1419,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } &<< { .svc = \"a\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[1; 8], [4; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[1; 8], [4; 8]]);
     }
 
     #[tokio::test]
@@ -1428,7 +1428,7 @@ mod tests {
         let out = planned("{ .svc = \"a\" } &> { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[1; 8], [2; 8], [3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[1; 8], [2; 8], [3; 8]]);
     }
 
     #[tokio::test]
@@ -1437,7 +1437,7 @@ mod tests {
         let out = planned("{ .svc = \"c\" } &< { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8], [4; 8]]);
     }
 
     #[tokio::test]
@@ -1446,7 +1446,7 @@ mod tests {
         let out = planned("{ .svc = \"b\" } &~ { .svc = \"b\" }", &store)
             .await
             .unwrap();
-        assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
+        assert2::assert!(span_ids(&out) == vec![[2; 8], [3; 8]]);
     }
 
     #[tokio::test]
@@ -1465,7 +1465,7 @@ mod tests {
         let out = planned("{ .svc != nil } | count() | by(span.svc) > 1", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1487,7 +1487,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             names(&out)
                 == vec![
                     "api-a".to_string(),
@@ -1535,7 +1535,7 @@ mod tests {
         let out = planned("{ .svc != nil } | count() > 1 | by(span.svc)", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1558,7 +1558,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1614,7 +1614,7 @@ mod tests {
         let out = planned("{ .svc = \"api\" } | avg(span:duration) > 100", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["slow-a".to_string(), "slow-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["slow-a".to_string(), "slow-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1673,7 +1673,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
+        assert2::assert!(
             names(&out)
                 == vec![
                     "fast-a".to_string(),
@@ -1701,7 +1701,7 @@ mod tests {
         let out = planned("{ .svc = \"api\" } | avg(span:duration)", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1723,7 +1723,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string()]);
     }
 
     #[tokio::test]
@@ -1746,7 +1746,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1766,7 +1766,9 @@ mod tests {
         let out = planned("{ .svc != nil } | by(span.svc) | coalesce()", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]);
+        assert2::assert!(
+            names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1786,7 +1788,9 @@ mod tests {
         let out = planned("{ .svc != nil } | by(span.svc)", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]);
+        assert2::assert!(
+            names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1810,7 +1814,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(names(&out) == vec!["db-a".to_string(), "db-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["db-a".to_string(), "db-b".to_string()]);
     }
 
     #[tokio::test]
@@ -1833,7 +1837,9 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]);
+        assert2::assert!(
+            names(&out) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -1871,7 +1877,7 @@ mod tests {
         let top = planned("{ .svc != nil } | count() | by(span.svc) | topk(1)", &store)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             names(&top)
                 == vec![
                     "cache-a".to_string(),
@@ -1886,7 +1892,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(names(&bottom) == vec!["db-a".to_string()]);
+        assert2::assert!(names(&bottom) == vec!["db-a".to_string()]);
     }
 
     #[tokio::test]
@@ -1927,7 +1933,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
+        assert2::assert!(
             names(&out)
                 == vec![
                     "cache-a".to_string(),
@@ -1975,7 +1981,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
+        assert2::assert!(
             names(&out)
                 == vec![
                     "cache-a".to_string(),
@@ -2023,7 +2029,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
+        assert2::assert!(
             names(&out)
                 == vec![
                     "cache-a".to_string(),
@@ -2071,7 +2077,7 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(
+        assert2::assert!(
             names(&out)
                 == vec![
                     "cache-a".to_string(),
@@ -2116,7 +2122,7 @@ mod tests {
         let top = planned("{ .svc != nil } | count() | topk(1) | by(span.svc)", &store)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             names(&top)
                 == vec![
                     "cache-a".to_string(),
@@ -2143,12 +2149,14 @@ mod tests {
         let top = planned("{ .svc != nil } | count() | topk(1)", &store)
             .await
             .unwrap();
-        assert!(names(&top) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]);
+        assert2::assert!(
+            names(&top) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
+        );
 
         let bottom = planned("{ .svc != nil } | count() | bottomk(1)", &store)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             names(&bottom) == vec!["api-a".to_string(), "api-b".to_string(), "db-a".to_string()]
         );
     }
@@ -2172,7 +2180,7 @@ mod tests {
         let out = planned("{ span:name != nil } | count() | topk(1) > 1", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 
     #[tokio::test]
@@ -2194,6 +2202,6 @@ mod tests {
         let out = planned("{ span:name != nil } | count() > 1 | topk(1)", &store)
             .await
             .unwrap();
-        assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
+        assert2::assert!(names(&out) == vec!["api-a".to_string(), "api-b".to_string()]);
     }
 }

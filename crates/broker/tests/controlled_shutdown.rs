@@ -18,7 +18,6 @@
 
 use std::{io, net::SocketAddr, time::Duration};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
 use crabka_protocol::{
@@ -106,12 +105,7 @@ async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION)
         .expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Wait until `(topic, partition)` appears in `handle`'s metadata
@@ -258,14 +252,13 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
         })
         .await;
     }
-    assert!(
+    assert2::assert!(
         leader_count(
             &cluster[raft_leader_idx].0,
             TOPIC,
             PARTITIONS,
             target_node_id.0
-        ) == PARTITIONS as usize,
-        "target should lead all partitions before shutdown"
+        ) == PARTITIONS as usize
     );
 
     // Pop the target out of the cluster vec — `controlled_shutdown`

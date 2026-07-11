@@ -1092,7 +1092,6 @@ fn api_key_label_name(api_key: crate::handlers::ApiKeyCode) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -1188,16 +1187,16 @@ mod tests {
             "crabka_broker_successful_authentication_total",
             "crabka_broker_failed_authentication_total",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
         // Topic label and values made it through.
-        for (needle, what) in [
+        for (needle, _what) in [
             ("topic=\"topic-a\"", "topic label"),
             ("100", "bytes_in=100"),
             ("50", "bytes_out=50"),
             ("7", "partitions_led=7"),
         ] {
-            assert!(buf.contains(needle), "expected {what} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 
@@ -1209,8 +1208,8 @@ mod tests {
         };
         // Pre-condition: no entry for the label yet.
         m.record_fetch("t", 0);
-        assert!(m.topic_fetch_requests.get_or_create(&lbl).get() == 1);
-        assert!(m.topic_bytes_out.get_or_create(&lbl).get() == 0);
+        assert2::assert!(m.topic_fetch_requests.get_or_create(&lbl).get() == 1);
+        assert2::assert!(m.topic_bytes_out.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1221,8 +1220,8 @@ mod tests {
         };
         m.record_produce("t", 1024);
         m.record_produce("t", 2048);
-        assert!(m.topic_produce_requests.get_or_create(&lbl).get() == 2);
-        assert!(m.topic_bytes_in.get_or_create(&lbl).get() == 3072);
+        assert2::assert!(m.topic_produce_requests.get_or_create(&lbl).get() == 2);
+        assert2::assert!(m.topic_bytes_in.get_or_create(&lbl).get() == 3072);
     }
 
     #[test]
@@ -1239,7 +1238,7 @@ mod tests {
         // 0, not a phantom series.
         m.record_produce_messages("t", 3);
         m.record_produce_messages("t", 7);
-        assert!(m.topic_messages_in.get_or_create(&lbl).get() == 10);
+        assert2::assert!(m.topic_messages_in.get_or_create(&lbl).get() == 10);
     }
 
     #[test]
@@ -1270,13 +1269,13 @@ mod tests {
             ("failed", &m.failed_authentication, &unknown, 1),
             ("successful", &m.successful_authentication, &unknown, 0),
         ];
-        for (outcome, family, label, want) in cases {
+        for (_outcome, family, label, want) in cases {
             // Each read is its own statement: `get_or_create` returns a
             // read guard, and a first-materialization on the same family
             // takes the write lock — holding several guards in one
             // expression self-deadlocks.
             let got = family.get_or_create(label).get();
-            assert!(got == want, "{outcome} auth for {:?}", label.mechanism);
+            assert2::assert!(got == want);
         }
     }
 
@@ -1303,7 +1302,7 @@ mod tests {
 
         for (label, want) in [(&crabka_100, 2), (&crabka_101, 1), (&other, 1)] {
             let got = m.client_software_versions.get_or_create(label).get();
-            assert!(got == want, "label {label:?}");
+            assert2::assert!(got == want);
         }
     }
 
@@ -1316,7 +1315,7 @@ mod tests {
         let mut body = String::new();
         let registry = m.registry.lock().await;
         prometheus_client::encoding::text::encode(&mut body, &registry).unwrap();
-        assert!(body.contains(
+        assert2::assert!(body.contains(
             "crabka_broker_client_software_versions_total{software_name=\"render-lib\",software_version=\"2.0.0\"} 1"
         ));
     }
@@ -1349,22 +1348,18 @@ mod tests {
             ("bytes_out", &m.partition_bytes_out, &lbl_p0, 2048),
             ("cpu_micros", &m.partition_cpu_micros, &lbl_p0, 500),
         ];
-        for (family_name, family, label, want) in cases {
+        for (_family_name, family, label, want) in cases {
             // Each read is its own statement: `get_or_create` returns a
             // read guard, and a first-materialization on the same family
             // takes the write lock — holding several guards in one
             // expression self-deadlocks.
             let got = family.get_or_create(label).get();
-            assert!(
-                got == want,
-                "{family_name} for partition {}",
-                label.partition
-            );
+            assert2::assert!(got == want);
         }
         // `partition_disk_bytes` is a Gauge family (i64), so it stays
         // out of the Counter table above.
         let disk_p0 = m.partition_disk_bytes.get_or_create(&lbl_p0).get();
-        assert!(disk_p0 == 1_000_000);
+        assert2::assert!(disk_p0 == 1_000_000);
     }
 
     #[test]
@@ -1394,11 +1389,11 @@ mod tests {
             ("failed_fetch", &m.topic_failed_fetch_requests, &good, 1),
             ("failed_fetch", &m.topic_failed_fetch_requests, &bad, 0),
         ];
-        for (family_name, family, label, want) in cases {
+        for (_family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert!(got == want, "{family_name} for {:?}", label.topic);
+            assert2::assert!(got == want);
         }
     }
 
@@ -1412,8 +1407,8 @@ mod tests {
             partition: 0,
         };
         // Counters still exist (get_or_create creates them) but at 0.
-        assert!(m.partition_bytes_in.get_or_create(&lbl).get() == 0);
-        assert!(m.partition_bytes_out.get_or_create(&lbl).get() == 0);
+        assert2::assert!(m.partition_bytes_in.get_or_create(&lbl).get() == 0);
+        assert2::assert!(m.partition_bytes_out.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1425,7 +1420,7 @@ mod tests {
             partition: 0,
         };
         // Helper short-circuits at 0; the label entry isn't created.
-        assert!(m.partition_cpu_micros.get_or_create(&lbl).get() == 0);
+        assert2::assert!(m.partition_cpu_micros.get_or_create(&lbl).get() == 0);
     }
 
     #[test]
@@ -1433,20 +1428,20 @@ mod tests {
         let m = BrokerMetrics::new();
         // Default for a fresh broker (in-memory placeholder, or no
         // tiered-storage at all) is `0`.
-        assert!(m.tiered_storage_rlmm_topic_backed.get() == 0);
+        assert2::assert!(m.tiered_storage_rlmm_topic_backed.get() == 0);
         // The bootstrap task bumps it to `1` after a successful
         // SwappableRlmm swap.
         m.tiered_storage_rlmm_topic_backed.set(1);
-        assert!(m.tiered_storage_rlmm_topic_backed.get() == 1);
+        assert2::assert!(m.tiered_storage_rlmm_topic_backed.get() == 1);
     }
 
     #[test]
     fn tiered_storage_rlmm_bootstrap_attempts_counts_up() {
         let m = BrokerMetrics::new();
-        assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 0);
+        assert2::assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 0);
         m.tiered_storage_rlmm_bootstrap_attempts.inc();
         m.tiered_storage_rlmm_bootstrap_attempts.inc();
-        assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 2);
+        assert2::assert!(m.tiered_storage_rlmm_bootstrap_attempts.get() == 2);
     }
 
     #[test]
@@ -1491,11 +1486,11 @@ mod tests {
                 2,
             ),
         ];
-        for (family_name, family, label, want) in cases {
+        for (_family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert!(got == want, "{family_name} for {:?}", label.topic);
+            assert2::assert!(got == want);
         }
     }
 
@@ -1535,11 +1530,11 @@ mod tests {
             ("api_requests", &m.api_requests, &produce, 0),
             ("api_requests", &m.api_requests, &unknown, 0),
         ];
-        for (family_name, family, label, want) in cases {
+        for (_family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert!(got == want, "{family_name} for {:?}", label.api_key);
+            assert2::assert!(got == want);
         }
     }
 
@@ -1563,7 +1558,7 @@ mod tests {
         };
         for (label, want) in [(&produce, 2), (&fetch, 1), (&unknown, 1)] {
             let got = m.api_requests.get_or_create(label).get();
-            assert!(got == want, "api_key {:?}", label.api_key);
+            assert2::assert!(got == want);
         }
     }
 
@@ -1602,15 +1597,11 @@ mod tests {
             ("replication_out", &m.replication_bytes_out, &lbl3, 4_000),
             ("replication_out", &m.replication_bytes_out, &lbl4, 0),
         ];
-        for (family_name, family, label, want) in cases {
+        for (_family_name, family, label, want) in cases {
             // One `get_or_create` guard per statement (first
             // materialization takes the family write lock).
             let got = family.get_or_create(label).get();
-            assert!(
-                got == want,
-                "{family_name} for partition {}",
-                label.partition
-            );
+            assert2::assert!(got == want);
         }
     }
 
@@ -1636,25 +1627,21 @@ mod tests {
         };
         // Histogram Family exposes sample count via the encoded `_count`;
         // assert the render + the error/gauge values here.
-        assert!(m.request_errors.get_or_create(&fetch).get() == 2);
-        assert!(m.in_flight_requests.get() == 1);
-        assert!(m.active_connections.get() == 5);
+        assert2::assert!(m.request_errors.get_or_create(&fetch).get() == 2);
+        assert2::assert!(m.in_flight_requests.get() == 1);
+        assert2::assert!(m.active_connections.get() == 5);
 
         let mut buf = String::new();
         let r = m.registry.lock().await;
         prometheus_client::encoding::text::encode(&mut buf, &r).unwrap();
-        assert!(
-            buf.contains("crabka_broker_request_duration_seconds_count{api_key=\"Produce\"} 2"),
-            "expected 2 Produce latency samples in:\n{buf}"
+        assert2::assert!(
+            buf.contains("crabka_broker_request_duration_seconds_count{api_key=\"Produce\"} 2")
         );
-        assert!(
-            buf.contains("crabka_broker_request_errors_total{api_key=\"Fetch\"} 2"),
-            "expected 2 Fetch request errors in:\n{buf}"
-        );
-        assert!(buf.contains("crabka_broker_in_flight_requests 1"));
-        assert!(buf.contains("crabka_broker_active_connections 5"));
+        assert2::assert!(buf.contains("crabka_broker_request_errors_total{api_key=\"Fetch\"} 2"));
+        assert2::assert!(buf.contains("crabka_broker_in_flight_requests 1"));
+        assert2::assert!(buf.contains("crabka_broker_active_connections 5"));
         // Unknown api_key folds under the shared "Unknown" label.
-        assert!(buf.contains("api_key=\"Unknown\""), "unknown label missing");
+        assert2::assert!(buf.contains("api_key=\"Unknown\""));
         // Keep `produce` referenced to document the intended label.
         let _ = produce;
     }

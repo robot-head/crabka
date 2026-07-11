@@ -130,7 +130,6 @@ pub enum AuthError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -143,10 +142,7 @@ mod tests {
             (SaslMechanism::OAuthBearer, AuthMethod::SaslOAuthBearer),
             (SaslMechanism::Gssapi, AuthMethod::SaslGssapi),
         ] {
-            assert!(
-                AuthMethod::from_sasl(mechanism) == want,
-                "case {mechanism:?}"
-            );
+            assert2::assert!(AuthMethod::from_sasl(mechanism) == want);
         }
     }
 
@@ -156,8 +152,8 @@ mod tests {
             principal_type: "User".into(),
             name: "alice".into(),
         };
-        assert!(p.to_string() == "User:alice");
+        assert2::assert!(p.to_string() == "User:alice");
         // FromStr is the inverse.
-        assert!("User:alice".parse::<KafkaPrincipal>().unwrap() == p);
+        assert2::assert!("User:alice".parse::<KafkaPrincipal>().unwrap() == p);
     }
 }

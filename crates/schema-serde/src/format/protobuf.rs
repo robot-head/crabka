@@ -218,9 +218,13 @@ mod tests {
             ..Default::default()
         };
         let text = file_to_proto(&file);
-        check!(text.contains("package demo;"));
-        check!(text.contains("message Order {"));
-        check!(text.contains("id = 1;"));
+        check!(
+            (
+                text.contains("package demo;"),
+                text.contains("message Order {"),
+                text.contains("id = 1;"),
+            ) == (true, true, true)
+        );
     }
 
     #[test]
@@ -351,9 +355,6 @@ mod tests {
         let frame = wire::encode_protobuf(11, &[0], &[]);
 
         let err = serde.deserialize("orders", &frame).unwrap_err();
-        assert!(
-            err.to_string().contains("messageType"),
-            "expected messageType mismatch error, got {err}"
-        );
+        assert2::assert!(err.to_string().contains("messageType"));
     }
 }

@@ -275,7 +275,7 @@ impl BlockIndex for TraceIndex {
 mod tests {
     use std::collections::{BTreeMap, BTreeSet};
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::bloom::ShardedTraceBloom;
@@ -329,33 +329,39 @@ mod tests {
     #[test]
     fn by_id_locate_uses_bloom_and_time_no_global_map() {
         let idx = seed();
-        let got = idx.candidate_blocks_for_trace("t", &tid(1), 0, 1_000);
-        assert!(got == vec!["b1".to_string()]);
-        let got = idx.candidate_blocks_for_trace("t", &tid(3), 0, 1_000);
-        assert!(got == vec!["b2".to_string()]);
-        let got = idx.candidate_blocks_for_trace("t", &tid(1), 500, 1_000);
-        assert!(got.is_empty());
+        for (_name, trace_id, min_ts, expected) in [
+            ("first trace", tid(1), 0, vec!["b1".to_string()]),
+            ("second trace", tid(3), 0, vec!["b2".to_string()]),
+            ("outside time window", tid(1), 500, Vec::new()),
+        ] {
+            assert2::assert!(
+                idx.candidate_blocks_for_trace("t", &trace_id, min_ts, 1_000) == expected
+            );
+        }
     }
 
     #[test]
     fn tag_pruning_keeps_only_blocks_that_can_contain_the_tag_value() {
         let idx = seed();
-        let got = idx.prune_blocks_by_tag("t", "service.name", Some("api"), 0, 1_000);
-        assert!(got == vec!["b1".to_string()]);
-        let got = idx.prune_blocks_by_tag("t", "service.name", Some("web"), 0, 1_000);
-        assert!(got == vec!["b2".to_string()]);
-        let got = idx.prune_blocks_by_tag("t", "service.name", Some("nope"), 0, 1_000);
-        assert!(got.is_empty());
+        for (_name, value, expected) in [
+            ("api", "api", vec!["b1".to_string()]),
+            ("web", "web", vec!["b2".to_string()]),
+            ("absent", "nope", Vec::new()),
+        ] {
+            assert2::assert!(
+                idx.prune_blocks_by_tag("t", "service.name", Some(value), 0, 1_000) == expected
+            );
+        }
     }
 
     #[test]
     fn tag_discovery_unions_blocks_in_window() {
         let idx = seed();
         let names = idx.tag_names("t", 0, 1_000);
-        assert!(names == vec!["service.name".to_string()]);
         let mut vals = idx.tag_values("t", "service.name", 0, 1_000);
         vals.sort();
-        assert!(vals == vec!["api".to_string(), "web".to_string()]);
+        assert2::assert!(names == vec!["service.name".to_string()]);
+        assert2::assert!(vals == vec!["api".to_string(), "web".to_string()]);
     }
 
     #[test]
@@ -364,8 +370,8 @@ mod tests {
         idx.add_trace_block("zeta", stats("b1", 0, 100, &[1], &[]));
         idx.add_trace_block("alpha", stats("b2", 0, 100, &[2], &[]));
         idx.add_trace_block("alpha", stats("b3", 0, 100, &[3], &[]));
-        assert!(idx.tenants() == vec!["alpha".to_string(), "zeta".to_string()]);
-        assert!(TraceIndex::new().tenants().is_empty());
+        assert2::assert!(idx.tenants() == vec!["alpha".to_string(), "zeta".to_string()]);
+        assert2::assert!(TraceIndex::new().tenants().is_empty());
     }
 
     #[test]
@@ -374,12 +380,14 @@ mod tests {
         // b1 is [0,100], b2 is [200,300]. A window of [400,500] overlaps
         // neither. With `&&`→`||` the `min_ts <= max_ts` half stays true for
         // both blocks, so the filter would wrongly admit them.
-        let got = idx.prune_blocks_by_tag("t", "service.name", None, 400, 500);
-        assert!(got.is_empty());
-
-        // A window snug on b1 only: [50,150] overlaps b1 but not b2.
-        let got = idx.prune_blocks_by_tag("t", "service.name", None, 50, 150);
-        assert!(got == vec!["b1".to_string()]);
+        for (_name, min_ts, max_ts, expected) in [
+            ("above both blocks", 400, 500, Vec::new()),
+            ("overlaps first block", 50, 150, vec!["b1".to_string()]),
+        ] {
+            assert2::assert!(
+                idx.prune_blocks_by_tag("t", "service.name", None, min_ts, max_ts) == expected
+            );
+        }
     }
 
     #[test]
@@ -388,10 +396,12 @@ mod tests {
         idx.add_trace_block("t", stats("b1", 0, 100, &[1], &[("a", "x")]));
         idx.add_trace_block("t", stats("b2", 200, 300, &[2], &[("b", "y")]));
 
-        // Window [50,150] overlaps only b1 → only its tag name.
-        assert!(idx.tag_names("t", 50, 150) == vec!["a".to_string()]);
-        // Window [400,500] overlaps neither → empty. `&&`→`||` would leak tags.
-        assert!(idx.tag_names("t", 400, 500).is_empty());
+        for (_name, min_ts, max_ts, expected) in [
+            ("overlaps first block", 50, 150, vec!["a".to_string()]),
+            ("above both blocks", 400, 500, Vec::new()),
+        ] {
+            assert2::assert!(idx.tag_names("t", min_ts, max_ts) == expected);
+        }
     }
 
     #[test]
@@ -399,11 +409,12 @@ mod tests {
         use crate::block_index::BlockIndex;
 
         let idx = seed();
-        // Window above both blocks: `&&`→`||` would admit b1/b2 via the
-        // still-true `min_ts <= max_ts` half.
-        assert!(BlockIndex::candidate_blocks(&idx, "t", 400, 500).is_empty());
-        // Snug on b2 only.
-        assert!(BlockIndex::candidate_blocks(&idx, "t", 250, 350) == vec!["b2".to_string()]);
+        for (_name, min_ts, max_ts, expected) in [
+            ("above both blocks", 400, 500, Vec::new()),
+            ("overlaps second block", 250, 350, vec!["b2".to_string()]),
+        ] {
+            assert2::assert!(BlockIndex::candidate_blocks(&idx, "t", min_ts, max_ts) == expected);
+        }
     }
 
     #[test]
@@ -413,8 +424,8 @@ mod tests {
         let idx = seed();
         let mut got = BlockIndex::candidate_blocks(&idx, "t", 0, 1_000);
         got.sort();
-        assert!(got == vec!["b1".to_string(), "b2".to_string()]);
-        assert!(idx.block_count("t") == 2);
+        assert2::assert!(got == vec!["b1".to_string(), "b2".to_string()]);
+        assert2::assert!(idx.block_count("t") == 2);
     }
 
     #[test]
@@ -434,8 +445,8 @@ mod tests {
         BlockIndex::add_block(&mut idx, &meta);
         BlockIndex::add_block(&mut idx, &meta);
 
-        assert!(idx.block_count("t") == 1);
-        assert!(
+        assert2::assert!(idx.block_count("t") == 1);
+        assert2::assert!(
             BlockIndex::candidate_blocks(&idx, "t", 0, 100)
                 == vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
         );
@@ -457,7 +468,7 @@ mod tests {
 
         BlockIndex::add_block(&mut idx, &meta);
 
-        assert!(
+        assert2::assert!(
             idx.candidate_blocks_for_trace("t", &tid(99), 0, 100)
                 == vec!["traces/t/00000/00000000000000000001.parquet".to_string()]
         );
@@ -476,10 +487,12 @@ mod tests {
         let old_keys = vec!["b1".to_string(), "b2".to_string()];
 
         idx.replace_trace_blocks("t", &old_keys, replacement.clone());
-        idx.replace_trace_blocks("t", &old_keys, replacement);
+        idx.replace_trace_blocks("t", &old_keys, replacement.clone());
 
-        assert!(idx.trace_blocks("t").len() == 1);
-        assert!(idx.trace_blocks("t")[0].object_key == "compacted-b1-b2");
+        let blocks = idx.trace_blocks("t");
+        assert2::assert!(
+            serde_json::to_value(blocks).unwrap() == serde_json::to_value([replacement]).unwrap()
+        );
     }
 
     #[tokio::test]
@@ -491,7 +504,7 @@ mod tests {
         idx.save(&store, "index/traces.json").await.unwrap();
         let loaded = TraceIndex::load(&store, "index/traces.json").await.unwrap();
         let got = loaded.candidate_blocks_for_trace("t", &tid(1), 0, 1_000);
-        assert!(got == vec!["b1".to_string()]);
+        assert2::assert!(got == vec!["b1".to_string()]);
     }
 
     #[tokio::test]
@@ -543,7 +556,7 @@ mod tests {
             count += 1;
         }
 
-        assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
+        assert2::assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
     }
 
     #[tokio::test]
@@ -577,7 +590,7 @@ mod tests {
             .unwrap();
 
         let loaded = TraceIndex::load(&store, "index/corrupt.json").await;
-        assert!(loaded.is_err());
+        assert2::assert!(loaded.is_err());
     }
 
     #[tokio::test]
@@ -609,6 +622,6 @@ mod tests {
             .unwrap();
 
         let loaded = TraceIndex::load(&store, "index/empty-shards.json").await;
-        assert!(loaded.is_err());
+        assert2::assert!(loaded.is_err());
     }
 }

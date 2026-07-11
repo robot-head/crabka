@@ -17,8 +17,6 @@
 
 use std::time::{Duration, Instant};
 
-use assert2::assert;
-
 mod support;
 
 use crabka_protocol::{
@@ -64,10 +62,7 @@ async fn await_txn_coordinator(client: &crabka_client_core::Client, tid: &str) {
         if node >= 0 {
             return;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "txn coordinator never became available: {fc:?}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // intentional: the FindCoordinator RPC itself triggers the lazy
         // __transaction_state leader election; coordinator availability is not
         // in the metadata image and has no awaiter/metric, so poll the RPC.
@@ -92,7 +87,7 @@ async fn create_topic(client: &crabka_client_core::Client) {
         })
         .await
         .expect("create topic");
-    assert!(resp.topics[0].error_code == 0, "create topic: {resp:?}");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 /// Resolve `TOPIC`'s `topic_id` via Metadata. The v8+ `OffsetFetch` `groups[]`
@@ -195,10 +190,7 @@ async fn begin_and_commit_offsets(
         if init.error_code == 0 {
             break (init.producer_id, init.producer_epoch);
         }
-        assert!(
-            init.error_code == NOT_COORDINATOR && Instant::now() <= deadline,
-            "InitProducerId: {init:?}"
-        );
+        assert2::assert!(init.error_code == NOT_COORDINATOR && Instant::now() <= deadline);
         // intentional: NOT_COORDINATOR clears once the elected leader installs
         // the txn coordinator locally — coordinator-local state, not in the
         // metadata image and with no awaiter/metric; bounded RPC-response poll.
@@ -217,7 +209,7 @@ async fn begin_and_commit_offsets(
         })
         .await
         .expect("add offsets to txn");
-    assert!(add.error_code == 0, "AddOffsetsToTxn: {add:?}");
+    assert2::assert!(add.error_code == 0);
 
     // TxnOffsetCommit: empty member_id + generation_id -1 = simple consumer (no
     // membership fencing). Appends a transactional offset record + buffers it.
@@ -242,10 +234,7 @@ async fn begin_and_commit_offsets(
         })
         .await
         .expect("txn offset commit");
-    assert!(
-        toc.topics[0].partitions[0].error_code == 0,
-        "TxnOffsetCommit: {toc:?}"
-    );
+    assert2::assert!(toc.topics[0].partitions[0].error_code == 0);
 
     (pid, epoch)
 }
@@ -266,10 +255,7 @@ async fn txn_offset_commit_visible_via_offset_fetch_after_commit_marker() {
 
     // Pre-commit: the transactional offset is held under the LSO and NOT yet
     // surfaced — Kafka makes it visible to OffsetFetch only after the marker.
-    assert!(
-        fetch_offset(&p.client, group, topic_id).await == -1,
-        "txn offset must be invisible before the COMMIT marker"
-    );
+    assert2::assert!(fetch_offset(&p.client, group, topic_id).await == -1);
 
     // EndTxn(commit) writes the COMMIT marker → materializes the buffer.
     let end = p
@@ -283,13 +269,10 @@ async fn txn_offset_commit_visible_via_offset_fetch_after_commit_marker() {
         })
         .await
         .expect("end txn commit");
-    assert!(end.error_code == 0, "EndTxn(commit): {end:?}");
+    assert2::assert!(end.error_code == 0);
 
     // Post-commit: the offset is now visible via OffsetFetch.
-    assert!(
-        fetch_offset(&p.client, group, topic_id).await == 3,
-        "txn offset must be visible after the COMMIT marker"
-    );
+    assert2::assert!(fetch_offset(&p.client, group, topic_id).await == 3);
 
     p.broker.shutdown().await;
 }
@@ -319,13 +302,10 @@ async fn txn_offset_commit_dropped_on_abort_marker() {
         })
         .await
         .expect("end txn abort");
-    assert!(end.error_code == 0, "EndTxn(abort): {end:?}");
+    assert2::assert!(end.error_code == 0);
 
     // Still absent: an aborted transactional offset is never committed.
-    assert!(
-        fetch_offset(&p.client, group, topic_id).await == -1,
-        "txn offset must stay absent after the ABORT marker"
-    );
+    assert2::assert!(fetch_offset(&p.client, group, topic_id).await == -1);
 
     p.broker.shutdown().await;
 }

@@ -534,57 +534,60 @@ pub(crate) fn kafka_error_name(code: i16) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn kafka_error_name_known_codes() {
-        for (code, want) in [
-            (0, "NONE"),
-            (36, "TOPIC_ALREADY_EXISTS"),
-            (41, "NOT_CONTROLLER"),
+        for (_name, code, want) in [
+            ("success", 0, "NONE"),
+            ("topic exists", 36, "TOPIC_ALREADY_EXISTS"),
+            ("not controller", 41, "NOT_CONTROLLER"),
         ] {
-            assert!(kafka_error_name(code) == want);
+            assert2::assert!(kafka_error_name(code) == want);
         }
     }
 
     #[test]
     fn users_kafka_error_name_includes_scram_describe_codes() {
-        for (code, want) in [
-            (31, "CLUSTER_AUTHORIZATION_FAILED"),
-            (33, "UNSUPPORTED_SASL_MECHANISM"),
-            (35, "UNSUPPORTED_VERSION"),
-            (66, "DELEGATION_TOKEN_EXPIRED"),
-            (83, "ELIGIBLE_LEADERS_NOT_AVAILABLE"),
-            (84, "ELECTION_NOT_NEEDED"),
-            (91, "RESOURCE_NOT_FOUND"),
-            (92, "DUPLICATE_RESOURCE"),
-            (93, "UNACCEPTABLE_CREDENTIAL"),
+        for (_name, code, want) in [
+            ("cluster authorization", 31, "CLUSTER_AUTHORIZATION_FAILED"),
+            ("unsupported SASL", 33, "UNSUPPORTED_SASL_MECHANISM"),
+            ("unsupported version", 35, "UNSUPPORTED_VERSION"),
+            ("delegation token expired", 66, "DELEGATION_TOKEN_EXPIRED"),
+            (
+                "eligible leaders unavailable",
+                83,
+                "ELIGIBLE_LEADERS_NOT_AVAILABLE",
+            ),
+            ("election unnecessary", 84, "ELECTION_NOT_NEEDED"),
+            ("resource not found", 91, "RESOURCE_NOT_FOUND"),
+            ("duplicate resource", 92, "DUPLICATE_RESOURCE"),
+            ("unacceptable credential", 93, "UNACCEPTABLE_CREDENTIAL"),
         ] {
-            assert!(kafka_error_name(code) == want);
+            assert2::assert!(kafka_error_name(code) == want);
         }
     }
 
     #[test]
     fn users_kafka_error_name_includes_ineligible_replica() {
-        assert!(kafka_error_name(107) == "INELIGIBLE_REPLICA");
+        assert2::assert!(kafka_error_name(107) == "INELIGIBLE_REPLICA");
     }
 
     #[test]
     fn kafka_error_name_unknown_returns_unknown() {
-        assert!(kafka_error_name(9999) == "UNKNOWN");
+        assert2::assert!(kafka_error_name(9999) == "UNKNOWN");
     }
 
     #[test]
     fn kafka_error_if_zero_code_is_none() {
-        assert!(kafka_error_if(0, None).is_none());
+        assert2::assert!(kafka_error_if(0, None).is_none());
     }
 
     #[test]
     fn kafka_error_if_nonzero_carries_name() {
         let e = kafka_error_if(36, Some("dup".into())).unwrap();
-        assert!(
+        assert2::assert!(
             e == KafkaError {
                 code: 36,
                 name: "TOPIC_ALREADY_EXISTS",
@@ -610,6 +613,6 @@ mod tests {
         // 127.0.0.1:1 has no listener; the secured connect must fail —
         // proving the security arg is threaded (not a type error).
         let res = AdminClient::connect_secured(&["127.0.0.1:1".to_string()], Some(security)).await;
-        assert!(res.is_err(), "connect to closed port must fail");
+        assert2::assert!(res.is_err());
     }
 }

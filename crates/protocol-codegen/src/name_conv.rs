@@ -101,7 +101,6 @@ fn is_reserved_keyword(s: &str) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -113,34 +112,47 @@ mod tests {
             ("aclEntries", "acl_entries"),
             ("zkMigrationReady", "zk_migration_ready"),
         ] {
-            assert!(field_name(input) == want);
+            assert2::assert!(field_name(input) == want);
         }
     }
 
     #[test]
     fn pascal_to_snake() {
-        assert!(field_name("ZkMigrationReady") == "zk_migration_ready");
-        assert!(field_name("ApiVersionsRequest") == "api_versions_request");
+        for (_case, input, want) in [
+            ("initialism", "ZkMigrationReady", "zk_migration_ready"),
+            ("words", "ApiVersionsRequest", "api_versions_request"),
+        ] {
+            assert2::assert!(field_name(input) == want);
+        }
     }
 
     #[test]
     fn acronym_runs_stay_together() {
         // KafkaClusterID -> kafka_cluster_id (acronym ID at the end)
-        assert!(field_name("KafkaClusterID") == "kafka_cluster_id");
-        // HTTPSEndpoint -> https_endpoint (acronym followed by Title)
-        assert!(field_name("HTTPSEndpoint") == "https_endpoint");
+        let cases = [
+            ("suffix", "KafkaClusterID", "kafka_cluster_id"),
+            // HTTPSEndpoint -> https_endpoint (acronym followed by Title)
+            ("prefix", "HTTPSEndpoint", "https_endpoint"),
+        ];
+        for (_case, input, want) in cases {
+            assert2::assert!(field_name(input) == want);
+        }
     }
 
     #[test]
     fn reserved_keywords_get_underscore() {
         for (input, want) in [("type", "type_"), ("Match", "match_"), ("loop", "loop_")] {
-            assert!(field_name(input) == want);
+            assert2::assert!(field_name(input) == want);
         }
     }
 
     #[test]
     fn module_name_uses_snake_case() {
-        assert!(module_name("ApiVersionsRequest") == "api_versions_request");
-        assert!(module_name("OffsetCommitResponse") == "offset_commit_response");
+        for (_case, input, want) in [
+            ("request", "ApiVersionsRequest", "api_versions_request"),
+            ("response", "OffsetCommitResponse", "offset_commit_response"),
+        ] {
+            assert2::assert!(module_name(input) == want);
+        }
     }
 }

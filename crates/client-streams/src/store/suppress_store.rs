@@ -328,31 +328,25 @@ mod tests {
         let mut s = store();
 
         // Not interactively queryable, not cache-aware.
-        assert!(s.as_iq().is_none());
-        assert!(!s.is_cached_erased());
+        assert2::assert!(s.as_iq().is_none());
+        assert2::assert!(!s.is_cached_erased());
         let cache = Arc::new(Mutex::new(NamedCache::new("sup".into())));
-        assert!(
-            !s.enable_cache_erased(cache),
-            "suppress store is not cache-aware"
-        );
-        assert!(
-            !s.is_cached_erased(),
-            "still not cached after the no-op enable"
-        );
+        assert2::assert!(!s.enable_cache_erased(cache));
+        assert2::assert!(!s.is_cached_erased());
 
         // The default flush_cache_into forwards nothing even with a staged entry.
         s.put("a".into(), 30, Change::update(None, 1), ctx(30))
             .await;
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
-        assert!(buffer.is_empty(), "no record cache → no forwarded change");
+        assert2::assert!(buffer.is_empty());
 
         // take_changelog_ts wraps each changelog entry with a None timestamp.
         let cl_ts = s.take_changelog_ts();
-        assert_eq!(cl_ts.len(), 1);
-        assert!(cl_ts[0].2.is_none(), "default timestamp is None");
+        assert2::assert!(cl_ts.len() == 1);
+        assert2::assert!(cl_ts.first().and_then(|entry| entry.2) == None);
         // The wrapped take drained the buffer.
-        assert!(s.take_changelog().is_empty());
+        assert2::assert!(s.take_changelog().is_empty());
 
         // set_record_context default is a no-op (must not panic).
         s.set_record_context(crate::processor::record::RecordContext {
@@ -370,17 +364,31 @@ mod tests {
             .await;
         s.put("b".into(), 10, Change::update(None, 2), ctx(10))
             .await;
-        check!(s.len() == 2);
-        check!(!s.is_empty());
+        check!((s.len(), s.is_empty()) == (2, false));
         check!(s.byte_size() > 0);
         // threshold 30 drains both, earliest buffer_time first.
         let out = s.evict_while(30).await;
-        check!(out.len() == 2);
-        check!(out[0].0 == "b" && out[0].1.new == Some(2) && out[0].2 == 10);
-        check!(out[1].0 == "a" && out[1].1.new == Some(1) && out[1].2 == 30);
-        check!(s.len() == 0);
-        check!(s.is_empty());
-        check!(s.byte_size() == 0);
+        check!(
+            out == vec![
+                (
+                    "b".into(),
+                    Change {
+                        old: None,
+                        new: Some(2)
+                    },
+                    10
+                ),
+                (
+                    "a".into(),
+                    Change {
+                        old: None,
+                        new: Some(1)
+                    },
+                    30
+                ),
+            ]
+        );
+        check!((s.len(), s.is_empty(), s.byte_size()) == (0, true, 0));
     }
 
     #[tokio::test]
@@ -392,9 +400,16 @@ mod tests {
             .await;
         check!(s.len() == 1);
         let out = s.evict_while(10).await;
-        check!(out.len() == 1);
-        check!(out[0].1.new == Some(2));
-        check!(out[0].1.old == Some(1));
+        check!(
+            out == vec![(
+                "k".into(),
+                Change {
+                    old: Some(1),
+                    new: Some(2)
+                },
+                12,
+            )]
+        );
     }
 
     #[tokio::test]
@@ -405,9 +420,28 @@ mod tests {
         s.put("b".into(), 10, Change::update(None, 2), ctx(10))
             .await;
         let first = s.evict_oldest().await.unwrap();
-        check!(first.0 == "b" && first.1.new == Some(2));
         let second = s.evict_oldest().await.unwrap();
-        check!(second.0 == "a" && second.1.new == Some(1));
+        check!(
+            (first, second)
+                == (
+                    (
+                        "b".into(),
+                        Change {
+                            old: None,
+                            new: Some(2)
+                        },
+                        10
+                    ),
+                    (
+                        "a".into(),
+                        Change {
+                            old: None,
+                            new: Some(1)
+                        },
+                        30
+                    ),
+                )
+        );
         check!(s.evict_oldest().await.is_none());
     }
 
@@ -419,15 +453,17 @@ mod tests {
         s.put("b".into(), 20, Change::update(None, 2), ctx(20))
             .await;
         let cl = s.take_changelog();
-        check!(cl.len() == 2);
-        check!(cl.iter().all(|(_, v)| v.is_some()));
+        check!((cl.len(), cl.iter().all(|(_, v)| v.is_some())) == (2, true));
         // evicting both logs a None tombstone keyed by the serialized key bytes.
         let _ = s.evict_while(20).await;
         let cl = s.take_changelog();
-        check!(cl.len() == 2);
-        check!(cl.iter().all(|(_, v)| v.is_none()));
-        check!(cl[0].0.as_ref() == b"a");
-        check!(cl[1].0.as_ref() == b"b");
+        check!(
+            (
+                cl.len(),
+                cl.iter().all(|(_, v)| v.is_none()),
+                cl.iter().map(|(key, _)| key.as_ref()).collect::<Vec<_>>(),
+            ) == (2, true, vec![b"a".as_slice(), b"b".as_slice()])
+        );
     }
 
     #[tokio::test]
@@ -446,11 +482,16 @@ mod tests {
         check!(dst.len() == 1);
         check!(dst.take_changelog().is_empty()); // restore re-emits nothing
         let out = dst.evict_while(42).await;
-        check!(out.len() == 1);
-        check!(out[0].0 == "k");
-        check!(out[0].1.new == Some(9));
-        check!(out[0].1.old == Some(7));
-        check!(out[0].2 == 42);
+        check!(
+            out == vec![(
+                "k".into(),
+                Change {
+                    old: Some(7),
+                    new: Some(9)
+                },
+                42,
+            )]
+        );
 
         // Re-buffer, then a None tombstone removes it.
         dst.apply_changelog(
@@ -528,14 +569,31 @@ mod tests {
         // Closing window [0,10) (threshold 10) emits a@[0,10)'s final value (2);
         // b@[20,30) stays buffered until its own close.
         let closed = restored.evict_while(10).await;
-        check!(closed.len() == 1);
-        check!(closed[0].0 == wk("a", 0));
-        check!(closed[0].1.new == Some(2));
-        check!(restored.len() == 1);
+        check!(
+            (closed, restored.len(),)
+                == (
+                    vec![(
+                        wk("a", 0),
+                        Change {
+                            old: None,
+                            new: Some(2)
+                        },
+                        5
+                    )],
+                    1,
+                )
+        );
         // Raising the threshold closes b@[20,30) too.
         let rest = restored.evict_while(30).await;
-        check!(rest.len() == 1);
-        check!(rest[0].0 == wk("b", 20));
-        check!(rest[0].1.new == Some(7));
+        check!(
+            rest == vec![(
+                wk("b", 20),
+                Change {
+                    old: None,
+                    new: Some(7)
+                },
+                25
+            )]
+        );
     }
 }

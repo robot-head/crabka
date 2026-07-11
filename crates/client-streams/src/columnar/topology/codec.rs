@@ -280,10 +280,16 @@ mod tests {
 
     #[test]
     fn reserved_columns_are_distinct_and_underscored() {
-        check!(RESERVED_COLUMNS.len() == 4);
-        for c in RESERVED_COLUMNS {
-            check!(c.starts_with("__"));
-        }
+        let actual = RESERVED_COLUMNS.map(|column| (column, column.starts_with("__")));
+        check!(
+            actual
+                == [
+                    (COL_KEY, true),
+                    (COL_TIMESTAMP, true),
+                    (COL_PARTITION, true),
+                    (COL_OFFSET, true)
+                ]
+        );
     }
 
     #[test]
@@ -320,13 +326,11 @@ mod tests {
             },
         ];
         let df = codec.decode(&records).unwrap();
-        check!(df.height() == 3);
-        check!(df.column(COL_PARTITION).is_ok());
+        check!((df.height(), df.column(COL_PARTITION).is_ok()) == (3, true));
 
         let out = codec.encode(&df).unwrap();
-        check!(out.len() == 1);
         let back = PolarsIpcSerde.deserialize("t", &out[0].value).unwrap();
-        check!(back.height() == 3);
+        check!((out.len(), back.height()) == (1, 3));
     }
 
     #[test]
@@ -422,19 +426,42 @@ mod tests {
             },
         ];
         let df = codec.decode(&recs).unwrap();
-        check!(df.height() == 2);
-        check!(df.column("amount").is_ok());
-        check!(df.column(COL_KEY).is_ok());
+        check!(
+            (
+                df.height(),
+                df.column("amount").is_ok(),
+                df.column(COL_KEY).is_ok()
+            ) == (2, true, true)
+        );
 
         let out = codec.encode(&df).unwrap();
-        check!(out.len() == 2);
-        check!(out[0].key.as_deref() == Some(b"a".as_ref()));
-        let v0: Txn = serde_json::from_slice(&out[0].value).unwrap();
+        let actual = out
+            .iter()
+            .map(|record| {
+                (
+                    record.key.as_deref(),
+                    serde_json::from_slice::<Txn>(&record.value).unwrap(),
+                )
+            })
+            .collect::<Vec<_>>();
         check!(
-            v0 == Txn {
-                user: "a".into(),
-                amount: 5
-            }
+            actual
+                == vec![
+                    (
+                        Some(b"a".as_ref()),
+                        Txn {
+                            user: "a".into(),
+                            amount: 5
+                        }
+                    ),
+                    (
+                        Some(b"b".as_ref()),
+                        Txn {
+                            user: "b".into(),
+                            amount: 7
+                        }
+                    ),
+                ]
         );
     }
 
@@ -452,11 +479,27 @@ mod tests {
             }).collect();
             let df = codec.decode(&recs).unwrap();
             let out = codec.encode(&df).unwrap();
-            prop_assert_eq!(out.len(), recs.len());
-            for (o, r) in out.iter().zip(&recs) {
-                prop_assert_eq!(o.key.as_deref(), r.key.as_deref());
-                prop_assert_eq!(o.timestamp, r.timestamp);
-            }
+            let actual = out
+                .iter()
+                .map(|record| {
+                    (
+                        record.key.as_deref(),
+                        serde_json::from_slice::<Txn>(&record.value).unwrap(),
+                        record.timestamp,
+                    )
+                })
+                .collect::<Vec<_>>();
+            let expected = recs
+                .iter()
+                .map(|record| {
+                    (
+                        record.key.as_deref(),
+                        serde_json::from_slice::<Txn>(&record.value).unwrap(),
+                        record.timestamp,
+                    )
+                })
+                .collect::<Vec<_>>();
+            prop_assert_eq!(actual, expected);
         }
     }
 }

@@ -129,46 +129,56 @@ mod tests {
     }
 
     #[test]
-    fn reads_always_pass_through() {
-        assert_eq!(
-            decide(&Method::GET, false, &secondary("http://p:8081")),
-            Decision::PassThrough
-        );
-    }
-    #[test]
-    fn primary_processes_writes_locally() {
-        assert_eq!(
-            decide(&Method::POST, false, &primary("http://me:8081")),
-            Decision::PassThrough
-        );
-    }
-    #[test]
-    fn secondary_forwards_writes_to_primary() {
-        assert_eq!(
-            decide(&Method::POST, false, &secondary("http://p:8081")),
-            Decision::Forward("http://p:8081".into())
-        );
-    }
-    #[test]
-    fn secondary_without_primary_is_unavailable() {
-        let st = PrimaryState {
+    fn forwarding_decision_cases() {
+        let no_primary = PrimaryState {
             is_primary: false,
             primary_url: None,
         };
-        assert_eq!(decide(&Method::DELETE, false, &st), Decision::Unavailable);
-    }
-    #[test]
-    fn already_forwarded_to_non_primary_is_retriable() {
-        assert_eq!(
-            decide(&Method::POST, true, &secondary("http://p:8081")),
-            Decision::Retriable
-        );
-    }
-    #[test]
-    fn already_forwarded_to_primary_passes_through() {
-        assert_eq!(
-            decide(&Method::POST, true, &primary("http://me:8081")),
-            Decision::PassThrough
-        );
+        for (_name, method, forwarded, state, expected) in [
+            (
+                "read_secondary",
+                Method::GET,
+                false,
+                secondary("http://p:8081"),
+                Decision::PassThrough,
+            ),
+            (
+                "write_primary",
+                Method::POST,
+                false,
+                primary("http://me:8081"),
+                Decision::PassThrough,
+            ),
+            (
+                "write_secondary",
+                Method::POST,
+                false,
+                secondary("http://p:8081"),
+                Decision::Forward("http://p:8081".into()),
+            ),
+            (
+                "secondary_without_primary",
+                Method::DELETE,
+                false,
+                no_primary,
+                Decision::Unavailable,
+            ),
+            (
+                "forwarded_secondary",
+                Method::POST,
+                true,
+                secondary("http://p:8081"),
+                Decision::Retriable,
+            ),
+            (
+                "forwarded_primary",
+                Method::POST,
+                true,
+                primary("http://me:8081"),
+                Decision::PassThrough,
+            ),
+        ] {
+            assert2::assert!(decide(&method, forwarded, &state) == expected);
+        }
     }
 }

@@ -305,6 +305,8 @@ Reference these guidelines when:
 
 ### 20. Testing (MEDIUM)
 
+- Replace chains of field-by-field assertions with a single comparison against the complete expected struct or structured value whenever meaningful whole-value equality is available.
+- Use table-driven or parameterized tests when multiple scenarios exercise the same behavior and differ only in their inputs or expected outputs.
 - [`test-cfg-test-module`](rules/test-cfg-test-module.md) - Put unit tests in `#[cfg(test)] mod tests { }` within each module
 - [`test-use-super`](rules/test-use-super.md) - Use `use super::*;` in test modules to access parent module items
 - [`test-integration-dir`](rules/test-integration-dir.md) - Put integration tests in the `tests/` directory

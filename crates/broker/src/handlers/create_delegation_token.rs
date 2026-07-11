@@ -212,7 +212,6 @@ fn err_response(code: i16) -> CreateDelegationTokenResponse {
 mod tests {
     use std::{collections::HashSet, sync::Arc, time::Duration};
 
-    use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, Principal, SaslMechanism};
     use tempfile::TempDir;
@@ -242,7 +241,7 @@ mod tests {
         let mut rx = handle.watch_leader();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while rx.borrow().is_none() {
-            assert!(std::time::Instant::now() < deadline, "no leader in 5s");
+            assert2::assert!(std::time::Instant::now() < deadline);
             let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
         }
         handle
@@ -285,7 +284,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
+        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -313,7 +312,7 @@ mod tests {
         .await;
         // token_id is a random UUID; the HMAC-SHA-256 output is 32 bytes and
         // the response carries them raw.
-        assert!((resp.token_id.is_empty(), resp.hmac.len()) == (false, 32));
+        assert2::assert!((resp.token_id.is_empty(), resp.hmac.len()) == (false, 32));
         // 60s ceiling < 24h default renew period → both timestamps collapse
         // to issue + 60s (the chosen_lifetime ceiling).
         let expected = CreateDelegationTokenResponse {
@@ -330,7 +329,7 @@ mod tests {
             throttle_time_ms: 0,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         // Persisted in image with the same hmac + owner + timestamps.
         let img = controller.current_image();
         let stored = img
@@ -348,7 +347,7 @@ mod tests {
             max_timestamp_ms: resp.max_timestamp_ms,
             renewers: vec![],
         };
-        assert!(*stored == expected_stored);
+        assert2::assert!(*stored == expected_stored);
         controller.cancel().await;
     }
 
@@ -371,7 +370,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
+        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_REQUEST_NOT_ALLOWED);
         controller.cancel().await;
     }
 
@@ -412,7 +411,7 @@ mod tests {
             throttle_time_ms: 0,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         controller.cancel().await;
     }
 
@@ -434,14 +433,19 @@ mod tests {
             // Branch 1: ceiling = 1h < 24h renew period. The renew period is
             // clamped *down* to chosen_lifetime, so expiry must collapse to
             // max, and both must equal issue + 1h (the chosen_lifetime).
-            (one_hour, one_hour, one_hour),
+            ("short ceiling clamps renewal", one_hour, one_hour, one_hour),
             // Branch 2: ceiling = 7d > 24h renew period. Now the renew period
             // is the smaller of the two, so expiry (issue + 24h) and max
             // (issue + 7d, the ceiling untouched) must be SEPARATE, leaving
             // room for Renew to extend expiry up to max.
-            (seven_days, RENEW_24H_MS, seven_days),
+            (
+                "long ceiling preserves renewal window",
+                seven_days,
+                RENEW_24H_MS,
+                seven_days,
+            ),
         ];
-        for (ceiling_ms, expiry_delta, max_delta) in cases {
+        for (_case, ceiling_ms, expiry_delta, max_delta) in cases {
             let req = CreateDelegationTokenRequest {
                 max_lifetime_ms: -1,
                 ..Default::default()
@@ -470,7 +474,7 @@ mod tests {
                 throttle_time_ms: 0,
                 unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
             };
-            assert!(resp == expected, "ceiling {ceiling_ms}: {resp:?}");
+            assert2::assert!(resp == expected);
         }
 
         controller.cancel().await;
@@ -496,7 +500,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
+        assert2::assert!(resp.error_code == crate::codes::INVALID_REQUEST);
         controller.cancel().await;
     }
 
@@ -543,7 +547,7 @@ mod tests {
             throttle_time_ms: 0,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
         // Persisted owner matches the response owner.
         let img = controller.current_image();
         let stored = img
@@ -561,7 +565,7 @@ mod tests {
             max_timestamp_ms: resp.max_timestamp_ms,
             renewers: vec![],
         };
-        assert!(*stored == expected_stored);
+        assert2::assert!(*stored == expected_stored);
         controller.cancel().await;
     }
 
@@ -591,7 +595,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED);
+        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTHORIZATION_FAILED);
         controller.cancel().await;
     }
 
@@ -611,7 +615,7 @@ mod tests {
             // Name set but type empty.
             ("type missing", None, Some("alice".to_string())),
         ];
-        for (case, owner_principal_type, owner_principal_name) in cases {
+        for (_case, owner_principal_type, owner_principal_name) in cases {
             let req = CreateDelegationTokenRequest {
                 max_lifetime_ms: -1,
                 owner_principal_type,
@@ -628,7 +632,7 @@ mod tests {
                 &super_users_with(&["admin"]),
             )
             .await;
-            assert!(resp.error_code == crate::codes::INVALID_REQUEST, "{case}");
+            assert2::assert!(resp.error_code == crate::codes::INVALID_REQUEST);
         }
 
         controller.cancel().await;
@@ -658,9 +662,13 @@ mod tests {
         };
 
         // (finalized metadata.version level; None = fresh image) → gated?
-        let cases = [(None, false), (Some(13), true), (Some(14), false)];
-        for (level, want_gated) in cases {
-            assert!(gate(level) == want_gated, "level {level:?}");
+        let cases = [
+            ("fresh image", None, false),
+            ("below gate", Some(13), true),
+            ("at gate", Some(14), false),
+        ];
+        for (_case, level, want_gated) in cases {
+            assert2::assert!(gate(level) == want_gated);
         }
     }
 
@@ -689,7 +697,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert!(resp.error_code == crate::codes::INVALID_REQUEST);
+        assert2::assert!(resp.error_code == crate::codes::INVALID_REQUEST);
         controller.cancel().await;
     }
 }

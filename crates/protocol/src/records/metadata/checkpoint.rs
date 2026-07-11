@@ -89,7 +89,7 @@ pub fn build_bootstrap_checkpoint(features: &[(&str, i16)]) -> Bytes {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{Decode, records::RecordBatch};
@@ -107,7 +107,7 @@ mod tests {
         let header = RecordBatch::decode(&mut cur).expect("header batch");
         check!(header.base_offset == 0);
         check!(header.attributes.is_control_batch());
-        assert!(header.records.len() == 1);
+        assert2::assert!(header.records.len() == 1);
         let header_value = header.records[0].value.as_ref().expect("header value");
         let mut header_cur = &header_value[..];
         let header_record =
@@ -117,36 +117,42 @@ mod tests {
             last_contained_log_timestamp: 0,
             unknown_tagged_fields: crate::UnknownTaggedFields(vec![]),
         };
-        assert!(header_record == expected_header);
-        assert!(header_cur.is_empty());
+        assert2::assert!(header_record == expected_header);
+        assert2::assert!(header_cur.is_empty());
 
         let data = RecordBatch::decode(&mut cur).expect("data batch");
         check!(data.base_offset == 1);
         check!(data.last_offset_delta == 2);
         check!(!data.attributes.is_control_batch());
-        assert!(data.records.len() == 3);
+        assert2::assert!(data.records.len() == 3);
         let expected = [
             ("metadata.version", 25),
             ("group.version", 1),
             ("transaction.version", 2),
         ];
         for (i, (record, (name, level))) in data.records.iter().zip(expected).enumerate() {
-            assert!(record.offset_delta == i32::try_from(i).expect("test index fits"));
             let value = record.value.as_ref().expect("feature value");
             let (decoded, version) =
                 KraftMetadataRecord::decode_value(value).expect("feature record");
-            assert!(version == FEATURE_LEVEL_API_VERSION);
-            let KraftMetadataRecord::FeatureLevel(feature) = decoded else {
-                panic!("expected feature level record");
-            };
-            assert!(feature.name == name);
-            assert!(feature.feature_level == level);
+            let expected_record = KraftMetadataRecord::FeatureLevel(FeatureLevelRecord {
+                name: name.to_string(),
+                feature_level: level,
+                ..Default::default()
+            });
+            assert2::assert!(
+                (record.offset_delta, version, decoded)
+                    == (
+                        i32::try_from(i).expect("test index fits"),
+                        FEATURE_LEVEL_API_VERSION,
+                        expected_record,
+                    )
+            );
         }
 
         let footer = RecordBatch::decode(&mut cur).expect("footer batch");
         check!(footer.base_offset == 4);
         check!(footer.attributes.is_control_batch());
-        assert!(footer.records.len() == 1);
+        assert2::assert!(footer.records.len() == 1);
         let footer_value = footer.records[0].value.as_ref().expect("footer value");
         let mut footer_cur = &footer_value[..];
         let footer_record =
@@ -155,7 +161,7 @@ mod tests {
             version: 0,
             unknown_tagged_fields: crate::UnknownTaggedFields(vec![]),
         };
-        assert!(footer_record == expected_footer);
+        assert2::assert!(footer_record == expected_footer);
         check!(footer_cur.is_empty());
         check!(cur.is_empty());
     }

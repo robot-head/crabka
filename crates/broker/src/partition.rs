@@ -625,7 +625,7 @@ impl std::fmt::Debug for Partition {
 mod tests {
     use std::sync::atomic::{AtomicI32, AtomicU64};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_log::LogConfig;
     use tempfile::tempdir;
 
@@ -765,7 +765,7 @@ mod tests {
             ("segments", false),
         ];
         for (needle, expected) in cases {
-            assert!(s.contains(needle) == expected, "needle {needle:?} in {s:?}");
+            assert2::assert!(s.contains(needle) == expected);
         }
     }
 
@@ -795,7 +795,7 @@ mod tests {
             current_leader_epoch: Arc::new(AtomicI32::new(0)),
             _writer_handle: Arc::new(writer),
         };
-        assert!(p.high_watermark().await == 42);
+        assert2::assert!(p.high_watermark().await == 42);
     }
 
     #[tokio::test]
@@ -852,14 +852,11 @@ mod tests {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
         append_records(&p, 3);
-        assert!(p.high_watermark().await == 0);
+        assert2::assert!(p.high_watermark().await == 0);
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert!(
-            futures_util::poll!(&mut waiter).is_pending(),
-            "waiter registers on first poll"
-        );
+        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
 
         p.install_isr(
             &[crabka_audit::NodeId(1)],
@@ -868,11 +865,8 @@ mod tests {
         )
         .await;
 
-        assert!(p.high_watermark().await == 3);
-        assert!(
-            futures_util::poll!(&mut waiter).is_ready(),
-            "notify should fire when ISR install advances HW"
-        );
+        assert2::assert!(p.high_watermark().await == 3);
+        assert2::assert!(futures_util::poll!(&mut waiter).is_ready());
     }
 
     #[tokio::test]
@@ -886,14 +880,11 @@ mod tests {
             crabka_audit::NodeId(1),
         )
         .await;
-        assert!(p.high_watermark().await == 2);
+        assert2::assert!(p.high_watermark().await == 2);
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert!(
-            futures_util::poll!(&mut waiter).is_pending(),
-            "waiter registers on first poll"
-        );
+        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
 
         p.install_isr(
             &[crabka_audit::NodeId(1)],
@@ -902,11 +893,8 @@ mod tests {
         )
         .await;
 
-        assert!(p.high_watermark().await == 2);
-        assert!(
-            futures_util::poll!(&mut waiter).is_pending(),
-            "unchanged HW must not wake waiters"
-        );
+        assert2::assert!(p.high_watermark().await == 2);
+        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
     }
 
     #[tokio::test]
@@ -933,20 +921,15 @@ mod tests {
 
             p.install_leader_change(leader, epoch).await;
 
-            assert!(
-                p.current_leader.load(Ordering::Acquire) == leader,
-                "case ({leader}, {epoch})"
-            );
-            assert!(
-                p.current_leader_epoch.load(Ordering::Acquire) == epoch,
-                "case ({leader}, {epoch})"
+            assert2::assert!(
+                (
+                    p.current_leader.load(Ordering::Acquire),
+                    p.current_leader_epoch.load(Ordering::Acquire),
+                ) == (leader, epoch)
             );
             let st = p.replica_state.lock().await;
-            assert!(st.per_follower.is_empty(), "case ({leader}, {epoch})");
-            assert!(
-                st.current_leader_epoch == crabka_ids::LeaderEpoch(epoch),
-                "case ({leader}, {epoch})"
-            );
+            assert2::assert!(st.per_follower.is_empty());
+            assert2::assert!(st.current_leader_epoch == crabka_ids::LeaderEpoch(epoch));
         }
     }
 
@@ -956,7 +939,7 @@ mod tests {
 
         p.test_set_leader_epoch(6);
 
-        assert!(p.current_leader_epoch.load(Ordering::Acquire) == 6);
+        assert2::assert!(p.current_leader_epoch.load(Ordering::Acquire) == 6);
     }
 
     #[tokio::test]
@@ -967,7 +950,7 @@ mod tests {
             .await
             .expect("set log start");
 
-        assert!(p.log_start_offset() == 5);
+        assert2::assert!(p.log_start_offset() == 5);
     }
 
     #[tokio::test]
@@ -1025,7 +1008,7 @@ mod tests {
         };
         let deadline = std::time::Instant::now() + std::time::Duration::from_millis(50);
         let result = p.await_hw_at_least(Offset(100), deadline).await;
-        assert!(matches!(result, Err(crate::partition::HwTimeout)));
+        assert2::assert!(matches!(result, Err(crate::partition::HwTimeout)));
     }
 
     #[tokio::test]
@@ -1080,7 +1063,7 @@ mod tests {
             .expect("log mutex")
             .append(&mut batch)
             .expect("append");
-        assert!(p.log_end_offset() == 3);
+        assert2::assert!(p.log_end_offset() == 3);
 
         // reported_hw below log_end: stored verbatim, notify fires.
         // A `Notified` future does not register with the `Notify` until it is
@@ -1088,46 +1071,34 @@ mod tests {
         // waiters — so poll once (Pending) to register BEFORE advancing HW.
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert!(
-            futures_util::poll!(&mut waiter).is_pending(),
-            "waiter registers on first poll"
-        );
+        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
         p.set_follower_hw(Offset(2)).await;
-        assert!(p.high_watermark().await == 2);
-        assert!(
-            futures_util::poll!(&mut waiter).is_ready(),
-            "notify should fire when HW advances"
-        );
+        assert2::assert!(p.high_watermark().await == 2);
+        assert2::assert!(futures_util::poll!(&mut waiter).is_ready());
 
         // reported_hw above log_end: clamped to log_end (3).
         p.set_follower_hw(Offset(100)).await;
-        assert!(p.high_watermark().await == 3);
+        assert2::assert!(p.high_watermark().await == 3);
 
         // reported_hw below current HW: no regression.
         p.set_follower_hw(Offset(1)).await;
-        assert!(p.high_watermark().await == 3);
+        assert2::assert!(p.high_watermark().await == 3);
     }
 
     #[tokio::test]
     async fn set_follower_hw_same_high_watermark_does_not_notify() {
         let hw_advance_notify = Arc::new(Notify::new());
         let (p, _td) = test_partition(hw_advance_notify.clone());
-        assert!(p.high_watermark().await == 0);
+        assert2::assert!(p.high_watermark().await == 0);
 
         let waiter = hw_advance_notify.notified();
         tokio::pin!(waiter);
-        assert!(
-            futures_util::poll!(&mut waiter).is_pending(),
-            "waiter registers on first poll"
-        );
+        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
 
         p.set_follower_hw(Offset(0)).await;
 
-        assert!(p.high_watermark().await == 0);
-        assert!(
-            futures_util::poll!(&mut waiter).is_pending(),
-            "unchanged HW must not wake waiters"
-        );
+        assert2::assert!(p.high_watermark().await == 0);
+        assert2::assert!(futures_util::poll!(&mut waiter).is_pending());
     }
 
     #[tokio::test]

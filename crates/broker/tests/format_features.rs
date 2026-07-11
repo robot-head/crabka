@@ -9,7 +9,7 @@
 
 use std::process::Command;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -54,12 +54,7 @@ fn run_crabka_format_with_features(
         .args(&args)
         .output()
         .expect("spawn crabka format");
-    assert!(
-        out.status.success(),
-        "crabka format failed: stdout={} stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -115,7 +110,7 @@ async fn standalone_format_feature_overrides_surface_in_api_versions() {
         })
         .await
         .expect("ApiVersions");
-    assert!(av.error_code == 0, "{av:?}");
+    assert2::assert!(av.error_code == 0);
 
     let finalized = |name: &str| {
         av.finalized_features

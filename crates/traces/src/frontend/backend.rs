@@ -320,7 +320,6 @@ impl QuerierBackend for MockQuerier {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
 
     use super::*;
     use crate::frontend::{job::JobShard, wire::TraceJson};
@@ -358,7 +357,7 @@ mod tests {
             shard: JobShard::Live,
         };
         let out = mock.search_job(&req).await.unwrap();
-        assert!(
+        assert2::assert!(
             out == SearchPartial {
                 traces: vec![trace("checkout")],
                 metrics: Metrics {
@@ -371,9 +370,9 @@ mod tests {
                 },
             }
         );
-        assert!(mock.search_calls().len() == 1);
-        check!(mock.search_calls()[0].tenant == "t1");
-        assert!(matches!(mock.search_calls()[0].shard, JobShard::Live));
+        assert2::assert!(mock.search_calls().len() == 1);
+        assert2::assert!(mock.search_calls()[0].tenant.as_str() == "t1");
+        assert2::assert!(matches!(mock.search_calls()[0].shard, JobShard::Live));
     }
 
     #[tokio::test]
@@ -389,13 +388,13 @@ mod tests {
             shard: JobShard::Live,
         };
         let out = mock.search_job(&req).await.unwrap();
-        assert!(out.traces.is_empty());
-        assert!(out.metrics == Metrics::default());
+        assert2::assert!(out.traces == vec![]);
+        assert2::assert!(out.metrics == Metrics::default());
     }
 
     #[test]
     fn querier_count_clamps_to_one() {
-        assert!(MockQuerier::with_querier_count(0).querier_count() == 1);
-        assert!(MockQuerier::with_querier_count(3).querier_count() == 3);
+        assert2::assert!(MockQuerier::with_querier_count(0).querier_count() == 1);
+        assert2::assert!(MockQuerier::with_querier_count(3).querier_count() == 3);
     }
 }

@@ -125,85 +125,112 @@ mod tests {
     #[test]
     fn incompatible_is_409_conflict() {
         let e = SrError::Incompatible(vec!["reader missing default".into()]);
-        assert_eq!(e.error_code(), 409);
-        assert_eq!(e.http_status(), StatusCode::CONFLICT);
-        assert!(e.to_string().contains("incompatible"));
+        assert2::assert!(e.error_code() == 409);
+        assert2::assert!(e.http_status() == StatusCode::CONFLICT);
+        assert2::assert!(e.to_string().contains("incompatible"));
     }
 
     #[test]
     fn codes_map_to_status() {
-        assert_eq!(
-            SrError::SubjectNotFound("s".into()).http_status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(SrError::SubjectNotFound("s".into()).error_code(), 40401);
-        assert_eq!(SrError::VersionNotFound.error_code(), 40402);
-        assert_eq!(SrError::SchemaNotFound.error_code(), 40403);
-        assert_eq!(SrError::InvalidSchema("bad".into()).error_code(), 42201);
-        assert_eq!(
-            SrError::InvalidSchema("bad".into()).http_status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert_eq!(SrError::Backend("x".into()).error_code(), 50001);
-    }
-
-    #[test]
-    fn slice3_codes() {
-        assert_eq!(
-            SrError::OperationNotPermitted("s".into()).error_code(),
-            42205
-        );
-        assert_eq!(
-            SrError::OperationNotPermitted("s".into()).http_status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
-        assert_eq!(
-            SrError::SubjectNotSoftDeleted("s".into()).error_code(),
-            40405
-        );
-        assert_eq!(
-            SrError::VersionNotSoftDeleted("s".into(), 2).error_code(),
-            40407
-        );
-        assert_eq!(
-            SrError::SubjectNotSoftDeleted("s".into()).http_status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(SrError::InvalidMode("X".into()).error_code(), 42204);
-        // cp-captured (cp-schema-registry 7.4.0 admin lifecycle):
-        assert_eq!(SrError::SubjectSoftDeleted("s".into()).error_code(), 40404);
-        assert_eq!(
-            SrError::SubjectSoftDeleted("s".into()).http_status(),
-            StatusCode::NOT_FOUND
-        );
-        assert_eq!(
-            SrError::SubjectModeNotConfigured("s".into()).error_code(),
-            40409
-        );
-    }
-
-    #[test]
-    fn references_codes() {
-        assert_eq!(SrError::ReferenceNotFound("r".into()).error_code(), 42201);
-        assert_eq!(
-            SrError::ReferencedByOthers("s:1".into()).error_code(),
-            42206
-        );
-        assert_eq!(
-            SrError::ReferencedByOthers("s:1".into()).http_status(),
-            StatusCode::UNPROCESSABLE_ENTITY
-        );
+        for (_name, error, code, status) in [
+            (
+                "subject_not_found",
+                SrError::SubjectNotFound("s".into()),
+                40401,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "version_not_found",
+                SrError::VersionNotFound,
+                40402,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "schema_not_found",
+                SrError::SchemaNotFound,
+                40403,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "invalid_schema",
+                SrError::InvalidSchema("bad".into()),
+                42201,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "backend",
+                SrError::Backend("x".into()),
+                50001,
+                StatusCode::INTERNAL_SERVER_ERROR,
+            ),
+            (
+                "operation_not_permitted",
+                SrError::OperationNotPermitted("s".into()),
+                42205,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "subject_not_soft_deleted",
+                SrError::SubjectNotSoftDeleted("s".into()),
+                40405,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "version_not_soft_deleted",
+                SrError::VersionNotSoftDeleted("s".into(), 2),
+                40407,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "invalid_mode",
+                SrError::InvalidMode("X".into()),
+                42204,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "subject_soft_deleted",
+                SrError::SubjectSoftDeleted("s".into()),
+                40404,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "subject_mode_not_configured",
+                SrError::SubjectModeNotConfigured("s".into()),
+                40409,
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "reference_not_found",
+                SrError::ReferenceNotFound("r".into()),
+                42201,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+            (
+                "referenced_by_others",
+                SrError::ReferencedByOthers("s:1".into()),
+                42206,
+                StatusCode::UNPROCESSABLE_ENTITY,
+            ),
+        ] {
+            assert2::assert!(error.error_code() == code);
+            assert2::assert!(error.http_status() == status);
+        }
     }
 
     #[tokio::test]
     async fn body_is_confluent_json() {
         let resp = SrError::SubjectNotFound("av-value".into()).into_response();
-        assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+        let status = resp.status();
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let v: serde_json::Value = serde_json::from_slice(&body).unwrap();
-        assert_eq!(v["error_code"], 40401);
-        assert!(v["message"].as_str().unwrap().contains("av-value"));
+        assert2::assert!(status == StatusCode::NOT_FOUND);
+        assert2::assert!(v["error_code"].as_i64() == Some(40401));
+        assert2::assert!(
+            v["message"]
+                .as_str()
+                .is_some_and(|message| message.contains("av-value"))
+        );
     }
 }

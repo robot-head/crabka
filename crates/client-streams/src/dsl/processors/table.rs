@@ -421,8 +421,13 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         // First record for "k": no prior store value → old None, new 42.
-        check!(change.old.is_none());
-        check!(change.new == Some(42i64));
+        check!(
+            *change
+                == Change {
+                    old: None,
+                    new: Some(42i64)
+                }
+        );
         check!(
             stores
                 .get_kv::<String, i64>("tbl")
@@ -446,12 +451,10 @@ mod tests {
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
         let rc = rc();
-
         let mut proc = VersionedKTableSourceProcessor::<String, i64> {
             store_name: "vtbl".into(),
             _pd: PhantomData,
         };
-
         // Record 1: k=10 @ts=100
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -474,9 +477,7 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old.is_none(), "first record: no prior value");
-        check!(change.new == Some(10i64));
-
+        check!(*change == Change::update(None, 10i64), "first record");
         // Record 2: k=20 @ts=200
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -499,9 +500,7 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old == Some(10i64), "record @200: old was v@100=10");
-        check!(change.new == Some(20i64));
-
+        check!(*change == Change::update(Some(10i64), 20i64), "record @200");
         // Record 3: k=15 @ts=150 (out-of-order)
         {
             let globals = crate::runtime::global::GlobalStateManager::default();
@@ -525,11 +524,9 @@ mod tests {
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
         check!(
-            change.old == Some(10i64),
+            *change == Change::update(Some(10i64), 15i64),
             "record @150: as_of(150) before put = v@100=10"
         );
-        check!(change.new == Some(15i64));
-
         // Latest (non-versioned get) must still be 20.
         check!(
             stores
@@ -661,8 +658,13 @@ mod tests {
 
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<String>>().unwrap();
-        check!(change.old == Some("8".to_string()));
-        check!(change.new == Some("9".to_string()));
+        check!(
+            *change
+                == Change {
+                    old: Some("8".to_string()),
+                    new: Some("9".to_string()),
+                }
+        );
         check!(
             stores2
                 .get_kv::<String, String>("mv")
@@ -748,8 +750,13 @@ mod tests {
 
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<String>>().unwrap();
-        check!(change.old == Some("8".to_string()));
-        check!(change.new == Some("9".to_string()));
+        check!(
+            *change
+                == Change {
+                    old: Some("8".to_string()),
+                    new: Some("9".to_string()),
+                }
+        );
         // No store was created or required.
         check!(stores.names().is_empty());
     }
@@ -804,8 +811,13 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old.is_none());
-        check!(change.new == Some(42i64));
+        check!(
+            *change
+                == Change {
+                    old: None,
+                    new: Some(42i64)
+                }
+        );
         check!(
             stores
                 .get_kv::<String, i64>("tbl")
@@ -842,8 +854,14 @@ mod tests {
         }
         let (_, rec) = buffer.pop_front().unwrap();
         let change = rec.value.downcast::<Change<i64>>().unwrap();
-        check!(change.old == Some(99i64), "old side survived the predicate");
-        check!(change.new.is_none(), "new side filtered out → tombstone");
+        check!(
+            *change
+                == Change {
+                    old: Some(99i64),
+                    new: None
+                },
+            "old side survives while the new side becomes a tombstone"
+        );
         check!(
             stores
                 .get_kv::<String, i64>("tbl")

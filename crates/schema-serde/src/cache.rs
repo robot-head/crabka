@@ -264,10 +264,14 @@ mod tests {
         let c = cache();
         c.seed_subject_id("orders-value", 42);
         c.seed_writer_schema(42, "schema-text");
-        check!(c.id_for_subject("orders-value") == Some(42));
         // Unknown id ⇒ pending (spawns a background fetch; needs a runtime).
-        check!(c.writer_schema(7).is_err());
-        check!(c.writer_schema(42).unwrap() == "schema-text");
+        check!(
+            (
+                c.id_for_subject("orders-value"),
+                c.writer_schema(7).is_err(),
+                c.writer_schema(42).unwrap(),
+            ) == (Some(42), true, "schema-text".to_string())
+        );
     }
 
     #[test]
@@ -279,8 +283,10 @@ mod tests {
     fn message_type_metadata_is_cached_by_id() {
         let c = cache();
         c.seed_writer_message_type(9, "demo.Order");
-        check!(c.writer_message_type(9).as_deref() == Some("demo.Order"));
-        check!(c.writer_message_type(10).is_none());
+        check!(
+            (c.writer_message_type(9), c.writer_message_type(10),)
+                == (Some("demo.Order".to_string()), None)
+        );
     }
 
     #[tokio::test]
@@ -315,9 +321,17 @@ mod tests {
 
         c.prewarm().await.unwrap();
 
-        check!(c.id_for_subject("orders-value") == Some(50));
-        check!(c.writer_schema(50).unwrap() == "syntax = \"proto3\";");
-        check!(c.writer_message_type(50).as_deref() == Some("demo.Order"));
+        check!(
+            (
+                c.id_for_subject("orders-value"),
+                c.writer_schema(50).unwrap(),
+                c.writer_message_type(50),
+            ) == (
+                Some(50),
+                "syntax = \"proto3\";".to_string(),
+                Some("demo.Order".to_string()),
+            )
+        );
     }
 
     #[tokio::test]
@@ -354,8 +368,12 @@ mod tests {
 
         c.prewarm().await.unwrap();
 
-        check!(c.id_for_subject("orders-value") == Some(51));
-        check!(c.writer_schema(51).unwrap() == r#"{"type":"object"}"#);
+        check!(
+            (
+                c.id_for_subject("orders-value"),
+                c.writer_schema(51).unwrap()
+            ) == (Some(51), r#"{"type":"object"}"#.to_string())
+        );
     }
 
     #[tokio::test]
@@ -389,7 +407,9 @@ mod tests {
 
         c.prewarm().await.unwrap();
 
-        check!(c.id_for_subject("orders-value") == Some(52));
-        check!(c.writer_message_type(52).as_deref() == Some("demo.Latest"));
+        check!(
+            (c.id_for_subject("orders-value"), c.writer_message_type(52))
+                == (Some(52), Some("demo.Latest".to_string()))
+        );
     }
 }

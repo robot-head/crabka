@@ -207,48 +207,64 @@ pub fn permission_to_wire(pt: PermissionType) -> PermissionTypeCode {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
     #[test]
     fn resource_type_concrete_rejects_any() {
         let cases = [
-            (1, Err(WireAclError::AnyRequiresFilter)),
-            (2, Ok(ResourceType::Topic)),
-            (3, Ok(ResourceType::Group)),
-            (4, Ok(ResourceType::Cluster)),
+            (
+                "any wildcard rejected",
+                1,
+                Err(WireAclError::AnyRequiresFilter),
+            ),
+            ("topic", 2, Ok(ResourceType::Topic)),
+            ("group", 3, Ok(ResourceType::Group)),
+            ("cluster", 4, Ok(ResourceType::Cluster)),
         ];
-        for (byte, want) in cases {
-            assert!(resource_type_concrete(byte) == want, "byte {byte}");
+        for (_case, byte, want) in cases {
+            assert2::assert!(resource_type_concrete(byte) == want);
         }
     }
 
     #[test]
     fn pattern_type_filter_any_and_match_collapse_to_none() {
         let cases = [
-            (1, Ok(None)),
-            (2, Ok(None)),
-            (3, Ok(Some(PatternType::Literal))),
+            ("any wildcard", 1, Ok(None)),
+            ("match wildcard", 2, Ok(None)),
+            ("literal", 3, Ok(Some(PatternType::Literal))),
         ];
-        for (byte, want) in cases {
-            assert!(pattern_type_filter(byte) == want, "byte {byte}");
+        for (_case, byte, want) in cases {
+            assert2::assert!(pattern_type_filter(byte) == want);
         }
     }
 
     #[test]
     fn resource_type_filter_collapses_any_and_rejects_unknown() {
         let cases = [
-            (WIRE_ANY, Ok(None)),
-            (2, Ok(Some(ResourceType::Topic))),
-            (3, Ok(Some(ResourceType::Group))),
-            (4, Ok(Some(ResourceType::Cluster))),
-            (5, Ok(Some(ResourceType::TransactionalId))),
-            (6, Ok(Some(ResourceType::DelegationToken))),
-            (7, Err(WireAclError::UnknownDiscriminant)),
+            ("any wildcard", WIRE_ANY, Ok(None)),
+            ("topic", 2, Ok(Some(ResourceType::Topic))),
+            ("group", 3, Ok(Some(ResourceType::Group))),
+            ("cluster", 4, Ok(Some(ResourceType::Cluster))),
+            (
+                "transactional id",
+                5,
+                Ok(Some(ResourceType::TransactionalId)),
+            ),
+            (
+                "delegation token",
+                6,
+                Ok(Some(ResourceType::DelegationToken)),
+            ),
+            (
+                "unknown discriminant",
+                7,
+                Err(WireAclError::UnknownDiscriminant),
+            ),
         ];
-        for (byte, want) in cases {
-            assert!(resource_type_filter(byte) == want, "byte {byte}");
+        for (_case, byte, want) in cases {
+            assert2::assert!(resource_type_filter(byte) == want);
         }
     }
 
@@ -258,54 +274,80 @@ mod tests {
         // report AnyRequiresFilter — a different wire error than a junk
         // discriminant — and the concrete codes must map, not fall through.
         let pattern_cases = [
-            (3, Ok(PatternType::Literal)),
-            (4, Ok(PatternType::Prefixed)),
-            (WIRE_UNKNOWN, Err(WireAclError::AnyRequiresFilter)),
-            (WIRE_ANY, Err(WireAclError::AnyRequiresFilter)),
-            (WIRE_PATTERN_MATCH, Err(WireAclError::AnyRequiresFilter)),
-            (5, Err(WireAclError::UnknownDiscriminant)),
+            ("literal", 3, Ok(PatternType::Literal)),
+            ("prefixed", 4, Ok(PatternType::Prefixed)),
+            (
+                "unknown wildcard",
+                WIRE_UNKNOWN,
+                Err(WireAclError::AnyRequiresFilter),
+            ),
+            (
+                "any wildcard",
+                WIRE_ANY,
+                Err(WireAclError::AnyRequiresFilter),
+            ),
+            (
+                "match wildcard",
+                WIRE_PATTERN_MATCH,
+                Err(WireAclError::AnyRequiresFilter),
+            ),
+            (
+                "junk discriminant",
+                5,
+                Err(WireAclError::UnknownDiscriminant),
+            ),
         ];
-        for (byte, want) in pattern_cases {
-            check!(pattern_type_concrete(byte) == want, "pattern byte {byte}");
+        for (case, byte, want) in pattern_cases {
+            check!(
+                pattern_type_concrete(byte) == want,
+                "case: {case}; pattern byte {byte}"
+            );
         }
 
-        for byte in [WIRE_UNKNOWN, WIRE_ANY] {
+        for (case, byte) in [
+            ("unknown wildcard", WIRE_UNKNOWN),
+            ("any wildcard", WIRE_ANY),
+        ] {
             check!(
                 operation_concrete(byte) == Err(WireAclError::AnyRequiresFilter),
-                "operation byte {byte}"
+                "case: {case}; operation byte {byte}"
             );
             check!(
                 permission_concrete(byte) == Err(WireAclError::AnyRequiresFilter),
-                "permission byte {byte}"
+                "case: {case}; permission byte {byte}"
             );
         }
     }
 
     #[test]
     fn operation_round_trip_through_wire() {
-        for op in [
-            AclOperation::All,
-            AclOperation::Read,
-            AclOperation::Write,
-            AclOperation::IdempotentWrite,
+        for (_case, op) in [
+            ("all operations", AclOperation::All),
+            ("read", AclOperation::Read),
+            ("write", AclOperation::Write),
+            ("idempotent write", AclOperation::IdempotentWrite),
             // KIP-939: TWO_PHASE_COMMIT, wire byte 15.
-            AclOperation::TwoPhaseCommit,
+            ("two phase commit", AclOperation::TwoPhaseCommit),
         ] {
             let b = operation_to_wire(op);
-            assert!(operation_concrete(b).unwrap() == op);
+            assert2::assert!(operation_concrete(b).unwrap() == op);
         }
     }
 
     #[test]
     fn permission_filter_maps_any_concrete_and_unknown() {
         let cases = [
-            (WIRE_ANY, Ok(None)),
-            (2, Ok(Some(PermissionType::Deny))),
-            (3, Ok(Some(PermissionType::Allow))),
-            (4, Err(WireAclError::UnknownDiscriminant)),
+            ("any wildcard", WIRE_ANY, Ok(None)),
+            ("deny", 2, Ok(Some(PermissionType::Deny))),
+            ("allow", 3, Ok(Some(PermissionType::Allow))),
+            (
+                "unknown discriminant",
+                4,
+                Err(WireAclError::UnknownDiscriminant),
+            ),
         ];
-        for (byte, want) in cases {
-            check!(permission_filter(byte) == want, "byte {byte}");
+        for (case, byte, want) in cases {
+            check!(permission_filter(byte) == want, "case: {case}; byte {byte}");
         }
     }
 
@@ -345,7 +387,7 @@ mod tests {
             operation: operation_concrete(8).unwrap(),
             permission_type: permission_concrete(3).unwrap(),
         };
-        assert!(resource_type_to_wire(entry.resource_type) == 6);
+        assert2::assert!(resource_type_to_wire(entry.resource_type) == 6);
         let expected = AclEntry {
             resource_type: ResourceType::DelegationToken,
             resource_name: "User:alice".into(),
@@ -355,6 +397,6 @@ mod tests {
             operation: AclOperation::Describe,
             permission_type: PermissionType::Allow,
         };
-        assert!(entry == expected);
+        assert2::assert!(entry == expected);
     }
 }

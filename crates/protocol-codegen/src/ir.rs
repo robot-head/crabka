@@ -224,7 +224,6 @@ fn strip_line_comments(src: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -248,23 +247,22 @@ mod tests {
             ("0-2", VersionRange { min: 0, max: 2 }),
             ("4", VersionRange { min: 4, max: 4 }),
         ] {
-            assert!(parse_version_range(input).unwrap() == want);
+            assert2::assert!(parse_version_range(input).unwrap() == want);
         }
-        assert!(parse_version_range("none").is_err()); // handled at call site
+        assert2::assert!(parse_version_range("none").is_err()); // handled at call site
     }
 
     #[test]
     fn comment_strip() {
         let src = "{\n// hi\n  \"x\": 1 // trailing\n}";
         let out = strip_line_comments(src);
-        assert!(out == "{\n\n  \"x\": 1 \n}\n");
+        assert2::assert!(out == "{\n\n  \"x\": 1 \n}\n");
     }
 
     #[test]
     fn comment_strip_preserves_double_slash_in_string() {
         let src = "{ \"default\": \"http://example.com\" } // tail";
         let out = strip_line_comments(src);
-        assert!(out.contains("http://example.com"));
-        assert!(!out.contains("tail"));
+        assert2::assert!(out == "{ \"default\": \"http://example.com\" } \n");
     }
 }

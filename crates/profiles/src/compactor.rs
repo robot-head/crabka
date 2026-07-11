@@ -486,7 +486,7 @@ async fn write_batches(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::{BlockIndex, Labels};
     use crabka_pprof::{EngineOpts, FlameEngine};
     use object_store::{ObjectStore, memory::InMemory};
@@ -533,8 +533,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(meta.row_count == 2);
-        assert!(
+        assert2::assert!(meta.row_count == 2);
+        assert2::assert!(
             BlockIndex::candidate_blocks(&index, "t", 0, i64::MAX) == vec![meta.object_key.clone()]
         );
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
@@ -587,7 +587,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert!(meta.row_count == 2);
+        assert2::assert!(meta.row_count == 2);
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
         let engine = FlameEngine::new(cold, EngineOpts::default());
         let fg = engine
@@ -595,7 +595,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 13);
+        assert2::assert!(fg.total == 13);
     }
 
     #[tokio::test]
@@ -659,12 +659,9 @@ mod tests {
                 .select_merge_stacktraces("t", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
                 .await
                 .unwrap();
-            assert!(before.total == 36);
+            assert2::assert!(before.total == 36);
             for name in ["alpha", "bravo", "charlie", "delta"] {
-                assert!(
-                    before.names.iter().any(|leaf| leaf == name),
-                    "{name} missing"
-                );
+                assert2::assert!(before.names.iter().any(|leaf| leaf == name));
             }
             drop(engine);
             Arc::try_unwrap(shared).unwrap_or_else(|_| panic!("sole owner after query"))
@@ -681,18 +678,15 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(c3.row_count == 4);
+        assert2::assert!(c3.row_count == 4);
 
         // After re-compaction every input partition must survive as a distinct
         // destination partition: four source partitions (two per input block)
         // must produce four distinct destinations with no aliasing.
         let final_partitions = index.stacktrace_partitions(&c3.object_key);
-        assert!(final_partitions.len() == 4, "{final_partitions:?}");
+        assert2::assert!(final_partitions.len() == 4);
         let distinct: BTreeSet<u64> = final_partitions.iter().copied().collect();
-        assert!(
-            distinct.len() == 4,
-            "partitions aliased: {final_partitions:?}"
-        );
+        assert2::assert!(distinct.len() == 4);
 
         // Query results unchanged after the second compaction.
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
@@ -701,9 +695,9 @@ mod tests {
             .select_merge_stacktraces("t", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
             .await
             .unwrap();
-        assert!(after.total == before_total);
+        assert2::assert!(after.total == before_total);
         for name in ["alpha", "bravo", "charlie", "delta"] {
-            assert!(after.names.iter().any(|leaf| leaf == name), "{name} lost");
+            assert2::assert!(after.names.iter().any(|leaf| leaf == name));
         }
     }
 
@@ -715,7 +709,7 @@ mod tests {
         let sources = [1_u64 << 32, 2_u64 << 32, 3_u64 << 32];
         let map = destination_partitions(1, &sources).unwrap();
         let base = 2_u64 << 32;
-        assert!(
+        assert2::assert!(
             map == BTreeMap::from([
                 (1_u64 << 32, base),
                 (2_u64 << 32, base | 1),
@@ -723,7 +717,7 @@ mod tests {
             ])
         );
         let dests: BTreeSet<u64> = map.values().copied().collect();
-        assert!(dests.len() == 3);
+        assert2::assert!(dests.len() == 3);
     }
 
     #[test]
@@ -760,8 +754,11 @@ mod tests {
 
         let jobs = plan_compactions(&index, 2);
 
-        assert!(jobs.len() == 1);
-        assert!(jobs[0].input_keys == vec!["a.parquet".to_string(), "b.parquet".to_string()]);
+        assert2::assert!(jobs.len() == 1);
+        assert2::assert!(
+            jobs[0].input_keys.as_slice()
+                == &["a.parquet".to_string(), "b.parquet".to_string()][..]
+        );
     }
 
     fn record(tenant: &str, service: &str, value: i64, function: &str) -> ProfileRecord {

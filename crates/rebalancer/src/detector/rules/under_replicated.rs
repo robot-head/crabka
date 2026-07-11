@@ -103,8 +103,6 @@ impl Rule for UnderReplicatedPartitions {
 mod tests {
     use std::time::Duration;
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         capacity::BrokerCapacities,
@@ -183,7 +181,7 @@ mod tests {
         let mut hist = SnapshotHistory::new(10);
         hist.push(&snap);
         let ctx = ctx(&snap, &hist, &cfg, &usages, &capacities, 1_000);
-        assert!(UnderReplicatedPartitions.evaluate(&ctx).is_empty());
+        assert2::assert!(UnderReplicatedPartitions.evaluate(&ctx).is_empty());
     }
 
     #[test]
@@ -201,8 +199,10 @@ mod tests {
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        assert!(matches!(hits[0].severity, AnomalySeverity::Critical));
+        assert2::assert!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>()
+                == vec![AnomalySeverity::Critical]
+        );
     }
 
     #[test]
@@ -225,8 +225,10 @@ mod tests {
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        assert!(matches!(hits[0].severity, AnomalySeverity::Warning));
+        assert2::assert!(
+            hits.iter().map(|hit| hit.severity).collect::<Vec<_>>()
+                == vec![AnomalySeverity::Warning]
+        );
     }
 
     #[test]
@@ -250,10 +252,12 @@ mod tests {
 
         let hits = UnderReplicatedPartitions.evaluate(&ctx);
 
-        assert!(hits.len() == 2);
-        assert!(
-            hits.iter()
-                .all(|hit| { matches!(hit.severity, AnomalySeverity::Warning) })
+        assert2::assert!(
+            (
+                hits.len(),
+                hits.iter()
+                    .all(|hit| matches!(hit.severity, AnomalySeverity::Warning))
+            ) == (2, true)
         );
     }
 
@@ -281,7 +285,7 @@ mod tests {
             .map(|hit| hit.key)
             .collect();
 
-        assert!(
+        assert2::assert!(
             keys == vec![
                 AnomalyKey::Partition {
                     topic: "a".into(),
@@ -319,6 +323,6 @@ mod tests {
         hist.push(&old);
         hist.push(&mid);
         let ctx = ctx(&now_snap, &hist, &cfg, &usages, &capacities, 200_000);
-        assert!(UnderReplicatedPartitions.evaluate(&ctx).is_empty());
+        assert2::assert!(UnderReplicatedPartitions.evaluate(&ctx).is_empty());
     }
 }

@@ -64,7 +64,7 @@ pub fn new_registry() -> Registry {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use axum::{body::Body, http::Request};
     use tower::ServiceExt;
 
@@ -90,7 +90,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -105,7 +105,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::SERVICE_UNAVAILABLE);
+        assert2::assert!(resp.status() == StatusCode::SERVICE_UNAVAILABLE);
     }
 
     #[tokio::test]
@@ -129,7 +129,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resp.status() == StatusCode::OK);
+        assert2::assert!(resp.status() == StatusCode::OK);
     }
 
     #[tokio::test]

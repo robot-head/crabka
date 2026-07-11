@@ -117,17 +117,17 @@ pub fn write_reference_tree(out_dir: &Path) -> anyhow::Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::tempdir;
 
     use super::*;
     #[test]
     fn page_front_matter_wraps_body() {
         let s = page_front_matter("Kafka", 10, "hello");
-        assert!(s.starts_with(
+        assert2::assert!(s.starts_with(
             "+++\ntitle = \"Kafka\"\nweight = 10\ntemplate = \"docs/page.html\"\n+++\n"
         ));
-        assert!(s.contains("hello"));
+        assert2::assert!(s.contains("hello"));
     }
     #[test]
     fn writes_full_tree() {
@@ -138,11 +138,11 @@ mod tests {
             "broker/protocol-apis.md",
             "broker/server-config.md",
         ] {
-            assert!(dir.path().join(page).exists(), "missing {page}");
+            assert2::assert!(dir.path().join(page).exists());
         }
         let kafka = std::fs::read_to_string(dir.path().join("operator/kafka.md")).unwrap();
-        assert!(kafka.contains("template = \"docs/page.html\""));
+        assert2::assert!(kafka.contains("template = \"docs/page.html\""));
         let idx = std::fs::read_to_string(dir.path().join("_index.md")).unwrap();
-        assert!(idx.contains("template = \"docs/section.html\""));
+        assert2::assert!(idx.contains("template = \"docs/section.html\""));
     }
 }

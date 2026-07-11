@@ -23,34 +23,32 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
     use bytes::BytesMut;
 
     use super::*;
     use crate::{Decode, Encode};
-    fn roundtrip(msg: &DescribeGroupsRequest, v: i16) {
+    fn roundtrip(case: &str, msg: &DescribeGroupsRequest, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert!(msg.encoded_len(v) == buf.len());
+        assert2::assert!(msg.encoded_len(v) == buf.len(), "case {case}, version {v}");
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = DescribeGroupsRequest::decode(&mut cur, v).unwrap();
-        assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty(), "case {case}, version {v}");
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
-        assert!(&reencoded[..] == &bytes[..]);
+        assert2::assert!(&reencoded[..] == &bytes[..]);
         let _ = default_json(v);
     }
     #[test]
-    fn default_roundtrips_all_versions() {
+    fn roundtrip_cases_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&DescribeGroupsRequest::default(), v);
-        }
-    }
-    #[test]
-    fn populated_roundtrips_all_versions() {
-        for v in MIN_VERSION..=MAX_VERSION {
-            roundtrip(&DescribeGroupsRequest::populated(v), v);
+            for (case, msg) in [
+                ("default", DescribeGroupsRequest::default()),
+                ("populated", DescribeGroupsRequest::populated(v)),
+            ] {
+                roundtrip(case, &msg, v);
+            }
         }
     }
 }

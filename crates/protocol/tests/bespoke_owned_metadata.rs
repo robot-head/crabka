@@ -2,7 +2,6 @@
 // behaviour (e.g. None-topics encoding quirk at v0). Relocated from
 // hand-written wrappers.
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::{
     Decode, Encode, UnknownTaggedFields,
@@ -20,10 +19,10 @@ fn owned_metadata_request_v0_topics_none_encodes_as_empty_array() {
     let req = MetadataRequest::default();
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MIN_VERSION).unwrap();
-    assert!(req.encoded_len(MIN_VERSION) == buf.len());
+    assert2::assert!(req.encoded_len(MIN_VERSION) == buf.len());
     let mut cur = &buf[..];
     let decoded = MetadataRequest::decode(&mut cur, MIN_VERSION).unwrap();
-    assert!(cur.is_empty(), "decoder left trailing bytes");
+    assert2::assert!(cur.is_empty());
     // v0: topics=None encodes as empty array; decoded will come back as Some([])
     let expected = MetadataRequest {
         topics: Some(vec![]),
@@ -32,7 +31,7 @@ fn owned_metadata_request_v0_topics_none_encodes_as_empty_array() {
         include_topic_authorized_operations: false,
         unknown_tagged_fields: UnknownTaggedFields::default(),
     };
-    assert!(decoded == expected);
+    assert2::assert!(decoded == expected);
 }
 
 #[test]
@@ -46,10 +45,10 @@ fn owned_metadata_request_max_version_roundtrips_null_topics() {
     };
     let mut buf = BytesMut::new();
     req.encode(&mut buf, MAX_VERSION).unwrap();
-    assert!(req.encoded_len(MAX_VERSION) == buf.len());
+    assert2::assert!(req.encoded_len(MAX_VERSION) == buf.len());
     let mut cur = &buf[..];
-    assert!(MetadataRequest::decode(&mut cur, MAX_VERSION).unwrap() == req);
-    assert!(cur.is_empty());
+    assert2::assert!(MetadataRequest::decode(&mut cur, MAX_VERSION).unwrap() == req);
+    assert2::assert!(cur.is_empty());
 }
 
 #[test]
@@ -72,10 +71,10 @@ fn owned_metadata_response_max_version_roundtrips_with_broker() {
     };
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MAX).unwrap();
-    assert!(resp.encoded_len(RESP_MAX) == buf.len());
+    assert2::assert!(resp.encoded_len(RESP_MAX) == buf.len());
     let mut cur = &buf[..];
-    assert!(MetadataResponse::decode(&mut cur, RESP_MAX).unwrap() == resp);
-    assert!(cur.is_empty());
+    assert2::assert!(MetadataResponse::decode(&mut cur, RESP_MAX).unwrap() == resp);
+    assert2::assert!(cur.is_empty());
 }
 
 #[test]
@@ -83,8 +82,8 @@ fn owned_metadata_response_min_version_roundtrips() {
     let resp = MetadataResponse::default();
     let mut buf = BytesMut::new();
     resp.encode(&mut buf, RESP_MIN).unwrap();
-    assert!(resp.encoded_len(RESP_MIN) == buf.len());
+    assert2::assert!(resp.encoded_len(RESP_MIN) == buf.len());
     let mut cur = &buf[..];
-    assert!(MetadataResponse::decode(&mut cur, RESP_MIN).unwrap() == resp);
-    assert!(cur.is_empty());
+    assert2::assert!(MetadataResponse::decode(&mut cur, RESP_MIN).unwrap() == resp);
+    assert2::assert!(cur.is_empty());
 }

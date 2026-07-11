@@ -17,7 +17,6 @@
 
 use std::{io, net::SocketAddr, time::Duration};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, Bytes, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle, metrics::PartitionLabel};
 use crabka_protocol::{
@@ -146,12 +145,7 @@ async fn create_topic_with_configs(
     let mut cur: &[u8] = &resp_bytes;
     let resp =
         CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics({topic}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Get topic_id via Metadata (needed for Produce/Fetch v9+).
@@ -219,11 +213,7 @@ async fn produce_record(addr: SocketAddr, topic: &str, topic_id: Uuid, key: &[u8
     let mut cur: &[u8] = &resp_bytes;
     let resp = ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse");
     let part = &resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "Produce must succeed: error_code={}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
 }
 
 /// A flattened record: key and value as plain byte vecs.
@@ -276,11 +266,7 @@ async fn fetch_all(addr: SocketAddr, topic: &str, topic_id: Uuid) -> Vec<FlatRec
         let mut got_any = false;
         for topic_resp in &resp.responses {
             for part_resp in &topic_resp.partitions {
-                assert!(
-                    part_resp.error_code == 0,
-                    "Fetch partition error: {}",
-                    part_resp.error_code
-                );
+                assert2::assert!(part_resp.error_code == 0);
                 if let Some(batches) = part_resp.records.as_ref().and_then(|p| p.as_v2()) {
                     for batch in batches {
                         got_any = true;
@@ -471,12 +457,11 @@ async fn compaction_dedupes_via_native_client() {
         .map(|r| String::from_utf8(r.key.clone()).unwrap())
         .filter(|k| k != "__pad__")
         .collect();
-    assert!(
+    assert2::assert!(
         distinct_keys
             == ["k1".to_string(), "k2".to_string(), "k3".to_string()]
                 .into_iter()
-                .collect::<std::collections::BTreeSet<_>>(),
-        "k1, k2, k3 must all survive compaction; got: {distinct_keys:?}"
+                .collect::<std::collections::BTreeSet<_>>()
     );
 
     // For each key, assert:
@@ -490,17 +475,11 @@ async fn compaction_dedupes_via_native_client() {
             .collect();
 
         let expected_latest = format!("v10-{key}");
-        assert!(
-            values_for_key.contains(&expected_latest),
-            "key {key} must have latest value {expected_latest}; got {values_for_key:?}"
-        );
+        assert2::assert!(values_for_key.contains(&expected_latest));
 
         for stale_round in 0..10u32 {
             let stale = format!("v{stale_round}-{key}");
-            assert!(
-                !values_for_key.contains(&stale),
-                "key {key} must NOT retain stale value {stale}; got {values_for_key:?}"
-            );
+            assert2::assert!(!values_for_key.contains(&stale));
         }
     }
 

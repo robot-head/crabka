@@ -130,14 +130,17 @@ mod tests {
     fn decode_round_trips() {
         let f = encode(258, b"body");
         let (id, body) = decode(&f).unwrap();
-        check!(id == 258);
-        check!(body == b"body");
+        check!((id, body) == (258, b"body".as_slice()));
     }
 
     #[test]
     fn decode_rejects_bad_magic_and_short() {
-        check!(decode(&[0x01, 0, 0, 0, 1]).is_err());
-        check!(decode(&[0x00, 0, 0]).is_err());
+        for (name, frame) in [
+            ("bad-magic", &[0x01, 0, 0, 0, 1][..]),
+            ("short", &[0x00, 0, 0][..]),
+        ] {
+            check!(decode(frame).is_err(), "case {name}");
+        }
     }
 
     #[test]
@@ -145,18 +148,14 @@ mod tests {
         let f = encode_protobuf(7, &[0], b"pb");
         check!(f.as_ref() == [0x00, 0x00, 0x00, 0x00, 0x07, 0x00, b'p', b'b']);
         let (id, idx, body) = decode_protobuf(&f).unwrap();
-        check!(id == 7);
-        check!(idx == vec![0]);
-        check!(body == b"pb");
+        check!((id, idx, body) == (7, vec![0], b"pb".as_slice()));
     }
 
     #[test]
     fn protobuf_nested_index_round_trips() {
         let f = encode_protobuf(7, &[1, 0], b"pb");
         let (id, idx, body) = decode_protobuf(&f).unwrap();
-        check!(id == 7);
-        check!(idx == vec![1, 0]);
-        check!(body == b"pb");
+        check!((id, idx, body) == (7, vec![1, 0], b"pb".as_slice()));
     }
 
     #[test]
@@ -164,8 +163,7 @@ mod tests {
         // Exactly 5 bytes = magic + id with an empty body. The guard is
         // `len < 5`, so a 5-byte frame must decode (not be rejected as short).
         let (id, body) = decode(&[0x00, 0x00, 0x00, 0x01, 0x02]).unwrap();
-        check!(id == 0x0102);
-        check!(body.is_empty());
+        check!((id, body) == (0x0102, b"".as_slice()));
     }
 
     #[test]

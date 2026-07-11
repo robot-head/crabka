@@ -94,11 +94,7 @@ async fn jvm_consumer_reads_gateway_output() {
         .output()
         .expect("docker run");
     let s = String::from_utf8_lossy(&out.stdout);
-    assert!(
-        s.contains("jvm-sees-this"),
-        "JVM consumer output: {s:?} / err {}",
-        String::from_utf8_lossy(&out.stderr)
-    );
+    assert2::assert!(s.contains("jvm-sees-this"));
 
     broker.shutdown().await;
 }

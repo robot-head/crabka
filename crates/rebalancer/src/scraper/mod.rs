@@ -195,7 +195,6 @@ enum Outcome {
 mod tests {
     use std::collections::BTreeSet;
 
-    use assert2::assert;
     use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
     use super::*;
@@ -224,34 +223,24 @@ mod tests {
     }
 
     #[test]
-    fn first_failure_warns() {
-        assert!(classify(None, false) == ScrapeLogLevel::Warn);
-    }
-
-    #[test]
-    fn ok_to_fail_warns() {
-        assert!(classify(Some(true), false) == ScrapeLogLevel::Warn);
-    }
-
-    #[test]
-    fn repeated_failure_is_quiet() {
-        assert!(classify(Some(false), false) == ScrapeLogLevel::Debug);
-    }
-
-    #[test]
-    fn recovery_is_info() {
-        assert!(classify(Some(false), true) == ScrapeLogLevel::Recovered);
-    }
-
-    #[test]
-    fn first_success_is_quiet() {
-        // No prior failure → no "recovered" log on first scrape.
-        assert!(classify(None, true) == ScrapeLogLevel::Debug);
-    }
-
-    #[test]
-    fn ok_to_ok_is_quiet() {
-        assert!(classify(Some(true), true) == ScrapeLogLevel::Debug);
+    fn classify_transitions_have_expected_log_levels() {
+        let cases = [
+            ("first failure", None, false, ScrapeLogLevel::Warn),
+            ("ok to failure", Some(true), false, ScrapeLogLevel::Warn),
+            (
+                "repeated failure",
+                Some(false),
+                false,
+                ScrapeLogLevel::Debug,
+            ),
+            ("recovery", Some(false), true, ScrapeLogLevel::Recovered),
+            // No prior failure means a first success is not a recovery.
+            ("first success", None, true, ScrapeLogLevel::Debug),
+            ("repeated success", Some(true), true, ScrapeLogLevel::Debug),
+        ];
+        for (_name, previous, current, expected) in cases {
+            assert2::assert!(classify(previous, current) == expected);
+        }
     }
 
     #[test]
@@ -265,7 +254,7 @@ mod tests {
             levels.push(classify(prev, current));
             prev = Some(current);
         }
-        assert!(
+        assert2::assert!(
             levels
                 == vec![
                     ScrapeLogLevel::Warn,
@@ -320,7 +309,9 @@ mod tests {
 
         // First tick: scrape both brokers (they'll fail; we don't care).
         scraper.tick_once().await;
-        assert!(scraper.last_ok.keys().copied().collect::<BTreeSet<_>>() == BTreeSet::from([1, 2]));
+        assert2::assert!(
+            scraper.last_ok.keys().copied().collect::<BTreeSet<_>>() == BTreeSet::from([1, 2])
+        );
 
         // Snapshot loses broker 2.
         snapshot.store(Arc::new(Some(ClusterState {
@@ -338,7 +329,9 @@ mod tests {
 
         scraper.tick_once().await;
         // last_ok should now only contain broker 1.
-        assert!(scraper.last_ok.keys().copied().collect::<BTreeSet<_>>() == BTreeSet::from([1]));
+        assert2::assert!(
+            scraper.last_ok.keys().copied().collect::<BTreeSet<_>>() == BTreeSet::from([1])
+        );
     }
 
     #[tokio::test]
@@ -360,8 +353,8 @@ mod tests {
             CancellationToken::new(),
         );
         failed_scraper.tick_once().await;
-        assert!(failed_scraper.last_ok.get(&1) == Some(&false));
-        assert!(
+        assert2::assert!(failed_scraper.last_ok.get(&1) == Some(&false));
+        assert2::assert!(
             failed_store
                 .disk_bytes_avg(1, "t", 0, Window::FiveMin, crate::goals::now_ms())
                 .is_none()
@@ -382,8 +375,8 @@ mod tests {
             CancellationToken::new(),
         );
         ok_scraper.tick_once().await;
-        assert!(ok_scraper.last_ok.get(&1) == Some(&true));
-        assert!(
+        assert2::assert!(ok_scraper.last_ok.get(&1) == Some(&true));
+        assert2::assert!(
             ok_store
                 .disk_bytes_avg(1, "t", 0, Window::FiveMin, crate::goals::now_ms())
                 .is_some_and(|v| (v - 42.0).abs() < 1e-9)
@@ -402,7 +395,7 @@ mod tests {
 
         let handle = tokio::spawn(scraper.run());
         tokio::time::sleep(Duration::from_millis(10)).await;
-        assert!(!handle.is_finished());
+        assert2::assert!(!handle.is_finished());
         shutdown.cancel();
         tokio::time::timeout(Duration::from_secs(1), handle)
             .await

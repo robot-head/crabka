@@ -153,7 +153,7 @@ fn labels_key(labels: &Labels) -> Vec<(String, String)> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::Labels;
     use crabka_pprof::PprofProfile;
 
@@ -207,18 +207,18 @@ mod tests {
         };
 
         let out = split_sample_types(&raw).unwrap();
-        assert!(out.len() == 2);
+        assert2::assert!(out.len() == 2);
 
         let types: Vec<&str> = out
             .iter()
             .map(|profile| profile.profile_type.as_str())
             .collect();
-        assert!(
+        assert2::assert!(
             types
                 .iter()
                 .any(|profile_type| profile_type == &"memory:alloc_objects:count:space:bytes")
         );
-        assert!(
+        assert2::assert!(
             types
                 .iter()
                 .any(|profile_type| profile_type == &"memory:alloc_space:bytes:space:bytes")
@@ -233,20 +233,31 @@ mod tests {
             .find(|profile| profile.profile_type.contains("alloc_space"))
             .unwrap();
 
-        check!(objects.samples[0].value == 3);
-        check!(space.samples[0].value == 4096);
-        check!(objects.samples[0].timestamp_ns == 123_000_000);
-        check!(objects.samples[0].stacktrace_location_refs == vec![6]);
-        for (name, want) in [
-            ("__profile_type__", objects.profile_type.as_str()),
-            ("__period_type__", "space"),
-            ("__period_unit__", "bytes"),
-            ("__type__", "alloc_objects"),
-            ("__unit__", "count"),
-            ("__service_name__", "api"),
-        ] {
-            check!(objects.labels.get(name) == Some(want));
-        }
+        check!(
+            (
+                objects.samples[0].value,
+                space.samples[0].value,
+                objects.samples[0].timestamp_ns,
+                objects.samples[0].stacktrace_location_refs.as_slice(),
+                objects.labels.get("__profile_type__"),
+                objects.labels.get("__period_type__"),
+                objects.labels.get("__period_unit__"),
+                objects.labels.get("__type__"),
+                objects.labels.get("__unit__"),
+                objects.labels.get("__service_name__"),
+            ) == (
+                3,
+                4096,
+                123_000_000,
+                &[6][..],
+                Some(objects.profile_type.as_str()),
+                Some("space"),
+                Some("bytes"),
+                Some("alloc_objects"),
+                Some("count"),
+                Some("api"),
+            )
+        );
     }
 
     #[test]
@@ -291,7 +302,7 @@ mod tests {
         })
         .unwrap();
 
-        assert!(out[0].samples[0].stacktrace_location_refs == vec![1]);
+        assert2::assert!(out[0].samples[0].stacktrace_location_refs == vec![1]);
     }
 
     #[test]

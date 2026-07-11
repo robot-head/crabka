@@ -121,7 +121,6 @@ impl CheckpointStore for InternalTopicCheckpointStore {
 mod tests {
     use std::collections::BTreeMap;
 
-    use assert2::assert;
     use crabka_connect::{CheckpointStore, OffsetValue, SourceOffset};
 
     use super::*;
@@ -150,6 +149,6 @@ mod tests {
             .await
             .unwrap();
         let loaded = store2.load().await.unwrap().unwrap();
-        assert!(loaded == off);
+        assert2::assert!(loaded == off);
     }
 }

@@ -46,7 +46,6 @@ pub fn fold_bucket(agg: SeriesAgg, values: &[i64]) -> f64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -58,7 +57,7 @@ mod tests {
             labels: vec![("service_name".to_string(), "checkout".to_string())],
             points: vec![(1000, 1.5), (2000, 2.0)],
         };
-        assert!(series.points[1] == (2000, 2.0));
+        assert2::assert!(series.points[1] == (2000, 2.0));
         let agg = SeriesAgg::Sum;
         takes_copy(agg);
         takes_copy(agg);
@@ -66,13 +65,15 @@ mod tests {
 
     #[test]
     fn step_secs_to_ms_rounds_and_rejects_nonpositive() {
-        assert!(step_ms_from_secs(15.0).unwrap() == 15_000);
-        assert!(step_ms_from_secs(0.5).unwrap() == 500);
+        assert2::assert!(step_ms_from_secs(15.0).unwrap() == 15_000);
+        assert2::assert!(step_ms_from_secs(0.5).unwrap() == 500);
         let zero = step_ms_from_secs(0.0).unwrap_err();
-        assert!(matches!(zero, ProfileError::Plan(message) if message.contains("positive finite")));
-        assert!(step_ms_from_secs(-1.0).is_err());
+        assert2::assert!(
+            matches!(zero, ProfileError::Plan(message) if message.contains("positive finite"))
+        );
+        assert2::assert!(step_ms_from_secs(-1.0).is_err());
         let infinity = step_ms_from_secs(f64::INFINITY).unwrap_err();
-        assert!(
+        assert2::assert!(
             matches!(infinity, ProfileError::Plan(message) if message.contains("positive finite"))
         );
     }
@@ -85,7 +86,7 @@ mod tests {
             (0.000_999_9, None),
             (0.001, Some(1)),
         ] {
-            assert!(step_ms_from_secs(step_secs).ok() == want, "{step_secs}");
+            assert2::assert!(step_ms_from_secs(step_secs).ok() == want);
         }
     }
 
@@ -97,16 +98,13 @@ mod tests {
             (14_999, 0),
             (-1, -15_000),
         ] {
-            assert!(
-                step_bucket_ms(timestamp_ms, 15_000) == want,
-                "{timestamp_ms}"
-            );
+            assert2::assert!(step_bucket_ms(timestamp_ms, 15_000) == want);
         }
     }
 
     #[test]
     fn fold_sum_vs_average() {
-        assert!((fold_bucket(SeriesAgg::Sum, &[2, 3, 5]) - 10.0).abs() < f64::EPSILON);
-        assert!((fold_bucket(SeriesAgg::Average, &[2, 3, 5]) - 10.0 / 3.0).abs() < 1e-12);
+        assert2::assert!((fold_bucket(SeriesAgg::Sum, &[2, 3, 5]) - 10.0).abs() < f64::EPSILON);
+        assert2::assert!((fold_bucket(SeriesAgg::Average, &[2, 3, 5]) - 10.0 / 3.0).abs() < 1e-12);
     }
 }

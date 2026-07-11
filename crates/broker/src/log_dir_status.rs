@@ -206,7 +206,7 @@ fn probe_one(dir: &Path) -> Result<(), String> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::tempdir;
 
     use super::*;
@@ -224,10 +224,10 @@ mod tests {
     fn probe_creates_missing_dir() {
         let tmp = tempdir().unwrap();
         let nested = tmp.path().join("nested").join("brand-new");
-        assert!(!nested.exists());
+        assert2::assert!(!nested.exists());
         let reg = LogDirRegistry::probe(std::slice::from_ref(&nested));
-        assert!(!reg.is_offline(&nested));
-        assert!(nested.is_dir(), "probe should have created the dir");
+        assert2::assert!(!reg.is_offline(&nested));
+        assert2::assert!(nested.is_dir());
     }
 
     /// Probe must leave nothing behind — the sentinel file is removed
@@ -238,7 +238,7 @@ mod tests {
     fn probe_cleans_up_sentinel_on_success() {
         let tmp = tempdir().unwrap();
         let _ = LogDirRegistry::probe(&[tmp.path().to_path_buf()]);
-        assert!(!tmp.path().join(PROBE_FILENAME).exists());
+        assert2::assert!(!tmp.path().join(PROBE_FILENAME).exists());
     }
 
     /// A path that can't be created (a regular file is in the way)
@@ -250,7 +250,7 @@ mod tests {
         let blocker = tmp.path().join("blocker");
         std::fs::write(&blocker, b"i am not a directory").unwrap();
         let reg = LogDirRegistry::probe(std::slice::from_ref(&blocker));
-        assert!(reg.is_offline(&blocker));
+        assert2::assert!(reg.is_offline(&blocker));
         // The reason string is OS-dependent, so pin (path, reason-is-empty)
         // pairs instead of the raw message.
         let offline: Vec<(PathBuf, bool)> = reg
@@ -258,10 +258,7 @@ mod tests {
             .iter()
             .map(|(path, reason)| (path.clone(), reason.is_empty()))
             .collect();
-        assert!(
-            offline == vec![(blocker, false)],
-            "offline entry must carry a non-empty reason",
-        );
+        assert2::assert!(offline == vec![(blocker, false)]);
     }
 
     /// One bad dir must not poison a sibling-good dir's status. The
@@ -287,7 +284,7 @@ mod tests {
     #[test]
     fn unknown_dir_is_not_offline() {
         let reg = LogDirRegistry::default();
-        assert!(!reg.is_offline(Path::new("/never/probed/anywhere")));
+        assert2::assert!(!reg.is_offline(Path::new("/never/probed/anywhere")));
     }
 
     /// Runtime flip on a previously-online dir: registry transitions
@@ -300,10 +297,10 @@ mod tests {
         let tmp = tempdir().unwrap();
         let dir = tmp.path().to_path_buf();
         let reg = LogDirRegistry::probe(std::slice::from_ref(&dir));
-        assert!(!reg.is_offline(&dir));
+        assert2::assert!(!reg.is_offline(&dir));
 
         let flipped = reg.mark_offline(&dir, "EIO from segment fsync");
-        assert!(flipped, "first mark_offline must flip and return true");
+        assert2::assert!(flipped);
 
         check!(reg.is_offline(&dir));
         check!(reg.offline() == vec![(dir.clone(), "EIO from segment fsync".to_string())]);
@@ -338,15 +335,15 @@ mod tests {
     fn mark_offline_on_unknown_dir_inserts_entry() {
         let reg = LogDirRegistry::default();
         let ghost = Path::new("/tmp/crabka-ghost-dir");
-        assert!(reg.mark_offline(ghost, "synthetic test"));
-        assert!(reg.is_offline(ghost));
+        assert2::assert!(reg.mark_offline(ghost, "synthetic test"));
+        assert2::assert!(reg.is_offline(ghost));
     }
 
     #[test]
     fn debug_includes_offline_count_and_entries() {
         let reg = LogDirRegistry::default();
         let ghost = Path::new("/tmp/crabka-debug-offline-dir");
-        assert!(reg.mark_offline(ghost, "debug reason"));
+        assert2::assert!(reg.mark_offline(ghost, "debug reason"));
 
         let rendered = format!("{reg:?}");
 
@@ -357,10 +354,7 @@ mod tests {
             "crabka-debug-offline-dir",
         ];
         for needle in needles {
-            assert!(
-                rendered.contains(needle),
-                "missing {needle:?} in rendered: {rendered}"
-            );
+            assert2::assert!(rendered.contains(needle));
         }
     }
 }

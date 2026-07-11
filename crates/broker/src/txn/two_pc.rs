@@ -102,32 +102,41 @@ pub(crate) fn should_abort_idle_txn(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn resolve_timeout_2pc_is_sentinel_regardless_of_request() {
         // Even an out-of-range request (-5) is ignored under 2PC.
-        for requested in [30_000, 0, i32::MAX, -5] {
-            assert!(
-                resolve_txn_timeout(true, requested) == NO_TIMEOUT_MS,
-                "{requested}"
-            );
+        for (_case, requested) in [
+            ("normal timeout ignored", 30_000),
+            ("zero timeout ignored", 0),
+            ("maximum timeout ignored", i32::MAX),
+            ("negative timeout ignored", -5),
+        ] {
+            assert2::assert!(resolve_txn_timeout(true, requested) == NO_TIMEOUT_MS);
         }
     }
 
     #[test]
     fn resolve_timeout_non_2pc_clamps_to_kafka_bounds() {
         // Below the floor clamps up; above the ceiling clamps down.
-        for (requested, want) in [
-            (30_000, 30_000),
-            (0, MIN_TXN_TIMEOUT_MS),
-            (-1, MIN_TXN_TIMEOUT_MS),
-            (i32::MAX, MAX_TXN_TIMEOUT_MS),
-            (MAX_TXN_TIMEOUT_MS + 1, MAX_TXN_TIMEOUT_MS),
+        for (_case, requested, want) in [
+            ("in-range timeout", 30_000, 30_000),
+            ("zero clamps to floor", 0, MIN_TXN_TIMEOUT_MS),
+            ("negative clamps to floor", -1, MIN_TXN_TIMEOUT_MS),
+            (
+                "maximum integer clamps to ceiling",
+                i32::MAX,
+                MAX_TXN_TIMEOUT_MS,
+            ),
+            (
+                "above maximum clamps to ceiling",
+                MAX_TXN_TIMEOUT_MS + 1,
+                MAX_TXN_TIMEOUT_MS,
+            ),
         ] {
-            assert!(resolve_txn_timeout(false, requested) == want, "{requested}");
+            assert2::assert!(resolve_txn_timeout(false, requested) == want);
         }
     }
 
@@ -144,16 +153,16 @@ mod tests {
     #[test]
     fn reaper_aborts_an_expired_ongoing_non_2pc_txn() {
         // Opened at t=0 with a 60s timeout; at t=60s it is reapable.
-        assert!(should_abort_idle_txn(TxnState::Ongoing, 60_000, 0, 60_000));
-        assert!(should_abort_idle_txn(TxnState::Ongoing, 60_000, 0, 120_000));
+        assert2::assert!(should_abort_idle_txn(TxnState::Ongoing, 60_000, 0, 60_000));
+        assert2::assert!(should_abort_idle_txn(TxnState::Ongoing, 60_000, 0, 120_000));
     }
 
     #[test]
     fn reaper_spares_a_not_yet_expired_ongoing_txn() {
         // One ms short of the timeout.
-        assert!(!should_abort_idle_txn(TxnState::Ongoing, 60_000, 0, 59_999));
+        assert2::assert!(!should_abort_idle_txn(TxnState::Ongoing, 60_000, 0, 59_999));
         // Exactly opened "now".
-        assert!(!should_abort_idle_txn(
+        assert2::assert!(!should_abort_idle_txn(
             TxnState::Ongoing,
             60_000,
             1_000,
@@ -166,13 +175,13 @@ mod tests {
         // The headline KIP-939 property at the unit level: a 2PC (sentinel
         // timeout) Ongoing transaction is never reaped, no matter how much time
         // has elapsed — including a `now_ms` past `i32::MAX` ms.
-        assert!(!should_abort_idle_txn(
+        assert2::assert!(!should_abort_idle_txn(
             TxnState::Ongoing,
             NO_TIMEOUT_MS,
             0,
             i64::MAX
         ));
-        assert!(!should_abort_idle_txn(
+        assert2::assert!(!should_abort_idle_txn(
             TxnState::Ongoing,
             NO_TIMEOUT_MS,
             0,
@@ -190,17 +199,14 @@ mod tests {
             TxnState::CompleteAbort,
             TxnState::Dead,
         ] {
-            assert!(
-                !should_abort_idle_txn(state, 60_000, 0, i64::MAX),
-                "{state:?} must never be reaped by the idle-txn timeout"
-            );
+            assert2::assert!(!should_abort_idle_txn(state, 60_000, 0, i64::MAX));
         }
     }
 
     #[test]
     fn reaper_is_robust_to_a_backwards_clock() {
         // now < start (clock skew) must not underflow into a spurious abort.
-        assert!(!should_abort_idle_txn(
+        assert2::assert!(!should_abort_idle_txn(
             TxnState::Ongoing,
             60_000,
             100_000,

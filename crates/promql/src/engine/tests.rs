@@ -1,6 +1,6 @@
 use std::{collections::BTreeMap, sync::Arc};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::Labels;
 use crabka_metrics::{BucketSpan, NativeHistogram, ResetHint};
 
@@ -26,27 +26,21 @@ fn assert_single_float_sample(result: &QueryResult, job: &str, expected: f64, co
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector for {context}");
     };
-    assert_eq!(samples.len(), 1, "{context}");
-    assert_eq!(samples[0].labels.get("__name__"), None, "{context}");
-    assert_eq!(samples[0].labels.get("job"), Some(job), "{context}");
-    assert!(
-        approx_eq(float_value(&samples[0].value), expected),
-        "{context}"
-    );
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("__name__") == None);
+    assert2::assert!(samples[0].labels.get("job") == Some(job));
+    assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
 }
 
 fn assert_single_on_x_float_sample(result: &QueryResult, expected: f64, context: &str) {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector for {context}");
     };
-    assert_eq!(samples.len(), 1, "{context}");
-    assert_eq!(samples[0].labels.get("__name__"), None, "{context}");
-    assert_eq!(samples[0].labels.get("job"), None, "{context}");
-    assert_eq!(samples[0].labels.get("x"), Some("1"), "{context}");
-    assert!(
-        approx_eq(float_value(&samples[0].value), expected),
-        "{context}"
-    );
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("__name__") == None);
+    assert2::assert!(samples[0].labels.get("job") == None);
+    assert2::assert!(samples[0].labels.get("x") == Some("1"));
+    assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -100,21 +94,15 @@ fn instant_samples_match(left: &[crate::InstantSample], right: &[crate::InstantS
 /// marker), and `count` drops the stale-NaN marker before counting (2, not 3).
 fn assert_aggregate_nan_staleness(query: &str, via_operators: &[crate::InstantSample]) {
     if query == "sum(nan_metric)" {
-        assert_eq!(via_operators.len(), 1, "sum(nan_metric) row missing");
+        assert2::assert!(via_operators.len() == 1);
         let value = float_value(&via_operators[0].value);
-        assert!(value.is_nan(), "genuine NaN not kept through sum: {value}");
-        assert!(
-            !super::is_stale_nan(value),
-            "aggregate value is a stale marker"
-        );
+        assert2::assert!(value.is_nan());
+        assert2::assert!(!super::is_stale_nan(value));
     }
     if query == "count(nan_metric)" {
-        assert_eq!(via_operators.len(), 1, "count(nan_metric) row missing");
+        assert2::assert!(via_operators.len() == 1);
         let value = float_value(&via_operators[0].value);
-        assert!(
-            approx_eq(value, 2.0),
-            "stale marker not dropped before count: got {value}, want 2"
-        );
+        assert2::assert!(approx_eq(value, 2.0));
     }
 }
 
@@ -133,24 +121,18 @@ fn assert_minmax_nan_ignoring(query: &str, via_operators: &[crate::InstantSample
     };
     match query {
         "min by (g) (minmax_nan)" => {
-            assert_eq!(via_operators.len(), 2, "`{query}`: expected mixed+allnan");
+            assert2::assert!(via_operators.len() == 2);
             let mixed = by_group("mixed");
-            assert!(
-                approx_eq(mixed, 1.0),
-                "`{query}`: mixed min over non-NaN: {mixed}"
-            );
+            assert2::assert!(approx_eq(mixed, 1.0));
             let allnan = by_group("allnan");
-            assert!(allnan.is_nan(), "`{query}`: all-NaN min not NaN: {allnan}");
+            assert2::assert!(allnan.is_nan());
         }
         "max by (g) (minmax_nan)" => {
-            assert_eq!(via_operators.len(), 2, "`{query}`: expected mixed+allnan");
+            assert2::assert!(via_operators.len() == 2);
             let mixed = by_group("mixed");
-            assert!(
-                approx_eq(mixed, 4.0),
-                "`{query}`: mixed max over non-NaN: {mixed}"
-            );
+            assert2::assert!(approx_eq(mixed, 4.0));
             let allnan = by_group("allnan");
-            assert!(allnan.is_nan(), "`{query}`: all-NaN max not NaN: {allnan}");
+            assert2::assert!(allnan.is_nan());
         }
         // `min`/`max` with no grouping fold both groups together: the global
         // extremum is over the only non-NaN samples (the mixed group's
@@ -158,20 +140,14 @@ fn assert_minmax_nan_ignoring(query: &str, via_operators: &[crate::InstantSample
         // presence does not force a NaN because the mixed group has finite
         // values).
         "min(minmax_nan)" => {
-            assert_eq!(via_operators.len(), 1, "`{query}`: expected one group");
+            assert2::assert!(via_operators.len() == 1);
             let value = float_value(&via_operators[0].value);
-            assert!(
-                approx_eq(value, 1.0),
-                "`{query}`: global min over non-NaN: {value}"
-            );
+            assert2::assert!(approx_eq(value, 1.0));
         }
         "max(minmax_nan)" => {
-            assert_eq!(via_operators.len(), 1, "`{query}`: expected one group");
+            assert2::assert!(via_operators.len() == 1);
             let value = float_value(&via_operators[0].value);
-            assert!(
-                approx_eq(value, 4.0),
-                "`{query}`: global max over non-NaN: {value}"
-            );
+            assert2::assert!(approx_eq(value, 4.0));
         }
         _ => {}
     }
@@ -198,53 +174,31 @@ fn assert_sparse_aggregate_excludes_no_value(query: &str, via_operators: &[crate
         | "max by (g) (rate(sparse_total[2m]))"
         | "count by (g) (rate(sparse_total[2m]))"
         | "group by (g) (rate(sparse_total[2m]))" => {
-            assert_eq!(
-                via_operators.len(),
-                1,
-                "`{query}`: only g=mix survives (g=allsparse is absent)"
-            );
-            assert!(group_value("mix").is_some(), "`{query}`: g=mix row missing");
-            assert!(
-                group_value("allsparse").is_none(),
-                "`{query}`: g=allsparse must be absent (all members no-value)"
-            );
+            assert2::assert!(via_operators.len() == 1);
+            assert2::assert!(group_value("mix").is_some());
+            assert2::assert!(group_value("allsparse").is_none());
             // `count`/`group` over g=mix see exactly the one dense member.
             if query == "count by (g) (rate(sparse_total[2m]))" {
-                assert!(
-                    approx_eq(group_value("mix").unwrap(), 1.0),
-                    "`{query}`: count over g=mix must be 1 (sparse member excluded)"
-                );
+                assert2::assert!(approx_eq(group_value("mix").unwrap(), 1.0));
             }
             if query == "group by (g) (rate(sparse_total[2m]))" {
-                assert!(
-                    approx_eq(group_value("mix").unwrap(), 1.0),
-                    "`{query}`: group=1"
-                );
+                assert2::assert!(approx_eq(group_value("mix").unwrap(), 1.0));
             }
         }
         // No grouping: the global aggregate is over the single dense rate.
         "count (rate(sparse_total[2m]))" => {
-            assert_eq!(via_operators.len(), 1, "`{query}`: one global row");
-            assert!(
-                approx_eq(float_value(&via_operators[0].value), 1.0),
-                "`{query}`: global count must be 1 (only the dense rate)"
-            );
+            assert2::assert!(via_operators.len() == 1);
+            assert2::assert!(approx_eq(float_value(&via_operators[0].value), 1.0));
         }
         "sum (rate(sparse_total[2m]))" => {
-            assert_eq!(via_operators.len(), 1, "`{query}`: one global row");
+            assert2::assert!(via_operators.len() == 1);
         }
         // The `*_over_time` window strands every sparse member, leaving only
         // the dense member in g=mix; g=allsparse is absent.
         "count by (g) (avg_over_time(sparse_total[30s]))" => {
-            assert_eq!(via_operators.len(), 1, "`{query}`: only g=mix survives");
-            assert!(
-                approx_eq(group_value("mix").unwrap(), 1.0),
-                "`{query}`: count over g=mix must be 1"
-            );
-            assert!(
-                group_value("allsparse").is_none(),
-                "`{query}`: g=allsparse must be absent"
-            );
+            assert2::assert!(via_operators.len() == 1);
+            assert2::assert!(approx_eq(group_value("mix").unwrap(), 1.0));
+            assert2::assert!(group_value("allsparse").is_none());
         }
         _ => {}
     }
@@ -362,7 +316,7 @@ async fn range_query_scans_store_once_per_matcher_set_not_per_step() {
         .eval_range_via_planner_forced("t", "count({job=\"broker\"})", 0, 19 * 15_000, 15_000)
         .await
         .unwrap();
-    assert!(matches!(result, QueryResult::RangeMatrix(_)));
+    assert2::assert!(matches!(result, QueryResult::RangeMatrix(_)));
     check!(
         scans.load(Ordering::SeqCst) == 2,
         "store scans should collapse to one float + one histogram union scan, got {}",
@@ -455,14 +409,13 @@ async fn histogram_quantile_mixed_emits_exact_warning_and_no_info() {
         .query_instant_with_annotations("tenant-a", "histogram_quantile(0.8, series)", 0)
         .await
         .expect("query");
-    assert_eq!(
-            annotations.warnings,
-            vec![
+    assert2::assert!(annotations == crate::Annotations {
+            warnings: vec![
                 "PromQL warning: vector contains a mix of classic and native histograms for metric name \"series\""
                     .to_string()
-            ]
-        );
-    assert!(annotations.infos.is_empty());
+            ],
+            infos: vec![],
+        });
 }
 
 #[tokio::test]
@@ -472,7 +425,7 @@ async fn histogram_fraction_mixed_emits_exact_warning() {
         .query_instant_with_annotations("tenant-a", "histogram_fraction(-Inf, 1, series)", 0)
         .await
         .expect("query");
-    assert!(annotations.warnings.iter().any(|w| w
+    assert2::assert!(annotations.warnings.iter().any(|w| w
             == "PromQL warning: vector contains a mix of classic and native histograms for metric name \"series\""));
 }
 
@@ -490,15 +443,14 @@ async fn histogram_float_comparison_emits_incompatible_types_info() {
         .query_instant_with_annotations("tenant-a", "h > 80", 0)
         .await
         .expect("query");
-    assert!(matches!(result, QueryResult::InstantVector(ref v) if v.is_empty()));
-    assert_eq!(
-            annotations.infos,
-            vec![
+    assert2::assert!(matches!(result, QueryResult::InstantVector(ref v) if v.is_empty()));
+    assert2::assert!(annotations == crate::Annotations {
+            infos: vec![
                 "PromQL info: incompatible sample types encountered for binary operator \">\": histogram > float"
                     .to_string()
-            ]
-        );
-    assert!(annotations.warnings.is_empty());
+            ],
+            warnings: vec![],
+        });
 }
 
 #[tokio::test]
@@ -508,7 +460,7 @@ async fn clean_query_raises_no_annotations() {
         .query_instant_with_annotations("tenant-a", "up", 10_000)
         .await
         .expect("query");
-    assert!(annotations.is_empty());
+    assert2::assert!(annotations.is_empty());
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -528,12 +480,12 @@ async fn limit_ratio_over_bound_emits_capping_warning() {
         .query_instant_with_annotations("tenant-a", "count(limit_ratio(1.1, http_requests))", 0)
         .await
         .expect("query");
-    assert_eq!(
-        annotations.warnings,
-        vec![
-            "PromQL warning: ratio value should be between -1 and 1, got 1.1, capping to 1"
-                .to_string()
-        ]
+    assert2::assert!(
+        annotations.warnings
+            == vec![
+                "PromQL warning: ratio value should be between -1 and 1, got 1.1, capping to 1"
+                    .to_string()
+            ]
     );
 }
 
@@ -565,10 +517,10 @@ async fn instant_label_join_combines_source_labels() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    check!(samples.len() == 1);
-    check!(samples[0].labels.get("target") == Some("api/a"));
-    check!(samples[0].labels.get("zone") == Some("us-east-1a"));
-    check!(approx_eq(float_value(&samples[0].value), 1.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("target") == Some("api/a"));
+    assert2::assert!(samples[0].labels.get("zone") == Some("us-east-1a"));
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 1.0));
 }
 
 #[tokio::test]
@@ -594,10 +546,10 @@ async fn instant_label_replace_uses_regex_capture_groups() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    check!(samples.len() == 1);
-    check!(samples[0].labels.get("host") == Some("api-1"));
-    check!(samples[0].labels.get("instance") == Some("api-1:9100"));
-    check!(approx_eq(float_value(&samples[0].value), 1.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("host") == Some("api-1"));
+    assert2::assert!(samples[0].labels.get("instance") == Some("api-1:9100"));
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 1.0));
 }
 
 #[tokio::test]
@@ -621,7 +573,7 @@ async fn instant_clamp_bounds_vector_values() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 3);
+    assert2::assert!(samples.len() == 3);
     let values = samples
         .iter()
         .map(|sample| {
@@ -766,14 +718,14 @@ async fn instant_unary_numeric_functions_transform_vector_values() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 3);
+        assert2::assert!(samples.len() == 3);
         for (case, value) in expected {
             let sample = samples
                 .iter()
                 .find(|sample| sample.labels.get("case") == Some(case))
                 .expect("sample for case");
-            assert!(sample.labels.get("__name__").is_none());
-            assert!(approx_eq(float_value(&sample.value), value));
+            assert2::assert!(sample.labels.get("__name__") == None);
+            assert2::assert!(approx_eq(float_value(&sample.value), value));
         }
     }
 }
@@ -848,14 +800,14 @@ async fn instant_hyperbolic_functions_transform_vector_values() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 3);
+        assert2::assert!(samples.len() == 3);
         for (case, value) in expected {
             let sample = samples
                 .iter()
                 .find(|sample| sample.labels.get("case") == Some(case))
                 .expect("sample for case");
-            assert!(sample.labels.get("__name__").is_none());
-            assert!(approx_eq(float_value(&sample.value), value));
+            assert2::assert!(sample.labels.get("__name__") == None);
+            assert2::assert!(approx_eq(float_value(&sample.value), value));
         }
     }
 }
@@ -958,14 +910,14 @@ async fn instant_trigonometric_functions_transform_vector_values() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 3);
+        assert2::assert!(samples.len() == 3);
         for (case, value) in expected {
             let sample = samples
                 .iter()
                 .find(|sample| sample.labels.get("case") == Some(case))
                 .expect("sample for case");
-            assert!(sample.labels.get("__name__").is_none());
-            assert!(approx_eq(float_value(&sample.value), value));
+            assert2::assert!(sample.labels.get("__name__") == None);
+            assert2::assert!(approx_eq(float_value(&sample.value), value));
         }
     }
 }
@@ -977,7 +929,7 @@ async fn scalar_pi_function_returns_pi_constant() {
         .query_instant("tenant-a", "pi()", 10_000)
         .await
         .unwrap();
-    assert!(
+    assert2::assert!(
         result
             == QueryResult::Scalar {
                 ts_ms: 10_000,
@@ -1026,13 +978,13 @@ async fn instant_sort_functions_order_vector_by_sample_value() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 3);
+        assert2::assert!(samples.len() == 3);
         let instances = samples
             .iter()
             .map(|sample| sample.labels.get("instance").unwrap().to_string())
             .collect::<Vec<_>>();
-        assert!(instances == expected_instances);
-        assert!(
+        assert2::assert!(instances == expected_instances);
+        assert2::assert!(
             samples
                 .iter()
                 .all(|sample| sample.labels.get("__name__") == Some("queue_depth"))
@@ -1068,10 +1020,10 @@ async fn instant_calendar_functions_extract_utc_fields_from_sample_values() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        check!(samples.len() == 1);
-        check!(samples[0].labels.get("__name__").is_none());
-        check!(samples[0].labels.get("case") == Some("leap"));
-        check!(approx_eq(float_value(&samples[0].value), expected));
+        assert2::assert!(samples.len() == 1);
+        assert2::assert!(samples[0].labels.get("__name__") == None);
+        assert2::assert!(samples[0].labels.get("case") == Some("leap"));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
     }
 }
 
@@ -1083,7 +1035,7 @@ async fn instant_calendar_functions_without_args_use_eval_time() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         result
             == QueryResult::Scalar {
                 ts_ms: 3_660_000,
@@ -1111,7 +1063,7 @@ async fn instant_clamp_with_reversed_bounds_returns_empty_vector() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -1152,10 +1104,19 @@ async fn instant_selector_returns_latest_sample_within_lookback() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    check!(samples.len() == 1);
-    check!(samples[0].labels.get("job") == Some("api"));
-    check!(samples[0].ts_ms == 20_000);
-    check!(approx_eq(float_value(&samples[0].value), 2.0));
+    check!(
+        (
+            samples.len(),
+            &samples[0].labels,
+            samples[0].ts_ms,
+            approx_eq(float_value(&samples[0].value), 2.0),
+        ) == (
+            1,
+            &labels(&[("__name__", "up"), ("job", "api")]),
+            20_000,
+            true,
+        )
+    );
 }
 
 #[tokio::test]
@@ -1337,7 +1298,7 @@ async fn instant_selector_or_matchers_union_matching_series() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 2);
+    assert2::assert!(samples.len() == 2);
     let values_by_job = samples
         .iter()
         .map(|sample| {
@@ -1384,7 +1345,7 @@ async fn instant_selector_stale_marker_terminates_series_before_lookback_expiry(
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -1448,19 +1409,19 @@ async fn instant_sum_by_groups_by_exact_labels_and_drops_metric_name() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 2);
+    assert2::assert!(samples.len() == 2);
     let api = samples
         .iter()
         .find(|sample| sample.labels.get("job") == Some("api"))
         .expect("api group");
-    check!(api.labels.get("__name__").is_none());
-    check!(api.labels.get("instance").is_none());
-    check!(approx_eq(float_value(&api.value), 3.0));
+    assert2::assert!(api.labels.get("__name__") == None);
+    assert2::assert!(api.labels.get("instance") == None);
+    assert2::assert!(approx_eq(float_value(&api.value), 3.0));
     let web = samples
         .iter()
         .find(|sample| sample.labels.get("job") == Some("web"))
         .expect("web group");
-    assert!(approx_eq(float_value(&web.value), 4.0));
+    assert2::assert!(approx_eq(float_value(&web.value), 4.0));
 }
 
 #[tokio::test]
@@ -1488,8 +1449,8 @@ async fn instant_count_counts_series() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 1);
-    assert!(approx_eq(float_value(&samples[0].value), 2.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 2.0));
 }
 
 #[tokio::test]
@@ -1513,10 +1474,10 @@ async fn instant_group_returns_one_for_each_group() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 2);
+    assert2::assert!(samples.len() == 2);
     for sample in samples {
-        assert!(sample.labels.get("__name__").is_none());
-        assert!(approx_eq(float_value(&sample.value), 1.0));
+        assert2::assert!(sample.labels.get("__name__") == None);
+        assert2::assert!(approx_eq(float_value(&sample.value), 1.0));
     }
 }
 
@@ -1587,7 +1548,7 @@ async fn instant_stdvar_aggregate_is_stable_for_large_offset_group() {
     else {
         panic!("expected vector");
     };
-    assert!(stdvar.len() == 1);
+    assert2::assert!(stdvar.len() == 1);
     let value = float_value(&stdvar[0].value);
     check!(!value.is_nan(), "stdvar must be finite, got NaN");
     check!(value > 0.0, "stdvar must be positive, got {value}");
@@ -1620,10 +1581,10 @@ async fn instant_avg_aggregate_does_not_overflow() {
     else {
         panic!("expected vector");
     };
-    assert!(avg.len() == 1);
+    assert2::assert!(avg.len() == 1);
     let value = float_value(&avg[0].value);
-    assert!(value.is_finite(), "avg must stay finite, got {value}");
-    assert!(approx_eq(value, f64::MAX));
+    assert2::assert!(value.is_finite());
+    assert2::assert!(approx_eq(value, f64::MAX));
 }
 
 /// M19: `count_values` renders a non-finite sample value through the canonical
@@ -1690,18 +1651,18 @@ async fn instant_count_values_counts_by_sample_value() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 2);
+    assert2::assert!(samples.len() == 2);
     let ok = samples
         .iter()
         .find(|sample| sample.labels.get("code") == Some("200"))
         .expect("200 bucket");
-    assert!(ok.labels.get("__name__").is_none());
-    assert!(approx_eq(float_value(&ok.value), 2.0));
+    assert2::assert!(ok.labels.get("__name__") == None);
+    assert2::assert!(approx_eq(float_value(&ok.value), 2.0));
     let err = samples
         .iter()
         .find(|sample| sample.labels.get("code") == Some("500"))
         .expect("500 bucket");
-    assert!(approx_eq(float_value(&err.value), 1.0));
+    assert2::assert!(approx_eq(float_value(&err.value), 1.0));
 }
 
 #[tokio::test]
@@ -1747,21 +1708,21 @@ async fn instant_count_values_counts_native_histogram_sample_values() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    check!(samples.len() == 2);
-    check!(samples.iter().all(|sample| {
-        sample.labels.get("__name__").is_none()
-            && sample.labels.get("job") == Some("api")
-            && sample.labels.get("histogram").is_some()
-    }));
+    let mut values = samples
+        .iter()
+        .map(|sample| float_value(&sample.value))
+        .collect::<Vec<_>>();
+    values.sort_by(f64::total_cmp);
     check!(
-        samples
-            .iter()
-            .any(|sample| approx_eq(float_value(&sample.value), 2.0))
-    );
-    check!(
-        samples
-            .iter()
-            .any(|sample| approx_eq(float_value(&sample.value), 1.0))
+        (
+            samples.len(),
+            samples.iter().all(|sample| {
+                sample.labels.get("__name__").is_none()
+                    && sample.labels.get("job") == Some("api")
+                    && sample.labels.get("histogram").is_some()
+            }),
+            values,
+        ) == (2, true, vec![1.0, 2.0])
     );
 }
 
@@ -1786,17 +1747,24 @@ async fn instant_topk_keeps_largest_samples_with_original_labels() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    check!(samples.len() == 2);
-    check!(samples.iter().any(|sample| {
-        sample.labels.get("__name__") == Some("memory_bytes")
-            && sample.labels.get("instance") == Some("b")
-            && approx_eq(float_value(&sample.value), 3.0)
-    }));
-    check!(samples.iter().any(|sample| {
-        sample.labels.get("__name__") == Some("memory_bytes")
-            && sample.labels.get("instance") == Some("c")
-            && approx_eq(float_value(&sample.value), 2.0)
-    }));
+    let mut projection = samples
+        .iter()
+        .map(|sample| {
+            (
+                sample.labels.get("__name__"),
+                sample.labels.get("instance"),
+                float_value(&sample.value),
+            )
+        })
+        .collect::<Vec<_>>();
+    projection.sort_by_key(|(_, instance, _)| *instance);
+    check!(
+        projection
+            == vec![
+                (Some("memory_bytes"), Some("b"), 3.0),
+                (Some("memory_bytes"), Some("c"), 2.0),
+            ]
+    );
 }
 
 #[tokio::test]
@@ -1958,21 +1926,10 @@ async fn instant_topk_and_bottomk_ignore_histograms() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert_eq!(samples.len(), 1, "{query}");
-        assert_eq!(
-            samples[0].labels.get("__name__"),
-            Some("memory_bytes"),
-            "{query}"
-        );
-        assert_eq!(
-            samples[0].labels.get("instance"),
-            Some(expected_instance),
-            "{query}"
-        );
-        assert!(
-            approx_eq(float_value(&samples[0].value), expected_value),
-            "{query}"
-        );
+        assert2::assert!(samples.len() == 1);
+        assert2::assert!(samples[0].labels.get("__name__") == Some("memory_bytes"));
+        assert2::assert!(samples[0].labels.get("instance") == Some(expected_instance));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), expected_value));
     }
 }
 
@@ -1986,8 +1943,8 @@ async fn instant_limit_ratio_requires_experimental_feature() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, PromqlError::Unsupported(_)));
-    assert!(format!("{error}").contains("experimental-functions"));
+    assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
+    assert2::assert!(format!("{error}").contains("experimental-functions"));
 }
 
 #[cfg(not(feature = "experimental-functions"))]
@@ -2000,8 +1957,8 @@ async fn instant_limitk_requires_experimental_feature() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, PromqlError::Unsupported(_)));
-    assert!(format!("{error}").contains("experimental-functions"));
+    assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
+    assert2::assert!(format!("{error}").contains("experimental-functions"));
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2031,7 +1988,7 @@ async fn instant_limitk_selects_deterministic_hash_subset() {
         panic!("expected vector");
     };
     let selected = sample_instances(&samples);
-    assert!(selected == vec!["c", "e"]);
+    assert2::assert!(selected == vec!["c", "e"]);
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2109,7 +2066,7 @@ async fn instant_limit_ratio_selects_deterministic_hash_subset() {
         panic!("expected vector");
     };
     let selected = sample_instances(&samples);
-    assert!(selected == vec!["b", "c", "e"]);
+    assert2::assert!(selected == vec!["b", "c", "e"]);
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2139,7 +2096,7 @@ async fn instant_limit_ratio_negative_selects_complement_subset() {
         panic!("expected vector");
     };
     let selected = sample_instances(&samples);
-    assert!(selected == vec!["a", "d"]);
+    assert2::assert!(selected == vec!["a", "d"]);
 }
 
 #[tokio::test]
@@ -2216,10 +2173,10 @@ async fn instant_quantile_aggregation_ignores_histograms() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].labels.get("__name__"), None);
-    assert_eq!(samples[0].labels.get("job"), Some("api"));
-    assert!(approx_eq(float_value(&samples[0].value), 4.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("__name__") == None);
+    assert2::assert!(samples[0].labels.get("job") == Some("api"));
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 4.0));
 }
 
 #[tokio::test]
@@ -2271,13 +2228,10 @@ async fn instant_min_max_and_std_aggregations_ignore_histograms() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert_eq!(samples.len(), 1, "{query}");
-        assert_eq!(samples[0].labels.get("__name__"), None, "{query}");
-        assert_eq!(samples[0].labels.get("job"), Some("api"), "{query}");
-        assert!(
-            approx_eq(float_value(&samples[0].value), expected),
-            "{query}"
-        );
+        assert2::assert!(samples.len() == 1);
+        assert2::assert!(samples[0].labels.get("__name__") == None);
+        assert2::assert!(samples[0].labels.get("job") == Some("api"));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
     }
 }
 
@@ -2318,13 +2272,10 @@ async fn instant_count_and_group_aggregations_include_histograms() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert_eq!(samples.len(), 1, "{query}");
-        assert_eq!(samples[0].labels.get("__name__"), None, "{query}");
-        assert_eq!(samples[0].labels.get("job"), Some("api"), "{query}");
-        assert!(
-            approx_eq(float_value(&samples[0].value), expected),
-            "{query}"
-        );
+        assert2::assert!(samples.len() == 1);
+        assert2::assert!(samples[0].labels.get("__name__") == None);
+        assert2::assert!(samples[0].labels.get("job") == Some("api"));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
     }
 }
 
@@ -2438,20 +2389,20 @@ async fn instant_sum_aggregation_combines_native_histograms_with_different_span_
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert_eq!(samples.len(), 1);
+    assert2::assert!(samples.len() == 1);
     let SampleValue::Histogram(histogram) = &samples[0].value else {
         panic!("expected histogram");
     };
-    assert!(approx_eq(histogram.count, 10.0));
-    assert!(approx_eq(histogram.sum, 30.0));
-    assert_eq!(
-        histogram.positive_spans,
-        vec![BucketSpan {
-            offset: 0,
-            length: 2
-        }]
+    assert2::assert!(approx_eq(histogram.count, 10.0));
+    assert2::assert!(approx_eq(histogram.sum, 30.0));
+    assert2::assert!(
+        &histogram.positive_spans
+            == &vec![BucketSpan {
+                offset: 0,
+                length: 2,
+            }]
     );
-    assert_eq!(histogram.positive_counts, vec![1.0, 2.0]);
+    assert2::assert!(&histogram.positive_counts == &vec![1.0, 2.0]);
 }
 
 #[tokio::test]
@@ -2498,9 +2449,9 @@ async fn instant_sum_and_avg_aggregations_omit_mixed_float_and_histogram_groups(
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert_eq!(samples.len(), 1, "{query}");
-        assert_eq!(samples[0].labels.get("job"), Some("web"), "{query}");
-        assert!(approx_eq(float_value(&samples[0].value), 6.0), "{query}");
+        assert2::assert!(samples.len() == 1);
+        assert2::assert!(samples[0].labels.get("job") == Some("web"));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), 6.0));
     }
 }
 
@@ -2552,8 +2503,8 @@ async fn instant_sum_aggregation_rejects_incompatible_native_histograms() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, PromqlError::Unsupported(_)));
-    assert!(format!("{error}").contains("incompatible native histogram"));
+    assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
+    assert2::assert!(format!("{error}").contains("incompatible native histogram"));
 }
 
 #[tokio::test]
@@ -2605,7 +2556,7 @@ async fn histogram_quantiles_requires_experimental_feature() {
         .await
         .unwrap_err();
 
-    assert!(format!("{error}").contains("experimental-functions"));
+    assert2::assert!(format!("{error}").contains("experimental-functions"));
 }
 
 #[cfg(feature = "experimental-functions")]
@@ -2638,7 +2589,7 @@ async fn histogram_quantiles_emits_one_sample_per_requested_quantile() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 2);
+    assert2::assert!(samples.len() == 2);
     let values = samples
         .iter()
         .map(|sample| {
@@ -2808,13 +2759,10 @@ async fn native_histogram_scalar_arithmetic_scales_histograms() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert_eq!(samples.len(), 1, "{query}");
-        assert_eq!(samples[0].labels.get("__name__"), None, "{query}");
-        assert_eq!(samples[0].labels.get("job"), Some("api"), "{query}");
-        assert!(
-            approx_eq(float_value(&samples[0].value), expected),
-            "{query}"
-        );
+        assert2::assert!(samples.len() == 1);
+        assert2::assert!(samples[0].labels.get("__name__") == None);
+        assert2::assert!(samples[0].labels.get("job") == Some("api"));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
     }
 }
 
@@ -2833,7 +2781,7 @@ async fn native_histogram_scalar_arithmetic_drops_invalid_operator_orders() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.is_empty(), "{query}");
+        assert2::assert!(samples.is_empty());
     }
 }
 
@@ -2920,7 +2868,7 @@ async fn scalar_binary_arithmetic_returns_scalar() {
         .query_instant("tenant-a", "2 * 3", 10_000)
         .await
         .unwrap();
-    assert!(
+    assert2::assert!(
         result
             == QueryResult::Scalar {
                 ts_ms: 10_000,
@@ -2936,7 +2884,7 @@ async fn scalar_binary_atan2_returns_angle_radians() {
         .query_instant("tenant-a", "1 atan2 1", 10_000)
         .await
         .unwrap();
-    assert!(
+    assert2::assert!(
         result
             == QueryResult::Scalar {
                 ts_ms: 10_000,
@@ -2955,8 +2903,8 @@ async fn scalar_max_of_min_of_require_experimental_feature() {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, PromqlError::Unsupported(_)));
-        assert!(format!("{error}").contains("experimental-functions"));
+        assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
+        assert2::assert!(format!("{error}").contains("experimental-functions"));
     }
 }
 
@@ -2969,7 +2917,7 @@ async fn scalar_max_of_min_of_return_larger_and_smaller_scalar() {
             .query_instant("tenant-a", query, 10_000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             result
                 == QueryResult::Scalar {
                     ts_ms: 10_000,
@@ -3002,7 +2950,7 @@ async fn scalar_function_converts_single_sample_vector_and_nan_otherwise() {
         .query_instant("tenant-a", "scalar(single_value)", 10_000)
         .await
         .unwrap();
-    assert!(
+    assert2::assert!(
         single
             == QueryResult::Scalar {
                 ts_ms: 10_000,
@@ -3018,8 +2966,8 @@ async fn scalar_function_converts_single_sample_vector_and_nan_otherwise() {
         let QueryResult::Scalar { ts_ms, value } = result else {
             panic!("expected scalar");
         };
-        assert!(ts_ms == 10_000);
-        assert!(value.is_nan());
+        assert2::assert!(ts_ms == 10_000);
+        assert2::assert!(value.is_nan());
     }
 }
 
@@ -3211,7 +3159,7 @@ async fn vector_vector_arithmetic_fill_uses_missing_side_values() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(values.len(), 3);
+    assert2::assert!(values.len() == 3);
     check!(approx_eq(values["matched"], 13.0));
     check!(approx_eq(values["left-only"], 7.0));
     check!(approx_eq(values["right-only"], 5.0));
@@ -3314,7 +3262,7 @@ async fn vector_vector_comparison_matches_native_histogram_equality() {
     let QueryResult::InstantVector(samples) = false_filter else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 
     let bool_result = engine
         .query_instant("tenant-a", "a == bool on (x) c", 10_000)
@@ -3336,7 +3284,7 @@ async fn vector_vector_comparison_matches_native_histogram_equality() {
     let QueryResult::InstantVector(samples) = invalid else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -3393,7 +3341,7 @@ async fn vector_vector_arithmetic_scales_native_histograms_with_matched_floats()
     let QueryResult::InstantVector(samples) = invalid else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -3435,7 +3383,7 @@ async fn vector_vector_group_left_carries_labels_from_one_side() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 2);
+    assert2::assert!(samples.len() == 2);
     for sample in samples {
         check!(sample.labels.get("__name__").is_none());
         check!(sample.labels.get("job") == Some("api"));
@@ -3495,13 +3443,13 @@ async fn vector_vector_group_left_fill_right_preserves_unmatched_many_side() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(values.len(), 3);
-    assert_eq!(values["a"].0, Some("east"));
-    assert!(approx_eq(values["a"].1, 110.0));
-    assert_eq!(values["b"].0, Some("east"));
-    assert!(approx_eq(values["b"].1, 60.0));
-    assert_eq!(values["c"].0, None);
-    assert!(approx_eq(values["c"].1, 7.0));
+    assert2::assert!(values.len() == 3);
+    assert2::assert!(values["a"].0 == Some("east"));
+    assert2::assert!(approx_eq(values["a"].1, 110.0));
+    assert2::assert!(values["b"].0 == Some("east"));
+    assert2::assert!(approx_eq(values["b"].1, 60.0));
+    assert2::assert!(values["c"].0 == None);
+    assert2::assert!(approx_eq(values["c"].1, 7.0));
 }
 
 #[tokio::test]
@@ -3556,13 +3504,13 @@ async fn vector_vector_group_right_fill_left_preserves_unmatched_many_side() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(values.len(), 3);
-    assert_eq!(values["a"].0, Some("east"));
-    assert!(approx_eq(values["a"].1, 110.0));
-    assert_eq!(values["b"].0, Some("east"));
-    assert!(approx_eq(values["b"].1, 60.0));
-    assert_eq!(values["c"].0, None);
-    assert!(approx_eq(values["c"].1, 7.0));
+    assert2::assert!(values.len() == 3);
+    assert2::assert!(values["a"].0 == Some("east"));
+    assert2::assert!(approx_eq(values["a"].1, 110.0));
+    assert2::assert!(values["b"].0 == Some("east"));
+    assert2::assert!(approx_eq(values["b"].1, 60.0));
+    assert2::assert!(values["c"].0 == None);
+    assert2::assert!(approx_eq(values["c"].1, 7.0));
 }
 
 #[tokio::test]
@@ -3648,16 +3596,17 @@ async fn info_function_uses_data_label_selector_to_filter_and_copy_labels() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert_eq!(samples.len(), 1);
-    assert_eq!(
-        samples[0].labels.get("__name__"),
-        Some("http_requests_total")
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(
+        samples[0].labels.clone()
+            == labels(&[
+                ("__name__", "http_requests_total"),
+                ("job", "api"),
+                ("instance", "a"),
+                ("region", "east"),
+            ])
     );
-    assert_eq!(samples[0].labels.get("job"), Some("api"));
-    assert_eq!(samples[0].labels.get("instance"), Some("a"));
-    assert_eq!(samples[0].labels.get("region"), Some("east"));
-    assert_eq!(samples[0].labels.get("cluster"), None);
-    assert!(approx_eq(float_value(&samples[0].value), 7.0));
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 7.0));
 }
 
 #[tokio::test]
@@ -3698,7 +3647,7 @@ async fn info_function_drops_series_when_required_data_label_selector_does_not_m
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -3737,9 +3686,9 @@ async fn info_function_keeps_base_label_when_info_label_overlaps() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].labels.get("region"), Some("base"));
-    assert_eq!(samples[0].labels.get("cluster"), Some("prod"));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("region") == Some("base"));
+    assert2::assert!(samples[0].labels.get("cluster") == Some("prod"));
 }
 
 #[tokio::test]
@@ -3780,8 +3729,8 @@ async fn info_function_uses_named_info_metric_selector() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].labels.get("version"), Some("1.2.3"));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("version") == Some("1.2.3"));
 }
 
 #[tokio::test]
@@ -3833,9 +3782,9 @@ async fn info_function_merges_data_labels_from_multiple_info_metrics() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert_eq!(samples.len(), 1);
-    assert_eq!(samples[0].labels.get("cluster"), Some("prod"));
-    assert_eq!(samples[0].labels.get("version"), Some("1.2.3"));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(samples[0].labels.get("cluster") == Some("prod"));
+    assert2::assert!(samples[0].labels.get("version") == Some("1.2.3"));
 }
 
 #[tokio::test]
@@ -3937,7 +3886,7 @@ async fn comparison_without_bool_filters_false_samples() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -4138,11 +4087,11 @@ async fn range_selector_at_start_and_end_use_query_bounds() {
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert!(series.len() == 1);
-        assert!(series[0].samples.len() == 3);
+        assert2::assert!(series.len() == 1);
+        assert2::assert!(series[0].samples.len() == 3);
         for (ts_ms, value) in &series[0].samples {
-            assert!([60_000, 120_000, 180_000].contains(ts_ms));
-            assert!(approx_eq(float_value(value), expected));
+            assert2::assert!([60_000, 120_000, 180_000].contains(ts_ms));
+            assert2::assert!(approx_eq(float_value(value), expected));
         }
     }
 }
@@ -4168,8 +4117,8 @@ async fn instant_increase_corrects_counter_resets() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 1);
-    assert!(approx_eq(float_value(&samples[0].value), 2.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 2.0));
 }
 
 #[tokio::test]
@@ -4193,8 +4142,8 @@ async fn instant_delta_is_gauge_delta_without_reset_correction() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 1);
-    assert!(approx_eq(float_value(&samples[0].value), -2.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(approx_eq(float_value(&samples[0].value), -2.0));
 }
 
 #[tokio::test]
@@ -4284,8 +4233,8 @@ async fn instant_irate_uses_last_two_samples_per_second() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 1);
-    assert!(approx_eq(float_value(&samples[0].value), 2.0 / 30.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 2.0 / 30.0));
 }
 
 #[tokio::test]
@@ -4309,8 +4258,8 @@ async fn instant_idelta_uses_last_two_samples_without_per_second_division() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 1);
-    assert!(approx_eq(float_value(&samples[0].value), 2.0));
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(approx_eq(float_value(&samples[0].value), 2.0));
 }
 
 #[tokio::test]
@@ -4385,8 +4334,8 @@ async fn instant_double_exponential_smoothing_requires_experimental_feature() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, PromqlError::Unsupported(_)));
-    assert!(format!("{error}").contains("experimental-functions"));
+    assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
+    assert2::assert!(format!("{error}").contains("experimental-functions"));
 }
 
 #[cfg(not(feature = "experimental-functions"))]
@@ -4401,11 +4350,8 @@ async fn instant_duration_expression_helpers_require_experimental_feature() {
             .await
             .unwrap_err();
 
-        assert!(matches!(error, PromqlError::Unsupported(_)), "{query}");
-        assert!(
-            format!("{error}").contains("experimental-functions"),
-            "{query}: {error}"
-        );
+        assert2::assert!(matches!(error, PromqlError::Unsupported(_)));
+        assert2::assert!(format!("{error}").contains("experimental-functions"));
     }
 }
 
@@ -4420,13 +4366,12 @@ async fn instant_duration_expression_helpers_return_zero() {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             result
                 == QueryResult::Scalar {
                     ts_ms: 120_000,
                     value: 0.0,
-                },
-            "{query}"
+                }
         );
     }
 }
@@ -4450,16 +4395,15 @@ async fn range_duration_expression_helpers_return_query_range_and_step_seconds()
         let QueryResult::RangeMatrix(series) = result else {
             panic!("expected matrix");
         };
-        assert_eq!(series.len(), 1, "{query}");
-        assert_eq!(series[0].labels.len(), 0, "{query}");
-        assert_eq!(
+        assert2::assert!(series.len() == 1);
+        assert2::assert!(series[0].labels.len() == 0);
+        assert2::assert!(
             series[0]
                 .samples
                 .iter()
                 .map(|(_, value)| float_value(value))
-                .collect::<Vec<_>>(),
-            vec![expected; 5],
-            "{query}"
+                .collect::<Vec<_>>()
+                == vec![expected; 5]
         );
     }
 }
@@ -4524,8 +4468,8 @@ async fn instant_double_exponential_smoothing_validates_factors() {
         .await
         .unwrap_err();
 
-    assert!(matches!(error, PromqlError::Plan(_)));
-    assert!(format!("{error}").contains("smoothing factor"));
+    assert2::assert!(matches!(error, PromqlError::Plan(_)));
+    assert2::assert!(format!("{error}").contains("smoothing factor"));
 }
 
 #[tokio::test]
@@ -4558,14 +4502,14 @@ async fn instant_basic_over_time_functions_reduce_range_samples() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("expected vector");
         };
-        assert!(samples.len() == 1);
+        assert2::assert!(samples.len() == 1);
         if preserves_name {
-            assert!(samples[0].labels.get("__name__") == Some("queue_depth"));
+            assert2::assert!(samples[0].labels.get("__name__") == Some("queue_depth"));
         } else {
-            assert!(samples[0].labels.get("__name__").is_none());
+            assert2::assert!(samples[0].labels.get("__name__").is_none());
         }
-        assert!(samples[0].labels.get("job") == Some("api"));
-        assert!(approx_eq(float_value(&samples[0].value), expected));
+        assert2::assert!(samples[0].labels.get("job") == Some("api"));
+        assert2::assert!(approx_eq(float_value(&samples[0].value), expected));
     }
 }
 
@@ -4800,7 +4744,7 @@ async fn instant_absent_over_time_treats_native_histograms_as_present() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.is_empty());
+    assert2::assert!(samples.is_empty());
 }
 
 #[tokio::test]
@@ -4811,7 +4755,7 @@ async fn instant_time_returns_evaluation_timestamp_seconds() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         result
             == QueryResult::Scalar {
                 ts_ms: 123_456,
@@ -4895,7 +4839,7 @@ async fn unary_minus_negates_scalar_expression() {
         .query_instant("tenant-a", "-(2 * 3)", 10_000)
         .await
         .unwrap();
-    assert!(
+    assert2::assert!(
         result
             == QueryResult::Scalar {
                 ts_ms: 10_000,
@@ -5166,10 +5110,10 @@ async fn instant_subquery_aligns_start_to_step_grid() {
     let QueryResult::InstantVector(samples) = result else {
         panic!("expected vector");
     };
-    assert!(samples.len() == 1);
-    assert!(approx_eq(
+    assert2::assert!(samples.len() == 1);
+    assert2::assert!(approx_eq(
         float_value(&samples[0].value),
-        2.366_666_666_666_666_7
+        2.366_666_666_666_666_7,
     ));
 }
 
@@ -5324,19 +5268,13 @@ fn range_planner_gate_routes_expected_shapes() {
         "metric @ start()",
         "metric @ end()",
     ] {
-        assert!(
-            routes(query),
-            "expected `{query}` to route through the planner"
-        );
+        assert2::assert!(routes(query));
     }
 
     // A raw matrix selector is a range-vector shape owned by the interpreter's
     // dedicated matrix range path (not per-step plannable), so the gate keeps
     // it on the interpreter.
-    assert!(
-        !routes("bar[30s]"),
-        "expected `bar[30s]` to stay on the interpreter"
-    );
+    assert2::assert!(!routes("bar[30s]"));
 }
 
 #[tokio::test]
@@ -5527,20 +5465,14 @@ async fn range_planner_path_matches_interpreter() {
         while let Expr::Paren(paren) = probe {
             probe = &paren.expr;
         }
-        assert!(
-            super::range_expr_routes_through_planner(probe),
-            "gate unexpectedly excludes `{query}` from the planner path"
-        );
+        assert2::assert!(super::range_expr_routes_through_planner(probe));
         // The public range path now routes these through the planner (the
         // only evaluation engine); it must evaluate without falling back.
         let planner = engine
             .query_range("t", query, start, end, step)
             .await
             .unwrap_or_else(|error| panic!("planner `{query}`: {error}"));
-        assert!(
-            matches!(planner, QueryResult::RangeMatrix(_)),
-            "range query `{query}` did not yield a matrix: {planner:?}"
-        );
+        assert2::assert!(matches!(planner, QueryResult::RangeMatrix(_)));
     }
 
     // The only top-level range shape the gate keeps on the interpreter is a
@@ -5555,10 +5487,7 @@ async fn range_planner_path_matches_interpreter() {
         while let Expr::Paren(paren) = probe {
             probe = &paren.expr;
         }
-        assert!(
-            !super::range_expr_routes_through_planner(probe),
-            "gate unexpectedly routes `{query}` through the planner"
-        );
+        assert2::assert!(!super::range_expr_routes_through_planner(probe));
     }
 
     // The headline fix, proven directly on the SPARSE aggregate-over-rate.
@@ -5585,11 +5514,7 @@ async fn range_planner_path_matches_interpreter() {
         .iter()
         .map(|series| series.labels.get("group"))
         .collect();
-    assert_eq!(
-        sparse_groups,
-        vec![Some("a")],
-        "no-value group b must be excluded, leaving only group a: {sparse:?}"
-    );
+    assert2::assert!(sparse_groups == vec![Some("a")]);
 
     // Pin the stale-vs-genuine-NaN semantics the scalar-math `spotty` parity
     // relies on, via the forced planner path on `abs(spotty - 10)`.
@@ -5600,17 +5525,13 @@ async fn range_planner_path_matches_interpreter() {
     else {
         panic!("expected matrix for `spotty`");
     };
-    assert_eq!(series.len(), 1, "spotty series missing");
+    assert2::assert!(series.len() == 1);
     // Steps (ms) -> selected latest-in-window value, lookback 5m:
     //   0 -> 1.0; 60k -> stale (DROPPED, no point); 120k -> 3.0;
     //   180k -> NaN (kept); 240k -> 5.0; 300k -> 5.0 (240k still in window).
     let points = &series[0].samples;
     let times: Vec<i64> = points.iter().map(|(t, _)| *t).collect();
-    assert_eq!(
-        times,
-        vec![0, 120_000, 180_000, 240_000, 300_000],
-        "stale-marker step not gapped: {times:?}"
-    );
+    assert2::assert!(times == vec![0, 120_000, 180_000, 240_000, 300_000]);
     let nan_point = points
         .iter()
         .find(|(t, _)| *t == 180_000)
@@ -5618,11 +5539,8 @@ async fn range_planner_path_matches_interpreter() {
     let SampleValue::Float(nan_value) = nan_point.1 else {
         panic!("expected float at 180k");
     };
-    assert!(nan_value.is_nan(), "genuine NaN not kept at 180k");
-    assert!(
-        !super::is_stale_nan(nan_value),
-        "genuine NaN reported as stale at 180k"
-    );
+    assert2::assert!(nan_value.is_nan());
+    assert2::assert!(!super::is_stale_nan(nan_value));
 }
 
 #[tokio::test]
@@ -5709,28 +5627,19 @@ async fn instant_selector_planner_path_matches_interpreter() {
 
         let interpreter = normalize(interpreter);
         let planner = normalize(planner);
-        assert!(
-            instant_samples_match(&interpreter, &planner),
-            "planner/interpreter divergence for `{query}`: {interpreter:?} vs {planner:?}"
-        );
+        assert2::assert!(instant_samples_match(&interpreter, &planner));
 
         // Pin the staleness semantics the parity above relies on.
         if query == "up{job=\"nan\"}" {
             // Genuine NaN is kept as a NaN value (and is not a stale marker).
-            assert_eq!(planner.len(), 1, "genuine NaN dropped for `{query}`");
+            assert2::assert!(planner.len() == 1);
             let value = float_value(&planner[0].value);
-            assert!(value.is_nan(), "genuine NaN not kept for `{query}`");
-            assert!(
-                !super::is_stale_nan(value),
-                "genuine NaN reported as stale for `{query}`"
-            );
+            assert2::assert!(value.is_nan());
+            assert2::assert!(!super::is_stale_nan(value));
         }
         if query == "up{job=\"db\"}" {
             // Stale-NaN marker terminates the series: empty result.
-            assert!(
-                planner.is_empty(),
-                "stale-NaN marker not dropped for `{query}`: {planner:?}"
-            );
+            assert2::assert!(planner.is_empty());
         }
     }
 }
@@ -5806,26 +5715,20 @@ async fn empty_valued_label_planner_path_matches_interpreter() {
                 .await
                 .unwrap(),
         );
-        assert!(
-            instant_samples_match(&interpreter, &planner),
-            "instant planner/interpreter divergence for `{query}`: {interpreter:?} vs {planner:?}"
-        );
+        assert2::assert!(instant_samples_match(&interpreter, &planner));
         // The plannable gate must route the empty-valued selector through the
         // operator path now (no `Ok(None)` fallback).
         let routed = engine
             .plan_instant_expr("t", &Expr::VectorSelector(selector.clone()), time_ms)
             .await
             .unwrap();
-        assert!(
-            routed.is_some(),
-            "selector `{query}` unexpectedly fell back to the interpreter"
-        );
+        assert2::assert!(routed.is_some());
     }
 
     // The bare selector `m` must yield exactly three rows (a, b, c) — proving
     // the present-empty (a) and absent (c) series were not collapsed.
     let bare = normalize(engine.query_instant("t", "m", time_ms).await.unwrap());
-    assert_eq!(bare.len(), 3, "present-empty and absent series collapsed");
+    assert2::assert!(bare.len() == 3);
 
     // (b) RANGE/matrix path: a rate over the empty-valued-label series must
     // also route through the operator leaf and keep the present-empty (a),
@@ -5841,20 +5744,12 @@ async fn empty_valued_label_planner_path_matches_interpreter() {
         panic!("expected matrix for `{query}`");
     };
     series.sort_by_key(|s| s.labels.fingerprint());
-    assert_eq!(
-        series.len(),
-        3,
-        "rate over present-empty/absent-label series collapsed: {series:?}"
-    );
+    assert2::assert!(series.len() == 3);
     // All three result series carry DISTINCT labelsets (the present-empty and
     // absent `__unit__` were not merged): distinct fingerprints.
     let fps: std::collections::BTreeSet<_> =
         series.iter().map(|s| s.labels.fingerprint()).collect();
-    assert_eq!(
-        fps.len(),
-        3,
-        "present-empty and absent series collapsed to the same labelset: {series:?}"
-    );
+    assert2::assert!(fps.len() == 3);
 }
 
 /// Pin the corrected RANGE-path lookback boundary against Prometheus
@@ -5901,10 +5796,7 @@ async fn range_bare_selector_lookback_boundary_matches_prometheus() {
         while let Expr::Paren(paren) = probe {
             probe = &paren.expr;
         }
-        assert!(
-            super::range_expr_routes_through_planner(probe),
-            "bare selector range query should route through the planner"
-        );
+        assert2::assert!(super::range_expr_routes_through_planner(probe));
     }
 
     // (2) planner (public range path) yields the boundary-correct grid.
@@ -5918,13 +5810,9 @@ async fn range_bare_selector_lookback_boundary_matches_prometheus() {
     let QueryResult::RangeMatrix(series) = &planner else {
         panic!("expected range matrix");
     };
-    assert_eq!(series.len(), 1, "boundary series missing");
+    assert2::assert!(series.len() == 1);
     let times: Vec<i64> = series[0].samples.iter().map(|(t, _)| *t).collect();
-    assert_eq!(
-        times,
-        vec![0, 60_000, 120_000, 180_000, 240_000],
-        "lookback boundary sample (t=300000 step) not excluded: {times:?}"
-    );
+    assert2::assert!(times == vec![0, 60_000, 120_000, 180_000, 240_000]);
 
     // (4) cross-check the interpreter's INSTANT path and the operator both
     // exclude the boundary sample directly, proving all three paths agree.
@@ -5932,10 +5820,7 @@ async fn range_bare_selector_lookback_boundary_matches_prometheus() {
     let QueryResult::InstantVector(samples) = instant_at_boundary else {
         panic!("expected instant vector");
     };
-    assert!(
-        samples.is_empty(),
-        "instant query at the lookback boundary must exclude the boundary sample: {samples:?}"
-    );
+    assert2::assert!(samples.is_empty());
 }
 
 /// Differential parity for a bare top-level selector carrying `@ start()` /
@@ -5983,10 +5868,7 @@ async fn range_at_start_end_selector_planner_matches_interpreter() {
         while let Expr::Paren(paren) = probe {
             probe = &paren.expr;
         }
-        assert!(
-            super::range_expr_routes_through_planner(probe),
-            "`{query}` should route through the planner"
-        );
+        assert2::assert!(super::range_expr_routes_through_planner(probe));
 
         // (2) the planner resolves `@ start()`/`@ end()` to a FIXED eval
         // instant repeated across every grid step, so each surviving series
@@ -5999,30 +5881,16 @@ async fn range_at_start_end_selector_planner_matches_interpreter() {
         else {
             panic!("expected matrix for `{query}`");
         };
-        assert_eq!(
-            !series.is_empty(),
-            expect_series,
-            "`{query}` series presence mismatch: {series:?}"
-        );
+        assert2::assert!(!series.is_empty() == expect_series);
         for s in &series {
             let times: Vec<i64> = s.samples.iter().map(|(t, _)| *t).collect();
-            assert_eq!(
-                times,
-                vec![0, 60_000, 120_000, 180_000, 240_000, 300_000],
-                "`{query}` series {:?} must have a point at every step (fixed @ eval): {times:?}",
-                s.labels
-            );
+            assert2::assert!(times == vec![0, 60_000, 120_000, 180_000, 240_000, 300_000]);
             let values: Vec<u64> = s
                 .samples
                 .iter()
                 .map(|(_, v)| float_value(v).to_bits())
                 .collect();
-            assert!(
-                values.windows(2).all(|w| w[0] == w[1]),
-                "`{query}` series {:?} value must be constant across steps (fixed @ eval): {:?}",
-                s.labels,
-                s.samples
-            );
+            assert2::assert!(values.windows(2).all(|w| w[0] == w[1]));
         }
     }
 
@@ -6030,10 +5898,7 @@ async fn range_at_start_end_selector_planner_matches_interpreter() {
     // must raise the SAME hard error on the planner path as the interpreter —
     // never silently produce a result or fall back.
     let instant_err = engine.query_instant("t", "m @ start()", 120_000).await;
-    assert!(
-        matches!(instant_err, Err(PromqlError::Unsupported(_))),
-        "instant `m @ start()` must be a hard Unsupported error, got {instant_err:?}"
-    );
+    assert2::assert!(matches!(instant_err, Err(PromqlError::Unsupported(_))));
 }
 
 /// Differential parity for the RESIDUAL range-vector folds the planner now
@@ -6132,10 +5997,7 @@ async fn extended_range_fold_planner_matches_interpreter() {
         };
         let via_operators = normalize(via_operators);
         let via_interpreter = normalize(via_interpreter);
-        assert!(
-            instant_samples_match(&via_operators, &via_interpreter),
-            "extended-range-fold planner/interpreter divergence for `{query}`:\n  operator={via_operators:?}\n  interpreter={via_interpreter:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_operators, &via_interpreter));
     }
 }
 
@@ -6166,10 +6028,7 @@ async fn range_scalar_expr_planner_path_matches_interpreter() {
         while let Expr::Paren(paren) = probe {
             probe = &paren.expr;
         }
-        assert!(
-            super::range_expr_routes_through_planner(probe),
-            "gate unexpectedly excludes scalar `{query}` from the planner path"
-        );
+        assert2::assert!(super::range_expr_routes_through_planner(probe));
         let planner = engine
             .query_range("t", query, start, end, step)
             .await
@@ -6179,16 +6038,9 @@ async fn range_scalar_expr_planner_path_matches_interpreter() {
         let QueryResult::RangeMatrix(series) = &planner else {
             panic!("expected range matrix for `{query}`");
         };
-        assert_eq!(series.len(), 1, "scalar `{query}` must yield one series");
-        assert!(
-            series[0].labels.is_empty(),
-            "scalar `{query}` series must be unlabeled"
-        );
-        assert_eq!(
-            series[0].samples.len(),
-            6,
-            "scalar `{query}` must have one point per grid step"
-        );
+        assert2::assert!(series.len() == 1);
+        assert2::assert!(series[0].labels.is_empty());
+        assert2::assert!(series[0].samples.len() == 6);
         // The constant scalars fold to their exact value at every step.
         if let Some(expected) = match query {
             "42" => Some(42.0_f64),
@@ -6197,11 +6049,7 @@ async fn range_scalar_expr_planner_path_matches_interpreter() {
             _ => None,
         } {
             for (_, value) in &series[0].samples {
-                assert_eq!(
-                    float_value(value).to_bits(),
-                    expected.to_bits(),
-                    "scalar `{query}` step value diverged"
-                );
+                assert2::assert!(float_value(value).to_bits() == expected.to_bits());
             }
         }
     }
@@ -6322,20 +6170,14 @@ async fn rate_range_planner_path_matches_interpreter() {
         // NaN-aware comparison so a genuine NaN value (e.g. `delta(nan_gauge)`)
         // is treated as equal to itself across both paths rather than spuriously
         // failing under IEEE `NaN != NaN`.
-        assert!(
-            instant_samples_match(&interpreter, &planner),
-            "planner/interpreter divergence for `{query}`: {interpreter:?} vs {planner:?}"
-        );
+        assert2::assert!(instant_samples_match(&interpreter, &planner));
 
         // Pin that the genuine-NaN delta is KEPT (non-null NaN value), not
         // dropped as if it were a no-value series.
         if query == "delta(nan_gauge[2m])" {
-            assert_eq!(planner.len(), 1, "genuine-NaN delta series dropped");
+            assert2::assert!(planner.len() == 1);
             let value = float_value(&planner[0].value);
-            assert!(
-                value.is_nan(),
-                "genuine NaN not kept through delta: {value}"
-            );
+            assert2::assert!(value.is_nan());
         }
     }
 }
@@ -6497,10 +6339,7 @@ async fn over_time_range_planner_path_matches_interpreter() {
         let via_interpreter = normalize(via_interpreter);
         let via_operators = normalize(via_operators);
         // NaN-aware comparison (a genuine NaN reduction equals itself).
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
 
         // Pin the SPARSE aggregate-over-over_time rule: the no-value (stranded)
         // member is excluded from its group, and the all-no-value group is
@@ -6511,26 +6350,18 @@ async fn over_time_range_planner_path_matches_interpreter() {
                 | "count by (g) (avg_over_time(depth_g[30s]))"
                 | "min by (g) (max_over_time(depth_g[30s]))"
         ) {
-            assert_eq!(
-                via_operators.len(),
-                1,
-                "`{query}`: only g=mix survives (g=allsparse absent)"
-            );
+            assert2::assert!(via_operators.len() == 1);
             let mix = via_operators
                 .iter()
                 .find(|sample| sample.labels.get("g") == Some("mix"));
-            assert!(mix.is_some(), "`{query}`: g=mix row missing");
-            assert!(
+            assert2::assert!(mix.is_some());
+            assert2::assert!(
                 via_operators
                     .iter()
-                    .all(|sample| sample.labels.get("g") != Some("allsparse")),
-                "`{query}`: g=allsparse must be absent"
+                    .all(|sample| sample.labels.get("g") != Some("allsparse"))
             );
             if query == "count by (g) (avg_over_time(depth_g[30s]))" {
-                assert!(
-                    approx_eq(float_value(&mix.unwrap().value), 1.0),
-                    "`{query}`: count over g=mix must be 1 (stranded member excluded)"
-                );
+                assert2::assert!(approx_eq(float_value(&mix.unwrap().value), 1.0));
             }
         }
     }
@@ -6552,10 +6383,7 @@ async fn over_time_range_planner_path_matches_interpreter() {
             .plan_instant_expr("t", &expr, 300_000)
             .await
             .unwrap_or_else(|error| panic!("plan `{query}`: {error}"));
-        assert!(
-            planned.is_some(),
-            "`{query}` must now route through the operator path"
-        );
+        assert2::assert!(planned.is_some());
     }
 }
 
@@ -6685,24 +6513,13 @@ async fn subquery_planner_path_matches_interpreter() {
 
         let via_interpreter = normalize(via_interpreter);
         let via_operators = normalize(via_operators);
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
 
         // Pin the sparse-window rule: the stranded member is dropped (no
         // sub-grid points), so only the dense series survives.
         if query == "sum_over_time(sparse[1m:30s])" {
-            assert_eq!(
-                via_operators.len(),
-                1,
-                "`{query}`: only l=dense survives (l=stranded dropped)"
-            );
-            assert_eq!(
-                via_operators[0].labels.get("l"),
-                Some("dense"),
-                "`{query}`: surviving series must be l=dense"
-            );
+            assert2::assert!(via_operators.len() == 1);
+            assert2::assert!(via_operators[0].labels.get("l") == Some("dense"));
         }
     }
 }
@@ -6819,10 +6636,7 @@ async fn scalar_math_planner_path_matches_interpreter() {
 
         let interpreter = normalize(via_interpreter);
         let operators = normalize(via_operators);
-        assert!(
-            samples_match(&interpreter, &operators),
-            "planner/interpreter divergence for `{query}`: interpreter={interpreter:?}, operators={operators:?}"
-        );
+        assert2::assert!(samples_match(&interpreter, &operators));
     }
 
     // A bare matrix selector now routes through the planner as a
@@ -6986,10 +6800,7 @@ async fn label_ops_planner_path_matches_interpreter() {
 
         let interpreter = normalize(via_interpreter);
         let operators = normalize(via_operators);
-        assert!(
-            samples_match(&interpreter, &operators),
-            "planner/interpreter divergence for `{query}`: interpreter={interpreter:?}, operators={operators:?}"
-        );
+        assert2::assert!(samples_match(&interpreter, &operators));
     }
 
     // A `label_replace` that collapses two series onto the same labelset must
@@ -7000,19 +6811,18 @@ async fn label_ops_planner_path_matches_interpreter() {
         .query_instant("t", collision, 60_000)
         .await
         .expect_err("collision must error through the operator path");
-    assert!(matches!(operator_err, PromqlError::Exec(_)));
+    assert2::assert!(matches!(operator_err, PromqlError::Exec(_)));
     // Confirm the operator path actually claimed the collision query (so the
     // error came from the operator path, not an interpreter fallback).
     let collision_expr =
         parse_promql_with_duration_context(collision, DurationExprContext::instant(60_000))
             .unwrap();
-    assert!(
+    assert2::assert!(
         engine
             .plan_instant_expr("t", &collision_expr, 60_000)
             .await
             .unwrap()
-            .is_some(),
-        "collision query must route through the planner"
+            .is_some()
     );
 
     // `sort_by_label` / `sort_by_label_desc` now route through the operator
@@ -7025,10 +6835,7 @@ async fn label_ops_planner_path_matches_interpreter() {
             .plan_instant_expr("t", &expr, 60_000)
             .await
             .unwrap_or_else(|error| panic!("plan `{query}`: {error}"));
-        assert!(
-            planned.is_some(),
-            "`{query}` must now route through the operator path"
-        );
+        assert2::assert!(planned.is_some());
     }
     // `sort_by_label(g)` with no label-name argument falls back so the
     // interpreter raises the canonical arity error.
@@ -7037,13 +6844,12 @@ async fn label_ops_planner_path_matches_interpreter() {
         DurationExprContext::instant(60_000),
     )
     .unwrap();
-    assert!(
+    assert2::assert!(
         engine
             .plan_instant_expr("t", &no_label, 60_000)
             .await
             .unwrap()
-            .is_none(),
-        "`sort_by_label(g)` (no label arg) must fall back to the interpreter"
+            .is_none()
     );
 }
 
@@ -7167,10 +6973,7 @@ async fn info_planner_path_matches_interpreter() {
 
         let interpreter = normalize(via_interpreter);
         let operators = normalize(via_operators);
-        assert!(
-            instant_samples_match(&interpreter, &operators),
-            "planner/interpreter divergence for `{query}`: interpreter={interpreter:?}, operators={operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&interpreter, &operators));
     }
 
     // A histogram info-series match errors identically (the info series must be
@@ -7201,10 +7004,7 @@ async fn info_planner_path_matches_interpreter() {
     let operator_result = hist_engine
         .plan_instant_expr("t", &hist_expr, 600_000)
         .await;
-    assert!(
-        matches!(operator_result, Err(PromqlError::Plan(_))),
-        "histogram info series must error through the operator path"
-    );
+    assert2::assert!(matches!(operator_result, Err(PromqlError::Plan(_))));
 }
 
 #[tokio::test]
@@ -7412,10 +7212,7 @@ async fn simple_aggregate_planner_path_matches_interpreter() {
 
         let via_interpreter = normalize(via_interpreter);
         let via_operators = normalize(via_operators);
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
 
         // Pin the staleness semantics through the aggregate: the genuine NaN
         // in `nan_metric` is kept (so `sum(nan_metric)` is NaN), and the
@@ -7566,15 +7363,9 @@ async fn aggregate_genuine_nan_group_parity() {
         };
         let oper = norm(via_operators);
         let interp = norm(via_interpreter);
-        assert!(
-            instant_samples_match(&interp, &oper),
-            "planner/interpreter divergence for `{query}`: {interp:?} vs {oper:?}"
-        );
+        assert2::assert!(instant_samples_match(&interp, &oper));
         // The stale group `l=d` is always absent on both paths.
-        assert!(
-            !oper.iter().any(|s| s.labels.get("l") == Some("d")),
-            "`{query}`: stale group l=d must be absent, got {oper:?}"
-        );
+        assert2::assert!(!oper.iter().any(|s| s.labels.get("l") == Some("d")));
         // Absolute Prometheus outcome per group.
         for (l, want) in *expect {
             let got = oper.iter().find(|s| s.labels.get("l") == Some(*l));
@@ -7584,18 +7375,12 @@ async fn aggregate_genuine_nan_group_parity() {
                         got.unwrap_or_else(|| panic!("`{query}`: group l={l} missing in {oper:?}"));
                     let got_value = float_value(&sample.value);
                     if value.is_nan() {
-                        assert!(
-                            got_value.is_nan() && !super::is_stale_nan(got_value),
-                            "`{query}`: l={l} want genuine NaN, got {got_value}"
-                        );
+                        assert2::assert!(got_value.is_nan() && !super::is_stale_nan(got_value));
                     } else {
-                        assert!(
-                            approx_eq(got_value, *value),
-                            "`{query}`: l={l} want {value}, got {got_value}"
-                        );
+                        assert2::assert!(approx_eq(got_value, *value));
                     }
                 }
-                None => assert!(got.is_none(), "`{query}`: l={l} must be absent"),
+                None => assert2::assert!(got.is_none()),
             }
         }
     }
@@ -7739,10 +7524,7 @@ async fn param_aggregate_planner_path_matches_interpreter() {
 
         let via_interpreter = normalize(via_interpreter);
         let via_operators = normalize(via_operators);
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
     }
 
     // The experimental `limitk`/`limit_ratio` param aggregations now route
@@ -7784,25 +7566,21 @@ async fn quantile_out_of_range_phi_returns_signed_inf_with_warning() {
         let QueryResult::InstantVector(samples) = result else {
             panic!("`{query}` must yield an instant vector");
         };
-        assert_eq!(samples.len(), 1, "`{query}`: collapsed to one group");
+        assert2::assert!(samples.len() == 1);
         let value = float_value(&samples[0].value);
-        assert!(
-            predicate(value),
-            "`{query}`: expected signed Inf / NaN, got {value}"
-        );
+        assert2::assert!(predicate(value));
         // For the +/-Inf cases, also pin the sign.
         if query.contains("1.1") {
-            assert!(value > 0.0, "phi > 1 -> +Inf");
+            assert2::assert!(value > 0.0);
         } else if query.contains("-0.1") {
-            assert!(value < 0.0, "phi < 0 -> -Inf");
+            assert2::assert!(value < 0.0);
         }
 
-        assert_eq!(
-            annotations.warnings,
-            vec![format!(
-                "PromQL warning: quantile value should be between 0 and 1, got {phi_text}"
-            )],
-            "`{query}` must raise exactly one InvalidQuantileWarning"
+        assert2::assert!(
+            annotations.warnings
+                == vec![format!(
+                    "PromQL warning: quantile value should be between 0 and 1, got {phi_text}"
+                )]
         );
     }
 }
@@ -7812,22 +7590,22 @@ async fn quantile_out_of_range_phi_returns_signed_inf_with_warning() {
 #[test]
 fn check_resolution_points_enforces_cap() {
     // A non-positive step is rejected outright.
-    assert!(check_resolution_points(0, 1_000, 0).is_err());
-    assert!(check_resolution_points(0, 1_000, -1).is_err());
+    assert2::assert!(check_resolution_points(0, 1_000, 0).is_err());
+    assert2::assert!(check_resolution_points(0, 1_000, -1).is_err());
 
     // `(end-start)/step == MAX_RESOLUTION_POINTS` intervals is accepted — the
     // same boundary the HTTP gate and Prometheus' `(end-start)/step > 11000`
     // rule admit (no off-by-one re-rejection of a gate-admitted query).
     let at_cap = i64::try_from(MAX_RESOLUTION_POINTS).unwrap(); // step = 1ms => intervals == MAX.
-    assert!(check_resolution_points(0, at_cap, 1).is_ok());
+    assert2::assert!(check_resolution_points(0, at_cap, 1).is_ok());
 
     // One interval over the cap errors.
-    assert!(check_resolution_points(0, at_cap + 1, 1).is_err());
+    assert2::assert!(check_resolution_points(0, at_cap + 1, 1).is_err());
 
     // The abusive `[1000d:1ms]`-style resolution is rejected before looping.
     let thousand_days_ms = 1_000_i64 * 24 * 60 * 60 * 1_000;
     let err = check_resolution_points(0, thousand_days_ms, 1).expect_err("must reject");
-    assert!(err.to_string().contains("exceeded maximum resolution"));
+    assert2::assert!(err.to_string().contains("exceeded maximum resolution"));
 }
 
 /// C2 (engine backstop): an abusive subquery resolution errors via the range
@@ -7844,10 +7622,7 @@ async fn abusive_subquery_resolution_errors_before_looping() {
         .query_instant("t", "last_over_time(up[1000d:1ms])", 0)
         .await
         .expect_err("abusive subquery resolution must error");
-    assert!(
-        err.to_string().contains("exceeded maximum resolution"),
-        "unexpected error: {err}"
-    );
+    assert2::assert!(err.to_string().contains("exceeded maximum resolution"));
 }
 
 /// Divergences A + B: a collapsed/global `sum`/`avg` over a multi-series
@@ -7993,11 +7768,7 @@ async fn sum_avg_collapsed_is_deterministic_and_matches_interpreter() {
             operator.sort_by_key(|sample| sample.labels.fingerprint());
 
             // Bit-for-bit parity with the interpreter (NaN sign included).
-            assert!(
-                instant_samples_match(&interpreter, &operator),
-                "operator/interpreter divergence for `{query}` (run {run}): \
-                     {interpreter:?} vs {operator:?}"
-            );
+            assert2::assert!(instant_samples_match(&interpreter, &operator));
 
             // Determinism: capture the exact float bits and require every run
             // to reproduce them.
@@ -8007,10 +7778,7 @@ async fn sum_avg_collapsed_is_deterministic_and_matches_interpreter() {
                 .collect();
             match &first_bits {
                 None => first_bits = Some(bits),
-                Some(expected) => assert_eq!(
-                    &bits, expected,
-                    "operator path flickered for `{query}` on run {run}"
-                ),
+                Some(expected) => assert2::assert!(&bits == expected),
             }
         }
     }
@@ -8155,10 +7923,7 @@ async fn structural_node_planner_path_matches_interpreter() {
                 .unwrap_or_else(|error| panic!("interpreter `{query}`: {error}")),
         );
 
-        assert!(
-            query_results_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(query_results_match(&via_interpreter, &via_operators));
     }
 
     // Pin the result types the parity above relies on.
@@ -8181,7 +7946,7 @@ async fn structural_node_planner_path_matches_interpreter() {
             .assemble_planned_instant(plan, time_ms)
             .await
             .unwrap();
-        assert_eq!(result.result_type(), want, "`{query}` result type");
+        assert2::assert!(result.result_type() == want);
     }
 
     // The `anchored` modifier on an instant-vector selector is the same hard
@@ -8194,14 +7959,8 @@ async fn structural_node_planner_path_matches_interpreter() {
         .unwrap();
         let planner_err = engine.plan_instant_expr("t", &expr, 120_000).await;
         let interp_err = engine.eval_instant_expr("t", &expr, 120_000).await;
-        assert!(
-            planner_err.is_err(),
-            "anchored(m) must error on the planner"
-        );
-        assert!(
-            interp_err.is_err(),
-            "anchored(m) must error on the interpreter"
-        );
+        assert2::assert!(planner_err.is_err());
+        assert2::assert!(interp_err.is_err());
     }
 }
 
@@ -8260,10 +8019,7 @@ async fn experimental_call_planner_path_matches_interpreter() {
                 .await
                 .unwrap_or_else(|error| panic!("interpreter `{query}`: {error}")),
         );
-        assert!(
-            query_results_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(query_results_match(&via_interpreter, &via_operators));
     }
 }
 
@@ -8337,14 +8093,8 @@ async fn experimental_param_aggregate_planner_path_matches_interpreter() {
             })
             .await;
 
-        assert!(
-            query_results_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
-        assert_eq!(
-            operator_annotations, interpreter_annotations,
-            "annotation divergence for `{query}`"
-        );
+        assert2::assert!(query_results_match(&via_interpreter, &via_operators));
+        assert2::assert!(operator_annotations == interpreter_annotations);
     }
 
     // Pin that an out-of-range ratio actually emits the warning (so the
@@ -8368,11 +8118,9 @@ async fn experimental_param_aggregate_planner_path_matches_interpreter() {
             super::ANNOTATIONS.with(|sink| sink.borrow().clone())
         })
         .await;
-    assert_eq!(annotations.warnings.len(), 1, "InvalidRatioWarning missing");
-    assert!(
-        annotations.warnings[0].contains("ratio value should be between -1 and 1"),
-        "unexpected warning text: {:?}",
-        annotations.warnings
+    assert2::assert!(annotations.warnings.len() == 1);
+    assert2::assert!(
+        annotations.warnings[0].contains("ratio value should be between -1 and 1") == true
     );
 }
 
@@ -8490,18 +8238,12 @@ async fn classic_histogram_quantile_planner_path_matches_interpreter() {
 
         let via_interpreter = normalize(via_interpreter);
         let via_operators = normalize(via_operators);
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
 
         // Pin the `__name__` + `le` drop on the operator-path output.
-        assert!(
-            via_operators.iter().all(|sample| {
-                sample.labels.get("__name__").is_none() && sample.labels.get("le").is_none()
-            }),
-            "`{query}`: operator path leaked __name__ / le: {via_operators:?}"
-        );
+        assert2::assert!(via_operators.iter().all(|sample| {
+            sample.labels.get("__name__").is_none() && sample.labels.get("le").is_none()
+        }));
     }
     // The native-histogram flavor of these folds (bare selector, native
     // `histogram_quantile`, the native accessors) now routes through the
@@ -8608,10 +8350,7 @@ async fn native_histogram_planner_path_matches_interpreter() {
         let via_operators = normalize(via_operators);
         // `instant_samples_match` compares histogram payloads structurally
         // (via `SampleValue` `PartialEq`) and floats bit-exactly.
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
     }
 
     // The bare-selector case must surface the native histogram payload (proving
@@ -8631,16 +8370,11 @@ async fn native_histogram_planner_path_matches_interpreter() {
     else {
         panic!("expected vector for nh");
     };
-    assert_eq!(
-        samples.len(),
-        2,
-        "bare native selector must keep both groups"
-    );
-    assert!(
+    assert2::assert!(samples.len() == 2);
+    assert2::assert!(
         samples
             .iter()
-            .all(|sample| matches!(sample.value, SampleValue::Histogram(_))),
-        "bare native selector must carry histogram payloads, got: {samples:?}"
+            .all(|sample| matches!(sample.value, SampleValue::Histogram(_)))
     );
 
     // `histogram_quantiles` (experimental) now routes through the shared
@@ -8673,10 +8407,10 @@ async fn native_histogram_planner_path_matches_interpreter() {
             samples.sort_by_key(|sample| sample.labels.fingerprint());
             samples
         };
-        assert!(
-            instant_samples_match(&normalize(via_interpreter), &normalize(via_operators)),
-            "histogram_quantiles planner/interpreter divergence for `{query}`"
-        );
+        assert2::assert!(instant_samples_match(
+            &normalize(via_interpreter),
+            &normalize(via_operators)
+        ));
     }
 }
 
@@ -8831,20 +8565,10 @@ async fn histogram_aggregation_planner_path_matches_interpreter() {
         let via_operators = normalize(via_operators);
         // `instant_samples_match` compares histogram payloads structurally
         // (via `SampleValue` `PartialEq`) and floats bit-exactly.
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
         // Annotation parity: the shared kernel emits identical (here: no)
         // annotations on both paths.
-        assert_eq!(
-            operator_annotations.warnings, interpreter_annotations.warnings,
-            "`{query}`: warning annotations diverge"
-        );
-        assert_eq!(
-            operator_annotations.infos, interpreter_annotations.infos,
-            "`{query}`: info annotations diverge"
-        );
+        assert2::assert!(operator_annotations == interpreter_annotations);
     }
 
     // Pin the absolute histogram-aware rules (not just operator==interpreter).
@@ -8874,23 +8598,14 @@ async fn histogram_aggregation_planner_path_matches_interpreter() {
     else {
         panic!("expected vector for sum");
     };
-    assert!(
-        sample_by_group(&sum_samples, "mixed").is_none(),
-        "sum: mixed float+histogram group must be dropped, got: {sum_samples:?}"
-    );
+    assert2::assert!(sample_by_group(&sum_samples, "mixed").is_none());
     let hist_row = sample_by_group(&sum_samples, "hist").expect("sum: g=hist row");
     let SampleValue::Histogram(merged) = hist_row.value else {
         panic!("sum: g=hist must be a merged histogram, got: {hist_row:?}");
     };
-    assert!(
-        approx_eq(merged.count, 12.0) && approx_eq(merged.sum, 26.0),
-        "sum: merged histogram count/sum wrong: {merged:?}"
-    );
+    assert2::assert!(approx_eq(merged.count, 12.0) && approx_eq(merged.sum, 26.0));
     let float_row = sample_by_group(&sum_samples, "float").expect("sum: g=float row");
-    assert!(
-        approx_eq(float_value(&float_row.value), 8.0),
-        "sum: g=float must sum its floats to 8, got: {float_row:?}"
-    );
+    assert2::assert!(approx_eq(float_value(&float_row.value), 8.0));
 
     // `min by (g) (m)`: g="hist" (all histograms) yields NO row; g="float"
     // reduces to 2; g="mixed" reduces to just its one float (10).
@@ -9055,18 +8770,8 @@ async fn histogram_range_planner_path_matches_interpreter() {
 
         let via_interpreter = normalize(via_interpreter);
         let via_operators = normalize(via_operators);
-        assert!(
-            instant_samples_match(&via_interpreter, &via_operators),
-            "planner/interpreter divergence for `{query}`: {via_interpreter:?} vs {via_operators:?}"
-        );
-        assert_eq!(
-            operator_annotations.warnings, interpreter_annotations.warnings,
-            "`{query}`: warning annotations diverge"
-        );
-        assert_eq!(
-            operator_annotations.infos, interpreter_annotations.infos,
-            "`{query}`: info annotations diverge"
-        );
+        assert2::assert!(instant_samples_match(&via_interpreter, &via_operators));
+        assert2::assert!(operator_annotations == interpreter_annotations);
     }
 
     // Pin the absolute rules the parity above relies on (not just
@@ -9089,16 +8794,9 @@ async fn histogram_range_planner_path_matches_interpreter() {
     else {
         panic!("expected vector for rate");
     };
-    assert_eq!(rate_samples.len(), 1, "rate yields one sample");
-    assert_eq!(
-        rate_samples[0].labels.get("__name__"),
-        None,
-        "rate drops the metric name"
-    );
-    assert!(
-        matches!(rate_samples[0].value, SampleValue::Histogram(_)),
-        "rate over histogram counters yields a histogram"
-    );
+    assert2::assert!(rate_samples.len() == 1);
+    assert2::assert!(rate_samples[0].labels.get("__name__") == None);
+    assert2::assert!(matches!(rate_samples[0].value, SampleValue::Histogram(_)));
 
     // `min_over_time(h[10m])` over an all-histogram window yields NO row
     // (histograms ignored).
@@ -9119,10 +8817,7 @@ async fn histogram_range_planner_path_matches_interpreter() {
     else {
         panic!("expected vector for min_over_time");
     };
-    assert!(
-        min_samples.is_empty(),
-        "min_over_time ignores histograms: all-histogram window yields no row, got: {min_samples:?}"
-    );
+    assert2::assert!(min_samples.is_empty());
 }
 
 #[tokio::test]
@@ -9263,10 +8958,7 @@ async fn binary_planner_path_matches_interpreter() {
 
         let interpreter = normalize(via_interpreter);
         let operators = normalize(via_operators);
-        assert!(
-            samples_match(&interpreter, &operators),
-            "planner/interpreter divergence for `{query}`: interpreter={interpreter:?}, operators={operators:?}"
-        );
+        assert2::assert!(samples_match(&interpreter, &operators));
     }
 
     // Pin specific behaviors the parity above relies on.
@@ -9275,19 +8967,13 @@ async fn binary_planner_path_matches_interpreter() {
     let QueryResult::InstantVector(arith) = arith else {
         panic!("expected vector");
     };
-    assert!(
-        arith.iter().all(|s| s.labels.get("__name__").is_none()),
-        "arithmetic must drop __name__"
-    );
+    assert2::assert!(arith.iter().all(|s| s.labels.get("__name__").is_none()));
     // 2. A comparison without `bool` keeps the LHS labelset (incl. __name__).
     let cmp = engine.query_instant("t", "m1 > m2", time_ms).await.unwrap();
     let QueryResult::InstantVector(cmp) = cmp else {
         panic!("expected vector");
     };
-    assert!(
-        cmp.iter().all(|s| s.labels.get("__name__") == Some("m1")),
-        "comparison without bool keeps the LHS metric name"
-    );
+    assert2::assert!(cmp.iter().all(|s| s.labels.get("__name__") == Some("m1")));
     // 3. A no-match set op: `right and on(job) left` drops `web` (no left).
     let setop = engine
         .query_instant("t", "right and on(job) left", time_ms)
@@ -9296,10 +8982,7 @@ async fn binary_planner_path_matches_interpreter() {
     let QueryResult::InstantVector(setop) = setop else {
         panic!("expected vector");
     };
-    assert!(
-        setop.iter().all(|s| s.labels.get("job") != Some("web")),
-        "`and` must drop the unmatched `web` series"
-    );
+    assert2::assert!(setop.iter().all(|s| s.labels.get("job") != Some("web")));
 
     // Scalar ∘ scalar now folds through the planner into a scalar planned
     // result; it must route AND match the interpreter's scalar value+ts.
@@ -9322,11 +9005,8 @@ async fn binary_planner_path_matches_interpreter() {
         let QueryResult::Scalar { ts_ms, value } = via_operators else {
             panic!("expected scalar for `{query}`");
         };
-        assert_eq!(ts_ms, time_ms, "scalar∘scalar `{query}` ts");
-        assert!(
-            value.to_bits() == expected.to_bits(),
-            "scalar∘scalar `{query}` value: got {value}, want {expected}"
-        );
+        assert2::assert!(ts_ms == time_ms);
+        assert2::assert!(value.to_bits() == expected.to_bits());
     }
 }
 
@@ -9457,10 +9137,10 @@ async fn util_planner_path_matches_interpreter() {
             .await
             .unwrap_or_else(|error| panic!("interpreter `{query}`: {error}"));
 
-        assert!(
-            results_match(via_interpreter.clone(), via_operators.clone()),
-            "planner/interpreter divergence for `{query}`: interpreter={via_interpreter:?}, operators={via_operators:?}"
-        );
+        assert2::assert!(results_match(
+            via_interpreter.clone(),
+            via_operators.clone()
+        ));
     }
 
     // Pin specific behaviors the parity above relies on.
@@ -9472,7 +9152,7 @@ async fn util_planner_path_matches_interpreter() {
     else {
         panic!("expected scalar");
     };
-    assert!(single.to_bits() == 42.5_f64.to_bits(), "scalar(single)");
+    assert2::assert!(single.to_bits() == 42.5_f64.to_bits());
     let QueryResult::Scalar { value: multi, .. } = engine
         .query_instant("t", "scalar(dup)", time_ms)
         .await
@@ -9480,7 +9160,7 @@ async fn util_planner_path_matches_interpreter() {
     else {
         panic!("expected scalar");
     };
-    assert!(multi.is_nan(), "scalar(multi) must be NaN");
+    assert2::assert!(multi.is_nan());
 
     // 2. time() and pi() are the eval-time seconds and π.
     let QueryResult::Scalar {
@@ -9490,20 +9170,14 @@ async fn util_planner_path_matches_interpreter() {
     else {
         panic!("expected scalar");
     };
-    assert_eq!(returned_ts, time_ms);
-    assert!(
-        eval_seconds.to_bits() == 60.0_f64.to_bits(),
-        "time() seconds"
-    );
+    assert2::assert!(returned_ts == time_ms);
+    assert2::assert!(eval_seconds.to_bits() == 60.0_f64.to_bits());
     let QueryResult::Scalar { value: pi_v, .. } =
         engine.query_instant("t", "pi()", time_ms).await.unwrap()
     else {
         panic!("expected scalar");
     };
-    assert!(
-        pi_v.to_bits() == std::f64::consts::PI.to_bits(),
-        "pi() value"
-    );
+    assert2::assert!(pi_v.to_bits() == std::f64::consts::PI.to_bits());
 
     // 3. absent(present) is empty; absent(gone{job="z"}) carries the matcher
     //    label and value 1.
@@ -9514,7 +9188,7 @@ async fn util_planner_path_matches_interpreter() {
     else {
         panic!("expected vector");
     };
-    assert!(present.is_empty(), "absent(present) must be empty");
+    assert2::assert!(present.is_empty());
     let QueryResult::InstantVector(gone) = engine
         .query_instant("t", "absent(gone{job=\"z\"})", time_ms)
         .await
@@ -9522,21 +9196,10 @@ async fn util_planner_path_matches_interpreter() {
     else {
         panic!("expected vector");
     };
-    assert_eq!(gone.len(), 1, "absent(missing) yields one series");
-    assert_eq!(
-        gone[0].labels.get("job"),
-        Some("z"),
-        "absent label from matcher"
-    );
-    assert_eq!(
-        gone[0].labels.get("__name__"),
-        None,
-        "absent drops __name__"
-    );
-    assert!(
-        float_value(&gone[0].value).to_bits() == 1.0_f64.to_bits(),
-        "absent value is 1"
-    );
+    assert2::assert!(gone.len() == 1);
+    assert2::assert!(gone[0].labels.get("job") == Some("z"));
+    assert2::assert!(gone[0].labels.get("__name__") == None);
+    assert2::assert!(float_value(&gone[0].value).to_bits() == 1.0_f64.to_bits());
 
     // 4. timestamp(m) reports each sample's own timestamp in seconds, not the
     //    eval time, and drops __name__.
@@ -9547,11 +9210,10 @@ async fn util_planner_path_matches_interpreter() {
     else {
         panic!("expected vector");
     };
-    assert!(
+    assert2::assert!(
         ts_samples
             .iter()
-            .all(|s| s.labels.get("__name__").is_none()),
-        "timestamp drops __name__"
+            .all(|s| s.labels.get("__name__").is_none())
     );
     let by_job: std::collections::BTreeMap<&str, f64> = ts_samples
         .iter()
@@ -9581,16 +9243,8 @@ async fn conformance_corpus_runs_green_through_planner() {
 
     let report = run_corpus_dir("tests/testdata").await;
     // Sanity: the corpus actually ran (no path/setup error swallowed the run).
-    assert!(!report.files.is_empty(), "corpus produced no files");
-    assert!(
-        report.files.iter().all(|file| file.passed),
-        "corpus regressed: {:?}",
-        report
-            .files
-            .iter()
-            .filter(|file| !file.passed)
-            .collect::<Vec<_>>()
-    );
+    assert2::assert!(!report.files.is_empty());
+    assert2::assert!(report.files.iter().all(|file| file.passed));
 }
 
 /// Direct totality assertion over a representative construct sweep: for every
@@ -9736,10 +9390,7 @@ async fn plan_instant_expr_is_total_over_construct_sweep() {
             .plan_instant_expr("t", &expr, time_ms)
             .await
             .unwrap_or_else(|error| panic!("plan valid `{query}` errored: {error}"));
-        assert!(
-            planned.is_some(),
-            "VALID `{query}` returned Ok(None) — plan_instant_expr is not total"
-        );
+        assert2::assert!(planned.is_some());
     }
 
     // INVALID families: each MUST surface as Err (never Ok(None), never
@@ -9778,15 +9429,11 @@ async fn plan_instant_expr_is_total_over_construct_sweep() {
             continue;
         };
         let outcome = engine.plan_instant_expr("t", &expr, time_ms).await;
-        let kind = match &outcome {
+        let _kind = match &outcome {
             Ok(Some(_)) => "Ok(Some)",
             Ok(None) => "Ok(None)",
             Err(_) => "Err",
         };
-        assert!(
-            outcome.is_err(),
-            "INVALID `{query}` did not raise a planner-side Err (got {kind}) — \
-                 the planner still defers this error to the interpreter via Ok(None)"
-        );
+        assert2::assert!(outcome.is_err());
     }
 }

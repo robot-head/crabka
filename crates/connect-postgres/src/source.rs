@@ -617,32 +617,31 @@ mod sql_tests {
     }
 
     #[test]
-    fn publication_validation_sql_reads_publication_tables() {
-        check!(
-            publication_tables_sql()
-                == "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2"
-        );
-    }
-
-    #[test]
-    fn publication_settings_sql_reads_publish_flags() {
-        check!(
-            publication_settings_sql()
-                == "SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = $1"
-        );
-    }
-
-    #[test]
-    fn replication_slot_validation_sql_reads_slot_metadata() {
-        check!(
-            replication_slot_sql()
-                == "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1"
-        );
-    }
-
-    #[test]
-    fn advance_slot_sql_casts_lsn_parameter() {
-        check!(advance_slot_sql() == "SELECT pg_replication_slot_advance($1, $2::pg_lsn)");
+    fn validation_sql_cases() {
+        for (_name, actual, expected) in [
+            (
+                "publication_tables",
+                publication_tables_sql(),
+                "SELECT tablename FROM pg_publication_tables WHERE pubname = $1 AND schemaname = $2",
+            ),
+            (
+                "publication_settings",
+                publication_settings_sql(),
+                "SELECT pubinsert, pubupdate, pubdelete, pubtruncate FROM pg_publication WHERE pubname = $1",
+            ),
+            (
+                "replication_slot",
+                replication_slot_sql(),
+                "SELECT slot_name, plugin, slot_type, database FROM pg_replication_slots WHERE slot_name = $1",
+            ),
+            (
+                "advance_slot",
+                advance_slot_sql(),
+                "SELECT pg_replication_slot_advance($1, $2::pg_lsn)",
+            ),
+        ] {
+            assert2::assert!(actual == expected);
+        }
     }
 
     #[test]
@@ -657,21 +656,18 @@ mod sql_tests {
 
     #[test]
     fn publication_settings_require_insert_update_delete_without_truncate() {
-        check!(publication_settings_are_compatible([
-            true, true, true, false
-        ]));
-        check!(!publication_settings_are_compatible([
-            false, true, true, false
-        ]));
-        check!(!publication_settings_are_compatible([
-            true, false, true, false
-        ]));
-        check!(!publication_settings_are_compatible([
-            true, true, false, false
-        ]));
-        check!(!publication_settings_are_compatible([
-            true, true, true, true
-        ]));
+        for (name, flags, expected) in [
+            ("required-flags", [true, true, true, false], true),
+            ("missing-insert", [false, true, true, false], false),
+            ("missing-update", [true, false, true, false], false),
+            ("missing-delete", [true, true, false, false], false),
+            ("includes-truncate", [true, true, true, true], false),
+        ] {
+            check!(
+                publication_settings_are_compatible(flags) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -688,10 +684,14 @@ mod sql_tests {
 
         match error {
             crabka_connect::ConnectError::Backend(message) => {
-                check!(message.contains("replication slot \"slot_a\" is not compatible"));
-                check!(message.contains("plugin is Some(\"test_decoding\")"));
-                check!(message.contains("slot_type is \"physical\""));
-                check!(message.contains("database is None"));
+                check!(
+                    (
+                        message.contains("replication slot \"slot_a\" is not compatible"),
+                        message.contains("plugin is Some(\"test_decoding\")"),
+                        message.contains("slot_type is \"physical\""),
+                        message.contains("database is None"),
+                    ) == (true, true, true, true)
+                );
             }
             error => panic!("expected backend error, got {error:?}"),
         }
@@ -701,6 +701,7 @@ mod sql_tests {
 #[cfg(test)]
 mod tests {
     use assert2::check;
+    use bytes::Bytes;
     use crabka_connect::{SecretString, Source as _};
     use crabka_schema_serde::wire::MAGIC;
 
@@ -813,15 +814,25 @@ mod tests {
             .expect("poll succeeds")
             .expect("row emits");
 
-        check!(record.key.is_some());
-        check!(record.value.is_some());
-        check!(record.key.as_ref().expect("key")[0] == MAGIC);
-        check!(record.value.as_ref().expect("value")[0] == MAGIC);
-        check!(record.timestamp == Some(1_700_000_000_000));
-        check!(header_value(&record, "crabka.pg.table").as_ref() == b"public.orders");
-        check!(header_value(&record, "crabka.pg.lsn").as_ref() == b"0/2A");
-        check!(header_value(&record, "crabka.pg.operation").as_ref() == b"insert");
-        check!(source.checkpoint() == Some(PgLsn(0x2a).to_source_offset("app", "slot_a")));
+        check!(
+            (
+                record.key.as_ref().map(|key| key[0]),
+                record.value.as_ref().map(|value| value[0]),
+                record.timestamp,
+                header_value(&record, "crabka.pg.table"),
+                header_value(&record, "crabka.pg.lsn"),
+                header_value(&record, "crabka.pg.operation"),
+                source.checkpoint(),
+            ) == (
+                Some(MAGIC),
+                Some(MAGIC),
+                Some(1_700_000_000_000),
+                Bytes::from_static(b"public.orders"),
+                Bytes::from_static(b"0/2A"),
+                Bytes::from_static(b"insert"),
+                Some(PgLsn(0x2a).to_source_offset("app", "slot_a")),
+            )
+        );
     }
 
     #[tokio::test]
@@ -842,12 +853,23 @@ mod tests {
             .expect("poll succeeds")
             .expect("row emits");
 
-        check!(record.key.is_some());
-        check!(record.value.is_none());
-        check!(record.timestamp.is_none());
-        check!(header_value(&record, "crabka.pg.table").as_ref() == b"public.orders");
-        check!(header_value(&record, "crabka.pg.lsn").as_ref() == b"0/2B");
-        check!(header_value(&record, "crabka.pg.operation").as_ref() == b"delete");
+        check!(
+            (
+                record.key.is_some(),
+                record.value.is_some(),
+                record.timestamp,
+                header_value(&record, "crabka.pg.table"),
+                header_value(&record, "crabka.pg.lsn"),
+                header_value(&record, "crabka.pg.operation"),
+            ) == (
+                true,
+                false,
+                None,
+                Bytes::from_static(b"public.orders"),
+                Bytes::from_static(b"0/2B"),
+                Bytes::from_static(b"delete"),
+            )
+        );
     }
 
     #[tokio::test]
@@ -970,14 +992,12 @@ mod tests {
             .0
             .insert("database".to_owned(), crabka_connect::OffsetValue::Long(7));
 
-        check!(matches!(
-            validate_database(&missing, "app"),
-            Err(crabka_connect::ConnectError::Offset(_))
-        ));
-        check!(matches!(
-            validate_database(&non_string, "app"),
-            Err(crabka_connect::ConnectError::Offset(_))
-        ));
+        for (_name, offset) in [("missing", missing), ("non_string", non_string)] {
+            assert2::assert!(matches!(
+                validate_database(&offset, "app"),
+                Err(crabka_connect::ConnectError::Offset(_))
+            ));
+        }
     }
 
     #[test]
@@ -1061,11 +1081,21 @@ mod tests {
             .expect("second poll succeeds")
             .expect("second row emits");
 
-        check!(header_value(&first, "crabka.pg.lsn").as_ref() == b"0/42");
-        check!(header_value(&second, "crabka.pg.lsn").as_ref() == b"0/42");
-        check!(first.timestamp == Some(1_700_000_000_123));
-        check!(second.timestamp == Some(1_700_000_000_123));
-        check!(source.checkpoint() == Some(PgLsn(0x42).to_source_offset("app", "slot_a")));
+        check!(
+            (
+                header_value(&first, "crabka.pg.lsn"),
+                header_value(&second, "crabka.pg.lsn"),
+                first.timestamp,
+                second.timestamp,
+                source.checkpoint(),
+            ) == (
+                Bytes::from_static(b"0/42"),
+                Bytes::from_static(b"0/42"),
+                Some(1_700_000_000_123),
+                Some(1_700_000_000_123),
+                Some(PgLsn(0x42).to_source_offset("app", "slot_a")),
+            )
+        );
         check!(source.poll().await.expect("poll succeeds").is_none());
     }
 
@@ -1091,10 +1121,11 @@ mod tests {
         let Some(LogicalEvent::Row(row)) = source.pending.pop_front() else {
             panic!("committed row should be pending");
         };
-        check!(row.lsn == PgLsn(0x2a));
-        check!(row.commit_lsn == Some(PgLsn(0x42)));
-        check!(row.txid == Some(TransactionId(123)));
-        check!(row.commit_timestamp_ms == Some(1_700_000_000_123));
+        let mut expected = insert_event(PgLsn(0x2a));
+        expected.commit_lsn = Some(PgLsn(0x42));
+        expected.txid = Some(TransactionId(123));
+        expected.commit_timestamp_ms = Some(1_700_000_000_123);
+        check!(row == expected);
     }
 }
 

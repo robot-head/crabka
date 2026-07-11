@@ -98,34 +98,40 @@ mod tests {
         let i = id("sr-node-1", 8081, true);
         let bytes = serde_json::to_vec(&i).unwrap();
         // cp's SchemaRegistryIdentity JSON (field order pinned to cp 7.4.0).
-        assert_eq!(
-            String::from_utf8(bytes.clone()).unwrap(),
-            r#"{"host":"sr-node-1","port":8081,"master_eligibility":true,"scheme":"http","version":1}"#
+        assert2::assert!(
+            String::from_utf8(bytes.clone()).unwrap()
+                == r#"{"host":"sr-node-1","port":8081,"master_eligibility":true,"scheme":"http","version":1}"#
         );
         let back: SchemaRegistryIdentity = serde_json::from_slice(&bytes).unwrap();
-        assert_eq!(back, i);
+        assert2::assert!(back == i);
     }
 
     #[test]
     fn assignment_round_trips_with_and_without_master() {
-        let a = SchemaRegistryGroupAssignment {
-            error: 0,
-            master: Some("crabka-d7c9d4c3".into()),
-            master_identity: Some(id("sr-node-1", 8081, true)),
-            version: SR_VERSION,
-        };
-        let b: SchemaRegistryGroupAssignment =
-            serde_json::from_slice(&serde_json::to_vec(&a).unwrap()).unwrap();
-        assert_eq!(a, b);
-        let none = SchemaRegistryGroupAssignment {
-            error: 1,
-            master: None,
-            master_identity: None,
-            version: SR_VERSION,
-        };
-        let n: SchemaRegistryGroupAssignment =
-            serde_json::from_slice(&serde_json::to_vec(&none).unwrap()).unwrap();
-        assert_eq!(none, n);
+        for (_name, assignment) in [
+            (
+                "with_master",
+                SchemaRegistryGroupAssignment {
+                    error: 0,
+                    master: Some("crabka-d7c9d4c3".into()),
+                    master_identity: Some(id("sr-node-1", 8081, true)),
+                    version: SR_VERSION,
+                },
+            ),
+            (
+                "without_master",
+                SchemaRegistryGroupAssignment {
+                    error: 1,
+                    master: None,
+                    master_identity: None,
+                    version: SR_VERSION,
+                },
+            ),
+        ] {
+            let decoded: SchemaRegistryGroupAssignment =
+                serde_json::from_slice(&serde_json::to_vec(&assignment).unwrap()).unwrap();
+            assert2::assert!(decoded == assignment);
+        }
     }
 
     #[test]
@@ -135,19 +141,20 @@ mod tests {
         let c = ("m3".to_string(), id("z", 8081, false)); // ineligible
         let pick1 = select_master(&[a.clone(), b.clone(), c.clone()]);
         let pick2 = select_master(&[c, b.clone(), a]);
-        assert_eq!(pick1, pick2);
-        // `http://a:8081` sorts before `http://b:8081`, so member `m1` wins.
-        assert_eq!(pick1.unwrap().0, "m1");
+        // `http://a:8081` sorts before `http://b:8081`, so member `m1` wins
+        // regardless of input order.
+        assert2::assert!(pick1 == Some(b.clone()));
+        assert2::assert!(pick2 == Some(b));
     }
 
     #[test]
     fn select_master_none_when_no_eligible() {
-        assert!(select_master(&[("m".into(), id("a", 1, false))]).is_none());
+        assert2::assert!(select_master(&[("m".into(), id("a", 1, false))]).is_none());
     }
 
     #[test]
     fn identity_url_builds_scheme_host_port() {
-        assert_eq!(id("h", 8081, true).url(), "http://h:8081");
+        assert2::assert!(id("h", 8081, true).url() == "http://h:8081");
     }
 
     // ── cp-byte-exact pins (captured from cp-schema-registry 7.4.0) ──────────────
@@ -173,8 +180,8 @@ mod tests {
     fn identity_encodes_cp_member_metadata_byte_exactly() {
         // Captured `master_identity` bytes (tests/fixtures/election/members.json).
         let id = cp_master_identity();
-        assert_eq!(
-            serde_json::to_vec(&id).unwrap(),
+        assert2::assert!(
+            serde_json::to_vec(&id).unwrap() ==
             br#"{"host":"sr-node-1","port":8081,"master_eligibility":true,"scheme":"http","version":1}"#
                 .to_vec()
         );
@@ -190,8 +197,8 @@ mod tests {
             master_identity: Some(cp_master_identity()),
             version: 1,
         };
-        assert_eq!(
-            serde_json::to_vec(&a).unwrap(),
+        assert2::assert!(
+            serde_json::to_vec(&a).unwrap() ==
             br#"{"error":0,"master":"crabka-d7c9d4c3-a778-465d-a069-954b68d772f9","master_identity":{"host":"sr-node-1","port":8081,"master_eligibility":true,"scheme":"http","version":1},"version":1}"#
                 .to_vec()
         );
@@ -228,8 +235,8 @@ mod tests {
             vec![node2.clone(), node1.clone()],
         ] {
             let (mid, idn) = select_master(&set).expect("a master");
-            assert_eq!(mid, "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9");
-            assert_eq!(idn.host, "sr-node-1");
+            assert2::assert!(mid.as_str() == "crabka-d7c9d4c3-a778-465d-a069-954b68d772f9");
+            assert2::assert!(idn.host.as_str() == "sr-node-1");
         }
     }
 }

@@ -93,7 +93,7 @@ pub fn load_bootstrap_records(log_dir: &Path) -> Result<Vec<MetadataRecord>, Bro
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_metadata::ScramCredentialRecord;
     use crabka_security::SaslMechanism;
     use serde_wincode::SerdeCompat;
@@ -115,7 +115,7 @@ mod tests {
     fn returns_empty_when_absent() {
         let dir = tempfile::tempdir().unwrap();
         let got = load_bootstrap_records(dir.path()).unwrap();
-        assert!(got.is_empty());
+        assert2::assert!(got.is_empty());
     }
 
     #[test]
@@ -133,9 +133,9 @@ mod tests {
         write_frame(&mut bytes, &rec);
         std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
         let got = load_bootstrap_records(dir.path()).unwrap();
-        assert!(got.len() == 1);
+        assert2::assert!(got.len() == 1);
         match &got[0] {
-            MetadataRecord::V1ScramCredential(r) => assert!(r.user == "alice"),
+            MetadataRecord::V1ScramCredential(r) => assert2::assert!(r.user == "alice"),
             _ => panic!("wrong variant"),
         }
     }
@@ -171,8 +171,8 @@ mod tests {
         std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
 
         let records = load_bootstrap_records(dir.path()).unwrap();
-        assert!(records.len() == 2);
-        assert!(initial_voters(&records) == seeded);
+        assert2::assert!(records.len() == 2);
+        assert2::assert!(initial_voters(&records) == seeded);
     }
 
     #[test]
@@ -180,7 +180,7 @@ mod tests {
         let recs = vec![MetadataRecord::V1KRaftVersion(
             crabka_metadata::KRaftVersionRecord { kraft_version: 1 },
         )];
-        assert!(initial_voters(&recs).is_empty());
+        assert2::assert!(initial_voters(&recs).is_empty());
     }
 
     #[test]
@@ -197,13 +197,13 @@ mod tests {
             serde_json::to_vec_pretty(&meta).unwrap(),
         )
         .unwrap();
-        assert!(read_directory_id(dir.path()).unwrap() == id);
+        assert2::assert!(read_directory_id(dir.path()).unwrap() == id);
     }
 
     #[test]
     fn read_directory_id_errors_when_absent() {
         let dir = tempfile::tempdir().unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             read_directory_id(dir.path()),
             Err(BrokerError::BootstrapFile { .. })
         ));
@@ -214,7 +214,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("bootstrap.records.bin"), [0u8, 0u8, 0u8]).unwrap();
         let err = load_bootstrap_records(dir.path()).unwrap_err();
-        assert!(matches!(err, BrokerError::BootstrapFile { .. }));
+        assert2::assert!(matches!(err, BrokerError::BootstrapFile { .. }));
     }
 
     #[test]
@@ -225,7 +225,7 @@ mod tests {
         bytes.extend_from_slice(&100u32.to_le_bytes());
         bytes.extend_from_slice(&[0u8; 4]);
         std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             load_bootstrap_records(dir.path()),
             Err(BrokerError::BootstrapFile { .. })
         ));
@@ -239,7 +239,7 @@ mod tests {
         bytes.extend_from_slice(&8u32.to_le_bytes());
         bytes.extend_from_slice(&[0xFFu8; 8]);
         std::fs::write(dir.path().join("bootstrap.records.bin"), &bytes).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             load_bootstrap_records(dir.path()),
             Err(BrokerError::BootstrapFile { .. })
         ));
@@ -251,7 +251,7 @@ mod tests {
         std::fs::write(dir.path().join("bootstrap.records.bin"), 0u32.to_le_bytes()).unwrap();
         let err = load_bootstrap_records(dir.path()).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("decode:"), "unexpected error: {msg}");
-        assert!(!msg.contains("truncated length prefix"));
+        assert2::assert!(msg.contains("decode:"));
+        assert2::assert!(!msg.contains("truncated length prefix"));
     }
 }

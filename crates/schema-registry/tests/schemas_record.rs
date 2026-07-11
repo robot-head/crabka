@@ -36,15 +36,15 @@ fn schema_key_serialises_byte_exact() {
         serde_json::to_vec(&SchemaKey::new("av-value", SchemaVersion(1))).unwrap(),
     )
     .unwrap();
-    assert_eq!(ours, key_str);
+    assert2::assert!(ours == key_str);
 }
 
 #[test]
 fn avro_value_omits_schema_type_and_references() {
     let (_, val_str) = schema_fixture_for("av-value");
     let v: serde_json::Value = serde_json::from_str(&val_str).unwrap();
-    assert!(v.get("schemaType").is_none(), "AVRO value omits schemaType");
-    assert!(v.get("references").is_none(), "AVRO value omits references");
+    assert2::assert!(v.get("schemaType") == None);
+    assert2::assert!(v.get("references") == None);
     // Our encode produces a structurally-equal value (field order may differ).
     let (_, our_val) = encode_schema(
         "av-value",
@@ -55,14 +55,14 @@ fn avro_value_omits_schema_type_and_references() {
         &[],
     );
     let ours: serde_json::Value = serde_json::from_slice(&our_val).unwrap();
-    assert_eq!(ours, v, "structural value match");
+    assert2::assert!(ours == v);
 }
 
 #[test]
 fn protobuf_value_has_schema_type() {
     let (_, val_str) = schema_fixture_for("pb-value");
     let v: serde_json::Value = serde_json::from_str(&val_str).unwrap();
-    assert_eq!(v["schemaType"], "PROTOBUF");
+    assert2::assert!(v["schemaType"] == "PROTOBUF");
     let (_, our_val) = encode_schema(
         "pb-value",
         SchemaVersion(i32::try_from(v["version"].as_i64().unwrap()).unwrap()),
@@ -72,10 +72,7 @@ fn protobuf_value_has_schema_type() {
         &[],
     );
     let ours: serde_json::Value = serde_json::from_slice(&our_val).unwrap();
-    assert_eq!(
-        ours, v,
-        "structural value match (incl. schemaType:PROTOBUF)"
-    );
+    assert2::assert!(ours == v);
 }
 
 #[test]
@@ -83,7 +80,7 @@ fn decode_handles_noop_and_schema_and_tombstone() {
     // NOOP fixture (record 0 or 1): value is null.
     let noop = fixture("schemas_record_0.json");
     let noop_key = noop["key"].as_str().unwrap().as_bytes();
-    assert!(matches!(
+    assert2::assert!(matches!(
         SchemaRecord::decode(noop_key, None),
         SchemaRecord::Noop
     ));
@@ -91,13 +88,26 @@ fn decode_handles_noop_and_schema_and_tombstone() {
     let (k, val) = schema_fixture_for("av-value");
     match SchemaRecord::decode(k.as_bytes(), Some(val.as_bytes())) {
         SchemaRecord::Schema(key, value) => {
-            assert_eq!(key.subject, "av-value");
-            assert_eq!(value.id, SchemaId(1));
+            assert2::assert!(key == SchemaKey::new("av-value", SchemaVersion(1)));
+            assert2::assert!(
+                value == SchemaValue {
+                    subject: "av-value".into(),
+                    version: SchemaVersion(1),
+                    id: SchemaId(1),
+                    schema_type: None,
+                    message_type: None,
+                    references: vec![],
+                    schema:
+                        r#"{"type":"record","name":"User","fields":[{"name":"id","type":"int"}]}"#
+                            .into(),
+                    deleted: false,
+                }
+            );
         }
         other => panic!("expected Schema, got {other:?}"),
     }
     // Unknown keytype -> Unknown (never panics).
-    assert!(matches!(
+    assert2::assert!(matches!(
         SchemaRecord::decode(br#"{"keytype":"WAT","magic":9}"#, None),
         SchemaRecord::Unknown
     ));
@@ -116,5 +126,5 @@ fn schema_value_round_trips() {
         deleted: false,
     };
     let s = serde_json::to_string(&v).unwrap();
-    assert_eq!(serde_json::from_str::<SchemaValue>(&s).unwrap(), v);
+    assert2::assert!(serde_json::from_str::<SchemaValue>(&s).unwrap() == v);
 }

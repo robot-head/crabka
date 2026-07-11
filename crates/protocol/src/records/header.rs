@@ -133,7 +133,7 @@ pub struct RecordBatchHeader {
 pub const HEADER_LEN: usize = 61;
 
 // Compile-time assertion that the layout is exactly 61 bytes.
-const _: () = assert!(size_of::<RecordBatchHeader>() == HEADER_LEN);
+const _: [(); HEADER_LEN] = [(); size_of::<RecordBatchHeader>()];
 
 /// Byte offset of the `base_offset` field (i64 BE, 8 bytes) within a v2
 /// record-batch header.
@@ -161,145 +161,131 @@ pub const CRC_COVERAGE_START: usize = 21;
 /// Panics if `buf` is shorter than [`HEADER_LEN`]; callers must validate
 /// the batch header (e.g. via borrowed decode) first.
 pub fn patch_base_offset_and_leader_epoch(buf: &mut [u8], base_offset: i64, leader_epoch: i32) {
-    assert!(
-        buf.len() >= HEADER_LEN,
-        "patch target shorter than v2 header"
-    );
+    assert2::assert!(buf.len() >= HEADER_LEN);
     buf[BASE_OFFSET_RANGE].copy_from_slice(&base_offset.to_be_bytes());
     buf[LEADER_EPOCH_RANGE].copy_from_slice(&leader_epoch.to_be_bytes());
 }
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_compression::CompressionType;
 
     use super::*;
 
-    macro_rules! attr_case {
-        ($name:ident, $bits:expr, $codec:expr, $ts:expr, $txn:expr, $ctrl:expr, $horizon:expr) => {
-            #[test]
-            fn $name() {
-                let a = Attributes($bits);
-                check!(
-                    a.compression() == $codec,
-                    "compression mismatch in {}",
-                    stringify!($name)
-                );
-                check!(
-                    a.timestamp_type() == $ts,
-                    "timestamp_type mismatch in {}",
-                    stringify!($name)
-                );
-                check!(
-                    a.is_transactional() == $txn,
-                    "is_transactional mismatch in {}",
-                    stringify!($name)
-                );
-                check!(
-                    a.is_control_batch() == $ctrl,
-                    "is_control_batch mismatch in {}",
-                    stringify!($name)
-                );
-                check!(
-                    a.has_delete_horizon() == $horizon,
-                    "has_delete_horizon mismatch in {}",
-                    stringify!($name)
-                );
-            }
-        };
+    struct AttributeCase {
+        bits: i16,
+        compression: CompressionType,
+        timestamp_type: TimestampType,
+        transactional: bool,
+        control_batch: bool,
+        delete_horizon: bool,
     }
 
-    attr_case!(
-        zero,
-        0,
-        CompressionType::None,
-        TimestampType::CreateTime,
-        false,
-        false,
-        false
-    );
-    attr_case!(
-        gzip_only,
-        0b0000_0000_0000_0001,
-        CompressionType::Gzip,
-        TimestampType::CreateTime,
-        false,
-        false,
-        false
-    );
-    attr_case!(
-        snappy_only,
-        0b0000_0000_0000_0010,
-        CompressionType::Snappy,
-        TimestampType::CreateTime,
-        false,
-        false,
-        false
-    );
-    attr_case!(
-        lz4_only,
-        0b0000_0000_0000_0011,
-        CompressionType::Lz4,
-        TimestampType::CreateTime,
-        false,
-        false,
-        false
-    );
-    attr_case!(
-        zstd_only,
-        0b0000_0000_0000_0100,
-        CompressionType::Zstd,
-        TimestampType::CreateTime,
-        false,
-        false,
-        false
-    );
-    attr_case!(
-        log_append,
-        0b0000_0000_0000_1000,
-        CompressionType::None,
-        TimestampType::LogAppendTime,
-        false,
-        false,
-        false
-    );
-    attr_case!(
-        transactional,
-        0b0000_0000_0001_0000,
-        CompressionType::None,
-        TimestampType::CreateTime,
-        true,
-        false,
-        false
-    );
-    attr_case!(
-        control,
-        0b0000_0000_0010_0000,
-        CompressionType::None,
-        TimestampType::CreateTime,
-        false,
-        true,
-        false
-    );
-    attr_case!(
-        delete_horizon_only,
-        0b0000_0000_0100_0000,
-        CompressionType::None,
-        TimestampType::CreateTime,
-        false,
-        false,
-        true
-    );
-    attr_case!(
-        all_set,
-        0b0000_0000_0111_1100,
-        CompressionType::Zstd,
-        TimestampType::LogAppendTime,
-        true,
-        true,
-        true
-    );
+    fn assert_attribute_case(case: &AttributeCase) {
+        let attributes = Attributes(case.bits);
+        assert2::assert!(attributes.compression() == case.compression);
+        assert2::assert!(attributes.timestamp_type() == case.timestamp_type);
+        assert2::assert!(attributes.is_transactional() == case.transactional);
+        assert2::assert!(attributes.is_control_batch() == case.control_batch);
+        assert2::assert!(attributes.has_delete_horizon() == case.delete_horizon);
+    }
+
+    #[test]
+    fn attribute_compression_cases() {
+        for case in [
+            AttributeCase {
+                bits: 0,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x01,
+                compression: CompressionType::Gzip,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x02,
+                compression: CompressionType::Snappy,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x03,
+                compression: CompressionType::Lz4,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x04,
+                compression: CompressionType::Zstd,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+        ] {
+            assert_attribute_case(&case);
+        }
+    }
+
+    #[test]
+    fn attribute_flag_cases() {
+        for case in [
+            AttributeCase {
+                bits: 0x08,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::LogAppendTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x10,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: true,
+                control_batch: false,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x20,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: true,
+                delete_horizon: false,
+            },
+            AttributeCase {
+                bits: 0x40,
+                compression: CompressionType::None,
+                timestamp_type: TimestampType::CreateTime,
+                transactional: false,
+                control_batch: false,
+                delete_horizon: true,
+            },
+            AttributeCase {
+                bits: 0x7c,
+                compression: CompressionType::Zstd,
+                timestamp_type: TimestampType::LogAppendTime,
+                transactional: true,
+                control_batch: true,
+                delete_horizon: true,
+            },
+        ] {
+            assert_attribute_case(&case);
+        }
+    }
 
     #[test]
     fn builder_round_trip() {
@@ -310,7 +296,7 @@ mod tests {
             .with_control(false);
 
         // Snappy = bits 0-2 = 010, LogAppendTime = bit 3, transactional = bit 4.
-        assert!(a == Attributes(0b0000_0000_0001_1010));
+        assert2::assert!(a == Attributes(0b0000_0000_0001_1010));
     }
 
     #[test]
@@ -319,20 +305,20 @@ mod tests {
         // must clear bit 1, not OR over it.
         let a = Attributes::default().with_compression(CompressionType::Lz4);
         let b = a.with_compression(CompressionType::Gzip);
-        assert!(b.compression() == CompressionType::Gzip);
-        assert!(b.0 & 0x07 == 1);
+        assert2::assert!(b.compression() == CompressionType::Gzip);
+        assert2::assert!(b.0 & 0x07 == 1);
     }
 
     #[test]
     fn delete_horizon_bit_round_trips() {
         // Default has no delete horizon.
         let base = Attributes::default();
-        assert!(!base.has_delete_horizon());
+        assert2::assert!(!base.has_delete_horizon());
 
         // Setting it flips exactly bit 6 (mask 0x40).
         let set = base.with_delete_horizon(true);
-        assert!(set.has_delete_horizon());
-        assert!(set.0 & Attributes::DELETE_HORIZON_BIT == 0x40);
+        assert2::assert!(set.has_delete_horizon());
+        assert2::assert!(set.0 & Attributes::DELETE_HORIZON_BIT == 0x40);
 
         // Orthogonal to control / transactional: setting those does not touch
         // bit 6, and bit 6 does not touch them.
@@ -341,11 +327,11 @@ mod tests {
             .with_transactional(true)
             .with_delete_horizon(true);
         // control = bit 5, transactional = bit 4, delete horizon = bit 6.
-        assert!(combo == Attributes(0b0000_0000_0111_0000));
+        assert2::assert!(combo == Attributes(0b0000_0000_0111_0000));
 
         // Clearing bit 6 leaves the others intact.
         let cleared = combo.with_delete_horizon(false);
-        assert!(cleared == Attributes(0b0000_0000_0011_0000));
+        assert2::assert!(cleared == Attributes(0b0000_0000_0011_0000));
     }
 
     /// Build a sample 61-byte header with known values. Reused across the
@@ -357,7 +343,7 @@ mod tests {
         buf[12..16].copy_from_slice(&1i32.to_be_bytes()); // partition_leader_epoch
         buf[16] = 2; // magic
         buf[17..21].copy_from_slice(&0x1234_5678u32.to_be_bytes()); // crc
-        buf[21..23].copy_from_slice(&0i16.to_be_bytes()); // attributes
+        buf[21..23].copy_from_slice(&0x1234i16.to_be_bytes()); // attributes
         buf[23..27].copy_from_slice(&3i32.to_be_bytes()); // last_offset_delta
         buf[27..35].copy_from_slice(&111i64.to_be_bytes()); // base_timestamp
         buf[35..43].copy_from_slice(&222i64.to_be_bytes()); // max_timestamp
@@ -368,45 +354,69 @@ mod tests {
         buf
     }
 
-    macro_rules! header_field {
-        ($name:ident, $field:ident, $expected:expr) => {
-            #[test]
-            fn $name() {
-                let buf = sample_header_bytes();
-                let h = RecordBatchHeader::ref_from_bytes(&buf[..]).expect("header reinterpret");
-                assert!(h.$field.get() == $expected);
-            }
-        };
+    #[derive(Debug, PartialEq)]
+    struct HeaderProjection {
+        base_offset: i64,
+        batch_length: i32,
+        partition_leader_epoch: i32,
+        magic: i8,
+        crc: u32,
+        attributes: i16,
+        last_offset_delta: i32,
+        base_timestamp: i64,
+        max_timestamp: i64,
+        producer_id: i64,
+        producer_epoch: i16,
+        base_sequence: i32,
+        records_count: i32,
     }
 
-    header_field!(reads_base_offset, base_offset, 100i64);
-    header_field!(reads_batch_length, batch_length, 77i32);
-    header_field!(reads_partition_leader_epoch, partition_leader_epoch, 1i32);
-    header_field!(reads_crc, crc, 0x1234_5678u32);
-    header_field!(reads_last_offset_delta, last_offset_delta, 3i32);
-    header_field!(reads_base_timestamp, base_timestamp, 111i64);
-    header_field!(reads_max_timestamp, max_timestamp, 222i64);
-    header_field!(reads_producer_id, producer_id, -1i64);
-    header_field!(reads_producer_epoch, producer_epoch, 7i16);
-    header_field!(reads_base_sequence, base_sequence, -1i32);
-    header_field!(reads_records_count, records_count, 4i32);
-
     #[test]
-    fn reads_magic_directly() {
+    fn reads_complete_header() {
         let buf = sample_header_bytes();
         let h = RecordBatchHeader::ref_from_bytes(&buf[..]).unwrap();
-        assert!(h.magic == 2);
+        let actual = HeaderProjection {
+            base_offset: h.base_offset.get(),
+            batch_length: h.batch_length.get(),
+            partition_leader_epoch: h.partition_leader_epoch.get(),
+            magic: h.magic,
+            crc: h.crc.get(),
+            attributes: h.attributes.get(),
+            last_offset_delta: h.last_offset_delta.get(),
+            base_timestamp: h.base_timestamp.get(),
+            max_timestamp: h.max_timestamp.get(),
+            producer_id: h.producer_id.get(),
+            producer_epoch: h.producer_epoch.get(),
+            base_sequence: h.base_sequence.get(),
+            records_count: h.records_count.get(),
+        };
+        let expected = HeaderProjection {
+            base_offset: 100,
+            batch_length: 77,
+            partition_leader_epoch: 1,
+            magic: 2,
+            crc: 0x1234_5678,
+            attributes: 0x1234,
+            last_offset_delta: 3,
+            base_timestamp: 111,
+            max_timestamp: 222,
+            producer_id: -1,
+            producer_epoch: 7,
+            base_sequence: -1,
+            records_count: 4,
+        };
+        assert2::assert!(actual == expected);
     }
 
     #[test]
     fn header_is_exactly_61_bytes() {
-        assert!(std::mem::size_of::<RecordBatchHeader>() == HEADER_LEN);
+        assert2::assert!(std::mem::size_of::<RecordBatchHeader>() == HEADER_LEN);
     }
 
     #[test]
     fn too_short_buffer_errors() {
         let buf = [0u8; HEADER_LEN - 1];
-        assert!(RecordBatchHeader::ref_from_bytes(&buf[..]).is_err());
+        assert2::assert!(RecordBatchHeader::ref_from_bytes(&buf[..]).is_err());
     }
 
     #[test]

@@ -909,7 +909,7 @@ async fn build_consumer_with_retry(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::scenario::{Acks, Compression, FailoverSpec, LoadMode, ModeTag};
@@ -950,16 +950,16 @@ mod tests {
 
     #[test]
     fn bytes_to_mb_is_proper_mebibyte() {
-        assert!((bytes_to_mb(1_048_576) - 1.0).abs() < 1e-9);
-        assert!(bytes_to_mb(0).abs() < 1e-9);
+        assert2::assert!((bytes_to_mb(1_048_576) - 1.0).abs() < f64::EPSILON);
+        assert2::assert!(bytes_to_mb(0).abs() < f64::EPSILON);
     }
 
     #[test]
     fn request_timeout_policy_bounds_producers_and_only_crabka_consumers() {
-        check!(producer_request_timeout() == Duration::from_secs(2));
-        check!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
-        check!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
-        check!(CONSUMER_BUILD_ATTEMPTS == 6);
+        assert2::assert!(producer_request_timeout() == Duration::from_secs(2));
+        assert2::assert!(consumer_request_timeout(Stack::Crabka) == Duration::from_secs(5));
+        assert2::assert!(consumer_request_timeout(Stack::Kafka) == Duration::from_secs(30));
+        assert2::assert!(CONSUMER_BUILD_ATTEMPTS == 6);
     }
 
     // TLS enabled: a CA path + server_name must build a `ClientSecurity` whose
@@ -974,13 +974,17 @@ mod tests {
             client_identity: None,
         };
         let sec = params.to_security();
-        check!(sec.protocol == ListenerProtocol::Ssl);
-        check!(sec.protocol.requires_tls());
-        check!(sec.sasl.is_none());
+        assert2::assert!(sec.protocol == ListenerProtocol::Ssl);
+        assert2::assert!(sec.protocol.requires_tls());
+        assert2::assert!(sec.sasl.is_none());
         let tls = sec.tls.expect("Ssl security carries a TLS config");
-        check!(tls.server_name == "demo-broker-headless.default.svc.cluster.local");
-        check!(tls.trust_roots_pem == Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt")));
-        check!(tls.client_identity.is_none());
+        assert2::assert!(
+            tls.server_name.as_str() == "demo-broker-headless.default.svc.cluster.local"
+        );
+        assert2::assert!(
+            tls.trust_roots_pem == Some(std::path::PathBuf::from("/etc/bench-ca/ca.crt"))
+        );
+        assert2::assert!(tls.client_identity == None);
     }
 
     // mTLS variant: a client identity threads through to the TLS config.
@@ -993,7 +997,7 @@ mod tests {
         };
         let sec = params.to_security();
         let tls = sec.tls.expect("TLS config present");
-        assert!(
+        assert2::assert!(
             tls.client_identity
                 == Some((
                     std::path::PathBuf::from("/c/tls.crt"),
@@ -1007,9 +1011,9 @@ mod tests {
     #[test]
     fn no_tls_params_means_plaintext_security_is_none() {
         let c = cfg(1);
-        assert!(c.tls.is_none());
+        assert2::assert!(c.tls.is_none());
         let security: Option<ClientSecurity> = c.tls.as_ref().map(TlsParams::to_security);
-        assert!(security.is_none());
+        assert2::assert!(security.is_none());
     }
 
     #[test]
@@ -1017,13 +1021,13 @@ mod tests {
         let s = scenario(1);
         let c = cfg(1);
         let out = empty_output(&s, &c, 42, vec!["a-note".into()], vec!["an-error".into()]);
-        check!(out.wallclock_start_unix_ms == 42);
-        check!(out.wallclock_end_unix_ms == 42);
-        check!(out.topology.broker_count == 1);
-        check!(out.notes == vec!["a-note"]);
-        check!(out.errors == vec!["an-error"]);
-        check!(out.first_ack_ms == 0);
-        check!(out.disturbance.is_none());
+        assert2::assert!(out.wallclock_start_unix_ms == WallclockMs(42));
+        assert2::assert!(out.wallclock_end_unix_ms == WallclockMs(42));
+        assert2::assert!(out.topology.broker_count == 1);
+        assert2::assert!(out.notes == vec!["a-note".to_owned()]);
+        assert2::assert!(out.errors == vec!["an-error".to_owned()]);
+        assert2::assert!(out.first_ack_ms == 0);
+        assert2::assert!(out.disturbance.is_none());
     }
 
     // The state byte is shared across producer/consumer tasks; verify the
@@ -1041,8 +1045,8 @@ mod tests {
         let mut s = scenario(3);
         s.mode_tag = ModeTag::Cluster;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert!(out.throughput.msgs_produced == 0);
-        assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
+        assert2::assert!(out.throughput.msgs_produced == 0);
+        assert2::assert!(out.notes.iter().any(|n| n.contains("topology-mismatch")));
     }
 
     #[tokio::test(start_paused = true)]
@@ -1067,12 +1071,10 @@ mod tests {
         s.warmup_s = 0;
         s.duration_s = 0;
         let out = run(s, cfg(1)).await.expect("run returned");
-        assert!(
+        assert2::assert!(
             out.notes
                 .iter()
-                .any(|n| n.contains("skipped:failover-needs-rf3")),
-            "expected failover skip note, got {:?}",
-            out.notes
+                .any(|n| n.contains("skipped:failover-needs-rf3"))
         );
     }
 }

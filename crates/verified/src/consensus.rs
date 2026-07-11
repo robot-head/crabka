@@ -307,7 +307,7 @@ pub fn recompute_high_watermark(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use proptest::prelude::*;
 
     use super::*;
@@ -361,41 +361,63 @@ mod tests {
 
     #[test]
     fn jitter_zero_base_is_zero() {
-        assert!(election_jitter_ms(7, 3, 0) == 0);
+        assert2::assert!(election_jitter_ms(7, 3, 0) == 0);
     }
 
     #[test]
     fn jitter_uses_node_and_epoch_hash_inputs() {
-        assert!(election_jitter_ms(1, 0, 1000) == 485);
-        assert!(election_jitter_ms(2, 0, 1000) == 354);
-        assert!(election_jitter_ms(1, 1, 1000) == 446);
+        for (_name, node, epoch, expected) in [
+            ("node one epoch zero", 1, 0, 485),
+            ("node two epoch zero", 2, 0, 354),
+            ("node one epoch one", 1, 1, 446),
+        ] {
+            assert2::assert!(election_jitter_ms(node, epoch, 1000) == expected);
+        }
     }
 
     #[test]
     fn up_to_date_is_the_kip595_rule() {
         // higher epoch wins regardless of offset
-        check!(log_is_up_to_date(5, 100, 6, 0));
-        // same epoch: candidate offset must be >= ours
-        check!(log_is_up_to_date(5, 100, 5, 100));
-        check!(!log_is_up_to_date(5, 100, 5, 99));
-        // lower epoch never wins
-        check!(!log_is_up_to_date(5, 0, 4, i64::MAX));
+        for (name, ours_epoch, ours_offset, candidate_epoch, candidate_offset, expected) in [
+            ("higher epoch", 5, 100, 6, 0, true),
+            ("same epoch equal offset", 5, 100, 5, 100, true),
+            ("same epoch older offset", 5, 100, 5, 99, false),
+            ("lower epoch", 5, 0, 4, i64::MAX, false),
+        ] {
+            check!(
+                log_is_up_to_date(ours_epoch, ours_offset, candidate_epoch, candidate_offset)
+                    == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn hwm_never_regresses_and_gates_on_epoch_start() {
         // majority offset (2 of {10, 3, 9} with majority=2 -> 9) is <= epoch_start 9: hold.
-        check!(recompute_high_watermark(10, &[3, 9], 2, 9, 5) == 5);
-        // majority offset 9 > epoch_start 8: advance.
-        check!(recompute_high_watermark(10, &[3, 9], 2, 8, 5) == 9);
-        // a fallen follower offset can't drag the HWM back down.
-        check!(recompute_high_watermark(10, &[1, 1], 2, 0, 7) == 7);
+        for (name, followers, epoch_start, current, expected) in [
+            ("gated at epoch start", &[3, 9][..], 9, 5, 5),
+            ("advances past epoch start", &[3, 9][..], 8, 5, 9),
+            ("never regresses", &[1, 1][..], 0, 7, 7),
+        ] {
+            check!(
+                recompute_high_watermark(10, followers, 2, epoch_start, current) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn hwm_counts_leader_and_followers_until_majority() {
-        check!(recompute_high_watermark(10, &[9, 8], 2, 0, 0) == 9);
-        check!(recompute_high_watermark(10, &[10, 10], 3, 0, 0) == 10);
-        check!(recompute_high_watermark(10, &[4, 4], 3, 0, 0) == 4);
+        for (name, followers, majority, expected) in [
+            ("two of three", &[9, 8][..], 2, 9),
+            ("all three at leader", &[10, 10][..], 3, 10),
+            ("all three below leader", &[4, 4][..], 3, 4),
+        ] {
+            check!(
+                recompute_high_watermark(10, followers, majority, 0, 0) == expected,
+                "case {name}"
+            );
+        }
     }
 }

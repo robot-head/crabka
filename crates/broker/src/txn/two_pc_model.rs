@@ -114,10 +114,7 @@ fn rebuild(s: &TwoPcProj) -> TxnEntry {
 /// Record a terminal outcome for `epoch`, asserting it has not already
 /// finalized either way (single-finalize + no commit-and-abort per generation).
 fn record(committed: &mut Vec<i16>, aborted: &mut Vec<i16>, epoch: i16, is_commit: bool) {
-    assert!(
-        !committed.contains(&epoch) && !aborted.contains(&epoch),
-        "epoch {epoch} finalized twice (commit={is_commit}); committed={committed:?} aborted={aborted:?}"
-    );
+    assert2::assert!(!committed.contains(&epoch) && !aborted.contains(&epoch));
     let v = if is_commit { committed } else { aborted };
     v.push(epoch);
     v.sort_unstable();
@@ -180,7 +177,7 @@ impl Model for TwoPcModel {
                 s.epoch += 1;
                 s.state = TxnState::Empty.to_kafka_status();
                 s.two_pc = two_pc;
-                assert!(s.epoch >= last.epoch, "epoch regressed on Init");
+                assert2::assert!(s.epoch >= last.epoch);
                 Some(s)
             }
             TwoPcAction::BeginTxn => {
@@ -273,14 +270,8 @@ fn run(model: TwoPcModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(
-        checker.max_depth() < MAX_DEPTH,
-        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
-    );
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

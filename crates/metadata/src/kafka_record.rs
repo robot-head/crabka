@@ -55,7 +55,7 @@ pub fn from_kafka_record(rec: &Record) -> Result<MetadataRecord, KafkaRecordErro
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use uuid::Uuid;
 
     use super::*;
@@ -75,26 +75,26 @@ mod tests {
         let rec = sample_topic();
         let kafka = to_kafka_record(&rec).expect("encode");
         let back = from_kafka_record(&kafka).expect("decode");
-        assert!(rec == back);
+        assert2::assert!(rec == back);
     }
 
     #[test]
     fn key_is_none_and_value_is_present() {
         let kafka = to_kafka_record(&sample_topic()).expect("encode");
-        assert!(kafka.key.is_none());
-        assert!(kafka.value.is_some());
+        assert2::assert!(kafka.key == None);
+        assert2::assert!(kafka.value.is_some());
     }
 
     #[test]
     fn record_key_is_none_even_when_default_record_has_key() {
         let kafka = to_kafka_record(&sample_topic()).expect("encode");
-        assert!(kafka.key == None);
+        assert2::assert!(kafka.key == None);
     }
 
     #[test]
     fn missing_value_is_an_error() {
         let empty = Record::default();
-        assert!(matches!(
+        assert2::assert!(matches!(
             from_kafka_record(&empty),
             Err(KafkaRecordError::MissingValue)
         ));
@@ -107,6 +107,6 @@ mod tests {
         let rec = sample_topic();
         let a = to_kafka_record(&rec).expect("encode");
         let b = to_kafka_record(&rec).expect("encode");
-        assert!(a.value == b.value);
+        assert2::assert!(a.value == b.value);
     }
 }

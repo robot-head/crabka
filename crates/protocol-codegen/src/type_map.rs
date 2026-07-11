@@ -76,7 +76,7 @@ fn inner_borrowed(t: &str, struct_path: Option<&str>) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -91,7 +91,7 @@ mod tests {
             ("uuid", false, "crate::primitives::uuid::Uuid"),
             ("records", false, "crate::records::RecordsPayload"),
         ] {
-            assert!(owned_type(t, nullable, None) == want);
+            assert2::assert!(owned_type(t, nullable, None) == want);
         }
     }
 
@@ -106,24 +106,50 @@ mod tests {
                 "crate::records::RecordsPayloadBorrowed<'a>",
             ),
         ] {
-            assert!(borrowed_type(t, nullable, None) == want);
+            assert2::assert!(borrowed_type(t, nullable, None) == want);
         }
     }
 
     #[test]
     fn arrays() {
-        check!(owned_type("[]int32", false, None) == "Vec<i32>");
-        check!(owned_type("[]string", true, None) == "Option<Vec<String>>");
-        check!(borrowed_type("[]string", false, None) == "Vec<&'a str>");
+        for (case, got, want) in [
+            (
+                "owned primitive",
+                owned_type("[]int32", false, None),
+                "Vec<i32>",
+            ),
+            (
+                "owned nullable string",
+                owned_type("[]string", true, None),
+                "Option<Vec<String>>",
+            ),
+            (
+                "borrowed string",
+                borrowed_type("[]string", false, None),
+                "Vec<&'a str>",
+            ),
+        ] {
+            check!(got == want, "case {case}");
+        }
     }
 
     #[test]
     fn struct_refs() {
-        check!(owned_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
-        // Caller is responsible for including <'a> in struct_path when needed.
-        check!(
-            borrowed_type("ProduceTopic", false, Some("ProduceTopic<'a>")) == "ProduceTopic<'a>"
-        );
+        for (case, got, want) in [
+            (
+                "owned",
+                owned_type("ProduceTopic", false, Some("ProduceTopic")),
+                "ProduceTopic",
+            ),
+            // Caller is responsible for including <'a> in struct_path when needed.
+            (
+                "borrowed",
+                borrowed_type("ProduceTopic", false, Some("ProduceTopic<'a>")),
+                "ProduceTopic<'a>",
+            ),
+        ] {
+            check!(got == want, "case {case}");
+        }
         check!(borrowed_type("ProduceTopic", false, Some("ProduceTopic")) == "ProduceTopic");
         check!(owned_type("[]ProduceTopic", false, Some("ProduceTopic")) == "Vec<ProduceTopic>");
         check!(

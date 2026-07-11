@@ -13,7 +13,6 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::{
@@ -92,7 +91,7 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
     let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 async fn describe_log_dirs(addr: SocketAddr) -> DescribeLogDirsResponse {
@@ -146,39 +145,28 @@ async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
     // 1. Placement spread: both directories hold at least one partition of `t`.
     let in_primary = count_topic_dirs(primary.path(), "t");
     let in_extra = count_topic_dirs(extra.path(), "t");
-    assert!(
-        in_primary + in_extra == N as usize,
-        "all partitions on disk"
-    );
-    assert!(
-        in_primary > 0 && in_extra > 0,
-        "partitions must spread across both dirs: primary={in_primary} extra={in_extra}"
-    );
+    assert2::assert!(in_primary + in_extra == N as usize);
+    assert2::assert!(in_primary > 0 && in_extra > 0);
 
     // 2. DescribeLogDirs reports one result per configured dir, and the
     //    union of `t` partitions across results is the full 0..N set.
     let resp = describe_log_dirs(addr).await;
-    assert!(resp.error_code == 0);
-    assert!(resp.results.len() == 2, "one result per log dir");
+    assert2::assert!((resp.error_code, resp.results.len()) == (0, 2));
 
     let mut reported: Vec<i32> = Vec::new();
     for result in &resp.results {
-        assert!(result.error_code == 0);
+        assert2::assert!(result.error_code == 0);
         for topic in &result.topics {
             if topic.name == "t" {
                 for p in &topic.partitions {
                     reported.push(p.partition_index);
-                    assert!(p.partition_size >= 0);
-                    assert!(!p.is_future_key);
+                    assert2::assert!((p.partition_size >= 0, p.is_future_key) == (true, false));
                 }
             }
         }
     }
     reported.sort_unstable();
-    assert!(
-        reported == (0..N).collect::<Vec<_>>(),
-        "all partitions reported"
-    );
+    assert2::assert!(reported == (0..N).collect::<Vec<_>>());
 
     handle.shutdown().await;
 }

@@ -166,7 +166,6 @@ async fn build_producer(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
     use qubit_clock::{MockTime, MockWaiterKind};
 
     use super::*;
@@ -219,7 +218,7 @@ mod tests {
             })
             .await
             .unwrap();
-            assert!(parked, "heartbeat task never parked on interval sleep #{n}");
+            assert2::assert!(parked);
 
             mock.advance(Duration::from_millis(100));
 
@@ -237,10 +236,7 @@ mod tests {
         // Exactly one heartbeat per advance — no more (no advance fired after
         // the loop) and no fewer (each advance was gated on its write landing).
         let count = crate::test_util::topic_record_count(&target, Heartbeat::TOPIC).await;
-        check!(
-            count == TICKS,
-            "expected exactly {TICKS} heartbeats, got {count}"
-        );
+        assert2::assert!(count == TICKS);
 
         let raw = crate::admin_util::read_last_value_for_key(
             &target,
@@ -250,6 +246,6 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(raw.is_some(), "no heartbeat written");
+        assert2::assert!(raw.is_some());
     }
 }

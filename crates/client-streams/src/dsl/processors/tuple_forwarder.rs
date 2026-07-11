@@ -112,16 +112,13 @@ mod tests {
     }
 
     #[test]
-    fn uncached_forwards_one_record() {
-        let f = TupleForwarder::resolve(false);
-        check!(forwarded_count(&f) == 1);
-    }
-
-    #[test]
-    fn cached_suppresses_forward() {
-        let f = TupleForwarder::resolve(true);
-        check!(forwarded_count(&f) == 0);
-        // Default == uncached behavior preserved (forwards).
-        check!(forwarded_count(&TupleForwarder::default()) == 1);
+    fn caching_controls_forwarding() {
+        for (name, forwarder, expected) in [
+            ("uncached", TupleForwarder::resolve(false), 1),
+            ("cached", TupleForwarder::resolve(true), 0),
+            ("default", TupleForwarder::default(), 1),
+        ] {
+            check!(forwarded_count(&forwarder) == expected, "case {name}");
+        }
     }
 }

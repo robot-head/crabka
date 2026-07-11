@@ -107,7 +107,6 @@ pub fn validate_movement(state: &ClusterState, mv: &Movement) -> Result<(), Move
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -156,7 +155,7 @@ mod tests {
             old_leader: 1,
             new_leader: 1,
         };
-        assert!(validate_movement(&fixture_state(), &mv).is_ok());
+        assert2::assert!(validate_movement(&fixture_state(), &mv).is_ok());
     }
 
     #[test]
@@ -169,7 +168,7 @@ mod tests {
             old_leader: 1,
             new_leader: 1,
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             validate_movement(&fixture_state(), &mv),
             Err(MovementError::ReplicationFactorChanged { .. })
         ));
@@ -185,7 +184,7 @@ mod tests {
             old_leader: 1,
             new_leader: 2,
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             validate_movement(&fixture_state(), &mv),
             Err(MovementError::LeaderNotInReplicas { .. })
         ));
@@ -201,7 +200,7 @@ mod tests {
             old_leader: 1,
             new_leader: 1,
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             validate_movement(&fixture_state(), &mv),
             Err(MovementError::DuplicateReplicas { .. })
         ));
@@ -217,7 +216,7 @@ mod tests {
             old_leader: 1,
             new_leader: 1,
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             validate_movement(&fixture_state(), &mv),
             Err(MovementError::UnknownBroker { id: 99 })
         ));
@@ -233,7 +232,7 @@ mod tests {
             old_leader: 1,
             new_leader: 1,
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             validate_movement(&fixture_state(), &mv),
             Err(MovementError::UnknownPartition { .. })
         ));

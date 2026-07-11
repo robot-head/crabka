@@ -289,7 +289,6 @@ struct PromResult {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -305,22 +304,22 @@ mod tests {
           }
         }"#;
         let p: PromResp = serde_json::from_str(json).unwrap();
-        assert!(p.status == "success");
-        assert!(p.data.unwrap().result.len() == 1);
+        assert2::assert!(p.status == "success");
+        assert2::assert!(p.data.unwrap().result.len() == 1);
     }
 
     #[test]
     fn parses_empty_result_set() {
         let json = r#"{"status":"success","data":{"resultType":"vector","result":[]}}"#;
         let p: PromResp = serde_json::from_str(json).unwrap();
-        assert!(p.data.unwrap().result.is_empty());
+        assert2::assert!(p.data.unwrap().result.is_empty());
     }
 
     #[test]
     fn parses_error_response() {
         let json = r#"{"status":"error","error":"bad query"}"#;
         let p: PromResp = serde_json::from_str(json).unwrap();
-        assert!(p.status == "error");
-        assert!(p.error.as_deref() == Some("bad query"));
+        assert2::assert!(p.status == "error");
+        assert2::assert!(p.error.as_deref() == Some("bad query"));
     }
 }

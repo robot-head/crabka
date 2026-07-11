@@ -386,7 +386,6 @@ fn handle_client_metrics_scoped(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -394,36 +393,36 @@ mod tests {
     fn topic_throttle_config_value_validated() {
         // Verify ThrottledReplicas::parse rejects malformed input that
         // the validator delegates to.
-        assert!(crate::throttle::ThrottledReplicas::parse("not-a-pair").is_err());
-        assert!(crate::throttle::ThrottledReplicas::parse("0:bad").is_err());
+        assert2::assert!(crate::throttle::ThrottledReplicas::parse("not-a-pair").is_err());
+        assert2::assert!(crate::throttle::ThrottledReplicas::parse("0:bad").is_err());
     }
 
     #[test]
     fn broker_scoped_rate_config_accepted() {
-        assert!(is_known_broker_config(
+        assert2::assert!(is_known_broker_config(
             crate::throttle::LEADER_THROTTLED_RATE_KEY
         ));
-        assert!(is_known_broker_config(
+        assert2::assert!(is_known_broker_config(
             crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
         ));
     }
 
     #[test]
     fn broker_scoped_unknown_config_rejected() {
-        assert!(!is_known_broker_config("not.a.real.config"));
-        assert!(validate_broker_config_value("not.a.real.config", "1024").is_err());
+        assert2::assert!(!is_known_broker_config("not.a.real.config"));
+        assert2::assert!(validate_broker_config_value("not.a.real.config", "1024").is_err());
     }
 
     #[test]
     fn broker_scoped_invalid_value_rejected() {
-        assert!(
+        assert2::assert!(
             validate_broker_config_value(
                 crate::throttle::LEADER_THROTTLED_RATE_KEY,
                 "not-a-number"
             )
             .is_err()
         );
-        assert!(
+        assert2::assert!(
             validate_broker_config_value(crate::throttle::LEADER_THROTTLED_RATE_KEY, "1024")
                 .is_ok()
         );
@@ -486,8 +485,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::INVALID_REQUEST);
-        assert!(to_submit.is_empty());
+        assert2::assert!(out.error_code == codes::INVALID_REQUEST);
+        assert2::assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -497,7 +496,7 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::INVALID_REQUEST);
+        assert2::assert!(out.error_code == codes::INVALID_REQUEST);
     }
 
     #[test]
@@ -507,8 +506,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::INVALID_CONFIG);
-        assert!(to_submit.is_empty());
+        assert2::assert!(out.error_code == codes::INVALID_CONFIG);
+        assert2::assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -524,13 +523,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::NONE);
+        assert2::assert!(out.error_code == codes::NONE);
         let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
             node_id: crabka_audit::NodeId(1),
             config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
             config_value: Some("2048".to_string()),
         })];
-        assert!(to_submit == expected);
+        assert2::assert!(to_submit == expected);
     }
 
     #[test]
@@ -543,13 +542,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::NONE);
+        assert2::assert!(out.error_code == codes::NONE);
         let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
             node_id: crabka_audit::NodeId(1),
             config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.to_string(),
             config_value: None,
         })];
-        assert!(to_submit == expected);
+        assert2::assert!(to_submit == expected);
     }
 
     #[test]
@@ -565,8 +564,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::INVALID_CONFIG);
-        assert!(to_submit.is_empty());
+        assert2::assert!(out.error_code == codes::INVALID_CONFIG);
+        assert2::assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -595,15 +594,17 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::NONE);
-        assert!(to_submit.len() == 1);
-        match &to_submit[0] {
-            MetadataRecord::V1ClientMetricsConfig(rec) => {
-                assert!(rec.name == "sub-a");
-                assert!(rec.configs.get("interval.ms").map(String::as_str) == Some("60000"));
-            }
-            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
-        }
+        assert2::assert!(out.error_code == codes::NONE);
+        let expected = vec![MetadataRecord::V1ClientMetricsConfig(
+            crabka_metadata::ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: std::collections::BTreeMap::from([
+                    ("interval.ms".into(), "60000".into()),
+                    ("metrics".into(), "org.apache.kafka.consumer.".into()),
+                ]),
+            },
+        )];
+        assert2::assert!(to_submit == expected);
     }
 
     #[test]
@@ -624,8 +625,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::INVALID_CONFIG);
-        assert!(to_submit.is_empty());
+        assert2::assert!(out.error_code == codes::INVALID_CONFIG);
+        assert2::assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -656,13 +657,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert!(out.error_code == codes::NONE);
-        match &to_submit[0] {
-            MetadataRecord::V1ClientMetricsConfig(rec) => {
-                assert!(!rec.configs.contains_key("interval.ms"));
-                assert!(rec.configs.get("metrics").map(String::as_str) == Some("a."));
-            }
-            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
-        }
+        assert2::assert!(out.error_code == codes::NONE);
+        let expected = vec![MetadataRecord::V1ClientMetricsConfig(
+            ClientMetricsConfigRecord {
+                name: "sub-a".into(),
+                configs: std::collections::BTreeMap::from([("metrics".into(), "a.".into())]),
+            },
+        )];
+        assert2::assert!(to_submit == expected);
     }
 }

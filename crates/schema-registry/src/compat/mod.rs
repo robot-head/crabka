@@ -219,8 +219,6 @@ pub fn check_against_version(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
-
     use super::*;
     use crate::{format::SchemaType, store::StoreState};
 
@@ -231,23 +229,31 @@ mod tests {
 
     #[test]
     fn level_parse_and_props() {
-        assert_eq!(
-            CompatibilityLevel::parse("BACKWARD"),
-            CompatibilityLevel::Backward
-        );
-        assert_eq!(
-            CompatibilityLevel::parse("FULL_TRANSITIVE"),
-            CompatibilityLevel::FullTransitive
-        );
-        check!(CompatibilityLevel::FullTransitive.is_transitive());
-        check!(!CompatibilityLevel::Backward.is_transitive());
-        check!(CompatibilityLevel::None.directions().is_empty());
+        for (_name, input, expected) in [
+            (
+                "backward",
+                "BACKWARD",
+                (CompatibilityLevel::Backward, false, 1),
+            ),
+            (
+                "full_transitive",
+                "FULL_TRANSITIVE",
+                (CompatibilityLevel::FullTransitive, true, 2),
+            ),
+            ("none", "NONE", (CompatibilityLevel::None, false, 0)),
+        ] {
+            let level = CompatibilityLevel::parse(input);
+            let (expected_level, expected_transitive, expected_direction_count) = expected;
+            assert2::assert!(level == expected_level);
+            assert2::assert!(level.is_transitive() == expected_transitive);
+            assert2::assert!(level.directions().len() == expected_direction_count);
+        }
     }
 
     #[test]
     fn first_version_and_none_always_ok() {
         let snap = StoreState::default();
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &av(ID), &[]).is_ok());
+        assert2::assert!(check_registration(&snap, "s", SchemaType::Avro, &av(ID), &[]).is_ok());
     }
 
     #[test]
@@ -256,15 +262,25 @@ mod tests {
         snap.set_subject_compat("s", "BACKWARD".into());
         snap.register("s", SchemaType::Avro, &av(ID), &[], None)
             .unwrap();
-        let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        assert!(matches!(
-            check_registration(&snap, "s", SchemaType::Avro, &bad, &[]),
-            Err(crate::error::SrError::Incompatible(_))
-        ));
-        let good = av(&format!(
-            "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
-        ));
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &good, &[]).is_ok());
+        for (_name, candidate, compatible) in [
+            (
+                "required_field",
+                av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}")),
+                false,
+            ),
+            (
+                "defaulted_field",
+                av(&format!(
+                    "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
+                )),
+                true,
+            ),
+        ] {
+            assert2::assert!(
+                check_registration(&snap, "s", SchemaType::Avro, &candidate, &[]).is_ok()
+                    == compatible
+            );
+        }
     }
 
     #[test]
@@ -274,7 +290,7 @@ mod tests {
         snap.register("s", SchemaType::Avro, &av(ID), &[], None)
             .unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        assert!(check_registration(&snap, "s", SchemaType::Avro, &bad, &[]).is_ok());
+        assert2::assert!(check_registration(&snap, "s", SchemaType::Avro, &bad, &[]).is_ok());
     }
 
     #[test]
@@ -284,17 +300,19 @@ mod tests {
         snap.register("s", SchemaType::Avro, &av(ID), &[], None)
             .unwrap();
         let bad = av(&format!("{ID},{{\"name\":\"x\",\"type\":\"int\"}}"));
-        let v = check_against_version(&snap, "s", SchemaType::Avro, &bad, &[], None).unwrap();
-        assert!(!v.is_compatible);
-        assert!(!v.messages.is_empty());
         let good = av(&format!(
             "{ID},{{\"name\":\"x\",\"type\":\"int\",\"default\":0}}"
         ));
-        assert!(
-            check_against_version(&snap, "s", SchemaType::Avro, &good, &[], None)
-                .unwrap()
-                .is_compatible
-        );
-        assert!(check_against_version(&snap, "nope", SchemaType::Avro, &good, &[], None).is_err());
+        for (_name, subject, candidate, expected) in [
+            ("incompatible", "s", bad.as_str(), Some((false, false))),
+            ("compatible", "s", good.as_str(), Some((true, true))),
+            ("missing_subject", "nope", good.as_str(), None),
+        ] {
+            let actual =
+                check_against_version(&snap, subject, SchemaType::Avro, candidate, &[], None)
+                    .ok()
+                    .map(|verdict| (verdict.is_compatible, verdict.messages.is_empty()));
+            assert2::assert!(actual == expected);
+        }
     }
 }

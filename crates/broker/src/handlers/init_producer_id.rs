@@ -319,7 +319,6 @@ async fn dispatch_abort_markers(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_log::{Log, LogConfig, ProducerId};
 
@@ -352,7 +351,7 @@ mod tests {
             crate::log_dir_status::LogDirRegistry::default(),
             Arc::new(crate::producer_state::ProducerState::new()),
         );
-        assert!(part.log_end_offset() == 0);
+        assert2::assert!(part.log_end_offset() == 0);
         partitions.insert("orders".to_string(), PartitionIndex(0), Arc::clone(&part));
 
         // Build a txn entry that names this partition.
@@ -367,11 +366,7 @@ mod tests {
             .expect("dispatch markers");
 
         // The abort marker is a single control record → LEO advances to 1.
-        assert!(
-            part.log_end_offset() == 1,
-            "abort marker must be appended (LEO 1), got {:?}",
-            part.log_end_offset()
-        );
+        assert2::assert!(part.log_end_offset() == 1);
     }
 
     /// A partition in the entry that isn't hosted locally is skipped without

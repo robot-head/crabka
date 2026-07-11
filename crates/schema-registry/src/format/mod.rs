@@ -113,14 +113,14 @@ mod tests {
 
     #[test]
     fn schema_type_wire_names() {
-        assert_eq!(SchemaType::Avro.wire_name(), None);
-        assert_eq!(SchemaType::Protobuf.wire_name(), Some("PROTOBUF"));
-        assert_eq!(SchemaType::Json.wire_name(), Some("JSON"));
-        assert_eq!(SchemaType::from_wire(None), SchemaType::Avro);
-        assert_eq!(
-            SchemaType::from_wire(Some("PROTOBUF")),
-            SchemaType::Protobuf
-        );
+        for (_name, ty, wire) in [
+            ("avro_default", SchemaType::Avro, None),
+            ("protobuf", SchemaType::Protobuf, Some("PROTOBUF")),
+            ("json", SchemaType::Json, Some("JSON")),
+        ] {
+            assert2::assert!(ty.wire_name() == wire);
+            assert2::assert!(SchemaType::from_wire(wire) == ty);
+        }
     }
 
     #[test]
@@ -137,18 +137,20 @@ mod tests {
             &[],
         )
         .unwrap();
-        assert_eq!(a.canonical_form(), b.canonical_form());
+        let a_form = a.canonical_form();
+        let b_form = b.canonical_form();
         let c = parse(
             SchemaType::Avro,
             r#"{"type":"record","name":"V","fields":[]}"#,
             &[],
         )
         .unwrap();
-        assert_ne!(a.canonical_form(), c.canonical_form());
+        assert2::assert!(a_form == b_form);
+        assert2::assert!(a_form != c.canonical_form());
     }
 
     #[test]
     fn avro_rejects_invalid() {
-        assert!(parse(SchemaType::Avro, "{not avro}", &[]).is_err());
+        assert2::assert!(parse(SchemaType::Avro, "{not avro}", &[]).is_err());
     }
 }

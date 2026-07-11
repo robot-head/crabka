@@ -293,7 +293,7 @@ pub fn issue_user_cert(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use rustls::pki_types::{CertificateDer, pem::PemObject};
     use x509_parser::prelude::{FromDer, X509Certificate};
 
@@ -311,30 +311,27 @@ mod tests {
         let validity_days: u32 = 365;
         let ca = generate_clients_ca("root", validity_days).expect("generate CA");
 
-        assert!(ca.cert_pem.contains("BEGIN CERTIFICATE"));
-        assert!(ca.key_pem.contains("BEGIN PRIVATE KEY"));
+        assert2::assert!(ca.cert_pem.contains("BEGIN CERTIFICATE"));
+        assert2::assert!(ca.key_pem.contains("BEGIN PRIVATE KEY"));
 
         let der = pem_to_der(&ca.cert_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse CA DER");
 
         let subject = cert.subject().to_string();
-        assert!(subject.contains("CN=root"), "subject was {subject}");
-        assert!(subject.contains("O=crabka"), "subject was {subject}");
+        assert2::assert!(subject.contains("CN=root"));
+        assert2::assert!(subject.contains("O=crabka"));
 
         let bc = cert
             .basic_constraints()
             .expect("basic constraints parse")
             .expect("basic constraints present");
-        assert!(bc.value.ca, "CA bit must be true on clients CA");
+        assert2::assert!(bc.value.ca);
 
         let validity = cert.validity();
         let span = validity.not_after.timestamp() - validity.not_before.timestamp();
         let expected = i64::from(validity_days) * 86_400;
         let tolerance: i64 = 60;
-        assert!(
-            (span - expected).abs() <= tolerance,
-            "validity span {span}s expected ~{expected}s"
-        );
+        assert2::assert!((span - expected).abs() <= tolerance);
     }
 
     #[test]
@@ -344,7 +341,7 @@ mod tests {
 
         let leaf_der = pem_to_der(&user.cert_pem);
         let (_, leaf) = X509Certificate::from_der(leaf_der.as_ref()).expect("parse leaf DER");
-        assert!(leaf.subject().to_string() == "CN=alice");
+        assert2::assert!(leaf.subject().to_string() == "CN=alice");
 
         let ca_der = pem_to_der(&ca.cert_pem);
         let (_, ca_x509) = X509Certificate::from_der(ca_der.as_ref()).expect("parse CA DER");
@@ -360,7 +357,7 @@ mod tests {
 
         let der = pem_to_der(&user.cert_pem);
         let dn = crate::extract_principal_from_cert(der.as_ref()).expect("extract principal");
-        assert!(dn == "CN=alice");
+        assert2::assert!(dn == "CN=alice");
     }
 
     #[test]
@@ -374,18 +371,15 @@ mod tests {
             .extended_key_usage()
             .expect("EKU parse")
             .expect("EKU present");
-        assert!(eku.value.client_auth, "client_auth must be set on leaf EKU");
+        assert2::assert!(eku.value.client_auth);
     }
 
     #[test]
     fn each_generate_is_unique() {
         let a = generate_clients_ca("x", 365).expect("generate CA a");
         let b = generate_clients_ca("x", 365).expect("generate CA b");
-        assert!(
-            a.cert_pem != b.cert_pem,
-            "each CA must have unique serial/key"
-        );
-        assert!(a.key_pem != b.key_pem, "each CA must have a unique key");
+        assert2::assert!(a.cert_pem != b.cert_pem);
+        assert2::assert!(a.key_pem != b.key_pem);
     }
 
     #[test]
@@ -395,16 +389,13 @@ mod tests {
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse cluster CA DER");
         let subject = cert.subject().to_string();
         for part in ["CN=c1", "O=crabka", "OU=cluster"] {
-            assert!(
-                subject.contains(part),
-                "missing {part}; subject was {subject}"
-            );
+            assert2::assert!(subject.contains(part));
         }
         let bc = cert
             .basic_constraints()
             .expect("BC parse")
             .expect("BC present");
-        assert!(bc.value.ca, "CA bit must be true on cluster CA");
+        assert2::assert!(bc.value.ca);
     }
 
     #[test]
@@ -413,10 +404,7 @@ mod tests {
         let der = pem_to_der(&ca.cert_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse");
         let subject = cert.subject().to_string();
-        assert!(
-            !subject.contains("OU=cluster"),
-            "clients CA must not carry OU=cluster; subject={subject}"
-        );
+        assert2::assert!(!subject.contains("OU=cluster"));
     }
 
     #[test]
@@ -438,19 +426,19 @@ mod tests {
             .extended_key_usage()
             .expect("EKU parse")
             .expect("EKU present");
-        assert!(eku.value.server_auth, "broker leaf must carry serverAuth");
-        assert!(eku.value.client_auth, "broker leaf must carry clientAuth");
+        assert2::assert!(eku.value.server_auth);
+        assert2::assert!(eku.value.client_auth);
 
         let san_ext = leaf
             .subject_alternative_name()
             .expect("SAN parse")
             .expect("SAN present");
         let general_names: Vec<_> = san_ext.value.general_names.iter().collect();
-        assert!(general_names.iter().any(|gn| matches!(
+        assert2::assert!(general_names.iter().any(|gn| matches!(
             gn,
             x509_parser::extensions::GeneralName::DNSName(s) if *s == "c1-broker-0"
         )));
-        assert!(
+        assert2::assert!(
             general_names
                 .iter()
                 .any(|gn| matches!(gn, x509_parser::extensions::GeneralName::IPAddress(_)))
@@ -493,7 +481,7 @@ mod tests {
             })
             .collect();
 
-        assert!(dns_names == vec!["c1-broker-0", "external.example"]);
+        assert2::assert!(dns_names == vec!["c1-broker-0", "external.example"]);
     }
 
     fn spki_der(cert_pem: &str) -> Vec<u8> {
@@ -508,25 +496,21 @@ mod tests {
         let renewed_pem = renew_cluster_ca(&orig.key_pem, "c1-cluster-ca", 365).expect("renew");
 
         // Same public key (same SPKI) — the renewal reuses the key.
-        assert!(
-            spki_der(&orig.cert_pem) == spki_der(&renewed_pem),
-            "renewed cert must carry the same public key"
-        );
+        assert2::assert!(spki_der(&orig.cert_pem) == spki_der(&renewed_pem));
 
         // Same subject DN, including OU=cluster.
         let der = pem_to_der(&renewed_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse renewed");
         let subject = cert.subject().to_string();
         for part in ["CN=c1-cluster-ca", "O=crabka", "OU=cluster"] {
-            assert!(subject.contains(part), "missing {part}; subject={subject}");
+            assert2::assert!(subject.contains(part));
         }
-        assert!(
+        assert2::assert!(
             cert.basic_constraints()
                 .expect("BC")
                 .expect("BC present")
                 .value
-                .ca,
-            "renewed cert must still be a CA"
+                .ca
         );
     }
 
@@ -540,10 +524,7 @@ mod tests {
             let (_, c) = X509Certificate::from_der(der.as_ref()).expect("parse");
             c.validity().not_after.timestamp() - c.validity().not_before.timestamp()
         };
-        assert!(
-            span(&renewed_pem) > span(&orig.cert_pem),
-            "renewed validity window must be longer"
-        );
+        assert2::assert!(span(&renewed_pem) > span(&orig.cert_pem));
     }
 
     #[test]
@@ -572,13 +553,10 @@ mod tests {
     fn renew_clients_ca_has_no_ou_cluster() {
         let orig = generate_clients_ca("c1-clients-ca", 30).expect("CA");
         let renewed_pem = renew_clients_ca(&orig.key_pem, "c1-clients-ca", 365).expect("renew");
-        assert!(spki_der(&orig.cert_pem) == spki_der(&renewed_pem));
+        assert2::assert!(spki_der(&orig.cert_pem) == spki_der(&renewed_pem));
         let der = pem_to_der(&renewed_pem);
         let (_, cert) = X509Certificate::from_der(der.as_ref()).expect("parse");
-        assert!(
-            !cert.subject().to_string().contains("OU=cluster"),
-            "clients CA must not carry OU=cluster"
-        );
+        assert2::assert!(!cert.subject().to_string().contains("OU=cluster"));
     }
 
     #[test]

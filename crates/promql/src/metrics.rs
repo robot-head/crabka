@@ -277,7 +277,7 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -330,7 +330,7 @@ mod tests {
             // One `query_started` is still outstanding (2 inc, 1 dec) → gauge == 1.
             "crabka_metrics_active_queries 1",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 

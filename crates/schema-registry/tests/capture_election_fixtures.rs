@@ -118,12 +118,7 @@ fn docker_pull(image: &str) {
         .args(["pull", image])
         .output()
         .expect("spawn docker pull");
-    assert!(
-        out.status.success(),
-        "docker pull {image} failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 /// Start one cp-schema-registry node with a distinct `host_name` and a published
@@ -157,14 +152,9 @@ fn docker_run_schema_registry(host_name: &str) -> String {
         ])
         .output()
         .expect("spawn docker run schema-registry");
-    assert!(
-        out.status.success(),
-        "docker run schema-registry ({host_name}) failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     let id = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    assert!(!id.is_empty(), "empty container id from docker run");
+    assert2::assert!(!id.is_empty());
     eprintln!("CAPTURE schema-registry container ({host_name}) id={id}");
     id
 }
@@ -174,11 +164,7 @@ fn docker_mapped_port(id: &str) -> u16 {
         .args(["port", id, "8081"])
         .output()
         .expect("spawn docker port");
-    assert!(
-        out.status.success(),
-        "docker port {id} 8081 failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     let text = String::from_utf8_lossy(&out.stdout);
     let port = text
         .lines()
@@ -279,12 +265,8 @@ async fn capture_group() {
         group.protocol_data,
         group.members.len()
     );
-    assert_eq!(group.error_code, 0, "DescribeGroups returned a group error");
-    assert_eq!(
-        group.members.len(),
-        2,
-        "expected exactly two `sr` members (both cp nodes joined)"
-    );
+    assert2::assert!(group.error_code == 0);
+    assert2::assert!(group.members.len() == 2);
 
     // cp's assignment carries `master` (the elected master's MEMBER_ID string)
     // and `master_identity` (its `SchemaRegistryIdentity` object). Every member

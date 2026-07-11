@@ -46,7 +46,7 @@ pub(crate) struct OffsetIndexEntry {
 /// Byte length of one serialized offset-index entry.
 const OFFSET_INDEX_ENTRY_LEN: usize = std::mem::size_of::<OffsetIndexEntry>();
 
-const _: () = assert!(OFFSET_INDEX_ENTRY_LEN == 8);
+const _: [(); 8] = [(); OFFSET_INDEX_ENTRY_LEN];
 
 /// 12 bytes per entry: ts i64 BE + rel u32 BE. Mirrors
 /// `crabka_log::index::TimeEntryRaw`.
@@ -60,7 +60,7 @@ pub(crate) struct TimeIndexEntry {
 /// Byte length of one serialized time-index entry.
 const TIME_INDEX_ENTRY_LEN: usize = std::mem::size_of::<TimeIndexEntry>();
 
-const _: () = assert!(TIME_INDEX_ENTRY_LEN == 12);
+const _: [(); 12] = [(); TIME_INDEX_ENTRY_LEN];
 
 /// 24 bytes per entry: `start_offset` i64 BE + `last_offset` i64 BE +
 /// `producer_id` i64 BE. Mirrors `crabka_log::txn_index::AbortedTxnRaw` so the
@@ -77,7 +77,7 @@ pub(crate) struct AbortedTxnIndexEntry {
 /// Byte length of one serialized aborted-transaction index entry.
 const TXN_INDEX_ENTRY_LEN: usize = std::mem::size_of::<AbortedTxnIndexEntry>();
 
-const _: () = assert!(TXN_INDEX_ENTRY_LEN == 24);
+const _: [(); 24] = [(); TXN_INDEX_ENTRY_LEN];
 
 /// One decoded aborted-transaction entry from a remote segment's `.txnindex`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -445,7 +445,6 @@ fn first_batch_at_or_after(data: &[u8], floor: LogOffset) -> Option<RecordBatch>
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -462,7 +461,7 @@ mod tests {
             .iter()
             .map(|e| (e.relative_offset.get(), e.position.get()))
             .collect();
-        assert!(decoded == vec![(0, 0), (10, 256), (20, 512)]);
+        assert2::assert!(decoded == vec![(0, 0), (10, 256), (20, 512)]);
     }
 
     fn offset_entries(pairs: &[(u32, u32)]) -> Vec<OffsetIndexEntry> {
@@ -487,8 +486,9 @@ mod tests {
 
     #[test]
     fn position_for_relative_offset_returns_floor() {
+        type TestCase1<'a> = (&'a [OffsetIndexEntry], u32, u32);
         let entries = offset_entries(&[(0, 0), (10, 256), (20, 512), (30, 1024)]);
-        let cases: [(&[OffsetIndexEntry], u32, u32); 5] = [
+        let cases: [TestCase1<'_>; 5] = [
             (&entries, 10, 256),   // exact
             (&entries, 15, 256),   // between
             (&entries, 0, 0),      // first entry exact
@@ -496,10 +496,7 @@ mod tests {
             (&[], 50, 0),          // empty
         ];
         for (entries, rel, want) in cases {
-            assert!(
-                position_for_relative_offset(entries, rel) == want,
-                "rel {rel}"
-            );
+            assert2::assert!(position_for_relative_offset(entries, rel) == want);
         }
     }
 
@@ -507,7 +504,7 @@ mod tests {
     fn position_for_relative_offset_below_first() {
         // Synthetic: first entry isn't at rel=0. Floor below it returns 0.
         let entries = offset_entries(&[(5, 100), (10, 200)]);
-        assert!(position_for_relative_offset(&entries, 3) == 0);
+        assert2::assert!(position_for_relative_offset(&entries, 3) == 0);
     }
 
     #[test]
@@ -522,24 +519,21 @@ mod tests {
             .iter()
             .map(|e| (e.timestamp.get(), e.relative_offset.get()))
             .collect();
-        assert!(decoded == vec![(1_000, 0), (2_000, 10), (3_000, 20)]);
+        assert2::assert!(decoded == vec![(1_000, 0), (2_000, 10), (3_000, 20)]);
     }
 
     #[test]
     fn relative_offset_for_timestamp_returns_first_ge() {
+        type TestCase2<'a> = (&'a [TimeIndexEntry], i64, Option<u32>);
         let entries = time_entries(&[(1_000, 0), (2_000, 10), (3_000, 20)]);
-        let cases: [(&[TimeIndexEntry], i64, Option<u32>); 4] = [
+        let cases: [TestCase2<'_>; 4] = [
             (&entries, 1_000, Some(0)),  // exact match
             (&entries, 1_500, Some(10)), // between → next
             (&entries, 4_000, None),     // after last
             (&[], 1_000, None),          // empty
         ];
         for (entries, ts, want) in cases {
-            assert!(
-                relative_offset_for_timestamp(entries, ts) == want,
-                "ts {ts} entries_len {}",
-                entries.len()
-            );
+            assert2::assert!(relative_offset_for_timestamp(entries, ts) == want);
         }
     }
 
@@ -557,10 +551,7 @@ mod tests {
             (u32::MAX, 1024, 100, None),
         ];
         for (start, segment, max_bytes, want) in cases {
-            assert!(
-                end_position_for(start, segment, max_bytes) == want,
-                "start {start} segment {segment} max_bytes {max_bytes}"
-            );
+            assert2::assert!(end_position_for(start, segment, max_bytes) == want);
         }
     }
 
@@ -609,14 +600,13 @@ mod tests {
             (1_000, None),
         ];
         for (floor, want_base) in cases {
-            assert!(
-                first_batch_at_or_after(&bytes, floor).map(|b| b.base_offset) == want_base,
-                "floor {floor}"
+            assert2::assert!(
+                first_batch_at_or_after(&bytes, floor).map(|b| b.base_offset) == want_base
             );
         }
 
         // Empty buffer → None.
-        assert!(first_batch_at_or_after(&[], 0).is_none());
+        assert2::assert!(first_batch_at_or_after(&[], 0).is_none());
     }
 
     #[test]
@@ -626,10 +616,7 @@ mod tests {
         batch.encode(&mut buf).unwrap();
         let bytes = buf.freeze();
 
-        assert!(
-            first_batch_at_or_after(&bytes, 7).is_none(),
-            "batch 3..6 must not cover floor 7"
-        );
+        assert2::assert!(first_batch_at_or_after(&bytes, 7).is_none());
     }
 
     #[test]
@@ -653,7 +640,7 @@ mod tests {
                 )
             })
             .collect();
-        assert!(decoded == vec![(0, 4, 1000), (10, 14, 2000)]);
+        assert2::assert!(decoded == vec![(0, 4, 1000), (10, 14, 2000)]);
     }
 
     #[test]
@@ -665,13 +652,18 @@ mod tests {
         // 5 trailing bytes that don't complete a 24-byte entry.
         buf.extend_from_slice(&[0xAA; 5]);
         let entries = parse_txn_index(&buf).expect("valid txn index");
-        assert!(entries.len() == 1, "partial trailing entry ignored");
-        assert!(entries[0].producer_id.get() == 1000);
+        assert2::assert!(
+            entries
+                .iter()
+                .map(|entry| entry.producer_id.get())
+                .collect::<Vec<_>>()
+                == vec![1000]
+        );
     }
 
     #[test]
     fn parse_txn_index_empty_is_empty() {
-        assert!(parse_txn_index(&[]).expect("empty is valid").is_empty());
+        assert2::assert!(parse_txn_index(&[]).expect("empty is valid").is_empty());
     }
 
     #[test]
@@ -696,10 +688,7 @@ mod tests {
             (0, 100, true),
         ];
         for (start, end, want) in cases {
-            assert!(
-                txn_overlaps(&e, start, end) == want,
-                "range [{start},{end}]"
-            );
+            assert2::assert!(txn_overlaps(&e, start, end) == want);
         }
     }
 
@@ -872,7 +861,7 @@ mod tests {
             log.append(&mut b).unwrap();
         }
         let exports = log.tierable_segments();
-        assert!(exports.len() >= 2, "test needs multiple sealed segments");
+        assert2::assert!(exports.len() >= 2);
 
         let rsm: Arc<dyn RemoteStorageManager> = Arc::new(LocalTieredStorage::new(remote_dir));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
@@ -958,7 +947,7 @@ mod tests {
             log.append(&mut b).unwrap();
         }
         let exports = log.tierable_segments();
-        assert!(exports.len() >= 2, "test needs multiple sealed segments");
+        assert2::assert!(exports.len() >= 2);
 
         // Write a `.txnindex` next to the first sealed segment's `.log` so the
         // export below picks it up. The abort covers the whole first segment.
@@ -974,10 +963,7 @@ mod tests {
 
         // Re-derive exports so the first one now carries the txnindex path.
         let exports = log.tierable_segments();
-        assert!(
-            exports[0].transaction_index_path.is_some(),
-            "first segment must now carry a .txnindex"
-        );
+        assert2::assert!(exports[0].transaction_index_path.is_some());
 
         let rsm: Arc<dyn RemoteStorageManager> = Arc::new(LocalTieredStorage::new(remote_dir));
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
@@ -1053,7 +1039,7 @@ mod tests {
             last_offset: last,
             producer_id: pid,
         }];
-        assert!(got == expected, "the copied abort is returned");
+        assert2::assert!(got == expected);
     }
 
     #[tokio::test]
@@ -1069,10 +1055,7 @@ mod tests {
             .aborted_transactions(&tp(), LeaderEpoch(0), seg.base_offset.0, seg.last_offset.0)
             .await
             .expect("ok");
-        assert!(
-            got.is_empty(),
-            "segment with no .txnindex yields an empty list, not an error"
-        );
+        assert2::assert!(got.is_empty());
     }
 
     #[tokio::test]
@@ -1095,12 +1078,7 @@ mod tests {
         // The batch returned should start at or before target_offset and end
         // at or after it.
         let last = got.base_offset + i64::from(got.last_offset_delta);
-        assert!(
-            got.base_offset <= target_offset && last >= target_offset,
-            "batch [{},{}] doesn't cover target {target_offset}",
-            got.base_offset,
-            last
-        );
+        assert2::assert!(got.base_offset <= target_offset && last >= target_offset);
     }
 
     #[tokio::test]
@@ -1113,11 +1091,7 @@ mod tests {
             .expect("ok")
             .expect("offset 12 is in the synthetic remote segment");
 
-        assert!(
-            got.base_offset == 10,
-            "relative offset 2 should read the first batch, not jump to {}",
-            got.base_offset
-        );
+        assert2::assert!(got.base_offset == 10);
     }
 
     #[tokio::test]
@@ -1133,7 +1107,7 @@ mod tests {
             .fetch_batch(&tp(), LeaderEpoch(0), 0, 4096)
             .await
             .unwrap();
-        assert!(got.is_none());
+        assert2::assert!(got.is_none());
     }
 
     #[tokio::test]
@@ -1149,7 +1123,7 @@ mod tests {
             .aborted_transactions(&tp(), LeaderEpoch(0), 0, 100)
             .await
             .expect("ok");
-        assert!(got.is_empty());
+        assert2::assert!(got.is_empty());
     }
 
     #[tokio::test]
@@ -1178,10 +1152,7 @@ mod tests {
             .fetch_batch(&tp(), LeaderEpoch(0), 50, 4096)
             .await
             .unwrap();
-        assert!(
-            got.is_none(),
-            "started (not finished) segment must be invisible"
-        );
+        assert2::assert!(got.is_none());
     }
 
     #[tokio::test]
@@ -1193,7 +1164,7 @@ mod tests {
         // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
         let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
         let got = reader.earliest_offset(&tp()).unwrap();
-        assert!(got == Some(expected));
+        assert2::assert!(got == Some(expected));
     }
 
     #[tokio::test]
@@ -1204,7 +1175,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> =
             Arc::new(InmemoryRemoteLogMetadataManager::new());
         let reader = RemoteReader::new(rsm, rlmm);
-        assert!(reader.earliest_offset(&tp()).unwrap() == None);
+        assert2::assert!(reader.earliest_offset(&tp()).unwrap() == None);
     }
 
     #[tokio::test]
@@ -1226,7 +1197,7 @@ mod tests {
         // The first finished segment is the lowest-base one.
         // Unwrap the log-layer `Offset` into this test's `i64` world at the seam.
         let expected = exports.iter().map(|e| e.base_offset.0).min().unwrap();
-        assert!(got == expected);
+        assert2::assert!(got == expected);
     }
 
     #[tokio::test]
@@ -1239,7 +1210,7 @@ mod tests {
             .unwrap()
             .expect("timestamp 2000 is indexed");
 
-        assert!(got == 14);
+        assert2::assert!(got == 14);
     }
 
     #[tokio::test]
@@ -1250,7 +1221,7 @@ mod tests {
         // All segments have max_ts=0 by construction (see test above); any
         // strictly-positive target is past every remote segment.
         let got = reader.offset_for_timestamp(&tp(), 1).await.unwrap();
-        assert!(got == None);
+        assert2::assert!(got == None);
     }
 
     // `NotReady` from the RLMM must propagate out of the reader
@@ -1318,7 +1289,7 @@ mod tests {
             .fetch_batch(&tp(), LeaderEpoch(0), 0, 4096)
             .await
             .unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
+        assert2::assert!(matches!(err, RemoteStorageError::NotReady { partition: 3 }));
     }
 
     #[tokio::test]
@@ -1329,7 +1300,7 @@ mod tests {
         let rlmm: Arc<dyn RemoteLogMetadataManager> = Arc::new(NotReadyRlmm);
         let reader = RemoteReader::new(rsm, rlmm);
         let err = reader.earliest_offset(&tp()).unwrap_err();
-        assert!(matches!(err, RemoteStorageError::NotReady { .. }));
+        assert2::assert!(matches!(err, RemoteStorageError::NotReady { .. }));
     }
 
     // ── I1: the list-based read paths (`earliest_offset` /
@@ -1355,10 +1326,7 @@ mod tests {
             match m.list_remote_log_segments(tp) {
                 Ok(_) => return,
                 Err(RemoteStorageError::NotReady { .. }) => {
-                    assert!(
-                        std::time::Instant::now() < deadline,
-                        "list path never became ready"
-                    );
+                    assert2::assert!(std::time::Instant::now() < deadline);
                     tokio::time::sleep(std::time::Duration::from_millis(5)).await;
                 }
                 Err(e) => panic!("unexpected list error: {e:?}"),
@@ -1382,7 +1350,7 @@ mod tests {
         let n = 16;
         let mp_owned = metadata_partition_for(&owned, n);
         let mp_other = metadata_partition_for(&not_owned, n);
-        assert!(mp_owned != mp_other, "test needs distinct metadata buckets");
+        assert2::assert!(mp_owned != mp_other);
 
         let log: Arc<dyn MetadataEventLog> = InProcessMetadataEventLog::new(n);
 
@@ -1459,27 +1427,18 @@ mod tests {
 
         // Unowned partition (never assigned) → the list path treats it as a
         // genuine miss: empty, not an error.
-        assert!(
-            reader.earliest_offset(&not_owned).unwrap() == None,
-            "unassigned partition is an empty list-path result, not NotReady"
-        );
+        assert2::assert!(reader.earliest_offset(&not_owned).unwrap() == None);
 
         // Assign the owned partition. Before catch-up the list path surfaces
         // NotReady through the reader. Poll until ready; observe at least the
         // ready (Some) terminal state.
         assign_and_wait_ready(&m, mp_owned, &owned).await;
-        assert!(
-            reader.earliest_offset(&owned).unwrap() == Some(0),
-            "owned + caught up → real earliest from the remote tier"
-        );
+        assert2::assert!(reader.earliest_offset(&owned).unwrap() == Some(0));
 
         // Remove the owned partition: the list path now returns empty (the
         // broker no longer owns it), NOT a stale segment.
         m.reconcile_assignment(&[]).await;
-        assert!(
-            reader.earliest_offset(&owned).unwrap() == None,
-            "removed partition's list path returns empty, not stale segments"
-        );
+        assert2::assert!(reader.earliest_offset(&owned).unwrap() == None);
 
         m.shutdown();
     }
@@ -1520,11 +1479,6 @@ mod tests {
             .expect("defensive fallback must resolve the segment despite epoch mismatch");
 
         let last = got.base_offset + i64::from(got.last_offset_delta);
-        assert!(
-            got.base_offset <= target_offset && last >= target_offset,
-            "batch [{},{}] doesn't cover target {target_offset}",
-            got.base_offset,
-            last,
-        );
+        assert2::assert!(got.base_offset <= target_offset && last >= target_offset);
     }
 }

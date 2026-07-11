@@ -117,113 +117,58 @@ pub fn get_nullable_array_len<B: Buf>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
 
-    // --- non-nullable, non-flexible -----------------------------------------
-
     #[test]
-    fn non_flex_empty_array_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 0, false);
-        assert!(buf.len() == 4, "prefix must be 4 bytes");
-        let mut cur = &buf[..];
-        assert!(get_array_len(&mut cur, false).unwrap() == 0);
-        assert!(cur.is_empty());
+    fn array_roundtrip_cases() {
+        for (_case, len, flexible, expected_prefix) in [
+            ("non-flex empty", 0, false, &[0, 0, 0, 0][..]),
+            ("non-flex three", 3, false, &[0, 0, 0, 3][..]),
+            ("flex empty", 0, true, &[0x01][..]),
+            ("flex three", 3, true, &[0x04][..]),
+        ] {
+            let mut buf = BytesMut::new();
+            put_array_len(&mut buf, len, flexible);
+            assert2::assert!(&buf[..] == expected_prefix);
+            buf.extend_from_slice(&vec![0; len]);
+            let mut cur = &buf[..];
+            assert2::assert!((get_array_len(&mut cur, flexible).unwrap(), cur.len()) == (len, len));
+        }
     }
 
     #[test]
-    fn non_flex_three_element_array_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 3, false);
-        assert!(buf.len() == 4);
-        // Provide 3 bytes of element payload so the length is within bounds.
-        buf.extend_from_slice(&[0u8; 3]);
-        let mut cur = &buf[..];
-        assert!(get_array_len(&mut cur, false).unwrap() == 3);
-        assert!(cur.len() == 3);
-    }
-
-    // --- non-nullable, flexible (compact) -----------------------------------
-
-    #[test]
-    fn flex_empty_array_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 0, true);
-        // len=0 → encode 1 → single byte 0x01
-        assert!(&buf[..] == &[0x01]);
-        let mut cur = &buf[..];
-        assert!(get_array_len(&mut cur, true).unwrap() == 0);
-        assert!(cur.is_empty());
-    }
-
-    #[test]
-    fn flex_three_element_array_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 3, true);
-        // len=3 → encode 4 → single byte 0x04
-        assert!(&buf[..] == &[0x04]);
-        // Provide 3 bytes of element payload so the length is within bounds.
-        buf.extend_from_slice(&[0u8; 3]);
-        let mut cur = &buf[..];
-        assert!(get_array_len(&mut cur, true).unwrap() == 3);
-        assert!(cur.len() == 3);
-    }
-
-    // --- nullable, non-flexible ---------------------------------------------
-
-    #[test]
-    fn non_flex_nullable_null_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_nullable_array_len(&mut buf, None, false);
-        assert!(&buf[..] == &[0xFF, 0xFF, 0xFF, 0xFF]); // -1 in big-endian
-        let mut cur = &buf[..];
-        assert!(get_nullable_array_len(&mut cur, false).unwrap() == None);
-        assert!(cur.is_empty());
-    }
-
-    #[test]
-    fn non_flex_nullable_some_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_nullable_array_len(&mut buf, Some(3), false);
-        buf.extend_from_slice(&[0u8; 3]);
-        let mut cur = &buf[..];
-        assert!(get_nullable_array_len(&mut cur, false).unwrap() == Some(3));
-        assert!(cur.len() == 3);
-    }
-
-    // --- nullable, flexible -------------------------------------------------
-
-    #[test]
-    fn flex_nullable_null_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_nullable_array_len(&mut buf, None, true);
-        assert!(&buf[..] == &[0x00]); // 0 = null in compact encoding
-        let mut cur = &buf[..];
-        assert!(get_nullable_array_len(&mut cur, true).unwrap() == None);
-        assert!(cur.is_empty());
-    }
-
-    #[test]
-    fn flex_nullable_some_roundtrip() {
-        let mut buf = BytesMut::new();
-        put_nullable_array_len(&mut buf, Some(3), true);
-        // Some(3) → encode 4 → 0x04
-        assert!(&buf[..] == &[0x04]);
-        buf.extend_from_slice(&[0u8; 3]);
-        let mut cur = &buf[..];
-        assert!(get_nullable_array_len(&mut cur, true).unwrap() == Some(3));
-        assert!(cur.len() == 3);
+    fn nullable_array_roundtrip_cases() {
+        for (_case, len, flexible, expected_prefix) in [
+            ("non-flex null", None, false, &[0xFF, 0xFF, 0xFF, 0xFF][..]),
+            ("non-flex some", Some(3), false, &[0, 0, 0, 3][..]),
+            ("flex null", None, true, &[0x00][..]),
+            ("flex some", Some(3), true, &[0x04][..]),
+        ] {
+            let mut buf = BytesMut::new();
+            put_nullable_array_len(&mut buf, len, flexible);
+            assert2::assert!(&buf[..] == expected_prefix);
+            let payload_len = len.unwrap_or(0);
+            buf.extend_from_slice(&vec![0; payload_len]);
+            let mut cur = &buf[..];
+            assert2::assert!(
+                (
+                    get_nullable_array_len(&mut cur, flexible).unwrap(),
+                    cur.len()
+                ) == (len, payload_len)
+            );
+        }
     }
 
     // --- prefix_len helpers -------------------------------------------------
 
     #[test]
     fn array_len_prefix_len_non_flex() {
-        assert!(array_len_prefix_len(0, false) == 4);
-        assert!(array_len_prefix_len(100, false) == 4);
+        for (_case, len) in [("empty", 0), ("populated", 100)] {
+            assert2::assert!(array_len_prefix_len(len, false) == 4);
+        }
     }
 
     #[test]
@@ -231,114 +176,78 @@ mod tests {
         // len=0 → varint(1) = 1 byte; len=126 → varint(127) = 1 byte;
         // len=127 → varint(128) = 2 bytes.
         for (len, want) in [(0, 1), (126, 1), (127, 2)] {
-            assert!(array_len_prefix_len(len, true) == want);
+            assert2::assert!(array_len_prefix_len(len, true) == want);
         }
     }
 
     #[test]
     fn nullable_prefix_len_non_flex_always_4() {
-        assert!(nullable_array_len_prefix_len(None, false) == 4);
-        assert!(nullable_array_len_prefix_len(Some(3), false) == 4);
+        for (_case, len) in [("null", None), ("some", Some(3))] {
+            assert2::assert!(nullable_array_len_prefix_len(len, false) == 4);
+        }
     }
 
     #[test]
     fn nullable_prefix_len_flex_null_is_1() {
         // null → varint(0) = 1 byte
-        assert!(nullable_array_len_prefix_len(None, true) == 1);
+        assert2::assert!(nullable_array_len_prefix_len(None, true) == 1);
     }
 
     // --- error cases --------------------------------------------------------
 
     #[test]
-    fn non_nullable_rejects_null_non_flex() {
-        let bytes = (-1i32).to_be_bytes();
-        let mut cur = &bytes[..];
-        assert!(matches!(
-            get_array_len(&mut cur, false),
-            Err(ProtocolError::InvalidValue(_))
-        ));
-    }
-
-    #[test]
-    fn non_nullable_rejects_null_flex() {
-        // varint 0 = null in compact encoding
-        let bytes = [0x00u8];
-        let mut cur = &bytes[..];
-        assert!(matches!(
-            get_array_len(&mut cur, true),
-            Err(ProtocolError::InvalidValue(_))
-        ));
+    fn non_nullable_rejects_null_cases() {
+        for (_case, bytes, flexible) in [
+            ("non-flex", &(-1i32).to_be_bytes()[..], false),
+            ("flex", &[0x00][..], true),
+        ] {
+            let mut cur = bytes;
+            assert2::assert!(matches!(
+                get_array_len(&mut cur, flexible),
+                Err(ProtocolError::InvalidValue(_))
+            ));
+        }
     }
 
     // --- pre-allocation DoS bound (length > remaining buffer) ----------------
 
     #[test]
-    fn non_flex_rejects_length_exceeding_remaining() {
-        // Declare a ~2-billion-element array with no element bytes following.
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 2_000_000_000, false);
-        let mut cur = &buf[..];
-        assert!(matches!(
-            get_array_len(&mut cur, false),
-            Err(ProtocolError::InvalidValue(
-                "array length exceeds remaining buffer"
-            ))
-        ));
-    }
-
-    #[test]
-    fn flex_rejects_length_exceeding_remaining() {
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 2_000_000_000, true);
-        let mut cur = &buf[..];
-        assert!(matches!(
-            get_array_len(&mut cur, true),
-            Err(ProtocolError::InvalidValue(
-                "array length exceeds remaining buffer"
-            ))
-        ));
-    }
-
-    #[test]
-    fn nullable_non_flex_rejects_length_exceeding_remaining() {
-        let mut buf = BytesMut::new();
-        put_nullable_array_len(&mut buf, Some(2_000_000_000), false);
-        let mut cur = &buf[..];
-        assert!(matches!(
-            get_nullable_array_len(&mut cur, false),
-            Err(ProtocolError::InvalidValue(
-                "array length exceeds remaining buffer"
-            ))
-        ));
-    }
-
-    #[test]
-    fn nullable_flex_rejects_length_exceeding_remaining() {
-        let mut buf = BytesMut::new();
-        put_nullable_array_len(&mut buf, Some(2_000_000_000), true);
-        let mut cur = &buf[..];
-        assert!(matches!(
-            get_nullable_array_len(&mut cur, true),
-            Err(ProtocolError::InvalidValue(
-                "array length exceeds remaining buffer"
-            ))
-        ));
+    fn rejects_length_exceeding_remaining_cases() {
+        for (_case, nullable, flexible) in [
+            ("non-nullable non-flex", false, false),
+            ("non-nullable flex", false, true),
+            ("nullable non-flex", true, false),
+            ("nullable flex", true, true),
+        ] {
+            let mut buf = BytesMut::new();
+            if nullable {
+                put_nullable_array_len(&mut buf, Some(2_000_000_000), flexible);
+            } else {
+                put_array_len(&mut buf, 2_000_000_000, flexible);
+            }
+            let mut cur = &buf[..];
+            let result = if nullable {
+                get_nullable_array_len(&mut cur, flexible).map(|value| value.unwrap_or(0))
+            } else {
+                get_array_len(&mut cur, flexible)
+            };
+            assert2::assert!(matches!(
+                result,
+                Err(ProtocolError::InvalidValue(
+                    "array length exceeds remaining buffer"
+                ))
+            ));
+        }
     }
 
     #[test]
     fn length_equal_to_remaining_is_accepted() {
-        // Non-flex: declare 5, supply exactly 5 trailing bytes.
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 5, false);
-        buf.extend_from_slice(&[0u8; 5]);
-        let mut cur = &buf[..];
-        assert!(get_array_len(&mut cur, false).unwrap() == 5);
-
-        // Compact: same, declare 5 with 5 trailing bytes.
-        let mut buf = BytesMut::new();
-        put_array_len(&mut buf, 5, true);
-        buf.extend_from_slice(&[0u8; 5]);
-        let mut cur = &buf[..];
-        assert!(get_array_len(&mut cur, true).unwrap() == 5);
+        for (_case, flexible) in [("non-flex", false), ("flex", true)] {
+            let mut buf = BytesMut::new();
+            put_array_len(&mut buf, 5, flexible);
+            buf.extend_from_slice(&[0u8; 5]);
+            let mut cur = &buf[..];
+            assert2::assert!(get_array_len(&mut cur, flexible).unwrap() == 5);
+        }
     }
 }

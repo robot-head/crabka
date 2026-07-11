@@ -108,7 +108,7 @@ impl VoterSet {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -129,30 +129,34 @@ mod tests {
     fn add_remove_are_immutable_copies() {
         let base = VoterSet::from_voters([sample(NodeId(1))]);
         let added = base.with_voter(sample(NodeId(2)));
-        assert!(base.contains(NodeId(1)) && !base.contains(NodeId(2)));
-        assert!(added.contains(NodeId(1)) && added.contains(NodeId(2)));
         let removed = added.without_voter(NodeId(1));
-        assert!(!removed.contains(NodeId(1)) && removed.contains(NodeId(2)));
+        assert2::assert!(base.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1)]);
+        assert2::assert!(added.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2)]);
+        assert2::assert!(removed.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(2)]);
     }
 
     #[test]
     fn ids_are_sorted() {
         let set = VoterSet::from_voters([sample(NodeId(3)), sample(NodeId(1)), sample(NodeId(2))]);
-        assert!(set.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert2::assert!(
+            set.ids().into_iter().collect::<Vec<_>>() == vec![NodeId(1), NodeId(2), NodeId(3)]
+        );
     }
 
     #[test]
     fn accessors_reflect_contents() {
         let set = VoterSet::from_voters([sample(NodeId(1)), sample(NodeId(2))]);
-        check!(set.len() == 2);
-        check!(!set.is_empty());
-        check!(set.get(NodeId(1)) == Some(&sample(NodeId(1))));
-        check!(set.get(NodeId(99)).is_none());
-        check!(set.iter().count() == 2);
+        check!(
+            (
+                set.len(),
+                set.is_empty(),
+                set.get(NodeId(1)),
+                set.get(NodeId(99)),
+                set.iter().count(),
+            ) == (2, false, Some(&sample(NodeId(1))), None, 2)
+        );
 
         let empty = VoterSet::default();
-        check!(empty.len() == 0);
-        check!(empty.is_empty());
-        check!(empty.iter().count() == 0);
+        check!((empty.len(), empty.is_empty(), empty.iter().count()) == (0, true, 0));
     }
 }

@@ -100,8 +100,6 @@ pub fn assign_nested_set(spans: &[SpanNode]) -> Vec<NestedSet> {
 mod tests {
     use std::{sync::mpsc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
 
     fn sid(n: u8) -> [u8; 8] {
@@ -133,7 +131,7 @@ mod tests {
         let spans = sample_tree();
         let ns = assign_nested_set(&spans);
         // -1 = Tempo's no-parent sentinel (so `nestedSetParent < 0` finds roots).
-        assert!(ns[idx(&spans, 1)].parent_id == -1);
+        assert2::assert!(ns[idx(&spans, 1)].parent_id == -1);
     }
 
     #[test]
@@ -141,10 +139,10 @@ mod tests {
         let spans = sample_tree();
         let ns = assign_nested_set(&spans);
         let p_left = ns[idx(&spans, 3)].nested_set_left;
-        assert!(ns[idx(&spans, 4)].parent_id == p_left);
         let root_left = ns[idx(&spans, 1)].nested_set_left;
-        assert!(ns[idx(&spans, 2)].parent_id == root_left);
-        assert!(ns[idx(&spans, 3)].parent_id == root_left);
+        assert2::assert!(ns[idx(&spans, 4)].parent_id == p_left);
+        assert2::assert!(ns[idx(&spans, 2)].parent_id == root_left);
+        assert2::assert!(ns[idx(&spans, 3)].parent_id == root_left);
     }
 
     #[test]
@@ -154,18 +152,18 @@ mod tests {
         let r = ns[idx(&spans, 1)];
         for id in [2_u8, 3, 4] {
             let d = ns[idx(&spans, id)];
-            assert!(r.nested_set_left < d.nested_set_left);
-            assert!(d.nested_set_right < r.nested_set_right);
+            assert2::assert!(r.nested_set_left < d.nested_set_left);
+            assert2::assert!(d.nested_set_right < r.nested_set_right);
         }
 
         let three = ns[idx(&spans, 3)];
         let two = ns[idx(&spans, 2)];
         let four = ns[idx(&spans, 4)];
-        assert!(
+        assert2::assert!(
             three.nested_set_left < four.nested_set_left
                 && four.nested_set_right < three.nested_set_right
         );
-        assert!(
+        assert2::assert!(
             !(two.nested_set_left < four.nested_set_left
                 && four.nested_set_right < two.nested_set_right)
         );
@@ -175,8 +173,8 @@ mod tests {
     fn orphan_is_treated_as_root() {
         let spans = vec![node(5, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == -1); // dangling parent → root sentinel
-        assert!(ns[0].nested_set_left < ns[0].nested_set_right);
+        assert2::assert!(ns[0].parent_id == -1); // dangling parent → root sentinel
+        assert2::assert!(ns[0].nested_set_left < ns[0].nested_set_right);
     }
 
     #[test]
@@ -184,42 +182,27 @@ mod tests {
         let spans = sample_tree();
         let ns = assign_nested_set(&spans);
         for n in &ns {
-            assert!(n.nested_set_left < n.nested_set_right);
+            assert2::assert!(n.nested_set_left < n.nested_set_right);
         }
     }
 
     #[test]
-    fn cyclic_parentage_still_assigns_valid_intervals() {
-        // A.parent = B, B.parent = A. Neither is a root, so a DFS seeded only
-        // from roots would never visit them and leave both at {0, 0, 0} —
-        // colliding with real roots and corrupting structural ops. Every node
-        // must still get a valid `left < right` interval.
-        let spans = vec![node(1, Some(2)), node(2, Some(1))];
-        let ns = assign_nested_set(&spans);
-        for n in &ns {
-            assert!(n.nested_set_left < n.nested_set_right);
+    fn cyclic_parentage_assigns_every_node_a_valid_interval() {
+        for (_name, spans) in [
+            ("two-node cycle", vec![node(1, Some(2)), node(2, Some(1))]),
+            (
+                "three-node cycle",
+                vec![node(1, Some(3)), node(2, Some(1)), node(3, Some(2))],
+            ),
+        ] {
+            let ns = assign_nested_set(&spans);
+            let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
+            lefts.sort_unstable();
+            lefts.dedup();
+            assert2::assert!(ns.iter().all(|n| n.nested_set_left < n.nested_set_right));
+            assert2::assert!(lefts.len() == ns.len());
+            assert2::assert!(ns.iter().any(|n| n.parent_id == -1));
         }
-        // Distinct, non-overlapping intervals → every node was actually visited.
-        let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
-        lefts.sort_unstable();
-        lefts.dedup();
-        assert!(lefts.len() == ns.len());
-        assert!(ns.iter().any(|n| n.parent_id == -1));
-    }
-
-    #[test]
-    fn three_node_cycle_is_fully_visited() {
-        // A->B->C->A: a pure cycle with no acyclic entry point.
-        let spans = vec![node(1, Some(3)), node(2, Some(1)), node(3, Some(2))];
-        let ns = assign_nested_set(&spans);
-        for n in &ns {
-            assert!(n.nested_set_left < n.nested_set_right);
-        }
-        let mut lefts: Vec<i32> = ns.iter().map(|n| n.nested_set_left).collect();
-        lefts.sort_unstable();
-        lefts.dedup();
-        assert!(lefts.len() == ns.len());
-        assert!(ns.iter().any(|n| n.parent_id == -1));
     }
 
     #[test]
@@ -233,7 +216,7 @@ mod tests {
         let ns = rx
             .recv_timeout(Duration::from_millis(250))
             .expect("cyclic parentage assignment should complete");
-        assert!(ns.len() == 3);
-        assert!(ns.iter().all(|node| node.nested_set_left > 0));
+        assert2::assert!(ns.len() == 3);
+        assert2::assert!(ns.iter().all(|node| node.nested_set_left > 0));
     }
 }

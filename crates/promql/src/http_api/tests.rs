@@ -158,30 +158,30 @@ impl MetricStore for SlowEmptyStore {
 fn float_formatting_matches_go() {
     // Matches Go's strconv.AppendFloat(f, fmt, -1, 64) selection used by
     // Prometheus jsonutil.MarshalFloat.
-    assert_eq!(format_sample_value(1.0), "1");
-    assert_eq!(format_sample_value(1.5), "1.5");
-    assert_eq!(format_sample_value(0.0), "0");
-    assert_eq!(format_sample_value(-0.0), "-0");
-    assert_eq!(format_sample_value(3.0), "3");
-    assert_eq!(format_sample_value(0.5), "0.5");
+    assert2::assert!(format_sample_value(1.0) == "1");
+    assert2::assert!(format_sample_value(1.5) == "1.5");
+    assert2::assert!(format_sample_value(0.0) == "0");
+    assert2::assert!(format_sample_value(-0.0) == "-0");
+    assert2::assert!(format_sample_value(3.0) == "3");
+    assert2::assert!(format_sample_value(0.5) == "0.5");
     // 1e20 stays in 'f' form (abs < 1e21).
-    assert_eq!(format_sample_value(1e20), "100000000000000000000");
+    assert2::assert!(format_sample_value(1e20) == "100000000000000000000");
     // 1e21 is the boundary where 'e' form kicks in.
-    assert_eq!(format_sample_value(1e21), "1e+21");
+    assert2::assert!(format_sample_value(1e21) == "1e+21");
     // 1e-6 is NOT < 1e-6, so it stays in 'f' form.
-    assert_eq!(format_sample_value(1e-6), "0.000001");
+    assert2::assert!(format_sample_value(1e-6) == "0.000001");
     // Just below 1e-6 switches to 'e' form.
-    assert_eq!(format_sample_value(9.999e-7), "9.999e-07");
-    assert_eq!(format_sample_value(1.5e-7), "1.5e-07");
-    assert_eq!(format_sample_value(f64::NAN), "NaN");
-    assert_eq!(format_sample_value(f64::INFINITY), "+Inf");
-    assert_eq!(format_sample_value(f64::NEG_INFINITY), "-Inf");
+    assert2::assert!(format_sample_value(9.999e-7) == "9.999e-07");
+    assert2::assert!(format_sample_value(1.5e-7) == "1.5e-07");
+    assert2::assert!(format_sample_value(f64::NAN) == "NaN");
+    assert2::assert!(format_sample_value(f64::INFINITY) == "+Inf");
+    assert2::assert!(format_sample_value(f64::NEG_INFINITY) == "-Inf");
     // Very long decimal: shortest round-trip representation.
-    assert_eq!(format_sample_value(0.1 + 0.2), "0.30000000000000004");
-    assert_eq!(format_sample_value(-1234.5678), "-1234.5678");
+    assert2::assert!(format_sample_value(0.1 + 0.2) == "0.30000000000000004");
+    assert2::assert!(format_sample_value(-1234.5678) == "-1234.5678");
     // Negative exponent boundary and large magnitudes.
-    assert_eq!(format_sample_value(-1e21), "-1e+21");
-    assert_eq!(format_sample_value(1.234e30), "1.234e+30");
+    assert2::assert!(format_sample_value(-1e21) == "-1e+21");
+    assert2::assert!(format_sample_value(1.234e30) == "1.234e+30");
 }
 
 #[test]
@@ -190,33 +190,19 @@ fn expand_alert_template_substitutions() {
     labels.insert("job", "api");
     labels.insert("instance", "host-1");
 
-    assert_eq!(
-        expand_alert_template("value is {{ $value }}", 42.5, &labels),
-        "value is 42.5"
+    assert2::assert!(
+        expand_alert_template("value is {{ $value }}", 42.5, &labels) == "value is 42.5"
     );
-    assert_eq!(
-        expand_alert_template("job={{ $labels.job }}", 1.0, &labels),
-        "job=api"
-    );
-    assert_eq!(
-        expand_alert_template("job={{ $labels.\"job\" }}", 1.0, &labels),
-        "job=api"
-    );
+    assert2::assert!(expand_alert_template("job={{ $labels.job }}", 1.0, &labels) == "job=api");
+    assert2::assert!(expand_alert_template("job={{ $labels.\"job\" }}", 1.0, &labels) == "job=api");
     // Absent label expands to empty string.
-    assert_eq!(
-        expand_alert_template("x={{ $labels.missing }}", 1.0, &labels),
-        "x="
-    );
+    assert2::assert!(expand_alert_template("x={{ $labels.missing }}", 1.0, &labels) == "x=");
     // Unknown actions pass through verbatim.
-    assert_eq!(
-        expand_alert_template("{{ humanize $value }}", 1.0, &labels),
-        "{{ humanize $value }}"
+    assert2::assert!(
+        expand_alert_template("{{ humanize $value }}", 1.0, &labels) == "{{ humanize $value }}"
     );
     // No-whitespace variants still expand.
-    assert_eq!(
-        expand_alert_template("{{$value}} {{$labels.job}}", 7.0, &labels),
-        "7 api"
-    );
+    assert2::assert!(expand_alert_template("{{$value}} {{$labels.job}}", 7.0, &labels) == "7 api");
 }
 
 #[tokio::test]
@@ -241,16 +227,15 @@ async fn query_range_rejects_ranges_over_tenant_limit() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(response.status() == StatusCode::UNPROCESSABLE_ENTITY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "execution");
-    assert!(
+    assert2::assert!(body["status"].as_str() == Some("error"));
+    assert2::assert!(body["errorType"].as_str() == Some("execution"));
+    assert2::assert!(
         body["error"]
             .as_str()
-            .unwrap()
-            .contains("query range too long")
+            .is_some_and(|error| error.contains("query range too long"))
     );
 }
 
@@ -275,15 +260,17 @@ async fn query_range_rejects_resolution_over_point_cap_without_limits() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    assert_eq!(
-        body["error"],
-        "exceeded maximum resolution of 11,000 points per timeseries. \
-         Try decreasing the query resolution (?step=XX)"
+    assert2::assert!(body["status"].as_str() == Some("error"));
+    assert2::assert!(body["errorType"].as_str() == Some("bad_data"));
+    assert2::assert!(
+        body["error"].as_str()
+            == Some(
+                "exceeded maximum resolution of 11,000 points per timeseries. \
+                 Try decreasing the query resolution (?step=XX)"
+            )
     );
 }
 
@@ -311,12 +298,12 @@ async fn instant_query_without_time_defaults_to_current_time() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::OK);
+    assert2::assert!(response.status() == StatusCode::OK);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["status"], "success");
-    assert_eq!(body["data"]["result"][0]["metric"]["job"], "api");
-    assert_eq!(body["data"]["result"][0]["value"][1], "1");
+    assert2::assert!(body["status"].as_str() == Some("success"));
+    assert2::assert!(body["data"]["result"][0]["metric"]["job"].as_str() == Some("api"));
+    assert2::assert!(body["data"]["result"][0]["value"][1].as_str() == Some("1"));
 }
 
 #[tokio::test]
@@ -351,9 +338,9 @@ async fn query_handlers_respect_configured_concurrency_limit() {
     );
 
     let (one, two) = tokio::join!(one, two);
-    assert_eq!(one.unwrap().status(), StatusCode::OK);
-    assert_eq!(two.unwrap().status(), StatusCode::OK);
-    assert_eq!(max_active.load(Ordering::SeqCst), 1);
+    assert2::assert!(one.unwrap().status() == StatusCode::OK);
+    assert2::assert!(two.unwrap().status() == StatusCode::OK);
+    assert2::assert!(max_active.load(Ordering::SeqCst) == 1);
 }
 
 #[tokio::test]
@@ -376,15 +363,14 @@ async fn rejects_tenant_id_with_unsupported_character() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    assert2::assert!(response.status() == StatusCode::BAD_REQUEST);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "bad_data");
-    // The reason comes from the shared `crabka_metrics::validate_tenant`.
-    assert_eq!(
-        body["error"],
-        "tenant ID contains unsupported character `/`"
+    assert2::assert!(body["status"].as_str() == Some("error"));
+    assert2::assert!(body["errorType"].as_str() == Some("bad_data"));
+    assert2::assert!(
+        body["error"].as_str() == // The reason comes from the shared `crabka_metrics::validate_tenant`.
+        Some("tenant ID contains unsupported character `/`")
     );
 }
 
@@ -420,16 +406,15 @@ async fn series_rejects_selected_series_over_tenant_limit() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(response.status() == StatusCode::UNPROCESSABLE_ENTITY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "execution");
-    assert!(
+    assert2::assert!(body["status"].as_str() == Some("error"));
+    assert2::assert!(body["errorType"].as_str() == Some("execution"));
+    assert2::assert!(
         body["error"]
             .as_str()
-            .unwrap()
-            .contains("series per query exceeded")
+            .is_some_and(|error| error.contains("series per query exceeded"))
     );
 }
 
@@ -465,15 +450,14 @@ async fn cardinality_active_series_rejects_over_tenant_limit() {
         .await
         .unwrap();
 
-    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    assert2::assert!(response.status() == StatusCode::UNPROCESSABLE_ENTITY);
     let body = to_bytes(response.into_body(), usize::MAX).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert_eq!(body["status"], "error");
-    assert_eq!(body["errorType"], "execution");
-    assert!(
+    assert2::assert!(body["status"].as_str() == Some("error"));
+    assert2::assert!(body["errorType"].as_str() == Some("execution"));
+    assert2::assert!(
         body["error"]
             .as_str()
-            .unwrap()
-            .contains("series per query exceeded")
+            .is_some_and(|error| error.contains("series per query exceeded"))
     );
 }

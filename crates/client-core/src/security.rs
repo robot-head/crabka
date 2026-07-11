@@ -125,7 +125,7 @@ impl ClientSecurity {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_security::ListenerProtocol;
 
     use super::*;
@@ -138,8 +138,7 @@ mod tests {
             sasl: None,
             sasl_host: None,
         };
-        assert!(!s.protocol.requires_tls());
-        assert!(!s.protocol.requires_sasl());
+        assert2::assert!((s.protocol.requires_tls(), s.protocol.requires_sasl()) == (false, false));
     }
 
     #[test]
@@ -153,8 +152,12 @@ mod tests {
             }),
             sasl_host: None,
         };
-        assert!(s.protocol.requires_sasl());
-        assert!(matches!(s.sasl, Some(SaslCredentials::Plain { .. })));
+        assert2::assert!(
+            (
+                s.protocol.requires_sasl(),
+                matches!(s.sasl, Some(SaslCredentials::Plain { .. }))
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -167,35 +170,38 @@ mod tests {
             sasl: None,
             sasl_host: Some("kdc-broker.example.com".into()),
         };
-        assert!(s.sasl_handshake_host(Some("10.0.0.5")) == "kdc-broker.example.com");
+        assert2::assert!(s.sasl_handshake_host(Some("10.0.0.5")) == "kdc-broker.example.com");
     }
 
     #[test]
     fn sasl_handshake_host_falls_back_to_tls_then_target_then_localhost() {
-        // No explicit sasl_host → TLS SNI wins.
-        let with_tls = ClientSecurity {
-            protocol: ListenerProtocol::SaslSsl,
-            tls: Some(TlsConnectorConfig {
-                trust_roots_pem: None,
-                server_name: "tls-host".into(),
-                client_identity: None,
-            }),
-            sasl: None,
-            sasl_host: None,
-        };
-        assert!(with_tls.sasl_handshake_host(Some("10.0.0.5")) == "tls-host");
-
-        // No sasl_host, no TLS → target host wins.
         let no_tls = ClientSecurity {
             protocol: ListenerProtocol::SaslPlaintext,
             tls: None,
             sasl: None,
             sasl_host: None,
         };
-        assert!(no_tls.sasl_handshake_host(Some("10.0.0.5")) == "10.0.0.5");
-
-        // Nothing set at all → localhost.
-        assert!(no_tls.sasl_handshake_host(None) == "localhost");
+        for (_name, security, target, expected) in [
+            (
+                "TLS server name",
+                ClientSecurity {
+                    protocol: ListenerProtocol::SaslSsl,
+                    tls: Some(TlsConnectorConfig {
+                        trust_roots_pem: None,
+                        server_name: "tls-host".into(),
+                        client_identity: None,
+                    }),
+                    sasl: None,
+                    sasl_host: None,
+                },
+                Some("10.0.0.5"),
+                "tls-host",
+            ),
+            ("target host", no_tls.clone(), Some("10.0.0.5"), "10.0.0.5"),
+            ("localhost fallback", no_tls, None, "localhost"),
+        ] {
+            assert2::assert!(security.sasl_handshake_host(target) == expected);
+        }
     }
 
     #[test]
@@ -233,9 +239,6 @@ mod tests {
                 "/nonexistent/key.pem".into(),
             )),
         };
-        assert!(
-            bogus.build().is_err(),
-            "bogus client-identity path returns Err"
-        );
+        assert2::assert!(bogus.build().is_err());
     }
 }

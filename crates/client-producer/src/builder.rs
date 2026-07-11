@@ -275,7 +275,7 @@ impl Producer {
 
 #[cfg(test)]
 mod security_arg_tests {
-    use assert2::assert;
+
     use crabka_client_core::{
         MockBroker,
         security::{ClientSecurity, SaslCredentials},
@@ -286,14 +286,14 @@ mod security_arg_tests {
 
     #[test]
     fn coordinator_retry_classifier_matches_cold_start_codes_only() {
-        for (code, want) in [
-            (COORDINATOR_LOAD_IN_PROGRESS, true),
-            (COORDINATOR_NOT_AVAILABLE, true),
-            (NOT_COORDINATOR, true),
-            (0, false),
-            (42, false),
+        for (_name, code, want) in [
+            ("loading", COORDINATOR_LOAD_IN_PROGRESS, true),
+            ("unavailable", COORDINATOR_NOT_AVAILABLE, true),
+            ("not coordinator", NOT_COORDINATOR, true),
+            ("success", 0, false),
+            ("invalid request", 42, false),
         ] {
-            assert!(is_retriable_coordinator_code(code) == want);
+            assert2::assert!(is_retriable_coordinator_code(code) == want);
         }
     }
 
@@ -301,41 +301,52 @@ mod security_arg_tests {
     fn init_producer_id_request_is_idempotent_only_shape() {
         let req = build_init_producer_id_request();
 
-        assert!(req.transactional_id.is_none());
-        assert!(req.transaction_timeout_ms == 0);
+        assert2::assert!((req.transactional_id.as_ref(), req.transaction_timeout_ms) == (None, 0));
     }
 
     #[tokio::test(start_paused = true)]
     async fn retry_helpers_preserve_deadline_and_backoff_boundaries() {
         let start = tokio::time::Instant::now();
-        assert!(!retry_deadline_elapsed(start, Duration::from_secs(30)));
+        assert2::assert!(!retry_deadline_elapsed(start, Duration::from_secs(30)));
         tokio::time::advance(Duration::from_secs(30)).await;
-        assert!(retry_deadline_elapsed(start, Duration::from_secs(30)));
-        for (current, want) in [
-            (Duration::from_millis(100), Duration::from_millis(200)),
-            (Duration::from_millis(800), Duration::from_secs(1)),
-            (Duration::from_secs(1), Duration::from_secs(1)),
+        assert2::assert!(retry_deadline_elapsed(start, Duration::from_secs(30)));
+        for (_name, current, want) in [
+            (
+                "double below cap",
+                Duration::from_millis(100),
+                Duration::from_millis(200),
+            ),
+            (
+                "double to cap",
+                Duration::from_millis(800),
+                Duration::from_secs(1),
+            ),
+            (
+                "remain capped",
+                Duration::from_secs(1),
+                Duration::from_secs(1),
+            ),
         ] {
-            assert!(next_backoff(current) == want);
+            assert2::assert!(next_backoff(current) == want);
         }
     }
 
     #[test]
     fn validated_acks_forces_idempotence_to_all_and_rejects_zero() {
-        for (idempotent, acks, want) in [
-            (true, Acks::One, Acks::All),
-            (false, Acks::One, Acks::One),
-            (false, Acks::Zero, Acks::Zero),
+        for (_name, idempotent, acks, want) in [
+            ("idempotent forces all", true, Acks::One, Acks::All),
+            ("non-idempotent keeps one", false, Acks::One, Acks::One),
+            ("non-idempotent keeps zero", false, Acks::Zero, Acks::Zero),
         ] {
-            assert!(validated_acks(idempotent, acks).unwrap() == want);
+            assert2::assert!(validated_acks(idempotent, acks).unwrap() == want);
         }
-        assert!(validated_acks(true, Acks::Zero).is_err());
+        assert2::assert!(validated_acks(true, Acks::Zero).is_err());
     }
 
     #[test]
     fn disabled_idempotence_identity_uses_kafka_sentinel_values() {
-        assert!(disabled_idempotence_identity() == (-1, -1));
-        assert!(initial_txn_pid_epoch() == (-1, -1));
+        assert2::assert!(disabled_idempotence_identity() == (-1, -1));
+        assert2::assert!(initial_txn_pid_epoch() == (-1, -1));
     }
 
     #[test]
@@ -346,13 +357,13 @@ mod security_arg_tests {
             producer_epoch: 7,
             ..Default::default()
         };
-        assert!(producer_identity_from_init(&success).unwrap() == (42, 7));
+        assert2::assert!(producer_identity_from_init(&success).unwrap() == (42, 7));
 
         let error = InitProducerIdResponse {
             error_code: 51,
             ..Default::default()
         };
-        assert!(matches!(
+        assert2::assert!(matches!(
             producer_identity_from_init(&error),
             Err(ProducerError::Server(51))
         ));
@@ -379,7 +390,7 @@ mod security_arg_tests {
             .security(security)
             .build()
             .await;
-        assert!(res.is_err(), "connect to closed port must fail");
+        assert2::assert!(res.is_err());
     }
 
     #[tokio::test]
@@ -397,13 +408,10 @@ mod security_arg_tests {
         let err = res
             .expect("producer build should not retain the 30s connect timeout")
             .expect_err("silent broker must time out during build");
-        assert!(
-            matches!(
-                err,
-                ProducerError::Client(ClientError::Timeout(d))
-                    if d == Duration::from_millis(100)
-            ),
-            "expected 100ms timeout, got {err:?}"
-        );
+        assert2::assert!(matches!(
+            err,
+            ProducerError::Client(ClientError::Timeout(d))
+                if d == Duration::from_millis(100)
+        ));
     }
 }

@@ -599,7 +599,7 @@ fn build_describe_cluster_body(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{BufMut, Bytes};
     use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::Decode;
@@ -766,15 +766,24 @@ mod tests {
             super::RaftError::Storage(crabka_log::LogError::Io(std::io::Error::new(kind, "io")))
         };
         let cases = [
-            (io_error(std::io::ErrorKind::UnexpectedEof), true),
-            (io_error(std::io::ErrorKind::BrokenPipe), false),
             (
+                "unexpected EOF",
+                io_error(std::io::ErrorKind::UnexpectedEof),
+                true,
+            ),
+            (
+                "broken pipe",
+                io_error(std::io::ErrorKind::BrokenPipe),
+                false,
+            ),
+            (
+                "protocol error",
                 super::RaftError::Protocol(crabka_protocol::ProtocolError::InvalidValue("not io")),
                 false,
             ),
         ];
-        for (err, want) in cases {
-            assert!(super::is_eof(&err) == want, "err: {err:?}");
+        for (_case, err, want) in cases {
+            assert2::assert!(super::is_eof(&err) == want);
         }
     }
 
@@ -801,10 +810,11 @@ mod tests {
             let (api_key, api_version, correlation_id, body) =
                 super::read_one_request(&mut server).await.expect("decode");
 
-            check!(api_key == 52, "case: {case}");
-            check!(api_version == 2, "case: {case}");
-            check!(correlation_id == 123, "case: {case}");
-            check!(body.as_ref() == want_body, "case: {case}");
+            check!(
+                (api_key, api_version, correlation_id, body.as_ref())
+                    == (ApiKey(52), ApiVersion(2), 123, want_body),
+                "case: {case}"
+            );
             writer.await.unwrap();
         }
     }
@@ -842,7 +852,7 @@ mod tests {
                 3,
             ),
         ];
-        for (case, frame, needed) in cases {
+        for (_case, frame, needed) in cases {
             let (mut client, mut server) = tokio::io::duplex(128);
             let writer = tokio::spawn(async move {
                 client.write_all(&frame).await.unwrap();
@@ -852,15 +862,12 @@ mod tests {
                 .await
                 .expect_err("short frame");
 
-            assert!(
-                matches!(
-                    err,
-                    super::RaftError::Protocol(
-                        crabka_protocol::ProtocolError::UnexpectedEof { needed: n }
-                    ) if n == needed
-                ),
-                "case: {case}, err: {err:?}"
-            );
+            assert2::assert!(matches!(
+                err,
+                super::RaftError::Protocol(
+                    crabka_protocol::ProtocolError::UnexpectedEof { needed: n }
+                ) if n == needed
+            ));
             writer.await.unwrap();
         }
     }
@@ -882,7 +889,7 @@ mod tests {
 
         let (_, _, _, body) = super::read_one_request(&mut server).await.expect("decode");
 
-        assert!(body.as_ref() == &[1, b'p', b'a', b'y']);
+        assert2::assert!(body.as_ref() == &[1, b'p', b'a', b'y']);
         writer.await.unwrap();
     }
 
@@ -905,7 +912,7 @@ mod tests {
         let vote_resp = super::dispatch(ApiKey(api_key::VOTE), vote, &engine)
             .await
             .expect("vote dispatch");
-        assert!(PeerResponse::decode_vote(&vote_resp).is_some());
+        assert2::assert!(PeerResponse::decode_vote(&vote_resp).is_some());
 
         let fetch = PeerRequest::Fetch {
             from: NodeId(2),
@@ -916,7 +923,7 @@ mod tests {
         let fetch_resp = super::dispatch(ApiKey(api_key::FETCH), fetch, &engine)
             .await
             .expect("fetch dispatch");
-        assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
+        assert2::assert!(PeerResponse::decode_fetch(&fetch_resp).is_some());
 
         let snapshot = PeerRequest::FetchSnapshot {
             from: NodeId(2),
@@ -928,7 +935,7 @@ mod tests {
         let snapshot_resp = super::dispatch(ApiKey(api_key::FETCH_SNAPSHOT), snapshot, &engine)
             .await
             .expect("snapshot dispatch");
-        assert!(matches!(
+        assert2::assert!(matches!(
             PeerResponse::decode_fetch_snapshot(&snapshot_resp),
             Some(PeerResponse::FetchSnapshot { error_code: 98, .. })
         ));
@@ -941,7 +948,7 @@ mod tests {
         let begin_resp = super::dispatch(ApiKey(api_key::BEGIN_QUORUM_EPOCH), begin, &engine)
             .await
             .expect("begin dispatch");
-        assert!(!begin_resp.is_empty());
+        assert2::assert!(!begin_resp.is_empty());
 
         let end = PeerRequest::EndQuorumEpoch {
             leader_id: NodeId(1),
@@ -951,7 +958,7 @@ mod tests {
         let end_resp = super::dispatch(ApiKey(api_key::END_QUORUM_EPOCH), end, &engine)
             .await
             .expect("end dispatch");
-        assert!(!end_resp.is_empty());
+        assert2::assert!(!end_resp.is_empty());
     }
 
     #[tokio::test]
@@ -967,8 +974,8 @@ mod tests {
         .await
         .expect("submit dispatch");
         let ok = decode_submit_change_response(&ok_body);
-        assert!(ok.error_code == 0);
-        assert!(ok.leader_hint == -1);
+        assert2::assert!(ok.error_code == 0);
+        assert2::assert!(ok.leader_hint == -1);
 
         let bad_req = CrabkaSubmitChangeRequest {
             records: Bytes::from_static(b"not-wincode"),
@@ -983,8 +990,8 @@ mod tests {
         .await
         .expect("decode failure dispatch");
         let err = decode_submit_change_response(&err_body);
-        assert!(err.error_code == 2);
-        assert!(err.leader_hint == -1);
+        assert2::assert!(err.error_code == 2);
+        assert2::assert!(err.leader_hint == -1);
     }
 
     #[tokio::test]
@@ -1000,7 +1007,7 @@ mod tests {
         )
         .await
         .expect("first submit");
-        assert!(decode_submit_change_response(&first).error_code == 0);
+        assert2::assert!(decode_submit_change_response(&first).error_code == 0);
 
         let duplicate = super::dispatch(
             ApiKey(API_KEY_SUBMIT_CHANGE),
@@ -1010,8 +1017,8 @@ mod tests {
         .await
         .expect("duplicate submit");
         let duplicate = decode_submit_change_response(&duplicate);
-        assert!(duplicate.error_code == 2);
-        assert!(duplicate.leader_hint == -1);
+        assert2::assert!(duplicate.error_code == 2);
+        assert2::assert!(duplicate.leader_hint == -1);
     }
 
     #[tokio::test]
@@ -1027,10 +1034,14 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        check!(resp.error_code == 0);
-        check!(resp.leader_hint == -1);
-        check!(resp.high_watermark == 0);
-        check!(resp.records.is_empty());
+        check!(
+            (
+                resp.error_code,
+                resp.leader_hint,
+                resp.high_watermark,
+                resp.records.is_empty(),
+            ) == (0, -1, 0, true)
+        );
     }
 
     #[tokio::test]
@@ -1051,10 +1062,14 @@ mod tests {
         .expect("metadata fetch dispatch");
 
         let resp = decode_metadata_fetch_response(&body);
-        check!(resp.error_code == 0);
-        check!(resp.leader_hint == 1);
-        check!(resp.high_watermark >= 1);
-        check!(!resp.records.is_empty());
+        check!(
+            (
+                resp.error_code,
+                resp.leader_hint,
+                resp.high_watermark >= 1,
+                resp.records.is_empty(),
+            ) == (0, 1, true, false)
+        );
     }
 
     #[tokio::test]
@@ -1069,11 +1084,15 @@ mod tests {
         let mut cur = &body[..];
         let resp = DescribeClusterResponse::decode(&mut cur, 1).expect("describe response");
         check!(cur.is_empty());
-        check!(resp.controller_id == -1);
-        check!(resp.brokers.len() == 1);
-        check!(resp.brokers[0].broker_id == -1);
-        check!(resp.brokers[0].host.as_str() == "");
-        check!(resp.brokers[0].port == -1);
+        check!(
+            (
+                resp.controller_id,
+                resp.brokers
+                    .iter()
+                    .map(|broker| (broker.broker_id, broker.host.as_str(), broker.port))
+                    .collect::<Vec<_>>(),
+            ) == (-1, vec![(-1, "", -1)])
+        );
     }
 
     #[test]
@@ -1084,18 +1103,15 @@ mod tests {
             let v = req_v.clamp(0, 4);
             let mut cur = &body[..];
             let resp = ApiVersionsResponse::decode(&mut cur, v).expect("decode body");
-            assert!(cur.is_empty(), "no trailing bytes (req_v={req_v})");
-            assert!(resp.error_code == 0);
+            assert2::assert!(cur.is_empty());
+            assert2::assert!(resp.error_code == 0);
             let keys: std::collections::BTreeSet<i16> =
                 resp.api_keys.iter().map(|k| k.api_key).collect();
             for want in [1i16, 18, 52, 53, 54, 59] {
-                assert!(
-                    keys.contains(&want),
-                    "missing api_key {want} at req_v={req_v}"
-                );
+                assert2::assert!(keys.contains(&want));
             }
             let vote = resp.api_keys.iter().find(|k| k.api_key == 52).unwrap();
-            assert!(vote.min_version == 0 && vote.max_version == 2);
+            assert2::assert!(vote.min_version == 0 && vote.max_version == 2);
         }
     }
 
@@ -1113,7 +1129,7 @@ mod tests {
         let av = super::api_versions_response_body(4);
         let mut cur = &av[..];
         let avr = ApiVersionsResponse::decode(&mut cur, 4).unwrap();
-        assert!(avr.api_keys.iter().any(|k| k.api_key == 60));
+        assert2::assert!(avr.api_keys.iter().any(|k| k.api_key == 60));
 
         let voters = vec![
             (1i32, "c1".to_string(), 9093i32),
@@ -1133,14 +1149,18 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            assert!(cur.is_empty(), "no trailing bytes (v={version})");
-            check!(resp.endpoint_type == 2);
-            check!(resp.cluster_id.as_str() == "clusterX");
-            check!(resp.controller_id == 1);
-            check!(resp.brokers.len() == 2);
-            check!(resp.brokers[0].broker_id == 1);
-            check!(resp.brokers[0].host.as_str() == "c1");
-            check!(resp.brokers[0].port == 9093);
+            assert2::assert!(cur.is_empty());
+            check!(
+                (
+                    resp.endpoint_type,
+                    resp.cluster_id.as_str(),
+                    resp.controller_id,
+                    resp.brokers
+                        .iter()
+                        .map(|broker| (broker.broker_id, broker.host.as_str(), broker.port))
+                        .collect::<Vec<_>>(),
+                ) == (2, "clusterX", 1, vec![(1, "c1", 9093), (2, "c2", 9093)])
+            );
 
             // endpoint_type = BROKERS (1) → broker projection (rack preserved).
             let body =
@@ -1148,12 +1168,20 @@ mod tests {
                     .unwrap();
             let mut cur = &body[..];
             let resp = DescribeClusterResponse::decode(&mut cur, version).unwrap();
-            check!(resp.endpoint_type == 1);
-            check!(resp.brokers.len() == 1);
-            check!(resp.brokers[0].broker_id == 10);
-            check!(resp.brokers[0].host.as_str() == "b10");
-            check!(resp.brokers[0].port == 9092);
-            check!(resp.brokers[0].rack.as_deref() == Some("rack-a"));
+            check!(
+                (
+                    resp.endpoint_type,
+                    resp.brokers
+                        .iter()
+                        .map(|broker| (
+                            broker.broker_id,
+                            broker.host.as_str(),
+                            broker.port,
+                            broker.rack.as_deref(),
+                        ))
+                        .collect::<Vec<_>>(),
+                ) == (1, vec![(10, "b10", 9092, Some("rack-a"))])
+            );
         }
     }
 }

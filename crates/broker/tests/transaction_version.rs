@@ -30,7 +30,6 @@
 
 use std::time::Duration;
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -85,11 +84,7 @@ async fn create_topic(client: &Client, name: &str, partitions: i32) {
         })
         .await
         .unwrap();
-    assert!(
-        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
-        "create_topic {name}: error_code={}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
 }
 
 /// Downgrade the finalized `transaction.version` to `level` via a
@@ -111,16 +106,13 @@ async fn downgrade_transaction_version(client: &Client, level: i16) {
         })
         .await
         .expect("UpdateFeatures");
-    assert!(resp.error_code == 0, "UpdateFeatures top-level: {resp:?}");
+    assert2::assert!(resp.error_code == 0);
     if let Some(row) = resp
         .results
         .iter()
         .find(|r| r.feature == "transaction.version")
     {
-        assert!(
-            row.error_code == 0,
-            "transaction.version downgrade to {level} rejected: {resp:?}"
-        );
+        assert2::assert!(row.error_code == 0);
     }
 }
 
@@ -173,10 +165,7 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert!(
-        seen == vec!["a", "b", "c"],
-        "tid={tid} level cycle: {seen:?}"
-    );
+    assert2::assert!(seen == vec!["a", "b", "c"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -261,10 +250,7 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("FindCoordinator");
-    assert!(
-        fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0),
-        "FindCoordinator: {fc:?}"
-    );
+    assert2::assert!(fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0));
 
     let mut init = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -285,10 +271,7 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         }
         // 15 COORDINATOR_NOT_AVAILABLE / 16 NOT_COORDINATOR: coordinator still
         // loading — back off and retry.
-        assert!(
-            resp.error_code == 15 || resp.error_code == 16,
-            "InitProducerId failed: {resp:?}"
-        );
+        assert2::assert!(resp.error_code == 15 || resp.error_code == 16);
         // intentional: txn-coordinator load state is not in the metadata image and
         // has no metric/awaiter; only InitProducerId's 15/16 code signals it.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -321,12 +304,9 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("AddPartitionsToTxn add");
-    assert!(add.error_code == 0, "AddPartitionsToTxn add: {add:?}");
+    assert2::assert!(add.error_code == 0);
     let add_part = &add.results_by_transaction[0].topic_results[0].results_by_partition[0];
-    assert!(
-        add_part.partition_error_code == NONE,
-        "adding (t,0) should succeed: {add:?}"
-    );
+    assert2::assert!(add_part.partition_error_code == NONE);
 
     // Verify-only query for BOTH (t,0) (added → NONE) and (t,1) (not added →
     // TRANSACTION_ABORTABLE). verify_only=true must never mutate state.
@@ -353,10 +333,10 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("AddPartitionsToTxn verify-only");
-    assert!(verify.error_code == 0, "verify-only top-level: {verify:?}");
+    assert2::assert!(verify.error_code == 0);
 
     let topic_result = &verify.results_by_transaction[0].topic_results[0];
-    assert!(topic_result.name == "t", "verify topic name: {verify:?}");
+    assert2::assert!(topic_result.name == "t");
 
     let code_for = |partition: i32| -> i16 {
         topic_result
@@ -369,14 +349,8 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
 
     let p0 = code_for(0);
     let p1 = code_for(1);
-    assert!(
-        p0 == NONE,
-        "verify-only (t,0) already in txn must be NONE(0), got {p0}: {verify:?}"
-    );
-    assert!(
-        p1 == TRANSACTION_ABORTABLE,
-        "verify-only (t,1) not in txn must be TRANSACTION_ABORTABLE(120), got {p1}: {verify:?}"
-    );
+    assert2::assert!(p0 == NONE);
+    assert2::assert!(p1 == TRANSACTION_ABORTABLE);
 
     broker.shutdown().await;
 }
@@ -408,10 +382,7 @@ async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
         })
         .await
         .expect("FindCoordinator");
-    assert!(
-        fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0),
-        "FindCoordinator: {fc:?}"
-    );
+    assert2::assert!(fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0));
 
     let mut init = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -430,10 +401,7 @@ async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
             init = Some(resp);
             break;
         }
-        assert!(
-            resp.error_code == 15 || resp.error_code == 16,
-            "InitProducerId failed: {resp:?}"
-        );
+        assert2::assert!(resp.error_code == 15 || resp.error_code == 16);
         // intentional: txn-coordinator load state is not in the metadata image and
         // has no metric/awaiter; only InitProducerId's 15/16 code signals it.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -477,12 +445,9 @@ async fn add_partition_ongoing(
         })
         .await
         .expect("AddPartitionsToTxn add");
-    assert!(add.error_code == 0, "AddPartitionsToTxn add: {add:?}");
+    assert2::assert!(add.error_code == 0);
     let add_part = &add.results_by_transaction[0].topic_results[0].results_by_partition[0];
-    assert!(
-        add_part.partition_error_code == NONE,
-        "adding ({topic},{partition}) should succeed: {add:?}"
-    );
+    assert2::assert!(add_part.partition_error_code == NONE);
 }
 
 /// Wait for the transaction coordinator for `tid` to finish loading after a
@@ -502,10 +467,7 @@ async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) ->
         })
         .await
         .expect("FindCoordinator");
-    assert!(
-        fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0),
-        "FindCoordinator: {fc:?}"
-    );
+    assert2::assert!(fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0));
 
     // Retry while the coordinator is still loading state from disk.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -574,11 +536,7 @@ async fn v1_ongoing_txn_survives_restart_via_decode_recover() {
         let client = admin_client(&bootstrap).await;
 
         let code = commit_via_end_txn(&client, TID, pid, epoch).await;
-        assert!(
-            code == NONE,
-            "EndTxn(commit) after restart must succeed (proves recover() decoded \
-             the Ongoing v1 entry with matching pid={pid}/epoch={epoch}); got error_code={code}"
-        );
+        assert2::assert!(code == NONE);
 
         broker.shutdown().await;
     }
@@ -620,11 +578,7 @@ async fn v0_ongoing_txn_survives_restart_via_decode_recover() {
         let client = admin_client(&bootstrap).await;
 
         let code = commit_via_end_txn(&client, TID, pid, epoch).await;
-        assert!(
-            code == NONE,
-            "EndTxn(commit) after restart must succeed (proves recover() decoded \
-             the Ongoing v0 entry with matching pid={pid}/epoch={epoch}); got error_code={code}"
-        );
+        assert2::assert!(code == NONE);
 
         broker.shutdown().await;
     }

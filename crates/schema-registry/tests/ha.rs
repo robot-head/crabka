@@ -51,8 +51,8 @@ async fn single_node_becomes_primary() {
     let c = cfg(&broker.listen_addr().to_string(), 8081);
     let mut rx = Election::start(&c, cancel.clone()).await.unwrap();
     let st = await_state(&mut rx, 20, |s| s.is_primary).await;
-    assert!(st.is_primary);
-    assert_eq!(st.primary_url.as_deref(), Some("http://127.0.0.1:8081"));
+    assert2::assert!(st.is_primary);
+    assert2::assert!(st.primary_url.as_deref() == Some("http://127.0.0.1:8081"));
     cancel.cancel();
     broker.shutdown().await;
 }
@@ -117,10 +117,7 @@ async fn await_get_body(http: &reqwest::Client, url: &str, expected: &str, secs:
         {
             return;
         }
-        assert!(
-            tokio::time::Instant::now() < deadline,
-            "GET {url} never returned {expected:?}"
-        );
+        assert2::assert!(tokio::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
 }
@@ -139,11 +136,7 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
     await_state(&mut a.primary, 25, |s| s.primary_url.is_some()).await;
     await_state(&mut b.primary, 25, |s| s.primary_url.is_some()).await;
     let a_is_primary = a.primary.borrow().is_primary;
-    assert_ne!(
-        a_is_primary,
-        b.primary.borrow().is_primary,
-        "exactly one primary"
-    );
+    assert2::assert!(a_is_primary != b.primary.borrow().is_primary);
     let secondary_port = if a_is_primary { b.port } else { a.port };
 
     let http = reqwest::Client::new();
@@ -159,11 +152,7 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        r.status(),
-        200,
-        "secondary forwarded the write to the primary"
-    );
+    assert2::assert!(r.status() == 200);
 
     // The write is readable on BOTH nodes (poll the secondary for consume lag).
     for port in [a.port, b.port] {
@@ -194,11 +183,7 @@ async fn multi_node_elects_one_primary_forwards_writes_and_fails_over() {
         .send()
         .await
         .unwrap();
-    assert_eq!(
-        r2.status(),
-        200,
-        "new primary accepts writes after failover"
-    );
+    assert2::assert!(r2.status() == 200);
     survivor.cancel.cancel();
     broker.shutdown().await;
 }

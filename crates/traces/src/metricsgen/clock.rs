@@ -57,17 +57,16 @@ impl Clock for MockClock {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn mock_clock_advances() {
         let c = MockClock::new(1_000);
-        assert!(c.now_ns() == 1_000);
+        assert2::assert!(c.now_ns() == 1_000);
         c.advance(500);
-        assert!(c.now_ns() == 1_500);
+        assert2::assert!(c.now_ns() == 1_500);
         c.set(42);
-        assert!(c.now_ns() == 42);
+        assert2::assert!(c.now_ns() == 42);
     }
 }

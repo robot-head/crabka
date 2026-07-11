@@ -544,7 +544,7 @@ impl AcquisitionState {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -559,7 +559,7 @@ mod tests {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(5), 100); // [0,4] Available
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        assert!(
+        assert2::assert!(
             acq == vec![AcquiredRange {
                 first: Offset(0),
                 last: Offset(4),
@@ -568,7 +568,7 @@ mod tests {
         );
         s.acknowledge("m1", Offset(0), Offset(4), AckType::Accept, t0())
             .unwrap();
-        assert!(s.start_offset == 5);
+        assert2::assert!(s.start_offset == 5);
     }
 
     #[test]
@@ -579,9 +579,15 @@ mod tests {
         s.acknowledge("m1", Offset(0), Offset(2), AckType::Release, t0())
             .unwrap();
         let acq2 = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        assert!(acq2[0].delivery_count == 2);
+        assert2::assert!(
+            acq2 == vec![AcquiredRange {
+                first: Offset(0),
+                last: Offset(2),
+                delivery_count: 2,
+            }]
+        );
         // Released records stay in the window; SPSO did not advance.
-        assert!(s.start_offset == 0);
+        assert2::assert!(s.start_offset == 0);
     }
 
     #[test]
@@ -594,8 +600,8 @@ mod tests {
             s.expire_locks(t0() + Duration::from_secs(31));
         }
         let acq = s.acquire("m1", 10, i32::MAX, t0() + Duration::from_secs(62), LOCK, 2);
-        assert!(acq.is_empty()); // archived, not redelivered
-        assert!(s.start_offset == 1); // SPSO advanced past the poison pill
+        assert2::assert!(acq.is_empty()); // archived, not redelivered
+        assert2::assert!(s.start_offset == 1); // SPSO advanced past the poison pill
     }
 
     #[test]
@@ -603,15 +609,21 @@ mod tests {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(10), 100); // [0,9] Available
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        assert!(acq.len() == 1);
+        assert2::assert!(
+            acq == vec![AcquiredRange {
+                first: Offset(0),
+                last: Offset(9),
+                delivery_count: 1,
+            }]
+        );
         // Accept only [0,3]; [4,9] remain Acquired.
         s.acknowledge("m1", Offset(0), Offset(3), AckType::Accept, t0())
             .unwrap();
-        assert!(s.start_offset == 4);
+        assert2::assert!(s.start_offset == 4);
         // The remaining acquired range can still be acknowledged.
         s.acknowledge("m1", Offset(4), Offset(9), AckType::Accept, t0())
             .unwrap();
-        assert!(s.start_offset == 10);
+        assert2::assert!(s.start_offset == 10);
     }
 
     #[test]
@@ -621,18 +633,18 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         // Before expiry: re-acquire finds nothing (all Acquired).
         let none = s.acquire("m2", 10, i32::MAX, t0(), LOCK, 5);
-        assert!(none.is_empty());
+        assert2::assert!(none.is_empty());
         s.expire_locks(t0() + Duration::from_secs(31));
         // Now another member can acquire; redelivery bumps the count.
         let acq = s.acquire("m2", 10, i32::MAX, t0() + Duration::from_secs(31), LOCK, 5);
-        assert!(
+        assert2::assert!(
             acq == vec![AcquiredRange {
                 first: Offset(0),
                 last: Offset(3),
                 delivery_count: 2
             }]
         );
-        assert!(s.start_offset == 0);
+        assert2::assert!(s.start_offset == 0);
     }
 
     #[test]
@@ -642,9 +654,9 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         s.acknowledge("m1", Offset(0), Offset(2), AckType::Reject, t0())
             .unwrap();
-        assert!(s.start_offset == 3); // archived prefix dropped
+        assert2::assert!(s.start_offset == 3); // archived prefix dropped
         let acq = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
-        assert!(acq.is_empty()); // nothing left
+        assert2::assert!(acq.is_empty()); // nothing left
     }
 
     #[test]
@@ -654,10 +666,10 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         s.acknowledge("m1", Offset(0), Offset(1), AckType::Gap, t0())
             .unwrap();
-        assert!(s.start_offset == 2);
+        assert2::assert!(s.start_offset == 2);
         let (_start, dcc, batches) = s.to_persist_batches();
-        assert!(batches.is_empty()); // archived prefix dropped from window
-        assert!(dcc == 2); // both offsets reached a terminal state
+        assert2::assert!(batches.is_empty()); // archived prefix dropped from window
+        assert2::assert!(dcc == 2); // both offsets reached a terminal state
     }
 
     #[test]
@@ -666,17 +678,19 @@ mod tests {
         s.materialize(Offset(5), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let (start, dcc, batches) = s.to_persist_batches();
-        check!(start == 0);
-        check!(dcc == 0); // nothing terminal yet
         // Acquired persists as Available(0) but retains its delivery_count.
         check!(
-            batches
-                == vec![StateBatch {
-                    first_offset: Offset(0),
-                    last_offset: Offset(4),
-                    delivery_state: DS_AVAILABLE,
-                    delivery_count: 1
-                }]
+            (start, dcc, batches)
+                == (
+                    Offset(0),
+                    0,
+                    vec![StateBatch {
+                        first_offset: Offset(0),
+                        last_offset: Offset(4),
+                        delivery_state: DS_AVAILABLE,
+                        delivery_count: 1
+                    }]
+                )
         );
     }
 
@@ -689,18 +703,32 @@ mod tests {
         s.acknowledge("m1", Offset(0), Offset(3), AckType::Accept, t0())
             .unwrap(); // SPSO -> 4
         let (start, _dcc, batches) = s.to_persist_batches();
-        assert!(start == 4);
+        assert2::assert!(start == 4);
 
         let mut reloaded = AcquisitionState::new(Offset(0));
         reloaded.load_from(start, 7, 3, 0, &batches);
-        check!(reloaded.start_offset == 4);
-        check!(reloaded.end_offset == 10);
-        check!(reloaded.state_epoch == 7);
-        check!(reloaded.leader_epoch == 3);
-        check!(!reloaded.dirty);
+        check!(
+            reloaded
+                == AcquisitionState {
+                    start_offset: Offset(4),
+                    end_offset: Offset(10),
+                    state_epoch: 7,
+                    leader_epoch: 3,
+                    dirty: false,
+                    delivery_complete_count: 0,
+                    batches: vec![InFlightBatch {
+                        first_offset: Offset(4),
+                        last_offset: Offset(9),
+                        state: RecordState::Available,
+                        delivery_count: 0,
+                        acquired_by: None,
+                        lock_deadline: None,
+                    }],
+                }
+        );
         // The remaining records are Available again and re-acquirable.
         let acq = reloaded.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(
+        assert2::assert!(
             acq == vec![AcquiredRange {
                 first: Offset(4),
                 last: Offset(9),
@@ -715,17 +743,22 @@ mod tests {
         s.materialize(Offset(3), 100);
         let _ = s.acquire("m1", 10, i32::MAX, t0(), LOCK, 5);
         let err = s.acknowledge("m2", Offset(0), Offset(2), AckType::Accept, t0());
-        assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
+        assert2::assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
     }
 
     #[test]
     fn materialize_respects_max_inflight() {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(100), 10); // hwm far ahead, but cap at 10 in flight
-        assert!(s.end_offset == 10);
+        assert2::assert!(s.end_offset == 10);
         let acq = s.acquire("m1", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(acq[0].first == 0);
-        assert!(acq[0].last == 9);
+        assert2::assert!(
+            acq == vec![AcquiredRange {
+                first: Offset(0),
+                last: Offset(9),
+                delivery_count: 1,
+            }]
+        );
     }
 
     #[test]
@@ -733,11 +766,22 @@ mod tests {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(10), 100);
         let acq = s.acquire("m1", 4, i32::MAX, t0(), LOCK, 5);
-        assert!(acq.len() == 1);
-        assert!(acq[0].first == 0 && acq[0].last == 3);
+        assert2::assert!(
+            acq == vec![AcquiredRange {
+                first: Offset(0),
+                last: Offset(3),
+                delivery_count: 1,
+            }]
+        );
         // The remaining [4,9] is still Available.
         let acq2 = s.acquire("m2", 100, i32::MAX, t0(), LOCK, 5);
-        assert!(acq2[0].first == 4 && acq2[0].last == 9);
+        assert2::assert!(
+            acq2 == vec![AcquiredRange {
+                first: Offset(4),
+                last: Offset(9),
+                delivery_count: 1,
+            }]
+        );
     }
 
     #[test]
@@ -746,10 +790,10 @@ mod tests {
         // consumer-lag accounting is preserved across a leader change.
         let mut s = AcquisitionState::new(Offset(4));
         s.load_from(Offset(4), 0, 0, 5, &[]);
-        assert!(s.delivery_complete_count() == 5);
+        assert2::assert!(s.delivery_complete_count() == 5);
         // It round-trips back out through the persist projection.
         let (_start, dcc, _batches) = s.to_persist_batches();
-        assert!(dcc == 5);
+        assert2::assert!(dcc == 5);
     }
 
     #[test]
@@ -763,18 +807,24 @@ mod tests {
         let mut s = AcquisitionState::new(Offset(0));
         s.materialize(Offset(4), 100);
         let acq = s.acquire("m1", 10, i32::MAX, t0, short, 5);
-        assert!(acq.len() == 1);
+        assert2::assert!(
+            acq == vec![AcquiredRange {
+                first: Offset(0),
+                last: Offset(3),
+                delivery_count: 1,
+            }]
+        );
         let original_deadline = t0 + short;
 
         // Renew extends the lock well past the original deadline.
         s.renew("m1", Offset(0), Offset(3), t0, long).unwrap();
-        assert!(s.dirty);
+        assert2::assert!(s.dirty);
 
         // Sweeping at the original deadline must NOT release the renewed lock.
         s.expire_locks(original_deadline);
         // Still Acquired by m1 -> a different member acquires nothing.
         let none = s.acquire("m2", 10, i32::MAX, original_deadline, short, 5);
-        assert!(none.is_empty());
+        assert2::assert!(none.is_empty());
         // And m1 can still acknowledge it (proves it stayed Acquired by m1).
         s.acknowledge(
             "m1",
@@ -784,7 +834,7 @@ mod tests {
             original_deadline,
         )
         .unwrap();
-        assert!(s.start_offset == 4);
+        assert2::assert!(s.start_offset == 4);
     }
 
     #[test]
@@ -795,13 +845,13 @@ mod tests {
         let _ = s.acquire("m1", 10, i32::MAX, t0, LOCK, 5);
         // Wrong member.
         let err = s.renew("m2", Offset(0), Offset(2), t0, LOCK);
-        assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
+        assert2::assert!(err == Err(crate::codes::INVALID_RECORD_STATE));
 
         // Non-Acquired range: release [0,2] back to Available, then renew fails.
         s.acknowledge("m1", Offset(0), Offset(2), AckType::Release, t0)
             .unwrap();
         let err2 = s.renew("m1", Offset(0), Offset(2), t0, LOCK);
-        assert!(err2 == Err(crate::codes::INVALID_RECORD_STATE));
+        assert2::assert!(err2 == Err(crate::codes::INVALID_RECORD_STATE));
     }
 }
 

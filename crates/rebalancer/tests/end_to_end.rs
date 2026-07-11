@@ -11,7 +11,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use async_trait::async_trait;
 use axum::Extension;
 use connectrpc_axum::message::{ConnectError, ConnectRequest, ConnectResponse, error::Code};
@@ -107,13 +107,12 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics.len() == 1,
-        "expected exactly one topic result, got {resp:?}"
-    );
-    assert!(
-        resp.topics[0].error_code == 0,
-        "create_topic({name}) failed: {resp:?}"
+    assert2::assert!(
+        resp.topics
+            .iter()
+            .map(|topic| topic.error_code)
+            .collect::<Vec<_>>()
+            == vec![0]
     );
 }
 
@@ -230,15 +229,17 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
     // GetState — must reflect the topics we just created.
     let gs =
         unwrap_ok(handlers::get_state(Extension(state.clone()), req(pb::GetStateRequest {})).await);
-    assert!(gs.brokers.len() == 1, "single-broker cluster");
-    assert!(gs.brokers[0].id == 1, "broker id matches for_tests config");
+    assert2::assert!(
+        gs.brokers
+            .iter()
+            .map(|broker| broker.id)
+            .collect::<Vec<_>>()
+            == vec![1]
+    );
     let topic_names: std::collections::BTreeSet<String> =
         gs.topics.iter().map(|t| t.name.clone()).collect();
     for t in &["topic-a", "topic-b", "topic-c"] {
-        assert!(
-            topic_names.contains(*t),
-            "missing topic {t} in snapshot, got {topic_names:?}"
-        );
+        assert2::assert!(topic_names.contains(*t));
     }
     // 3 topics × 4 partitions = 12 partition entries (plus any internal
     // topics the broker may surface — we just assert the lower bound).
@@ -248,7 +249,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         .filter(|t| ["topic-a", "topic-b", "topic-c"].contains(&t.name.as_str()))
         .map(|t| t.partitions.len())
         .sum();
-    assert!(user_partitions == 12, "expected 12 user-topic partitions");
+    assert2::assert!(user_partitions == 12);
 
     // CreateProposal — balanced single-broker cluster → empty movements.
     let proposal = unwrap_ok(
@@ -259,21 +260,18 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         .await,
     );
     check!(
-        proposal.movements.is_empty(),
-        "expected empty movements on a single-broker balanced cluster, got {:?}",
-        proposal.movements
-    );
-    check!(!proposal.id.is_empty(), "proposal must have an id");
-    check!(
-        proposal.status == i32::from(pb::ProposalStatus::Computed),
-        "fresh proposal must be Computed"
+        (
+            proposal.movements.is_empty(),
+            proposal.id.is_empty(),
+            proposal.status,
+        ) == (true, false, i32::from(pb::ProposalStatus::Computed))
     );
     let summary = proposal
         .summary
         .as_ref()
         .expect("proposal must carry a summary");
-    assert!(summary.replica_movements == 0);
-    assert!(summary.leader_movements == 0);
+    assert2::assert!(summary.replica_movements == 0);
+    assert2::assert!(summary.leader_movements == 0);
 
     // GetProposal — round-trips by id.
     let fetched = unwrap_ok(
@@ -285,7 +283,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(fetched.id == proposal.id);
+    assert2::assert!(fetched.id == proposal.id);
 
     // ListProposals — the one we just stored shows up.
     let listed = unwrap_ok(
@@ -295,11 +293,14 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(
-        listed.proposals.len() == 1,
-        "expected the single proposal in the list"
+    assert2::assert!(
+        listed
+            .proposals
+            .iter()
+            .map(|p| p.id.as_str())
+            .collect::<Vec<_>>()
+            == vec![proposal.id.as_str()]
     );
-    assert!(listed.proposals[0].id == proposal.id);
 
     // DryRunProposal — empty proposal → 0 bytes moved estimate.
     let dry = unwrap_ok(
@@ -311,8 +312,8 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(dry.id == proposal.id);
-    assert!(dry.estimated_bytes_moved == 0);
+    assert2::assert!(dry.id.as_str() == proposal.id.as_str());
+    assert2::assert!(dry.estimated_bytes_moved == 0);
 
     // GetProposal on a missing id → NotFound.
     let missing = unwrap_err(
@@ -324,7 +325,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(missing.code() == Code::NotFound);
+    assert2::assert!(missing.code() == Code::NotFound);
 
     // DryRunProposal on a missing id → NotFound.
     let missing_dry = unwrap_err(
@@ -336,7 +337,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(missing_dry.code() == Code::NotFound);
+    assert2::assert!(missing_dry.code() == Code::NotFound);
 
     // CreateProposal with an unknown goal name → InvalidArgument.
     let bad_goal = unwrap_err(
@@ -348,7 +349,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(bad_goal.code() == Code::InvalidArgument);
+    assert2::assert!(bad_goal.code() == Code::InvalidArgument);
 
     // ExecuteProposal on a no-movements proposal → FailedPrecondition.
     // The 43b handler refuses to start an execution with an empty plan.
@@ -362,7 +363,7 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         )
         .await,
     );
-    assert!(exec.code() == Code::FailedPrecondition);
+    assert2::assert!(exec.code() == Code::FailedPrecondition);
 
     // OpenMetrics: the registry that `/metrics` would scrape contains
     // all three spec-promised metrics with the `crabka_rebalancer_`
@@ -376,9 +377,9 @@ async fn create_proposal_on_balanced_cluster_returns_empty_movements() {
         "crabka_rebalancer_snapshots_total",
         "crabka_rebalancer_proposals_created_total",
     ] {
-        assert!(buf.contains(needle), "missing {needle} in /metrics:\n{buf}");
+        assert2::assert!(buf.contains(needle));
     }
-    assert!(buf.contains("# EOF"), "OpenMetrics terminator missing");
+    assert2::assert!(buf.contains("# EOF"));
 
     // Bound the test's wall-clock — broker shutdown can hang if a task
     // is stuck; surface that as a test failure rather than a CI timeout.
@@ -529,15 +530,12 @@ async fn execute_proposal_settles_against_real_broker() {
     }
     let _ = exec_task.await;
 
-    assert!(
-        matches!(
-            final_status,
-            ProposalStatus::Completed | ProposalStatus::Failed
-        ),
-        "expected terminal status, got {final_status:?}"
-    );
+    assert2::assert!(matches!(
+        final_status,
+        ProposalStatus::Completed | ProposalStatus::Failed
+    ));
     // After terminal the backend must be tombstoned.
-    assert!(backend.loaded().is_none());
+    assert2::assert!(backend.loaded().is_none());
 
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
@@ -628,26 +626,19 @@ async fn cancel_clears_throttle_and_reverts() {
         if started || terminal {
             break;
         }
-        assert!(
-            std::time::Instant::now() < deadline,
-            "execution never started"
-        );
+        assert2::assert!(std::time::Instant::now() < deadline);
         tokio::time::sleep(Duration::from_millis(5)).await;
     }
     cancel_for_caller.cancel();
     let _ = tokio::time::timeout(Duration::from_secs(10), exec_task).await;
 
     let after = store.get("cancel-1").unwrap();
-    assert!(
-        matches!(
-            after.status,
-            ProposalStatus::Cancelled | ProposalStatus::Completed | ProposalStatus::Failed
-        ),
-        "expected terminal status, got {:?}",
-        after.status
-    );
+    assert2::assert!(matches!(
+        after.status,
+        ProposalStatus::Cancelled | ProposalStatus::Completed | ProposalStatus::Failed
+    ));
     // After terminal the backend must be tombstoned.
-    assert!(backend.loaded().is_none());
+    assert2::assert!(backend.loaded().is_none());
 
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
@@ -728,16 +719,12 @@ async fn restart_resumes_in_flight_plan() {
     let _ = tokio::time::timeout(Duration::from_secs(10), exec.run()).await;
 
     let after = store.get("resume-1").unwrap();
-    assert!(
-        matches!(
-            after.status,
-            ProposalStatus::Completed | ProposalStatus::Failed
-        ),
-        "expected terminal status after resume, got {:?}",
-        after.status
-    );
+    assert2::assert!(matches!(
+        after.status,
+        ProposalStatus::Completed | ProposalStatus::Failed
+    ));
     // After terminal the backend must be tombstoned.
-    assert!(backend.loaded().is_none());
+    assert2::assert!(backend.loaded().is_none());
 
     tokio::time::timeout(Duration::from_secs(30), broker.shutdown())
         .await
@@ -798,10 +785,7 @@ async fn rack_aware_eliminates_same_rack_collisions() {
     };
 
     let mvs: Vec<Movement> = RackAware.propose(&state, &ctx);
-    assert!(
-        mvs.len() == 1,
-        "expected exactly one RackAware movement, got {mvs:?}"
-    );
+    assert2::assert!(mvs.len() == 1);
     let m = &mvs[0];
     check!(m.topic == "t");
     check!(m.partition == 0);
@@ -884,10 +868,7 @@ async fn replica_capacity_evicts_over_capacity_broker() {
     };
 
     let mvs: Vec<Movement> = ReplicaCapacity.propose(&state, &ctx);
-    assert!(
-        !mvs.is_empty(),
-        "expected movements to evict broker 1; got {mvs:?}"
-    );
+    assert2::assert!(!mvs.is_empty());
 
     // Every movement must reduce broker 1's replica count.
     for m in &mvs {
@@ -1019,10 +1000,7 @@ async fn disk_usage_evicts_hot_broker() {
     };
 
     let mvs: Vec<Movement> = DiskUsage.propose(&state, &ctx);
-    assert!(
-        !mvs.is_empty(),
-        "expected disk-eviction movements; got {mvs:?}"
-    );
+    assert2::assert!(!mvs.is_empty());
 
     // Apply movements; broker 1's post-state total must shrink.
     let mut working = state.partitions.clone();
@@ -1038,10 +1016,7 @@ async fn disk_usage_evicts_hot_broker() {
         .iter()
         .map(|p| p.replicas.iter().filter(|x| **x == 1).count())
         .sum::<usize>();
-    assert!(
-        broker_1_count < 5,
-        "broker 1 still hosts all replicas after eviction"
-    );
+    assert2::assert!(broker_1_count < 5);
 }
 
 // ===== Anomaly detector integration tests =====
@@ -1060,11 +1035,7 @@ async fn get_anomalies_returns_empty_when_detector_quiet() {
     )
     .await
     .expect("get_anomalies handler returned Err");
-    assert!(
-        resp.0.anomalies.is_empty(),
-        "expected empty anomaly list on a quiet detector, got {:?}",
-        resp.0.anomalies
-    );
+    assert2::assert!(resp.0.anomalies.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1100,7 +1071,7 @@ async fn anomaly_store_persists_and_get_anomalies_returns_it() {
     )
     .await
     .expect("get_anomalies handler returned Err");
-    assert!(resp.0.anomalies.len() == 2);
+    assert2::assert!(resp.0.anomalies.len() == 2);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1160,11 +1131,8 @@ async fn auto_trigger_skipped_when_executor_in_flight() {
         .await
         .expect("maybe_trigger should not error on a gate-skip path");
 
-    assert!(
-        state.store.list(0).len() == 0,
-        "no proposal should be inserted when an execution is in flight"
-    );
-    assert!(metrics.auto_trigger_skipped_executing.get() == 1);
+    assert2::assert!(state.store.list(0).len() == 0);
+    assert2::assert!(metrics.auto_trigger_skipped_executing.get() == 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1251,10 +1219,6 @@ async fn disk_pressure_anomaly_auto_triggers_proposal() {
     // auto-trigger pipeline is exercised end-to-end either way.
     let proposal_count = state.store.list(0).len();
     let no_movements_count = metrics.auto_trigger_skipped_no_movements.get();
-    let fired_count = metrics.auto_trigger_fired_disk_pressure.get();
-    assert!(
-        proposal_count > 0 || no_movements_count > 0,
-        "expected either a proposal inserted or no_movements counter incremented; \
-         got proposals={proposal_count}, no_movements={no_movements_count}, fired={fired_count}"
-    );
+    let _fired_count = metrics.auto_trigger_fired_disk_pressure.get();
+    assert2::assert!(proposal_count > 0 || no_movements_count > 0);
 }

@@ -110,7 +110,6 @@ pub fn authorized_operations_bits(
 mod tests {
     use std::collections::HashSet;
 
-    use assert2::assert;
     use crabka_metadata::{AclEntry, MetadataRecord, PatternType, PermissionType, ResourceType};
     use crabka_security::{AuthMethod, Principal};
     use uuid::Uuid;
@@ -147,59 +146,55 @@ mod tests {
     }
 
     #[test]
-    fn supported_operations_topic_matches_kafka() {
-        let ops = supported_operations(ResourceType::Topic);
-        // Order doesn't matter for callers but the set must match.
-        let got: HashSet<_> = ops.iter().copied().collect();
-        let want: HashSet<_> = [
-            AclOperation::Read,
-            AclOperation::Write,
-            AclOperation::Create,
-            AclOperation::Delete,
-            AclOperation::Alter,
-            AclOperation::Describe,
-            AclOperation::DescribeConfigs,
-            AclOperation::AlterConfigs,
-        ]
-        .into_iter()
-        .collect();
-        assert!(got == want);
-    }
+    fn supported_operations_match_kafka_by_resource() {
+        type TestCase1<'a> = (&'a str, ResourceType, &'a [AclOperation]);
+        let cases: [TestCase1<'_>; 3] = [
+            (
+                "topic",
+                ResourceType::Topic,
+                &[
+                    AclOperation::Read,
+                    AclOperation::Write,
+                    AclOperation::Create,
+                    AclOperation::Delete,
+                    AclOperation::Alter,
+                    AclOperation::Describe,
+                    AclOperation::DescribeConfigs,
+                    AclOperation::AlterConfigs,
+                ],
+            ),
+            (
+                "group",
+                ResourceType::Group,
+                &[
+                    AclOperation::Read,
+                    AclOperation::Describe,
+                    AclOperation::Delete,
+                ],
+            ),
+            (
+                "cluster",
+                ResourceType::Cluster,
+                &[
+                    AclOperation::Create,
+                    AclOperation::Alter,
+                    AclOperation::Describe,
+                    AclOperation::ClusterAction,
+                    AclOperation::AlterConfigs,
+                    AclOperation::DescribeConfigs,
+                    AclOperation::IdempotentWrite,
+                ],
+            ),
+        ];
 
-    #[test]
-    fn supported_operations_group_matches_kafka() {
-        let got: HashSet<_> = supported_operations(ResourceType::Group)
-            .iter()
-            .copied()
-            .collect();
-        let want: HashSet<_> = [
-            AclOperation::Read,
-            AclOperation::Describe,
-            AclOperation::Delete,
-        ]
-        .into_iter()
-        .collect();
-        assert!(got == want);
-    }
-
-    #[test]
-    fn supported_operations_cluster_matches_kafka() {
-        let got: HashSet<_> = supported_operations(ResourceType::Cluster)
-            .iter()
-            .copied()
-            .collect();
-        let want: HashSet<_> = [
-            AclOperation::Create,
-            AclOperation::Alter,
-            AclOperation::Describe,
-            AclOperation::ClusterAction,
-            AclOperation::AlterConfigs,
-            AclOperation::DescribeConfigs,
-            AclOperation::IdempotentWrite,
-        ]
-        .into_iter()
-        .collect();
-        assert!(got == want);
+        for (_case, resource_type, expected) in cases {
+            let actual: HashSet<_> = supported_operations(resource_type)
+                .iter()
+                .copied()
+                .collect();
+            let expected: HashSet<_> = expected.iter().copied().collect();
+            assert2::assert!(actual == expected);
+        }
     }
 
     #[test]
@@ -209,19 +204,19 @@ mod tests {
         let p = principal("anyone");
         let h = addr();
 
-        for rt in [
-            ResourceType::Topic,
-            ResourceType::Group,
-            ResourceType::Cluster,
-            ResourceType::TransactionalId,
-            ResourceType::DelegationToken,
+        for (_case, rt) in [
+            ("topic", ResourceType::Topic),
+            ("group", ResourceType::Group),
+            ("cluster", ResourceType::Cluster),
+            ("transactional id", ResourceType::TransactionalId),
+            ("delegation token", ResourceType::DelegationToken),
         ] {
             let bits = authorized_operations_bits(&auth, &img, &p, &h, rt, "name");
             let expected = supported_operations(rt)
                 .iter()
                 .copied()
                 .fold(0_i32, |acc, op| acc | bit(op));
-            assert!(bits == expected, "{rt:?}: full mask under AllowAll");
+            assert2::assert!(bits == expected);
         }
     }
 
@@ -236,7 +231,7 @@ mod tests {
         // alice is not a super-user and the image has no ACLs → every
         // supported op denies → bitfield is 0.
         let bits = authorized_operations_bits(&auth, &img, &p, &h, ResourceType::Topic, "foo");
-        assert!(bits == 0);
+        assert2::assert!(bits == 0);
     }
 
     #[test]
@@ -254,14 +249,14 @@ mod tests {
             .iter()
             .copied()
             .fold(0_i32, |acc, op| acc | bit(op));
-        assert!(topic_bits == topic_want);
+        assert2::assert!(topic_bits == topic_want);
 
         let group_bits = authorized_operations_bits(&auth, &img, &p, &h, ResourceType::Group, "g");
         let group_want = supported_operations(ResourceType::Group)
             .iter()
             .copied()
             .fold(0_i32, |acc, op| acc | bit(op));
-        assert!(group_bits == group_want);
+        assert2::assert!(group_bits == group_want);
     }
 
     #[test]
@@ -280,7 +275,7 @@ mod tests {
         // Read ACL grants Read directly and Describe via implication.
         // No other supported op should be set.
         let expected = bit(AclOperation::Read) | bit(AclOperation::Describe);
-        assert!(bits == expected);
+        assert2::assert!(bits == expected);
     }
 
     #[test]
@@ -297,7 +292,7 @@ mod tests {
         let h = addr();
         let bits = authorized_operations_bits(&auth, &img, &p, &h, ResourceType::Topic, "foo");
         let expected = bit(AclOperation::Write) | bit(AclOperation::Describe);
-        assert!(bits == expected);
+        assert2::assert!(bits == expected);
     }
 
     #[test]
@@ -314,9 +309,9 @@ mod tests {
         let h = addr();
         let bits = authorized_operations_bits(&auth, &img, &p, &h, ResourceType::Group, "cg");
         let expected = bit(AclOperation::Read) | bit(AclOperation::Describe);
-        assert!(bits == expected);
+        assert2::assert!(bits == expected);
         // Bit for Delete (6) must NOT be set.
-        assert!(bits & bit(AclOperation::Delete) == 0);
+        assert2::assert!(bits & bit(AclOperation::Delete) == 0);
     }
 
     #[test]
@@ -339,7 +334,7 @@ mod tests {
         // Read is denied; the Describe-via-Read implication also collapses
         // because the matching ACL row that would have granted it now
         // resolves to Deny under matches_operation. Bitfield is 0.
-        assert!(bits == 0);
+        assert2::assert!(bits == 0);
     }
 
     #[test]
@@ -348,19 +343,19 @@ mod tests {
         // discriminants. If `operation_to_wire` ever drifts from
         // Kafka's `AclOperation.code()`, the wire field would become
         // unintelligible to JVM clients.
-        for (op, want) in [
-            (AclOperation::Read, 1 << 3),
-            (AclOperation::Write, 1 << 4),
-            (AclOperation::Create, 1 << 5),
-            (AclOperation::Delete, 1 << 6),
-            (AclOperation::Alter, 1 << 7),
-            (AclOperation::Describe, 1 << 8),
-            (AclOperation::ClusterAction, 1 << 9),
-            (AclOperation::DescribeConfigs, 1 << 10),
-            (AclOperation::AlterConfigs, 1 << 11),
-            (AclOperation::IdempotentWrite, 1 << 12),
+        for (_case, op, want) in [
+            ("read", AclOperation::Read, 1 << 3),
+            ("write", AclOperation::Write, 1 << 4),
+            ("create", AclOperation::Create, 1 << 5),
+            ("delete", AclOperation::Delete, 1 << 6),
+            ("alter", AclOperation::Alter, 1 << 7),
+            ("describe", AclOperation::Describe, 1 << 8),
+            ("cluster action", AclOperation::ClusterAction, 1 << 9),
+            ("describe configs", AclOperation::DescribeConfigs, 1 << 10),
+            ("alter configs", AclOperation::AlterConfigs, 1 << 11),
+            ("idempotent write", AclOperation::IdempotentWrite, 1 << 12),
         ] {
-            assert!(bit(op) == want, "{op:?}");
+            assert2::assert!(bit(op) == want);
         }
     }
 }

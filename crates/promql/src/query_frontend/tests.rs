@@ -87,13 +87,13 @@ fn range_query_plan_splits_on_step_grid_without_duplicate_steps() {
     // split-interval windows [0,120k), [120k,240k), [240k,360k); each
     // sub-range spans the eval points landing in its absolute window with
     // no duplicate step across sub-ranges.
-    assert_eq!(
-        ranges,
-        vec![
-            (0, 60_000, None),
-            (120_000, 180_000, None),
-            (240_000, 240_000, None),
-        ]
+    assert2::assert!(
+        ranges
+            == vec![
+                (0, 60_000, None),
+                (120_000, 180_000, None),
+                (240_000, 240_000, None),
+            ]
     );
 }
 
@@ -115,9 +115,9 @@ fn range_query_plan_rejects_resolution_over_point_cap() {
     .unwrap_err();
 
     match error {
-        PromqlError::Plan(message) => assert_eq!(
-            message,
-            "exceeded maximum resolution of 11,000 points per timeseries. \
+        PromqlError::Plan(message) => assert2::assert!(
+            message
+                == "exceeded maximum resolution of 11,000 points per timeseries. \
              Try decreasing the query resolution (?step=XX)"
         ),
         other => panic!("expected Plan error, got {other:?}"),
@@ -139,7 +139,7 @@ fn range_query_plan_allows_resolution_at_point_cap_boundary() {
         },
     )
     .unwrap();
-    assert!(!plan.is_empty());
+    assert2::assert!(!plan.is_empty());
 }
 
 #[test]
@@ -166,10 +166,7 @@ fn range_query_plan_aligns_subranges_to_absolute_split_grid() {
 
     // Eval points 60k | 120k,180k | 240k,300k bucket into [0,120k),
     // [120k,240k), [240k,360k).
-    assert_eq!(
-        ranges,
-        vec![(60_000, 60_000), (120_000, 180_000), (240_000, 300_000)]
-    );
+    assert2::assert!(ranges == vec![(60_000, 60_000), (120_000, 180_000), (240_000, 300_000)]);
 }
 
 #[tokio::test]
@@ -204,7 +201,7 @@ async fn moving_window_reuses_cached_subranges() {
         .len();
     // Absolute buckets: [0,120k)->[0,60k], [120k,240k)->[120k,180k],
     // [240k,360k)->[240k,300k], [360k,480k)->[360k,360k] => 4 sub-queries.
-    assert_eq!(first_fresh, 4);
+    assert2::assert!(first_fresh == 4);
 
     // Second window shifted by one step (60_000 < split 120_000) and the
     // same step phase, so the absolute-aligned interior buckets
@@ -235,12 +232,12 @@ async fn moving_window_reuses_cached_subranges() {
     // Second window sub-ranges: [60k,60k] | [120k,180k]* | [240k,300k]* |
     // [360k,420k]. The two starred interior sub-ranges hit the cache, so
     // only the two non-cached sub-ranges execute fresh.
-    assert_eq!(second_fresh, 2);
+    assert2::assert!(second_fresh == 2);
     let second_starts = all_calls[first_fresh..]
         .iter()
         .map(|query| (query.start_ms, query.end_ms))
         .collect::<Vec<_>>();
-    assert_eq!(second_starts, vec![(60_000, 60_000), (360_000, 420_000)]);
+    assert2::assert!(second_starts == vec![(60_000, 60_000), (360_000, 420_000)]);
 }
 
 #[test]
@@ -262,15 +259,15 @@ fn range_query_plan_expands_each_split_across_mimir_query_shards() {
         .map(|subquery| subquery.shard_matcher().expect("sharded subquery").value)
         .collect::<Vec<_>>();
 
-    assert_eq!(shard_values, vec!["1_of_3", "2_of_3", "3_of_3"]);
-    assert!(
+    assert2::assert!(shard_values == vec!["1_of_3", "2_of_3", "3_of_3"]);
+    assert2::assert!(
         plan.iter()
             .all(|subquery| subquery.start_ms == 0 && subquery.end_ms == 60_000)
     );
 
     let matcher = plan[0].shard_matcher().expect("first shard matcher");
-    assert_eq!(matcher.name, "__query_shard__");
-    assert_eq!(matcher.op, MatchOp::Eq);
+    assert2::assert!(matcher.name.as_str() == "__query_shard__");
+    assert2::assert!(matcher.op == MatchOp::Eq);
 }
 
 #[test]
@@ -287,8 +284,8 @@ fn range_query_plan_shards_avg_for_partial_sum_count_reduction() {
     )
     .unwrap();
 
-    assert_eq!(plan.len(), 3);
-    assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
+    assert2::assert!(plan.len() == 3);
+    assert2::assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
 }
 
 #[test]
@@ -306,11 +303,8 @@ fn range_query_plan_shards_stddev_and_stdvar_for_moment_reduction() {
         )
         .unwrap();
 
-        assert_eq!(plan.len(), 3, "{query}");
-        assert!(
-            plan.iter().all(|subquery| subquery.shard.is_some()),
-            "{query}"
-        );
+        assert2::assert!(plan.len() == 3);
+        assert2::assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
     }
 }
 
@@ -328,8 +322,8 @@ fn range_query_plan_skips_shards_for_unsupported_aggregate_reducers() {
     )
     .unwrap();
 
-    assert_eq!(plan.len(), 1);
-    assert_eq!(plan[0].shard, None);
+    assert2::assert!(plan.len() == 1);
+    assert2::assert!(plan[0].shard == None);
 }
 
 #[test]
@@ -346,8 +340,8 @@ fn range_query_plan_skips_nested_avg_until_rewrite_is_aggregate_aware() {
     )
     .unwrap();
 
-    assert_eq!(plan.len(), 1);
-    assert_eq!(plan[0].shard, None);
+    assert2::assert!(plan.len() == 1);
+    assert2::assert!(plan[0].shard == None);
 }
 
 #[test]
@@ -365,11 +359,8 @@ fn range_query_plan_shards_min_and_max_aggregate_reducers() {
         )
         .unwrap();
 
-        assert_eq!(plan.len(), 3, "{query}");
-        assert!(
-            plan.iter().all(|subquery| subquery.shard.is_some()),
-            "{query}"
-        );
+        assert2::assert!(plan.len() == 3);
+        assert2::assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
     }
 }
 
@@ -387,8 +378,8 @@ fn range_query_plan_shards_group_aggregate_reducer() {
     )
     .unwrap();
 
-    assert_eq!(plan.len(), 3);
-    assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
+    assert2::assert!(plan.len() == 3);
+    assert2::assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
 }
 
 #[test]
@@ -406,11 +397,8 @@ fn range_query_plan_shards_topk_and_bottomk_for_final_rank_reduction() {
         )
         .unwrap();
 
-        assert_eq!(plan.len(), 3, "{query}");
-        assert!(
-            plan.iter().all(|subquery| subquery.shard.is_some()),
-            "{query}"
-        );
+        assert2::assert!(plan.len() == 3);
+        assert2::assert!(plan.iter().all(|subquery| subquery.shard.is_some()));
     }
 }
 
@@ -428,10 +416,7 @@ fn shard_query_injection_adds_mimir_selector_to_vector_and_matrix_selectors() {
         "http_requests_total",
         r#"up{__query_shard__="1_of_2"}"#,
     ] {
-        assert!(
-            rewritten.contains(needle),
-            "missing {needle} in {rewritten}"
-        );
+        assert2::assert!(rewritten.contains(needle));
     }
 }
 
@@ -460,22 +445,22 @@ fn range_query_merge_combines_time_split_samples_for_same_series() {
     ])
     .unwrap();
 
-    assert_eq!(
-        result,
-        QueryResult::RangeMatrix(vec![
-            RangeSeries {
-                labels: api_labels,
-                samples: vec![
-                    (0, SampleValue::Float(1.0)),
-                    (60_000, SampleValue::Float(2.0)),
-                    (120_000, SampleValue::Float(4.0)),
-                ],
-            },
-            RangeSeries {
-                labels: worker_labels,
-                samples: vec![(0, SampleValue::Float(3.0))],
-            },
-        ])
+    assert2::assert!(
+        result
+            == QueryResult::RangeMatrix(vec![
+                RangeSeries {
+                    labels: api_labels,
+                    samples: vec![
+                        (0, SampleValue::Float(1.0)),
+                        (60_000, SampleValue::Float(2.0)),
+                        (120_000, SampleValue::Float(4.0)),
+                    ],
+                },
+                RangeSeries {
+                    labels: worker_labels,
+                    samples: vec![(0, SampleValue::Float(3.0))],
+                },
+            ])
     );
 }
 
@@ -500,20 +485,19 @@ fn range_query_merge_sums_sharded_partial_float_samples_for_same_series() {
     ])
     .unwrap();
 
-    assert_eq!(
-        result,
-        QueryResult::RangeMatrix(vec![RangeSeries {
-            labels,
-            samples: vec![
-                (0, SampleValue::Float(11.0)),
-                (60_000, SampleValue::Float(22.0)),
-            ],
-        }])
+    assert2::assert!(
+        result
+            == QueryResult::RangeMatrix(vec![RangeSeries {
+                labels,
+                samples: vec![
+                    (0, SampleValue::Float(11.0)),
+                    (60_000, SampleValue::Float(22.0)),
+                ],
+            }])
     );
 }
 
 #[test]
-#[allow(clippy::float_cmp)]
 fn range_query_merge_sums_native_histograms_with_different_span_layouts() {
     let labels = labels(&[]);
     let result = merge_range_query_results(vec![
@@ -553,21 +537,21 @@ fn range_query_merge_sums_native_histograms_with_different_span_layouts() {
     let QueryResult::RangeMatrix(series) = result else {
         panic!("expected range matrix");
     };
-    assert_eq!(series.len(), 1);
-    assert_eq!(series[0].labels, labels);
+    assert2::assert!(series.len() == 1);
+    assert2::assert!(&series[0].labels == &labels);
     let SampleValue::Histogram(histogram) = &series[0].samples[0].1 else {
         panic!("expected histogram sample");
     };
-    assert_eq!(histogram.count, 10.0);
-    assert_eq!(histogram.sum, 30.0);
-    assert_eq!(
-        histogram.positive_spans,
-        vec![BucketSpan {
-            offset: 0,
-            length: 3,
-        }]
+    assert2::assert!((histogram.count - 10.0).abs() < f64::EPSILON);
+    assert2::assert!((histogram.sum - 30.0).abs() < f64::EPSILON);
+    assert2::assert!(
+        &histogram.positive_spans
+            == &vec![BucketSpan {
+                offset: 0,
+                length: 3,
+            }]
     );
-    assert_eq!(histogram.positive_counts, vec![1.0, 5.0, 4.0]);
+    assert2::assert!(&histogram.positive_counts == &vec![1.0, 5.0, 4.0]);
 }
 
 #[test]
@@ -578,7 +562,7 @@ fn range_query_merge_rejects_non_matrix_subquery_results() {
     }])
     .unwrap_err();
 
-    assert!(format!("{err}").contains("range matrix"));
+    assert2::assert!(format!("{err}").contains("range matrix"));
 }
 
 #[test]
@@ -598,14 +582,14 @@ fn range_result_cache_is_scoped_by_tenant_query_range_step_and_shard() {
 
     cache.insert("tenant-a", &query, result.clone());
 
-    assert_eq!(cache.get("tenant-a", &query), Some(result));
-    assert_eq!(cache.get("tenant-b", &query), None);
+    assert2::assert!(cache.get("tenant-a", &query) == Some(result));
+    assert2::assert!(cache.get("tenant-b", &query) == None);
 
     let other_shard = FrontendRangeQuery {
         shard: Some(QueryShard { index: 2, total: 2 }),
         ..query
     };
-    assert_eq!(cache.get("tenant-a", &other_shard), None);
+    assert2::assert!(cache.get("tenant-a", &other_shard) == None);
 }
 
 #[test]
@@ -632,7 +616,7 @@ fn range_result_cache_returns_owned_results() {
     let Some(QueryResult::RangeMatrix(second_hit)) = cache.get("tenant-a", &query) else {
         panic!("cached range matrix");
     };
-    assert_eq!(second_hit[0].samples, vec![(0, SampleValue::Float(1.0))]);
+    assert2::assert!(second_hit[0].samples == vec![(0, SampleValue::Float(1.0))]);
 }
 
 #[test]
@@ -656,19 +640,18 @@ fn in_memory_round_trips_then_expires() {
 
     // Within the TTL window: hit.
     clock.advance(89_000);
-    assert_eq!(cache.get("tenant-a", &query), Some(result));
+    assert2::assert!(cache.get("tenant-a", &query) == Some(result));
 
     // One step past the TTL: miss, and the entry is evicted.
     clock.advance(2_000);
-    assert_eq!(cache.get("tenant-a", &query), None);
-    assert_eq!(
+    assert2::assert!(cache.get("tenant-a", &query) == None);
+    assert2::assert!(
         cache
             .range_results
             .lock()
             .expect("query frontend cache poisoned")
-            .len(),
-        0,
-        "expired entry must be evicted on miss"
+            .len()
+            == 0
     );
 }
 
@@ -690,7 +673,7 @@ fn in_memory_without_ttl_never_expires() {
 
     cache.insert("tenant-a", &query, result.clone());
     clock.advance(i64::from(u32::MAX));
-    assert_eq!(cache.get("tenant-a", &query), Some(result));
+    assert2::assert!(cache.get("tenant-a", &query) == Some(result));
 }
 
 #[tokio::test]
@@ -719,11 +702,11 @@ async fn object_store_range_result_cache_expires_stale_objects() {
 
     // Within TTL: hit.
     clock.advance(29_000);
-    assert_eq!(cache.get("tenant-a", &query).await.unwrap(), Some(result));
+    assert2::assert!(cache.get("tenant-a", &query).await.unwrap() == Some(result));
 
     // Past TTL: miss.
     clock.advance(2_000);
-    assert_eq!(cache.get("tenant-a", &query).await.unwrap(), None);
+    assert2::assert!(cache.get("tenant-a", &query).await.unwrap() == None);
 }
 
 #[tokio::test]
@@ -748,7 +731,7 @@ async fn object_store_range_result_cache_persists_across_instances() {
         .await
         .unwrap();
 
-    assert_eq!(second.get("tenant-a", &query).await.unwrap(), Some(result));
+    assert2::assert!(second.get("tenant-a", &query).await.unwrap() == Some(result));
 }
 
 #[derive(Default)]
@@ -922,15 +905,15 @@ async fn frontend_range_execution_reduces_sharded_topk_from_rank_candidates() {
         .lock()
         .expect("rank executor calls poisoned")
         .clone();
-    assert_eq!(
+    assert2::assert!(
         calls
             .iter()
             .map(|query| (query.query.as_str(), query.shard))
-            .collect::<Vec<_>>(),
-        vec![
-            ("topk(2, up)", Some(QueryShard { index: 1, total: 2 })),
-            ("topk(2, up)", Some(QueryShard { index: 2, total: 2 })),
-        ]
+            .collect::<Vec<_>>()
+            == vec![
+                ("topk(2, up)", Some(QueryShard { index: 1, total: 2 })),
+                ("topk(2, up)", Some(QueryShard { index: 2, total: 2 })),
+            ]
     );
     let QueryResult::RangeMatrix(series) = result else {
         panic!("topk range matrix");
@@ -944,10 +927,7 @@ async fn frontend_range_execution_reduces_sharded_topk_from_rank_candidates() {
             (series.labels.get("series").unwrap().to_string(), value)
         })
         .collect::<Vec<_>>();
-    assert_eq!(
-        selected,
-        vec![("a".to_string(), 10.0), ("c".to_string(), 9.0)]
-    );
+    assert2::assert!(selected == vec![("a".to_string(), 10.0), ("c".to_string(), 9.0)]);
 }
 
 #[tokio::test]
@@ -978,19 +958,19 @@ async fn frontend_range_execution_reduces_sharded_stdvar_from_moment_partials() 
         .lock()
         .expect("moment partial executor calls poisoned")
         .clone();
-    assert_eq!(
+    assert2::assert!(
         calls
             .iter()
             .map(|query| (query.query.as_str(), query.shard))
-            .collect::<Vec<_>>(),
-        vec![
-            ("sum(up)", Some(QueryShard { index: 1, total: 2 })),
-            ("sum(up)", Some(QueryShard { index: 2, total: 2 })),
-            ("count(up)", Some(QueryShard { index: 1, total: 2 })),
-            ("count(up)", Some(QueryShard { index: 2, total: 2 })),
-            ("sum((up) * (up))", Some(QueryShard { index: 1, total: 2 }),),
-            ("sum((up) * (up))", Some(QueryShard { index: 2, total: 2 }),),
-        ]
+            .collect::<Vec<_>>()
+            == vec![
+                ("sum(up)", Some(QueryShard { index: 1, total: 2 })),
+                ("sum(up)", Some(QueryShard { index: 2, total: 2 })),
+                ("count(up)", Some(QueryShard { index: 1, total: 2 })),
+                ("count(up)", Some(QueryShard { index: 2, total: 2 })),
+                ("sum((up) * (up))", Some(QueryShard { index: 1, total: 2 }),),
+                ("sum((up) * (up))", Some(QueryShard { index: 2, total: 2 }),),
+            ]
     );
     let QueryResult::RangeMatrix(series) = result else {
         panic!("stdvar range matrix");
@@ -998,7 +978,7 @@ async fn frontend_range_execution_reduces_sharded_stdvar_from_moment_partials() 
     let SampleValue::Float(value) = series[0].samples[0].1 else {
         panic!("stdvar float sample");
     };
-    assert!((value - (38.0 / 3.0)).abs() < 1e-9);
+    assert2::assert!((value - (38.0 / 3.0)).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -1030,7 +1010,7 @@ async fn frontend_range_execution_reduces_sharded_stddev_from_moment_partials() 
     let SampleValue::Float(value) = series[0].samples[0].1 else {
         panic!("stddev float sample");
     };
-    assert!((value - (38.0_f64 / 3.0).sqrt()).abs() < 1e-9);
+    assert2::assert!((value - (38.0_f64 / 3.0).sqrt()).abs() < 1e-9);
 }
 
 #[tokio::test]
@@ -1061,24 +1041,24 @@ async fn frontend_range_execution_reduces_sharded_avg_from_sum_and_count_partial
         .lock()
         .expect("avg partial executor calls poisoned")
         .clone();
-    assert_eq!(
+    assert2::assert!(
         calls
             .iter()
             .map(|query| (query.query.as_str(), query.shard))
-            .collect::<Vec<_>>(),
-        vec![
-            ("sum(up)", Some(QueryShard { index: 1, total: 2 })),
-            ("sum(up)", Some(QueryShard { index: 2, total: 2 })),
-            ("count(up)", Some(QueryShard { index: 1, total: 2 })),
-            ("count(up)", Some(QueryShard { index: 2, total: 2 })),
-        ]
+            .collect::<Vec<_>>()
+            == vec![
+                ("sum(up)", Some(QueryShard { index: 1, total: 2 })),
+                ("sum(up)", Some(QueryShard { index: 2, total: 2 })),
+                ("count(up)", Some(QueryShard { index: 1, total: 2 })),
+                ("count(up)", Some(QueryShard { index: 2, total: 2 })),
+            ]
     );
-    assert_eq!(
-        result,
-        QueryResult::RangeMatrix(vec![RangeSeries {
-            labels: labels(&[]),
-            samples: vec![(0, SampleValue::Float(4.0))],
-        }])
+    assert2::assert!(
+        result
+            == QueryResult::RangeMatrix(vec![RangeSeries {
+                labels: labels(&[]),
+                samples: vec![(0, SampleValue::Float(4.0))],
+            }])
     );
 }
 
@@ -1127,31 +1107,31 @@ async fn frontend_range_execution_uses_cache_and_merges_subquery_results() {
         .lock()
         .expect("recording executor calls poisoned")
         .clone();
-    assert_eq!(
+    assert2::assert!(
         calls
             .iter()
             .map(|query| (query.start_ms, query.end_ms))
-            .collect::<Vec<_>>(),
-        vec![(120_000, 180_000)]
+            .collect::<Vec<_>>()
+            == vec![(120_000, 180_000)]
     );
-    assert_eq!(
+    assert2::assert!(
         cache
             .get("tenant-a", &calls[0])
-            .expect("fresh subquery cached"),
-        QueryResult::RangeMatrix(vec![RangeSeries {
-            labels: labels(&[("__name__", "up"), ("job", "api")]),
-            samples: vec![(120_000, SampleValue::Float(120_000.0))],
-        }])
+            .expect("fresh subquery cached")
+            == QueryResult::RangeMatrix(vec![RangeSeries {
+                labels: labels(&[("__name__", "up"), ("job", "api")]),
+                samples: vec![(120_000, SampleValue::Float(120_000.0))],
+            }])
     );
-    assert_eq!(
-        result,
-        QueryResult::RangeMatrix(vec![RangeSeries {
-            labels: labels(&[("__name__", "up"), ("job", "api")]),
-            samples: vec![
-                (0, SampleValue::Float(1.0)),
-                (120_000, SampleValue::Float(120_000.0)),
-            ],
-        }])
+    assert2::assert!(
+        result
+            == QueryResult::RangeMatrix(vec![RangeSeries {
+                labels: labels(&[("__name__", "up"), ("job", "api")]),
+                samples: vec![
+                    (0, SampleValue::Float(1.0)),
+                    (120_000, SampleValue::Float(120_000.0)),
+                ],
+            }])
     );
 }
 
@@ -1214,7 +1194,7 @@ async fn frontend_range_execution_dispatches_subqueries_concurrently() {
     )
     .unwrap();
     let width = planned.len();
-    assert!(width >= 2, "test needs multiple sub-queries, got {width}");
+    assert2::assert!(width >= 2);
 
     let executor = ConcurrencyProbeExecutor::new(width);
     let cache = QueryFrontendCache::default();
@@ -1236,7 +1216,7 @@ async fn frontend_range_execution_dispatches_subqueries_concurrently() {
     dispatched.sort_by_key(|query| query.start_ms);
     let mut expected = planned.clone();
     expected.sort_by_key(|query| query.start_ms);
-    assert_eq!(dispatched, expected);
+    assert2::assert!(dispatched == expected);
 
     // Stitched result is identical to a deterministic sequential merge,
     // independent of completion order.
@@ -1251,7 +1231,7 @@ async fn frontend_range_execution_dispatches_subqueries_concurrently() {
     }
     let sequential_merge =
         merge_range_query_results_with_reducer(sequential, QueryShardReducer::First).unwrap();
-    assert_eq!(stitched, sequential_merge);
+    assert2::assert!(stitched == sequential_merge);
 }
 
 #[tokio::test]
@@ -1296,15 +1276,15 @@ async fn frontend_range_execution_runs_against_promql_engine() {
     .await
     .unwrap();
 
-    assert_eq!(
-        result,
-        QueryResult::RangeMatrix(vec![RangeSeries {
-            labels: labels(&[("__name__", "up"), ("job", "api")]),
-            samples: vec![
-                (0, SampleValue::Float(1.0)),
-                (60_000, SampleValue::Float(2.0)),
-                (120_000, SampleValue::Float(3.0)),
-            ],
-        }])
+    assert2::assert!(
+        result
+            == QueryResult::RangeMatrix(vec![RangeSeries {
+                labels: labels(&[("__name__", "up"), ("job", "api")]),
+                samples: vec![
+                    (0, SampleValue::Float(1.0)),
+                    (60_000, SampleValue::Float(2.0)),
+                    (120_000, SampleValue::Float(3.0)),
+                ],
+            }])
     );
 }

@@ -87,7 +87,7 @@ impl From<PprofProfile> for crate::proto::Profile {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use prost::Message;
 
     use super::*;
@@ -117,8 +117,8 @@ mod tests {
         let bytes = sample_pprof().encode_to_vec();
         let profile = PprofProfile::decode(&bytes).unwrap();
 
-        assert!(profile.inner() == &sample_pprof());
-        assert!(
+        assert2::assert!(profile.inner() == &sample_pprof());
+        assert2::assert!(
             crate::proto::Profile::decode(profile.encode().as_slice()).unwrap() == sample_pprof()
         );
     }
@@ -127,7 +127,7 @@ mod tests {
     fn invalid_bytes_report_decode_error() {
         let error = PprofProfile::decode(&[0xff]).unwrap_err();
 
-        assert!(matches!(error, ProfileError::Decode(_)));
+        assert2::assert!(matches!(error, ProfileError::Decode(_)));
     }
 
     #[test]
@@ -135,7 +135,7 @@ mod tests {
         let inner = sample_pprof();
         let profile = PprofProfile::from(inner.clone());
 
-        assert!(crate::proto::Profile::from(profile) == inner);
+        assert2::assert!(crate::proto::Profile::from(profile) == inner);
     }
 
     #[test]
@@ -143,18 +143,22 @@ mod tests {
         let inner = sample_pprof();
         let profile = PprofProfile::from(inner.clone());
 
-        check!(profile.string(1) == Some("cpu"));
-        check!(profile.string(-1).is_none());
-        check!(profile.string(99).is_none());
-        check!(profile.sample_types() == vec![("cpu".to_string(), "nanoseconds".to_string())]);
-        check!(profile.period_type_strings() == ("wall".to_string(), "milliseconds".to_string()));
-        check!(
+        assert2::assert!(profile.string(1) == Some("cpu"));
+        assert2::assert!(profile.string(-1) == None);
+        assert2::assert!(profile.string(99) == None);
+        assert2::assert!(
+            profile.sample_types() == vec![("cpu".to_string(), "nanoseconds".to_string())]
+        );
+        assert2::assert!(
+            profile.period_type_strings() == ("wall".to_string(), "milliseconds".to_string())
+        );
+        assert2::assert!(
             profile.samples()
-                == vec![crate::proto::Sample {
+                == &[crate::proto::Sample {
                     location_id: vec![1],
                     value: vec![42],
                     label: Vec::new(),
-                }]
+                }][..]
         );
         check!(profile.into_inner() == inner);
     }

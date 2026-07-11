@@ -166,7 +166,7 @@ impl ShardedTraceBloom {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -184,7 +184,7 @@ mod tests {
             b.insert(&tid(n));
         }
         for n in 0..64_u8 {
-            assert!(b.maybe_contains(&tid(n)));
+            assert2::assert!(b.maybe_contains(&tid(n)));
         }
     }
 
@@ -206,21 +206,21 @@ mod tests {
             }
         }
         let rate = f64::from(fp) / f64::from(probes);
-        assert!(rate < 0.05);
+        assert2::assert!(rate < 0.05);
     }
 
     #[test]
     fn shard_is_fnv_mod_count() {
         let b = ShardedTraceBloom::new(16, 64, 0.01);
         let t = tid(42);
-        assert!(b.shard_of(&t) == (fnv1_32(&t) as usize) % 16);
+        assert2::assert!(b.shard_of(&t) == (fnv1_32(&t) as usize) % 16);
     }
 
     #[test]
     fn match_all_bloom_has_no_false_negatives() {
         let b = ShardedTraceBloom::match_all_with_tempo_defaults();
         for n in 0..=255_u8 {
-            assert!(b.maybe_contains(&tid(n)));
+            assert2::assert!(b.maybe_contains(&tid(n)));
         }
     }
 
@@ -228,7 +228,7 @@ mod tests {
     fn fnv1_32_is_stable() {
         let h = fnv1_32(&[0_u8]);
         let expected = 2_166_136_261_u32.wrapping_mul(16_777_619);
-        assert!(h == expected);
+        assert2::assert!(h == expected);
     }
 
     #[test]
@@ -240,10 +240,10 @@ mod tests {
         let h0 = 2_166_136_261_u32;
         let h1 = h0.wrapping_mul(PRIME) ^ 0x01;
         let expected = h1.wrapping_mul(PRIME) ^ 0xFF;
-        assert!(fnv1_32(&[0x01, 0xFF]) == expected);
+        assert2::assert!(fnv1_32(&[0x01, 0xFF]) == expected);
         // Guard: with `|=` the result would be h1.mul(PRIME) | 0xFF, which differs.
         let or_variant = h1.wrapping_mul(PRIME) | 0xFF;
-        assert!(expected != or_variant);
+        assert2::assert!(expected != or_variant);
     }
 
     #[test]
@@ -260,8 +260,8 @@ mod tests {
         // `&=` and `|=` produce different hashes for the same input.
         let and_variant = ((h0 & 0x01).wrapping_mul(PRIME) & 0xFF).wrapping_mul(PRIME);
         let or_variant = ((h0 | 0x01).wrapping_mul(PRIME) | 0xFF).wrapping_mul(PRIME);
-        assert!(expected != and_variant);
-        assert!(expected != or_variant);
+        assert2::assert!(expected != and_variant);
+        assert2::assert!(expected != or_variant);
     }
 
     #[test]
@@ -271,7 +271,7 @@ mod tests {
         // probe positions. Choose a trace id whose fnv1a hash has its low bit
         // SET so `| 1` and `^ 1` actually diverge, then pin the exact probes.
         let trace_id = tid(3);
-        assert!(fnv1a_32(&trace_id) & 1 == 1);
+        assert2::assert!(fnv1a_32(&trace_id) & 1 == 1);
 
         let shard = BloomShard::new(64, 0.01);
         let h1 = u64::from(fnv1_32(&trace_id));
@@ -280,7 +280,7 @@ mod tests {
             .map(|i| h1.wrapping_add(i.wrapping_mul(h2)) % shard.num_bits)
             .collect();
         let got: Vec<u64> = shard.probes(&trace_id).collect();
-        assert!(got == expected);
+        assert2::assert!(got == expected);
 
         // The `& 1` and `^ 1` variants give a different probe sequence.
         let h2_and = u64::from(fnv1a_32(&trace_id)) & 1;
@@ -291,8 +291,8 @@ mod tests {
         let xor_variant: Vec<u64> = (0..u64::from(shard.k))
             .map(|i| h1.wrapping_add(i.wrapping_mul(h2_xor)) % shard.num_bits)
             .collect();
-        assert!(expected != and_variant);
-        assert!(expected != xor_variant);
+        assert2::assert!(expected != and_variant);
+        assert2::assert!(expected != xor_variant);
     }
 
     #[test]
@@ -301,29 +301,30 @@ mod tests {
         b.insert(&tid(1));
         let json = serde_json::to_vec(&b).unwrap();
         let back: ShardedTraceBloom = serde_json::from_slice(&json).unwrap();
-        assert!(back.maybe_contains(&tid(1)));
+        assert2::assert!(back.maybe_contains(&tid(1)));
     }
 
     #[test]
     fn validate_accepts_constructed_bloom() {
         let b = ShardedTraceBloom::new(4, 32, 0.01);
-        assert!(b.validate().is_ok());
+        assert2::assert!(b.validate().is_ok());
     }
 
     #[test]
     fn validate_rejects_corrupt_deserialized_blooms() {
-        // num_bits == 0 → divide-by-zero on probe.
-        let zero_bits: ShardedTraceBloom =
-            serde_json::from_str(r#"{"shards":[{"bits":[],"num_bits":0,"k":1}]}"#).unwrap();
-        assert!(zero_bits.validate().is_err());
-
-        // Empty shards → divide-by-zero in shard_of.
-        let no_shards: ShardedTraceBloom = serde_json::from_str(r#"{"shards":[]}"#).unwrap();
-        assert!(no_shards.validate().is_err());
-
-        // bits too short for num_bits → out-of-bounds index on lookup.
-        let short_bits: ShardedTraceBloom =
-            serde_json::from_str(r#"{"shards":[{"bits":[0],"num_bits":128,"k":1}]}"#).unwrap();
-        assert!(short_bits.validate().is_err());
+        for (_name, json) in [
+            (
+                "zero bit count",
+                r#"{"shards":[{"bits":[],"num_bits":0,"k":1}]}"#,
+            ),
+            ("no shards", r#"{"shards":[]}"#),
+            (
+                "bit vector shorter than declared count",
+                r#"{"shards":[{"bits":[0],"num_bits":128,"k":1}]}"#,
+            ),
+        ] {
+            let bloom: ShardedTraceBloom = serde_json::from_str(json).unwrap();
+            assert2::assert!(bloom.validate().is_err());
+        }
     }
 }

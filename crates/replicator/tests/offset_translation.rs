@@ -172,36 +172,16 @@ async fn offset_translation_never_skips_unreplicated_data() {
     // ------------------------------------------ assertions: NEVER-SKIP property
 
     // a) The upstream offset equals the committed source offset (50).
-    assert_eq!(
-        checkpoint.upstream,
-        UpstreamOffset(50),
-        "upstream committed offset must be 50 (all records consumed); got {}",
-        checkpoint.upstream
-    );
+    assert2::assert!(checkpoint.upstream == UpstreamOffset(50));
 
     // b) The downstream offset is non-negative and does not exceed what has
     //    actually been replicated — this is the core never-skip invariant.
-    assert!(
-        checkpoint.downstream >= DownstreamOffset(0),
-        "downstream offset must be >= 0; got {}",
-        checkpoint.downstream
-    );
-    assert!(
-        checkpoint.downstream <= DownstreamOffset(replicated_count),
-        "NEVER-SKIP VIOLATED: downstream={} exceeds replicated_count={}",
-        checkpoint.downstream,
-        replicated_count
-    );
+    assert2::assert!(checkpoint.downstream >= DownstreamOffset(0));
+    assert2::assert!(checkpoint.downstream <= DownstreamOffset(replicated_count));
 
     // c) The store's translate() output is consistent with what was written.
     let translated = store.translate("orders", PartitionIndex(0), CommittedOffset(50));
-    assert_eq!(
-        translated,
-        Some(checkpoint.downstream),
-        "store.translate(\"orders\", 0, 50) = {:?} but checkpoint.downstream = {}",
-        translated,
-        checkpoint.downstream
-    );
+    assert2::assert!(translated == Some(checkpoint.downstream));
 
     println!(
         "[offset_translation] PASS — upstream={} downstream={} replicated={} (never-skip held)",

@@ -77,9 +77,6 @@ mod tests {
         let batch = sample();
         let bytes = s.serialize("t", &batch);
         let back = s.deserialize("t", &bytes).unwrap();
-        check!(back.num_rows() == batch.num_rows());
-        check!(back.num_columns() == batch.num_columns());
-        check!(back.schema() == batch.schema());
         check!(back == batch);
     }
 
@@ -90,8 +87,7 @@ mod tests {
         let bytes = s.serialize("t", &sample());
         let reader = StreamReader::try_new(&bytes[..], None).unwrap();
         let batches: Vec<_> = reader.collect::<Result<_, _>>().unwrap();
-        check!(batches.len() == 1);
-        check!(batches[0].num_rows() == 2);
+        check!((batches.len(), batches[0].num_rows()) == (1, 2));
     }
 
     #[test]

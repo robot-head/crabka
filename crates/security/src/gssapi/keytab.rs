@@ -270,7 +270,6 @@ pub fn load_service_keys(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -333,7 +332,7 @@ mod tests {
         let kt = keytab(&[body]);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert!(
+        assert2::assert!(
             entries
                 == vec![KeytabKey {
                     components: vec!["kafka".to_string(), "localhost".to_string()],
@@ -345,7 +344,7 @@ mod tests {
         );
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
-        assert!(found.key == key);
+        assert2::assert!(found.key == key);
     }
 
     #[test]
@@ -383,12 +382,12 @@ mod tests {
         ]);
 
         let found = load_service_key(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("found");
-        assert!(found.kvno == 5);
-        assert!(found.key == key_v5);
+        assert2::assert!(found.kvno == 5);
+        assert2::assert!(&found.key == &key_v5);
 
         // Wrong service name -> NotFound.
         let err = load_service_key(&kt, "http", ENCTYPE_AES256_CTS_HMAC_SHA1_96).unwrap_err();
-        assert!(matches!(err, KeytabError::NotFound { .. }));
+        assert2::assert!(matches!(err, KeytabError::NotFound { .. }));
     }
 
     #[test]
@@ -446,7 +445,7 @@ mod tests {
         let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
         // One key per distinct SPN, ordered by component list. Highest kvno
         // wins for the duplicated SPN; aes128 decoy excluded.
-        assert!(
+        assert2::assert!(
             keys == vec![
                 KeytabKey {
                     components: vec!["kafka".to_string(), "host.docker.internal".to_string()],
@@ -490,7 +489,7 @@ mod tests {
         ]);
 
         let keys = load_service_keys(&kt, "kafka", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
-        assert!(
+        assert2::assert!(
             keys == vec![KeytabKey {
                 components: vec!["kafka".to_string(), "localhost".to_string()],
                 realm: "R".to_string(),
@@ -513,7 +512,7 @@ mod tests {
             kvno32: None,
         })]);
         let keys = load_service_keys(&kt, "http", ENCTYPE_AES256_CTS_HMAC_SHA1_96).expect("load");
-        assert!(keys.is_empty());
+        assert2::assert!(keys.is_empty());
     }
 
     #[test]
@@ -537,8 +536,7 @@ mod tests {
         kt.extend_from_slice(&good);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert!(entries.len() == 1, "hole must not produce an entry");
-        assert!(entries[0].key == key);
+        assert2::assert!(entries.iter().map(|entry| &entry.key).collect::<Vec<_>>() == vec![&key]);
     }
 
     #[test]
@@ -556,14 +554,13 @@ mod tests {
         kt.extend_from_slice(&[0x00, 0x00, 0x00]);
 
         let entries = parse_keytab(&kt).expect("parse");
-        assert!(entries.len() == 1);
-        assert!(entries[0].key == key);
+        assert2::assert!(entries.iter().map(|entry| &entry.key).collect::<Vec<_>>() == vec![&key]);
     }
 
     #[test]
     fn bad_magic_rejected() {
         let err = parse_keytab(&[0x05, 0x01, 0x00, 0x00]).unwrap_err();
-        assert!(matches!(err, KeytabError::BadMagic(0x0501)));
+        assert2::assert!(matches!(err, KeytabError::BadMagic(0x0501)));
     }
 
     #[test]
@@ -579,7 +576,7 @@ mod tests {
         });
         let mut kt = keytab(&[body]);
         kt.truncate(kt.len() - 10); // chop the tail of the entry
-        assert!(matches!(
+        assert2::assert!(matches!(
             parse_keytab(&kt),
             Err(KeytabError::Truncated { .. })
         ));

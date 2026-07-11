@@ -66,16 +66,13 @@ mod tests {
         fs::write(content.join("ignore.txt"), "OLD").unwrap();
 
         let changed = super::sync_snippets(&content, &crates).unwrap();
-        assert_eq!(changed, 1);
+        assert2::assert!(changed == 1);
         let out = fs::read_to_string(&md).unwrap();
-        assert!(out.contains("```rust\nlet z = 9;\n```"));
-        assert!(!out.contains("OLD"));
-        assert_eq!(
-            fs::read_to_string(content.join("ignore.txt")).unwrap(),
-            "OLD"
-        );
+        assert2::assert!(out.contains("```rust\nlet z = 9;\n```"));
+        assert2::assert!(!out.contains("OLD"));
+        assert2::assert!(fs::read_to_string(content.join("ignore.txt")).unwrap() == "OLD");
 
         // Second run is a no-op: already in sync.
-        assert_eq!(super::sync_snippets(&content, &crates).unwrap(), 0);
+        assert2::assert!(super::sync_snippets(&content, &crates).unwrap() == 0);
     }
 }

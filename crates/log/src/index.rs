@@ -31,7 +31,7 @@ struct OffsetEntryRaw {
     position: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<OffsetEntryRaw>() == OFFSET_ENTRY_SIZE);
+const _: [(); OFFSET_ENTRY_SIZE] = [(); std::mem::size_of::<OffsetEntryRaw>()];
 
 #[derive(Debug)]
 pub struct OffsetIndex {
@@ -148,7 +148,7 @@ impl OffsetIndex {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::tempdir;
 
     use super::*;
@@ -161,8 +161,14 @@ mod tests {
         idx.append(0, 0).unwrap();
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
-        for (offset, want) in [(50, 0), (100, 4096), (150, 4096), (200, 8192), (9999, 8192)] {
-            check!(idx.lookup(offset) == want, "offset={offset}");
+        for (name, offset, want) in [
+            ("floor first", 50, 0),
+            ("exact middle", 100, 4096),
+            ("floor middle", 150, 4096),
+            ("exact last", 200, 8192),
+            ("past last", 9999, 8192),
+        ] {
+            check!(idx.lookup(offset) == want, "case {name}: offset={offset}");
         }
     }
 
@@ -171,8 +177,9 @@ mod tests {
         let dir = tempdir().unwrap();
         let path = dir.path().join("00000000000000000000.index");
         let idx = OffsetIndex::open(&path).unwrap();
-        assert!(idx.lookup(0) == 0);
-        assert!(idx.lookup(1000) == 0);
+        for (_name, offset) in [("zero", 0), ("positive", 1000)] {
+            assert2::assert!(idx.lookup(offset) == 0);
+        }
     }
 
     #[test]
@@ -186,8 +193,8 @@ mod tests {
             idx.flush().unwrap();
         }
         let idx = OffsetIndex::open(&path).unwrap();
-        assert!(idx.entry_count() == 2);
-        assert!(idx.lookup(100) == 4096);
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.lookup(100) == 4096);
     }
 
     #[test]
@@ -212,9 +219,9 @@ mod tests {
         drop(f);
 
         let idx = OffsetIndex::open(&path).unwrap();
-        check!(idx.entry_count() == 2);
-        check!(idx.last_entry() == Some((100, 4096)));
-        check!(idx.lookup(150) == 4096);
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.last_entry() == Some((100, 4096)));
+        assert2::assert!(idx.lookup(150) == 4096);
     }
 
     #[test]
@@ -225,13 +232,16 @@ mod tests {
         idx.append(0, 0).unwrap();
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
-        for (offset, want) in [
-            (100, Some(4096)), // exact
-            (150, Some(8192)), // ceiling
-            (0, Some(0)),
-            (201, None), // past last
+        for (name, offset, want) in [
+            ("exact", 100, Some(4096)),
+            ("ceiling", 150, Some(8192)),
+            ("first", 0, Some(0)),
+            ("past last", 201, None),
         ] {
-            check!(idx.position_at_or_after(offset) == want, "offset={offset}");
+            check!(
+                idx.position_at_or_after(offset) == want,
+                "case {name}: offset={offset}"
+            );
         }
     }
 
@@ -244,8 +254,8 @@ mod tests {
         idx.append(100, 4096).unwrap();
         idx.append(200, 8192).unwrap();
         idx.truncate_by_position(8192).unwrap();
-        assert!(idx.entry_count() == 2);
-        assert!(idx.last_entry() == Some((100, 4096)));
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.last_entry() == Some((100, 4096)));
     }
 }
 
@@ -262,7 +272,7 @@ struct TimeEntryRaw {
     relative_offset: U32<BigEndian>,
 }
 
-const _: () = assert!(std::mem::size_of::<TimeEntryRaw>() == TIME_ENTRY_SIZE);
+const _: [(); TIME_ENTRY_SIZE] = [(); std::mem::size_of::<TimeEntryRaw>()];
 
 #[derive(Debug)]
 pub struct TimeIndex {
@@ -367,7 +377,7 @@ impl TimeIndex {
 
 #[cfg(test)]
 mod time_tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use tempfile::tempdir;
 
     use super::*;
@@ -380,14 +390,14 @@ mod time_tests {
         idx.append(1_000_000, 0).unwrap();
         idx.append(2_000_000, 100).unwrap();
         idx.append(3_000_000, 200).unwrap();
-        for (ts, want) in [
-            (0, 0),
-            (1_500_000, 0),
-            (2_000_000, 100),
-            (2_500_000, 100),
-            (5_000_000, 200),
+        for (name, ts, want) in [
+            ("before first", 0, 0),
+            ("floor first", 1_500_000, 0),
+            ("exact middle", 2_000_000, 100),
+            ("floor middle", 2_500_000, 100),
+            ("past last", 5_000_000, 200),
         ] {
-            check!(idx.lookup(ts) == want, "ts={ts}");
+            check!(idx.lookup(ts) == want, "case {name}: ts={ts}");
         }
     }
 
@@ -402,7 +412,7 @@ mod time_tests {
             idx.flush().unwrap();
         }
         let idx = TimeIndex::open(&path).unwrap();
-        assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.entry_count() == 2);
     }
 
     #[test]
@@ -422,8 +432,8 @@ mod time_tests {
         drop(f);
 
         let idx = TimeIndex::open(&path).unwrap();
-        check!(idx.entry_count() == 2);
-        check!(idx.last_entry() == Some((2_000, 100)));
-        check!(idx.lookup(2_500) == 100);
+        assert2::assert!(idx.entry_count() == 2);
+        assert2::assert!(idx.last_entry() == Some((2_000, 100)));
+        assert2::assert!(idx.lookup(2_500) == 100);
     }
 }

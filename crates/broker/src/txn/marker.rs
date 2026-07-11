@@ -64,15 +64,18 @@ pub fn build_marker_batch(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn commit_marker_attribute_bits_set() {
         let b = build_marker_batch(ProducerId(1000), 0, Offset(7), MarkerType::Commit);
-        assert!(b.attributes.is_transactional());
-        assert!(b.attributes.is_control_batch());
+        assert2::assert!(
+            (
+                b.attributes.is_transactional(),
+                b.attributes.is_control_batch(),
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -80,13 +83,13 @@ mod tests {
         let b = build_marker_batch(ProducerId(1000), 0, Offset(0), MarkerType::Abort);
         let key = b.records[0].key.as_ref().unwrap();
         // i16 BE version 0, then i16 BE control type 0 (abort).
-        assert!(&key[..] == &[0u8, 0, 0, 0][..]);
+        assert2::assert!(&key[..] == &[0u8, 0, 0, 0][..]);
     }
 
     #[test]
     fn commit_marker_key_type_is_one() {
         let b = build_marker_batch(ProducerId(1000), 0, Offset(0), MarkerType::Commit);
         let key = b.records[0].key.as_ref().unwrap();
-        assert!(&key[2..] == &1i16.to_be_bytes());
+        assert2::assert!(&key[2..] == &1i16.to_be_bytes());
     }
 }

@@ -199,7 +199,6 @@ pub fn apply_sort_by_label(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -227,7 +226,7 @@ mod tests {
         .unwrap();
         // `dst` gets the capture-group expansion; `__name__` is preserved
         // (label_replace does not drop it).
-        assert!(
+        assert2::assert!(
             out == vec![sample(
                 &[("__name__", "m"), ("src", "a-b"), ("dst", "a")],
                 1.0
@@ -240,7 +239,7 @@ mod tests {
         let input = vec![sample(&[("__name__", "m"), ("src", "zzz")], 1.0)];
         let out = apply_label_replace(input.clone(), "dst", "$1", "src", "(\\d+)").unwrap();
         // No match: series unchanged, no `dst` label added.
-        assert!(out == input);
+        assert2::assert!(out == input);
     }
 
     #[test]
@@ -254,7 +253,7 @@ mod tests {
         )
         .unwrap();
         // The interpreter's `Labels::insert` keeps an empty-valued label.
-        assert!(out[0].labels.get("dst") == Some(""));
+        assert2::assert!(out[0].labels.get("dst") == Some(""));
     }
 
     #[test]
@@ -264,8 +263,8 @@ mod tests {
         // would wrongly match and write `dst`.
         let input = vec![sample(&[("__name__", "m"), ("src", "xfooy")], 1.0)];
         let out = apply_label_replace(input.clone(), "dst", "$0", "src", "foo").unwrap();
-        assert!(out == input);
-        assert!(out[0].labels.get("dst").is_none());
+        assert2::assert!(out == input);
+        assert2::assert!(out[0].labels.get("dst").is_none());
 
         // The same pattern matches when it spans the entire value.
         let out = apply_label_replace(
@@ -276,14 +275,14 @@ mod tests {
             "foo",
         )
         .unwrap();
-        assert!(out[0].labels.get("dst") == Some("foo"));
+        assert2::assert!(out[0].labels.get("dst") == Some("foo"));
     }
 
     #[test]
     fn label_replace_invalid_regex_errors() {
         let err = apply_label_replace(vec![sample(&[("src", "x")], 1.0)], "dst", "$1", "src", "(")
             .unwrap_err();
-        assert!(matches!(err, PromqlError::Plan(_)));
+        assert2::assert!(matches!(err, PromqlError::Plan(_)));
     }
 
     #[test]
@@ -294,7 +293,7 @@ mod tests {
             "-",
             &["a".to_string(), "b".to_string()],
         );
-        assert!(out[0].labels.get("dst") == Some("1-2"));
+        assert2::assert!(out[0].labels.get("dst") == Some("1-2"));
     }
 
     #[test]
@@ -305,7 +304,7 @@ mod tests {
             ",",
             &["a".to_string(), "missing".to_string()],
         );
-        assert!(out[0].labels.get("dst") == Some("1,"));
+        assert2::assert!(out[0].labels.get("dst") == Some("1,"));
     }
 
     /// The series whose `l` label spells the post-sort order, by label.
@@ -326,8 +325,8 @@ mod tests {
             SortOrder::Ascending,
         );
         // 1.0 < 2.0 < NaN (total_cmp puts NaN last for ascending).
-        assert!(order(&out) == vec!["a", "b", "n"]);
-        assert!(matches!(out[2].value, SampleValue::Float(v) if v.is_nan()));
+        assert2::assert!(order(&out) == vec!["a", "b", "n"]);
+        assert2::assert!(matches!(out[2].value, SampleValue::Float(v) if v.is_nan()));
     }
 
     #[test]
@@ -336,7 +335,7 @@ mod tests {
             vec![sample(&[("l", "a")], 1.0), sample(&[("l", "b")], 2.0)],
             SortOrder::Descending,
         );
-        assert!(order(&out) == vec!["b", "a"]);
+        assert2::assert!(order(&out) == vec!["b", "a"]);
     }
 
     #[test]
@@ -345,7 +344,7 @@ mod tests {
             vec![sample(&[("l", "z")], 1.0), sample(&[("l", "a")], 1.0)],
             SortOrder::Ascending,
         );
-        assert!(out[0].labels.get("l") == Some("a"));
-        assert!(out[1].labels.get("l") == Some("z"));
+        assert2::assert!(out[0].labels.get("l") == Some("a"));
+        assert2::assert!(out[1].labels.get("l") == Some("z"));
     }
 }

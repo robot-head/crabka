@@ -224,44 +224,48 @@ mod tests {
         };
         apply_record(&store, SchemaRecord::Schema(k, v));
         apply_record(&store, SchemaRecord::Noop);
-        assert_eq!(
-            store.read().versions("av-value", false).unwrap(),
-            vec![SchemaVersion(1)]
-        );
-        assert_eq!(
-            store.read().schema_by_id(SchemaId(1), false).unwrap().1,
-            "{\"type\":\"int\"}"
+        let snapshot = store.read();
+        assert2::assert!(snapshot.versions("av-value", false).unwrap() == vec![SchemaVersion(1)]);
+        assert2::assert!(
+            snapshot.schema_by_id(SchemaId(1), false).unwrap().1 == "{\"type\":\"int\"}".to_owned()
         );
     }
 
     #[test]
     fn fetch_transport_errors_force_reader_reconnect() {
-        assert_eq!(
-            fetch_error_action(&ClientError::Disconnected),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Timeout(Duration::from_millis(1))),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Connect {
-                addr: "127.0.0.1:9092".parse().unwrap(),
-                source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
-            }),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Io(io::Error::new(
-                io::ErrorKind::ConnectionReset,
-                "reset",
-            ))),
-            FetchErrorAction::Reconnect
-        );
-        assert_eq!(
-            fetch_error_action(&ClientError::Server { error_code: 6 }),
-            FetchErrorAction::RetrySameConnection
-        );
+        let cases = [
+            (
+                "disconnected",
+                ClientError::Disconnected,
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "timeout",
+                ClientError::Timeout(Duration::from_millis(1)),
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "connect",
+                ClientError::Connect {
+                    addr: "127.0.0.1:9092".parse().unwrap(),
+                    source: io::Error::new(io::ErrorKind::ConnectionRefused, "refused"),
+                },
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "io",
+                ClientError::Io(io::Error::new(io::ErrorKind::ConnectionReset, "reset")),
+                FetchErrorAction::Reconnect,
+            ),
+            (
+                "server",
+                ClientError::Server { error_code: 6 },
+                FetchErrorAction::RetrySameConnection,
+            ),
+        ];
+        for (_name, error, expected) in cases {
+            assert2::assert!(fetch_error_action(&error) == expected);
+        }
     }
 
     #[test]
@@ -296,7 +300,7 @@ mod tests {
                 }),
             ),
         );
-        assert_eq!(store.read().global_mode(), "READONLY");
+        assert2::assert!(store.read().global_mode() == "READONLY");
         apply_record(
             &store,
             SchemaRecord::Mode(
@@ -308,7 +312,7 @@ mod tests {
                 None,
             ),
         );
-        assert_eq!(store.read().global_mode(), "READWRITE");
+        assert2::assert!(store.read().global_mode() == "READWRITE");
         // subject mode set then clear
         apply_record(
             &store,
@@ -323,7 +327,7 @@ mod tests {
                 }),
             ),
         );
-        assert_eq!(store.read().subject_mode("s"), Some("IMPORT"));
+        assert2::assert!(store.read().subject_mode("s") == Some("IMPORT"));
         apply_record(
             &store,
             SchemaRecord::Mode(
@@ -335,7 +339,7 @@ mod tests {
                 None,
             ),
         );
-        assert_eq!(store.read().subject_mode("s"), None);
+        assert2::assert!(store.read().subject_mode("s") == None);
         // soft-delete the subject, then permanently delete its version via a tombstone
         apply_record(
             &store,
@@ -351,11 +355,11 @@ mod tests {
                 },
             ),
         );
-        assert!(store.read().versions("s", false).is_none());
+        assert2::assert!(store.read().versions("s", false).is_none());
         apply_record(
             &store,
             SchemaRecord::Tombstone(SchemaKey::new("s", SchemaVersion(1))),
         );
-        assert!(store.read().versions("s", true).is_none());
+        assert2::assert!(store.read().versions("s", true).is_none());
     }
 }

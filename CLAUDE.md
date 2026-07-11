@@ -26,6 +26,11 @@ Follow the style guides in [`docs/style_guides/`](docs/style_guides/README.md) �
 
 Don't make style-only sweeps across untouched files — bring a file into line with the guides only when you're already editing it, keeping the tidy-up proportionate to the change.
 
+### Assertions and Clippy
+
+- Never add `#[allow(clippy::...)]` (or any equivalent Clippy suppression). Fix every Clippy warning in the code, regardless of the effort required.
+- Never use Rust's plain `assert!`, `assert_eq!`, or `assert_ne!` macros. Use the `assert2` crate's `assert!` macro instead, including for equality and inequality comparisons.
+
 ## Execution
 
 When executing implementation plans, always use **subagent-driven development in parallel batches** where the per-task file sets don't overlap. The plan groups tasks into batches; dispatch all tasks within a batch concurrently (single message, multiple Agent calls), wait for the batch to complete, review, then move to the next batch. Sequential dispatch one-task-at-a-time is wasted wall-clock — use it only when later tasks genuinely depend on earlier ones in the same batch.

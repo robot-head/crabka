@@ -262,7 +262,6 @@ async fn run_loop(
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use assert2::assert;
     use bytes::{Bytes, BytesMut};
     use crabka_metadata::{MetadataRecord, TopicRecord, to_kraft_values};
     use crabka_protocol::{
@@ -434,7 +433,7 @@ mod tests {
             (4, crabka_raft::NodeId(2)),
         ];
         for (idx, expected_id) in cases {
-            assert!(voter_at(&voters, idx).0 == expected_id, "idx {idx}");
+            assert2::assert!(voter_at(&voters, idx).0 == expected_id);
         }
     }
 
@@ -445,7 +444,7 @@ mod tests {
 
         let new_offset = apply_fetch_records(6, &records, &image_tx);
 
-        assert!(new_offset == 7);
+        assert2::assert!(new_offset == 7);
     }
 
     #[test]
@@ -455,8 +454,8 @@ mod tests {
 
         let new_offset = apply_fetch_records(4, &records, &image_tx);
 
-        assert!(new_offset == 5);
-        assert!(image_tx.borrow().topic("offset-topic").is_some());
+        assert2::assert!(new_offset == 5);
+        assert2::assert!(image_tx.borrow().topic("offset-topic").is_some());
     }
 
     #[tokio::test]
@@ -473,7 +472,7 @@ mod tests {
 
         observer.cancel().await;
 
-        assert!(observer.task.lock().await.is_none());
+        assert2::assert!(observer.task.lock().await.is_none());
     }
 
     #[tokio::test]
@@ -518,7 +517,7 @@ mod tests {
             }
             tokio::task::yield_now().await;
         }
-        assert!(saw_first_fetch, "observer should issue the first fetch");
+        assert2::assert!(saw_first_fetch);
         let after_first_fetch = fetches.load(Ordering::SeqCst);
 
         // The empty fetch left the observer caught up, so it must now be parked
@@ -533,13 +532,10 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(
-            parked,
-            "observer should park on the poll-interval sleep after an empty fetch",
-        );
+        assert2::assert!(parked);
 
-        assert!(fetches.load(Ordering::SeqCst) == after_first_fetch);
-        assert!(dial_count.load(Ordering::SeqCst) == after_first_fetch);
+        assert2::assert!(fetches.load(Ordering::SeqCst) == after_first_fetch);
+        assert2::assert!(dial_count.load(Ordering::SeqCst) == after_first_fetch);
 
         observer.cancel().await;
         mock.stop();
@@ -586,15 +582,12 @@ mod tests {
             if img_rx.borrow().topic("observed").is_some() {
                 break;
             }
-            assert!(
-                tokio::time::Instant::now() <= deadline,
-                "observer did not replicate topic within 5s"
-            );
+            assert2::assert!(tokio::time::Instant::now() <= deadline);
             let _ = tokio::time::timeout(Duration::from_millis(200), img_rx.changed()).await;
         }
 
-        assert!(observer.current_image().topic("observed").is_some());
-        assert!(
+        assert2::assert!(observer.current_image().topic("observed").is_some());
+        assert2::assert!(
             client_ids
                 .lock()
                 .unwrap()

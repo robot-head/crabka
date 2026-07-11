@@ -172,8 +172,10 @@ mod tests {
             time_ms: 0,
         };
         let r = AuditRecord::from_event(&authn, &product);
-        check!(hdr(&r, "principal").as_deref() == Some("alice"));
-        check!(hdr(&r, "status").as_deref() == Some("failure"));
+        check!(
+            (hdr(&r, "principal"), hdr(&r, "status"))
+                == (Some("alice".into()), Some("failure".into()))
+        );
         let admin = AuditEvent::AdminOperation {
             outcome: AuditOutcome::Success,
             principal: AuditPrincipal {
@@ -189,8 +191,10 @@ mod tests {
             time_ms: 0,
         };
         let r = AuditRecord::from_event(&admin, &product);
-        check!(hdr(&r, "principal").as_deref() == Some("bob"));
-        check!(hdr(&r, "status").as_deref() == Some("success"));
+        check!(
+            (hdr(&r, "principal"), hdr(&r, "status"))
+                == (Some("bob".into()), Some("success".into()))
+        );
         let deny = AuditEvent::AuthorizationDenied {
             principal: AuditPrincipal {
                 name: "carol".into(),
@@ -206,15 +210,16 @@ mod tests {
             time_ms: 0,
         };
         let r = AuditRecord::from_event(&deny, &product);
-        check!(hdr(&r, "principal").as_deref() == Some("carol"));
-        check!(hdr(&r, "status").as_deref() == Some("denied"));
+        check!(
+            (hdr(&r, "principal"), hdr(&r, "status"))
+                == (Some("carol".into()), Some("denied".into()))
+        );
         let life = AuditEvent::Lifecycle {
             kind: LifecycleKind::BrokerStarted,
             node_id: 1,
             time_ms: 0,
         };
         let r = AuditRecord::from_event(&life, &product);
-        check!(hdr(&r, "principal") == None);
-        check!(hdr(&r, "status") == None);
+        check!((hdr(&r, "principal"), hdr(&r, "status")) == (None, None));
     }
 }

@@ -10,7 +10,7 @@ fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, 
     )
     .unwrap();
     let actual = serde_json::to_value(wire).unwrap();
-    assert_eq!(actual, expected, "wire topology != JVM fixture {fixture}");
+    assert2::assert!(actual == expected);
 }
 
 #[test]
@@ -80,10 +80,7 @@ fn cogroup_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/cogroup/behavior.json").unwrap(),
     )
     .unwrap();
-    assert_eq!(
-        got, golden,
-        "cogroup output sequence != JVM behavioral golden"
-    );
+    assert2::assert!(got == golden);
 }
 
 /// The default-serde `aggregate(init, store_name)` convenience (no explicit
@@ -114,7 +111,7 @@ fn cogroup_default_serde_aggregate_runs() {
         got.push((k, v));
     }
     // in1 "xx" (len 2) → 2; in2 "z" (+1) → 3.
-    assert_eq!(got, vec![("a".to_string(), 2), ("a".to_string(), 3)]);
+    assert2::assert!(got == vec![("a".to_string(), 2), ("a".to_string(), 3)]);
 }
 
 /// `Materialized::with_logging(false)` registers the shared cogroup store with no
@@ -136,8 +133,5 @@ fn cogroup_logging_false_omits_changelog() {
         .to_explicit("out", Produced::with(StringSerde, I64Serde));
     let wire = b.build_optimized("app").unwrap().to_wire();
     let json = serde_json::to_string(&serde_json::to_value(&wire).unwrap()).unwrap();
-    assert!(
-        !json.contains("cg-store-changelog"),
-        "with_logging(false) must omit the shared-store changelog topic"
-    );
+    assert2::assert!(!json.contains("cg-store-changelog"));
 }

@@ -20,7 +20,7 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_protocol::{
@@ -217,15 +217,7 @@ async fn create_acls_super_user_can_provision_and_describe() {
     let create_resp = drive_create_acls_as_plain(addr, "admin", b"admin-secret", create_req)
         .await
         .expect("CreateAcls as super-user must succeed");
-    assert!(
-        create_resp.results.len() == 1,
-        "one result per creation: {create_resp:?}"
-    );
-    assert!(
-        create_resp.results[0].error_code == 0,
-        "super-user creation must return error_code=0, got {:?}",
-        create_resp.results[0]
-    );
+    assert2::assert!((create_resp.results.len(), create_resp.results[0].error_code) == (1, 0));
 
     // Describe with a permissive filter (resource_type=Topic, everything
     // else any/null) — must return exactly one resource entry carrying
@@ -236,29 +228,30 @@ async fn create_acls_super_user_can_provision_and_describe() {
             .expect("DescribeAcls as super-user must succeed");
     handle.shutdown().await;
 
-    assert!(
-        describe_resp.error_code == 0,
-        "DescribeAcls must succeed, got {describe_resp:?}"
-    );
-    assert!(
-        describe_resp.resources.len() == 1,
-        "expected exactly one matching resource, got {:?}",
-        describe_resp.resources
-    );
+    assert2::assert!((describe_resp.error_code, describe_resp.resources.len()) == (0, 1));
     let resource = &describe_resp.resources[0];
-    check!(resource.resource_type == RESOURCE_TYPE_TOPIC);
-    check!(resource.resource_name == "foo");
-    check!(resource.pattern_type == PATTERN_TYPE_LITERAL);
-    assert!(
-        resource.acls.len() == 1,
-        "expected exactly one ACL description, got {:?}",
-        resource.acls
-    );
     let acl = &resource.acls[0];
-    check!(acl.principal == "User:alice");
-    check!(acl.host == "*");
-    check!(acl.operation == OPERATION_READ);
-    check!(acl.permission_type == PERMISSION_ALLOW);
+    check!(
+        (
+            resource.resource_type,
+            resource.resource_name.as_str(),
+            resource.pattern_type,
+            resource.acls.len(),
+            acl.principal.as_str(),
+            acl.host.as_str(),
+            acl.operation,
+            acl.permission_type,
+        ) == (
+            RESOURCE_TYPE_TOPIC,
+            "foo",
+            PATTERN_TYPE_LITERAL,
+            1,
+            "User:alice",
+            "*",
+            OPERATION_READ,
+            PERMISSION_ALLOW,
+        )
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -287,12 +280,9 @@ async fn create_acls_non_super_user_rejected() {
         .expect("CreateAcls request must round-trip even when denied");
     handle.shutdown().await;
 
-    assert!(resp.results.len() == 2, "one result row per creation");
-    for (i, r) in resp.results.iter().enumerate() {
-        assert!(
-            r.error_code == 31, /* CLUSTER_AUTHORIZATION_FAILED */
-            "binding {i} must be denied with CLUSTER_AUTHORIZATION_FAILED, got {r:?}"
-        );
+    assert2::assert!(resp.results.len() == 2);
+    for r in resp.results.iter() {
+        assert2::assert!(r.error_code == 31);
     }
 }
 
@@ -315,9 +305,9 @@ async fn delete_acls_removes_matching() {
     let create_resp = drive_create_acls_as_plain(addr, "admin", b"admin-secret", create_req)
         .await
         .expect("provisioning CreateAcls must succeed");
-    assert!(create_resp.results.len() == 2);
+    assert2::assert!(create_resp.results.len() == 2);
     for r in &create_resp.results {
-        assert!(r.error_code == 0, "provisioning must succeed, got {r:?}");
+        assert2::assert!(r.error_code == 0);
     }
 
     // Delete only the Read-on-foo binding via a precisely-targeted filter.
@@ -337,23 +327,21 @@ async fn delete_acls_removes_matching() {
     let delete_resp = drive_delete_acls_as_plain(addr, "admin", b"admin-secret", delete_req)
         .await
         .expect("DeleteAcls must succeed");
-    assert!(
-        delete_resp.filter_results.len() == 1,
-        "one filter result row per filter"
-    );
-    assert!(
-        delete_resp.filter_results[0].error_code == 0,
-        "filter must succeed, got {:?}",
-        delete_resp.filter_results[0]
+    assert2::assert!(
+        (
+            delete_resp.filter_results.len(),
+            delete_resp.filter_results[0].error_code,
+        ) == (1, 0)
     );
     let matching = &delete_resp.filter_results[0].matching_acls;
-    assert!(
-        matching.len() == 1,
-        "exactly one ACL must match the precise filter, got {matching:?}"
+    assert2::assert!(
+        (
+            matching.len(),
+            matching[0].resource_name.as_str(),
+            matching[0].operation,
+            matching[0].error_code,
+        ) == (1, "foo", OPERATION_READ, 0)
     );
-    check!(matching[0].resource_name == "foo");
-    check!(matching[0].operation == OPERATION_READ);
-    check!(matching[0].error_code == 0);
 
     // Describe — only the Write-on-bar binding should remain.
     let describe_resp =
@@ -362,7 +350,7 @@ async fn delete_acls_removes_matching() {
             .expect("DescribeAcls must succeed");
     handle.shutdown().await;
 
-    assert!(describe_resp.error_code == 0);
+    assert2::assert!(describe_resp.error_code == 0);
     // Flatten all (resource, acl) pairs so the assertion doesn't depend
     // on whether the broker groups by resource or emits one resource per
     // ACL — the contract is "the deleted binding is gone, the other one
@@ -373,15 +361,8 @@ async fn delete_acls_removes_matching() {
             surviving.push((r.resource_name.clone(), a.operation, a.permission_type));
         }
     }
-    assert!(
-        surviving.len() == 1,
-        "exactly one binding must remain, got {surviving:?}"
-    );
-    assert!(
-        surviving[0] == ("bar".to_string(), OPERATION_WRITE, PERMISSION_ALLOW),
-        "the surviving binding must be Write-on-bar, got {:?}",
-        surviving[0]
-    );
+    assert2::assert!(surviving.len() == 1);
+    assert2::assert!(surviving[0] == ("bar".to_string(), OPERATION_WRITE, PERMISSION_ALLOW));
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -442,15 +423,13 @@ async fn produce_denied_without_topic_acl() {
     .expect("Produce must round-trip");
     handle.shutdown().await;
 
-    assert!(resp.responses.len() == 1, "one topic in response");
-    assert!(
-        resp.responses[0].partition_responses.len() == 1,
-        "one partition row in response"
-    );
     let p = &resp.responses[0].partition_responses[0];
-    assert!(
-        p.error_code == ERR_TOPIC_AUTHORIZATION_FAILED,
-        "alice has no Write ACL on foo, expected TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
+    assert2::assert!(
+        (
+            resp.responses.len(),
+            resp.responses[0].partition_responses.len(),
+            p.error_code,
+        ) == (1, 1, ERR_TOPIC_AUTHORIZATION_FAILED)
     );
 }
 
@@ -495,12 +474,13 @@ async fn produce_allowed_with_topic_write_acl() {
         .await
         .expect("Produce must round-trip");
 
-    assert!(resp.responses.len() == 1);
-    assert!(resp.responses[0].partition_responses.len() == 1);
     let p = &resp.responses[0].partition_responses[0];
-    assert!(
-        p.error_code == 0,
-        "alice has Write ACL on foo, expected error_code=0, got {p:?}"
+    assert2::assert!(
+        (
+            resp.responses.len(),
+            resp.responses[0].partition_responses.len(),
+            p.error_code,
+        ) == (1, 1, 0)
     );
 
     // Verify the record actually landed in the local log.
@@ -509,10 +489,7 @@ async fn produce_allowed_with_topic_write_acl() {
         .await
         .expect("foo-0 must be hosted on this broker");
     handle.shutdown().await;
-    assert!(
-        leo >= 1,
-        "log_end_offset must advance after a successful Produce, got {leo}"
-    );
+    assert2::assert!(leo >= 1);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -569,15 +546,13 @@ async fn fetch_denied_without_topic_read_acl() {
         .expect("Fetch must round-trip");
     handle.shutdown().await;
 
-    assert!(resp.responses.len() == 1, "one topic in response");
-    assert!(
-        resp.responses[0].partitions.len() == 1,
-        "one partition row in response"
-    );
     let p = &resp.responses[0].partitions[0];
-    assert!(
-        p.error_code == ERR_TOPIC_AUTHORIZATION_FAILED,
-        "alice has no Read ACL on foo, expected TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
+    assert2::assert!(
+        (
+            resp.responses.len(),
+            resp.responses[0].partitions.len(),
+            p.error_code,
+        ) == (1, 1, ERR_TOPIC_AUTHORIZATION_FAILED)
     );
 }
 
@@ -637,12 +612,7 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str, partitions: i32) {
     let resp = drive_create_topics_as_plain(addr, "admin", b"admin-secret", req)
         .await
         .expect("CreateTopics as super-user must round-trip");
-    assert!(resp.topics.len() == 1, "one topic in response");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics({name}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 async fn drive_create_topics_as_plain(
@@ -791,14 +761,8 @@ async fn metadata_silent_filter_on_fetch_all() {
         .iter()
         .filter_map(|t| t.name.as_deref())
         .collect();
-    assert!(
-        names.contains(&"t1"),
-        "t1 must be visible to alice, got {names:?}"
-    );
-    assert!(
-        !names.contains(&"t2"),
-        "t2 must be silently filtered out of fetch-all, got {names:?}"
-    );
+    assert2::assert!(names.contains(&"t1"));
+    assert2::assert!(!names.contains(&"t2"));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -848,12 +812,10 @@ async fn metadata_explicit_deny_on_named_topic() {
     .expect("Metadata must round-trip");
     handle.shutdown().await;
 
-    assert!(resp.topics.len() == 1, "one topic row in response");
+    assert2::assert!(resp.topics.len() == 1);
     let row = &resp.topics[0];
-    assert!(row.name.as_deref() == Some("t2"));
-    assert!(
-        row.error_code == ERR_TOPIC_AUTHORIZATION_FAILED,
-        "alice has no ACL on t2, expected TOPIC_AUTHORIZATION_FAILED (29), got {row:?}"
+    assert2::assert!(
+        (row.name.as_deref(), row.error_code) == (Some("t2"), ERR_TOPIC_AUTHORIZATION_FAILED)
     );
 }
 
@@ -892,10 +854,7 @@ async fn join_group_denied_without_group_read_acl() {
         drive_join_group_as_plain(addr, "alice", b"wonderland", join_group_request("cg-1"))
             .await
             .expect("JoinGroup must round-trip");
-    assert!(
-        denied.error_code == ERR_GROUP_AUTHORIZATION_FAILED,
-        "alice has no Group Read on cg-1, expected GROUP_AUTHORIZATION_FAILED (30), got {denied:?}"
-    );
+    assert2::assert!(denied.error_code == ERR_GROUP_AUTHORIZATION_FAILED);
 
     // Provision Allow Read Group LITERAL "cg-1" User:alice.
     handle
@@ -921,13 +880,8 @@ async fn join_group_denied_without_group_read_acl() {
     let bootstrap = retry_join_group_until_allowed(addr, "alice", b"wonderland", "cg-1")
         .await
         .expect("JoinGroup retry must round-trip");
-    assert!(
-        bootstrap.error_code == ERR_MEMBER_ID_REQUIRED,
-        "first authorized JoinGroup must return MEMBER_ID_REQUIRED (79) with a generated member_id, got {bootstrap:?}"
-    );
-    assert!(
-        !bootstrap.member_id.is_empty(),
-        "broker must return a non-empty generated member_id on MEMBER_ID_REQUIRED"
+    assert2::assert!(
+        (bootstrap.error_code, bootstrap.member_id.is_empty()) == (ERR_MEMBER_ID_REQUIRED, false)
     );
 
     // Second call with the generated member_id should complete the
@@ -939,10 +893,7 @@ async fn join_group_denied_without_group_read_acl() {
         .expect("second JoinGroup must round-trip");
     handle.shutdown().await;
 
-    assert!(
-        joined.error_code == 0,
-        "JoinGroup must succeed with alice's Group Read ACL on cg-1, got {joined:?}"
-    );
+    assert2::assert!(joined.error_code == 0);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -985,10 +936,7 @@ async fn init_producer_id_denied_without_txn_acl() {
         .expect("InitProducerId must round-trip");
     handle.shutdown().await;
 
-    assert!(
-        resp.error_code == ERR_TRANSACTIONAL_ID_AUTHORIZATION_FAILED,
-        "alice has no TransactionalId Write ACL on tx-1, expected TRANSACTIONAL_ID_AUTHORIZATION_FAILED (53), got {resp:?}"
-    );
+    assert2::assert!(resp.error_code == ERR_TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -1046,13 +994,9 @@ async fn implication_metadata_describes_after_read_acl() {
     .expect("Metadata must round-trip");
     handle.shutdown().await;
 
-    assert!(resp.topics.len() == 1, "one topic row in response");
+    assert2::assert!(resp.topics.len() == 1);
     let row = &resp.topics[0];
-    assert!(row.name.as_deref() == Some("foo"));
-    assert!(
-        row.error_code == 0,
-        "Read implies Describe, foo must be visible to alice with error_code=0, got {row:?}"
-    );
+    assert2::assert!((row.name.as_deref(), row.error_code) == (Some("foo"), 0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1097,13 +1041,9 @@ async fn implication_metadata_describes_after_write_acl() {
     .expect("Metadata must round-trip");
     handle.shutdown().await;
 
-    assert!(resp.topics.len() == 1, "one topic row in response");
+    assert2::assert!(resp.topics.len() == 1);
     let row = &resp.topics[0];
-    assert!(row.name.as_deref() == Some("foo"));
-    assert!(
-        row.error_code == 0,
-        "Write implies Describe, foo must be visible to alice with error_code=0, got {row:?}"
-    );
+    assert2::assert!((row.name.as_deref(), row.error_code) == (Some("foo"), 0));
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1132,12 +1072,7 @@ async fn multi_super_user_both_can_provision() {
     let admin_resp = drive_create_acls_as_plain(addr, "admin", b"admin-secret", admin_req)
         .await
         .expect("CreateAcls as admin must round-trip");
-    assert!(admin_resp.results.len() == 1);
-    assert!(
-        admin_resp.results[0].error_code == 0,
-        "admin is a super-user, CreateAcls must succeed: {:?}",
-        admin_resp.results[0]
-    );
+    assert2::assert!((admin_resp.results.len(), admin_resp.results[0].error_code) == (1, 0));
 
     // ops-bot (super-user #2) must also succeed.
     let ops_req = CreateAclsRequest {
@@ -1147,12 +1082,7 @@ async fn multi_super_user_both_can_provision() {
     let ops_resp = drive_create_acls_as_plain(addr, "ops-bot", b"ops-secret", ops_req)
         .await
         .expect("CreateAcls as ops-bot must round-trip");
-    assert!(ops_resp.results.len() == 1);
-    assert!(
-        ops_resp.results[0].error_code == 0,
-        "ops-bot is a super-user, CreateAcls must succeed: {:?}",
-        ops_resp.results[0]
-    );
+    assert2::assert!((ops_resp.results.len(), ops_resp.results[0].error_code) == (1, 0));
 
     // alice (not in super-set, no Cluster Alter ACL) must be denied per
     // binding with CLUSTER_AUTHORIZATION_FAILED (31).
@@ -1168,12 +1098,9 @@ async fn multi_super_user_both_can_provision() {
         .expect("CreateAcls request must round-trip even when denied");
     handle.shutdown().await;
 
-    assert!(alice_resp.results.len() == 2);
-    for (i, r) in alice_resp.results.iter().enumerate() {
-        assert!(
-            r.error_code == 31, /* CLUSTER_AUTHORIZATION_FAILED */
-            "binding {i} must be denied for alice (not in super_users), got {r:?}"
-        );
+    assert2::assert!(alice_resp.results.len() == 2);
+    for r in alice_resp.results.iter() {
+        assert2::assert!(r.error_code == 31);
     }
 }
 

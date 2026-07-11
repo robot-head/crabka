@@ -5313,7 +5313,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5325,7 +5325,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5337,7 +5337,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5349,7 +5349,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5360,7 +5360,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5372,7 +5372,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5384,7 +5384,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5396,7 +5396,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5408,7 +5408,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5420,7 +5420,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5431,7 +5431,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5442,7 +5442,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5454,7 +5454,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5466,7 +5466,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5478,7 +5478,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5490,7 +5490,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5502,7 +5502,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5514,7 +5514,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5526,7 +5526,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5538,7 +5538,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5550,7 +5550,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5562,7 +5562,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5573,7 +5573,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5584,7 +5584,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5596,7 +5596,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5608,7 +5608,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5620,7 +5620,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5632,7 +5632,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5644,7 +5644,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5656,7 +5656,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5668,7 +5668,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5680,7 +5680,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5692,7 +5692,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5704,7 +5704,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5716,7 +5716,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5728,7 +5728,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5740,7 +5740,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5752,7 +5752,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5763,7 +5763,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5774,7 +5774,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5786,7 +5786,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5798,7 +5798,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5810,7 +5810,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5822,7 +5822,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5833,7 +5833,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5844,7 +5844,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5855,7 +5855,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5866,7 +5866,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5877,7 +5877,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5888,7 +5888,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5899,7 +5899,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5911,7 +5911,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5923,7 +5923,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5935,7 +5935,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5947,7 +5947,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5959,7 +5959,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5970,7 +5970,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5981,7 +5981,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -5992,7 +5992,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6003,7 +6003,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6015,7 +6015,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6027,7 +6027,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6039,7 +6039,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6051,7 +6051,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6063,7 +6063,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6075,7 +6075,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6087,7 +6087,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6099,7 +6099,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6111,7 +6111,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6123,7 +6123,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6135,7 +6135,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6147,7 +6147,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6159,7 +6159,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6171,7 +6171,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6183,7 +6183,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6195,7 +6195,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6207,7 +6207,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6219,7 +6219,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6231,7 +6231,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6243,7 +6243,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6255,7 +6255,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6267,7 +6267,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6279,7 +6279,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6291,7 +6291,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6302,7 +6302,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6313,7 +6313,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6325,7 +6325,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6337,7 +6337,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6347,7 +6347,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::end_txn_request::EndTxnRequest::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6357,7 +6357,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::end_txn_response::EndTxnResponse::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6368,7 +6368,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6379,7 +6379,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6391,7 +6391,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6403,7 +6403,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6413,7 +6413,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::fetch_request::FetchRequest::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6423,7 +6423,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::fetch_response::FetchResponse::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6434,7 +6434,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6446,7 +6446,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6458,7 +6458,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6470,7 +6470,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6482,7 +6482,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6494,7 +6494,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6505,7 +6505,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6516,7 +6516,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6528,7 +6528,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6540,7 +6540,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6552,7 +6552,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6564,7 +6564,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6576,7 +6576,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6588,7 +6588,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6599,7 +6599,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6610,7 +6610,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6621,7 +6621,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6632,7 +6632,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6644,7 +6644,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6656,7 +6656,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6667,7 +6667,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6678,7 +6678,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6689,7 +6689,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6700,7 +6700,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6712,7 +6712,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6724,7 +6724,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6736,7 +6736,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6748,7 +6748,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6759,7 +6759,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6770,7 +6770,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6781,7 +6781,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6792,7 +6792,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6803,7 +6803,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6814,7 +6814,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6825,7 +6825,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6836,7 +6836,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6848,7 +6848,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6860,7 +6860,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6870,7 +6870,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::produce_request::ProduceRequest::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6881,7 +6881,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6892,7 +6892,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6904,7 +6904,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6916,7 +6916,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6928,7 +6928,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6940,7 +6940,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6952,7 +6952,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6964,7 +6964,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6976,7 +6976,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -6988,7 +6988,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7000,7 +7000,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7010,7 +7010,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::request_header::RequestHeader::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7020,7 +7020,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::response_header::ResponseHeader::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7032,7 +7032,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7044,7 +7044,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7055,7 +7055,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7067,7 +7067,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7079,7 +7079,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7091,7 +7091,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7102,7 +7102,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7113,7 +7113,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7125,7 +7125,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7137,7 +7137,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7149,7 +7149,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7161,7 +7161,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7173,7 +7173,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7185,7 +7185,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7197,7 +7197,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7209,7 +7209,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7220,7 +7220,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7231,7 +7231,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                 &mut cur, version,
             )
             .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7243,7 +7243,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7255,7 +7255,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7267,7 +7267,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7279,7 +7279,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7291,7 +7291,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7303,7 +7303,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7315,7 +7315,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7327,7 +7327,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7336,7 +7336,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let mut cur = bytes;
             let msg = crabka_protocol::owned::vote_request::VoteRequest::decode(&mut cur, version)
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7346,7 +7346,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let msg =
                 crabka_protocol::owned::vote_response::VoteResponse::decode(&mut cur, version)
                     .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7358,7 +7358,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7370,7 +7370,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7382,7 +7382,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     &mut cur, version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -7394,7 +7394,7 @@ pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
                     version,
                 )
                 .unwrap();
-            assert!(cur.is_empty());
+            assert2::assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()

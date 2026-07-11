@@ -22,9 +22,9 @@ workspace = true
 # the observability stack, which does not depend on `crabka-protocol` — that
 # needs to name a Kafka offset or partition index without threading a raw integer.
 [dependencies]
+assert2 = { workspace = true }
 derive_more = { workspace = true }
 serde = { workspace = true, features = ["derive"] }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 serde_json = { workspace = true }

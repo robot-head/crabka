@@ -343,7 +343,7 @@ fn labels_to_proto(labels: &[(String, String)]) -> Vec<Label> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use prost::Message as _;
 
     use super::*;
@@ -462,35 +462,35 @@ mod tests {
             .unwrap();
         let request = TestWriteRequest::decode(decoded.as_slice()).unwrap();
 
-        assert_eq!(
-            request,
-            TestWriteRequest {
-                timeseries: vec![TestTimeSeries {
-                    labels: vec![
-                        TestLabel {
-                            name: "__name__".into(),
-                            value: "traces_spanmetrics_calls_total".into(),
-                        },
-                        TestLabel {
-                            name: "service".into(),
-                            value: "api".into(),
-                        },
-                    ],
-                    samples: vec![TestSample {
-                        value: 7.0,
-                        timestamp: 1_234,
-                    }],
-                    exemplars: vec![TestExemplar {
-                        labels: vec![TestLabel {
-                            name: "trace_id".into(),
-                            value: "0abc".into(),
+        assert2::assert!(
+            request
+                == TestWriteRequest {
+                    timeseries: vec![TestTimeSeries {
+                        labels: vec![
+                            TestLabel {
+                                name: "__name__".into(),
+                                value: "traces_spanmetrics_calls_total".into(),
+                            },
+                            TestLabel {
+                                name: "service".into(),
+                                value: "api".into(),
+                            },
+                        ],
+                        samples: vec![TestSample {
+                            value: 7.0,
+                            timestamp: 1_234,
                         }],
-                        value: 0.042,
-                        timestamp: 1_235,
+                        exemplars: vec![TestExemplar {
+                            labels: vec![TestLabel {
+                                name: "trace_id".into(),
+                                value: "0abc".into(),
+                            }],
+                            value: 0.042,
+                            timestamp: 1_235,
+                        }],
+                        histograms: vec![],
                     }],
-                    histograms: vec![],
-                }],
-            }
+                }
         );
     }
 
@@ -506,9 +506,8 @@ mod tests {
 
         let out = to_timeseries(&[s]);
 
-        assert_eq!(
-            out,
-            vec![WireTimeSeries {
+        assert2::assert!(
+            out == vec![WireTimeSeries {
                 labels: vec![
                     ("__name__".into(), "traces_spanmetrics_calls_total".into()),
                     ("service".into(), "api".into()),
@@ -541,7 +540,7 @@ mod tests {
 
         let out = to_timeseries(&[s]);
 
-        assert!(out.len() == 5);
+        assert2::assert!(out.len() == 5);
         let bucket_inf = out
             .iter()
             .find(|t| {
@@ -549,19 +548,19 @@ mod tests {
                     && has_label(t, "le", "+Inf")
             })
             .unwrap();
-        assert!((bucket_inf.value - 2.0).abs() < 1e-9);
+        assert2::assert!((bucket_inf.value - 2.0).abs() < 1e-9);
 
         let sum = out
             .iter()
             .find(|t| has_label(t, "__name__", "traces_spanmetrics_latency_sum"))
             .unwrap();
-        assert!((sum.value - 0.012).abs() < 1e-9);
+        assert2::assert!((sum.value - 0.012).abs() < 1e-9);
 
         let count = out
             .iter()
             .find(|t| has_label(t, "__name__", "traces_spanmetrics_latency_count"))
             .unwrap();
-        assert!((count.value - 2.0).abs() < 1e-9);
+        assert2::assert!((count.value - 2.0).abs() < 1e-9);
 
         let le_8 = out
             .iter()
@@ -570,8 +569,8 @@ mod tests {
                     && has_label(t, "le", "0.008")
             })
             .unwrap();
-        assert!(le_8.exemplars.len() == 1);
-        assert!(le_8.exemplars[0].labels[0].0 == "trace_id");
+        assert2::assert!(le_8.exemplars.len() == 1);
+        assert2::assert!(le_8.exemplars[0].labels[0].0.as_str() == "trace_id");
     }
 
     #[test]
@@ -605,51 +604,51 @@ mod tests {
             .unwrap();
         let request = TestWriteRequest::decode(decoded.as_slice()).unwrap();
 
-        assert_eq!(
-            request,
-            TestWriteRequest {
-                timeseries: vec![TestTimeSeries {
-                    labels: vec![
-                        TestLabel {
-                            name: "__name__".into(),
-                            value: "traces_spanmetrics_latency".into(),
-                        },
-                        TestLabel {
-                            name: "service".into(),
-                            value: "api".into(),
-                        },
-                    ],
-                    samples: vec![],
-                    exemplars: vec![TestExemplar {
-                        labels: vec![TestLabel {
-                            name: "trace_id".into(),
-                            value: "abc".into(),
+        assert2::assert!(
+            request
+                == TestWriteRequest {
+                    timeseries: vec![TestTimeSeries {
+                        labels: vec![
+                            TestLabel {
+                                name: "__name__".into(),
+                                value: "traces_spanmetrics_latency".into(),
+                            },
+                            TestLabel {
+                                name: "service".into(),
+                                value: "api".into(),
+                            },
+                        ],
+                        samples: vec![],
+                        exemplars: vec![TestExemplar {
+                            labels: vec![TestLabel {
+                                name: "trace_id".into(),
+                                value: "abc".into(),
+                            }],
+                            value: 0.12,
+                            timestamp: 1_235,
                         }],
-                        value: 0.12,
-                        timestamp: 1_235,
-                    }],
-                    histograms: vec![TestHistogram {
-                        count_float: 4.5,
-                        sum: 0.25,
-                        schema: 8,
-                        zero_threshold: 0.001,
-                        zero_count_float: 1.5,
-                        positive_spans: vec![TestBucketSpan {
-                            offset: -2,
-                            length: 2,
+                        histograms: vec![TestHistogram {
+                            count_float: 4.5,
+                            sum: 0.25,
+                            schema: 8,
+                            zero_threshold: 0.001,
+                            zero_count_float: 1.5,
+                            positive_spans: vec![TestBucketSpan {
+                                offset: -2,
+                                length: 2,
+                            }],
+                            positive_counts: vec![2.0, 1.0],
+                            reset_hint: TestResetHint::No as i32,
+                            timestamp: 1_234,
                         }],
-                        positive_counts: vec![2.0, 1.0],
-                        reset_hint: TestResetHint::No as i32,
-                        timestamp: 1_234,
                     }],
-                }],
-            }
+                }
         );
     }
 
     #[test]
     fn le_label_renders_inf_and_floats() {
-        assert!(le_label(f64::INFINITY) == "+Inf");
-        assert!(le_label(0.008) == "0.008");
+        assert2::assert!(le_label(f64::INFINITY) == "+Inf");
+        assert2::assert!(le_label(0.008) == "0.008");
     }
 }

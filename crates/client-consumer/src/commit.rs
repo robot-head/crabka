@@ -262,7 +262,7 @@ impl Consumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -299,12 +299,12 @@ mod tests {
 
     #[test]
     fn first_commit_error_returns_first_non_zero_partition_error() {
-        for (errors, want) in [
-            (&[0, 0][..], 0),
-            (&[0, 27, 42][..], 27),
-            (&[16, 27][..], 16),
+        for (_name, errors, want) in [
+            ("all successful", &[0, 0][..], 0),
+            ("later first error", &[0, 27, 42][..], 27),
+            ("first partition errors", &[16, 27][..], 16),
         ] {
-            assert!(first_commit_error(&response(errors)) == want);
+            assert2::assert!(first_commit_error(&response(errors)) == want);
         }
     }
 
@@ -324,8 +324,13 @@ mod tests {
         );
 
         let offsets = commit_offsets(raw, &positions);
-        assert!(offsets.get(&("known".into(), 0)) == Some(&(11, 7)));
-        assert!(offsets.get(&("unknown".into(), 1)) == Some(&(22, -1)));
+        assert2::assert!(
+            offsets
+                == HashMap::from([
+                    (("known".into(), 0), (11, 7)),
+                    (("unknown".into(), 1), (22, -1)),
+                ])
+        );
     }
 
     #[tokio::test]
@@ -336,7 +341,7 @@ mod tests {
 
         let snapshot = snapshot_commit_topics(&offsets, &positions, &topic_ids).await;
 
-        assert!(snapshot.is_none());
+        assert2::assert!(snapshot.is_none());
     }
 
     #[tokio::test]
@@ -361,30 +366,32 @@ mod tests {
         let mut topics = topics;
         topics[0].partitions.sort_by_key(|p| p.partition_index);
 
-        assert!(partition_count == 2);
-        assert!(
-            topics
-                == vec![OffsetCommitRequestTopic {
-                    name: "alpha".into(),
-                    topic_id,
-                    partitions: vec![
-                        OffsetCommitRequestPartition {
-                            partition_index: 0,
-                            committed_offset: 10,
-                            committed_leader_epoch: -1,
-                            committed_metadata: Some(String::new()),
-                            unknown_tagged_fields: UnknownTaggedFields::default(),
-                        },
-                        OffsetCommitRequestPartition {
-                            partition_index: 1,
-                            committed_offset: 20,
-                            committed_leader_epoch: 7,
-                            committed_metadata: Some(String::new()),
-                            unknown_tagged_fields: UnknownTaggedFields::default(),
-                        },
-                    ],
-                    unknown_tagged_fields: UnknownTaggedFields::default(),
-                }]
+        assert2::assert!(
+            (partition_count, topics)
+                == (
+                    2,
+                    vec![OffsetCommitRequestTopic {
+                        name: "alpha".into(),
+                        topic_id,
+                        partitions: vec![
+                            OffsetCommitRequestPartition {
+                                partition_index: 0,
+                                committed_offset: 10,
+                                committed_leader_epoch: -1,
+                                committed_metadata: Some(String::new()),
+                                unknown_tagged_fields: UnknownTaggedFields::default(),
+                            },
+                            OffsetCommitRequestPartition {
+                                partition_index: 1,
+                                committed_offset: 20,
+                                committed_leader_epoch: 7,
+                                committed_metadata: Some(String::new()),
+                                unknown_tagged_fields: UnknownTaggedFields::default(),
+                            },
+                        ],
+                        unknown_tagged_fields: UnknownTaggedFields::default(),
+                    }]
+                )
         );
     }
 
@@ -413,7 +420,7 @@ mod tests {
             topics.clone(),
         );
 
-        assert!(
+        assert2::assert!(
             req == OffsetCommitRequest {
                 group_id: "group-a".into(),
                 generation_id_or_member_epoch: 42,
@@ -428,40 +435,36 @@ mod tests {
 
     #[test]
     fn commit_response_result_defers_rebalance_codes_only_while_coordinator_alive() {
-        // success regardless of coordinator liveness
-        check!(commit_response_result(&response(&[0, 0]), true).is_ok());
-        check!(commit_response_result(&response(&[0, 0]), false).is_ok());
-        // a non-rebalance error is always fatal
-        assert!(matches!(
-            commit_response_result(&response(&[0, 42]), true).unwrap_err(),
-            ConsumerError::Server(42)
-        ));
-        // ILLEGAL_GENERATION (22), UNKNOWN_MEMBER_ID (25), and
-        // REBALANCE_IN_PROGRESS (27) DEFER while the coordinator is alive to
-        // rejoin (it republishes the generation/member and the offsets recommit
-        // next round) — a commit loop must survive a rebalance or broker restart.
-        check!(commit_response_result(&response(&[22]), true).is_ok());
-        check!(commit_response_result(&response(&[25]), true).is_ok());
-        check!(commit_response_result(&response(&[27]), true).is_ok());
-        check!(commit_response_result(&response(&[0, 22]), true).is_ok());
-        // ...but they are FATAL if the coordinator task has exited: it can never
-        // refresh the generation, so deferring would silently never-advance.
-        assert!(matches!(
-            commit_response_result(&response(&[22]), false).unwrap_err(),
-            ConsumerError::Server(22)
-        ));
-        assert!(matches!(
-            commit_response_result(&response(&[25]), false).unwrap_err(),
-            ConsumerError::Server(25)
-        ));
-        assert!(matches!(
-            commit_response_result(&response(&[27]), false).unwrap_err(),
-            ConsumerError::Server(27)
-        ));
-        // first-error precedence: a fatal code ahead of a rebalance code stays fatal
-        assert!(matches!(
-            commit_response_result(&response(&[16, 27]), true).unwrap_err(),
-            ConsumerError::Server(16)
-        ));
+        for (name, errors, coordinator_alive, expected_error) in [
+            ("success while alive", &[0, 0][..], true, None),
+            ("success after coordinator exit", &[0, 0][..], false, None),
+            ("non-rebalance error", &[0, 42][..], true, Some(42)),
+            ("illegal generation deferred", &[22][..], true, None),
+            ("unknown member deferred", &[25][..], true, None),
+            ("rebalance deferred", &[27][..], true, None),
+            (
+                "later illegal generation deferred",
+                &[0, 22][..],
+                true,
+                None,
+            ),
+            ("illegal generation after exit", &[22][..], false, Some(22)),
+            ("unknown member after exit", &[25][..], false, Some(25)),
+            ("rebalance after exit", &[27][..], false, Some(27)),
+            (
+                "fatal error takes precedence",
+                &[16, 27][..],
+                true,
+                Some(16),
+            ),
+        ] {
+            let actual = commit_response_result(&response(errors), coordinator_alive);
+            let actual_error = match actual {
+                Ok(()) => None,
+                Err(ConsumerError::Server(code)) => Some(code),
+                Err(other) => panic!("case {name}: unexpected error {other:?}"),
+            };
+            check!(actual_error == expected_error, "case {name}");
+        }
     }
 }

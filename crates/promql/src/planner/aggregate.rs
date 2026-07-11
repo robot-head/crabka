@@ -228,7 +228,6 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::assert;
     use datafusion::{catalog::MemTable, prelude::SessionContext};
 
     use super::*;
@@ -364,7 +363,7 @@ mod tests {
         )
         .unwrap();
         let got = run(plan, &ctx).await;
-        assert!(
+        assert2::assert!(
             got == vec![
                 (vec![("group".to_string(), "canary".to_string())], 4.0),
                 (vec![("group".to_string(), "prod".to_string())], 3.0),
@@ -392,7 +391,7 @@ mod tests {
         )
         .unwrap();
         let got = run(plan, &ctx).await;
-        assert!(
+        assert2::assert!(
             got == vec![
                 (vec![("group".to_string(), "canary".to_string())], 4.0),
                 (vec![("group".to_string(), "prod".to_string())], 3.0),
@@ -415,7 +414,7 @@ mod tests {
         let plan =
             plan_simple_aggregate(leaf, SimpleAggregateOp::Sum, &Grouping::By(vec![])).unwrap();
         let got = run(plan, &ctx).await;
-        assert!(got == vec![(vec![], 7.0)]);
+        assert2::assert!(got == vec![(vec![], 7.0)]);
     }
 
     #[tokio::test]
@@ -452,7 +451,7 @@ mod tests {
             let plan =
                 plan_simple_aggregate(leaf, op, &Grouping::By(vec!["group".into()])).unwrap();
             let got = run(plan, &ctx).await;
-            assert!(got == want, "case {op:?}");
+            assert2::assert!(got == want);
         }
     }
 
@@ -465,7 +464,7 @@ mod tests {
         let plan =
             plan_simple_aggregate(leaf, SimpleAggregateOp::Sum, &Grouping::By(vec![])).unwrap();
         let got = run(plan, &ctx).await;
-        assert!(got.is_empty());
+        assert2::assert!(got.is_empty());
     }
 
     #[tokio::test]
@@ -479,7 +478,7 @@ mod tests {
         )
         .unwrap();
         let got = run(plan, &ctx).await;
-        assert!(got.is_empty());
+        assert2::assert!(got.is_empty());
     }
 
     #[tokio::test]
@@ -494,8 +493,8 @@ mod tests {
         )
         .unwrap();
         let got = run(plan, &ctx).await;
-        assert!(got.len() == 1);
-        assert!(got[0].1.is_nan());
+        assert2::assert!(got.len() == 1);
+        assert2::assert!(got[0].1.is_nan());
     }
 
     #[tokio::test]
@@ -521,8 +520,8 @@ mod tests {
             let plan =
                 plan_simple_aggregate(leaf, op, &Grouping::By(vec!["group".into()])).unwrap();
             let got = run(plan, &ctx).await;
-            assert!(got.len() == 1, "case {op:?}");
-            assert!(got[0].1.to_bits() == want.to_bits(), "case {op:?}");
+            assert2::assert!(got.len() == 1);
+            assert2::assert!(got[0].1.to_bits() == want.to_bits());
         }
     }
 
@@ -538,8 +537,8 @@ mod tests {
             let plan =
                 plan_simple_aggregate(leaf, op, &Grouping::By(vec!["group".into()])).unwrap();
             let got = run(plan, &ctx).await;
-            assert!(got.len() == 1, "case {op:?}");
-            assert!(got[0].1.is_nan(), "case {op:?}");
+            assert2::assert!(got.len() == 1);
+            assert2::assert!(got[0].1.is_nan());
         }
     }
 
@@ -566,7 +565,7 @@ mod tests {
         .unwrap();
         let got = run(plan, &ctx).await;
         // Only group y survives; the all-NULL group x produces no row.
-        assert!(got == vec![(vec![("group".to_string(), "y".to_string())], 3.0)]);
+        assert2::assert!(got == vec![(vec![("group".to_string(), "y".to_string())], 3.0)]);
     }
 
     #[tokio::test]
@@ -594,7 +593,7 @@ mod tests {
         let got = run(plan, &ctx).await;
         // 2 value-bearing rows (1.0 and the genuine NaN); the two NULLs are
         // dropped before counting.
-        assert!(got == vec![(vec![("group".to_string(), "prod".to_string())], 2.0)]);
+        assert2::assert!(got == vec![(vec![("group".to_string(), "prod".to_string())], 2.0)]);
     }
 
     #[tokio::test]
@@ -619,7 +618,7 @@ mod tests {
         )
         .unwrap();
         let got = run(plan, &ctx).await;
-        assert!(got.len() == 1);
-        assert!(got[0].1.is_nan());
+        assert2::assert!(got.len() == 1);
+        assert2::assert!(got[0].1.is_nan());
     }
 }

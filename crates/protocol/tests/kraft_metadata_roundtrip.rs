@@ -5,7 +5,6 @@
 
 use std::path::Path;
 
-use assert2::assert;
 use bytes::BytesMut;
 use crabka_protocol::records::{RecordBatch, metadata::record::KraftMetadataRecord};
 
@@ -24,13 +23,7 @@ fn assert_log_roundtrips(log: &[u8]) {
         // batch layer + that record values were read verbatim).
         let mut re = BytesMut::new();
         batch.encode(&mut re).expect("batch re-encodes");
-        assert!(
-            re.as_ref() == batch_bytes,
-            "batch at base_offset {} not byte-identical (len {} vs {})",
-            batch.base_offset,
-            re.len(),
-            batch_bytes.len()
-        );
+        assert2::assert!(re.as_ref() == batch_bytes);
 
         // Control batches (LeaderChange / Snapshot*) are not value-enveloped;
         // their byte-identity is covered by the whole-batch assertion above.
@@ -42,17 +35,13 @@ fn assert_log_roundtrips(log: &[u8]) {
                     let reencoded = decoded
                         .encode_value(version)
                         .expect("metadata record value re-encodes");
-                    assert!(
-                        reencoded.as_ref() == value.as_ref(),
-                        "record value (apiKey {}) not byte-identical",
-                        decoded.api_key()
-                    );
+                    assert2::assert!(reencoded.as_ref() == value.as_ref());
                 }
             }
         }
         pos += consumed;
     }
-    assert!(pos == log.len(), "trailing bytes after final batch");
+    assert2::assert!(pos == log.len());
 }
 
 fn metadata_log_roundtrips(path: &Path) -> datatest_stable::Result<()> {

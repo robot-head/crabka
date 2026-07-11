@@ -25,7 +25,7 @@ fn main() {
     let bytes = ArrowIpcSerde.serialize("orders.arrow", &batch);
     let back = ArrowIpcSerde.deserialize("orders.arrow", &bytes).unwrap();
     // docs:end arrow-roundtrip
-    assert_eq!(back.num_rows(), 2);
-    assert_eq!(back, batch);
+    assert2::assert!(back.num_rows() == 2);
+    assert2::assert!(back == batch);
     println!("format_arrow: OK ({} bytes)", bytes.len());
 }

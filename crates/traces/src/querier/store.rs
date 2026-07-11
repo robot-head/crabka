@@ -1077,8 +1077,12 @@ fn string_matches(value: &str, op: MatchCmp, expected: &MatchValue) -> bool {
         return false;
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(expected.as_str())
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(expected.as_str())
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Re => {
             regex::Regex::new(&format!("^(?:{expected})$")).is_ok_and(|re| re.is_match(value))
         }
@@ -1098,8 +1102,12 @@ fn int_matches(value: i64, op: MatchCmp, expected: &MatchValue) -> bool {
         _ => return false,
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Lt => value < expected,
         MatchCmp::Lte => value <= expected,
         MatchCmp::Gt => value > expected,
@@ -1144,15 +1152,18 @@ fn kind_enum_value(name: &str) -> Option<i32> {
     }
 }
 
-#[allow(clippy::float_cmp)]
 fn float_matches(value: f64, op: MatchCmp, expected: &MatchValue) -> bool {
     let expected = match expected {
         MatchValue::Float(value) => *value,
         _ => return false,
     };
     match op {
-        MatchCmp::Eq => value == expected,
-        MatchCmp::Neq => value != expected,
+        MatchCmp::Eq => value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
+        MatchCmp::Neq => !value
+            .partial_cmp(&expected)
+            .is_some_and(std::cmp::Ordering::is_eq),
         MatchCmp::Lt => value < expected,
         MatchCmp::Lte => value <= expected,
         MatchCmp::Gt => value > expected,
@@ -2574,7 +2585,7 @@ mod tests {
         },
         datatypes::{DataType, Field, Int32Type, Schema, SchemaRef},
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::{
         AttrValue as BlockAttrValue, BlockWriter, NestedSet as BlockNestedSet, PromotedSpanAttr,
         SCOL_START_NANO, SCOL_TRACE_ID, ShardedTraceBloom, SpanAttr, SpanKind as BlockSpanKind,
@@ -2604,6 +2615,24 @@ mod tests {
 
     fn shared(index: TraceIndex) -> SharedTraceIndex {
         Arc::new(ArcSwap::from_pointee(index))
+    }
+
+    #[test]
+    fn integer_matchers_distinguish_equal_and_unequal_values() {
+        let expected = MatchValue::Int(7);
+        assert2::assert!(int_matches(7, MatchCmp::Eq, &expected));
+        assert2::assert!(!int_matches(8, MatchCmp::Eq, &expected));
+        assert2::assert!(!int_matches(7, MatchCmp::Neq, &expected));
+        assert2::assert!(int_matches(8, MatchCmp::Neq, &expected));
+    }
+
+    #[test]
+    fn float_matchers_distinguish_equal_and_unequal_values() {
+        let expected = MatchValue::Float(7.5);
+        assert2::assert!(float_matches(7.5, MatchCmp::Eq, &expected));
+        assert2::assert!(!float_matches(8.5, MatchCmp::Eq, &expected));
+        assert2::assert!(!float_matches(7.5, MatchCmp::Neq, &expected));
+        assert2::assert!(float_matches(8.5, MatchCmp::Neq, &expected));
     }
 
     #[derive(Default)]
@@ -2841,9 +2870,17 @@ mod tests {
         let got = trace_from_batches(&[7; 16], vec![batch()])
             .unwrap()
             .unwrap();
-        check!(got.root_service_name == "api");
-        check!(got.spans.len() == 1);
-        check!(got.spans[0].attributes == vec![("svc".into(), AttrValue::Str("a".into()))]);
+        check!(
+            (
+                got.root_service_name.as_str(),
+                got.spans.len(),
+                got.spans[0].attributes.as_slice(),
+            ) == (
+                "api",
+                1,
+                [("svc".into(), AttrValue::Str("a".into()))].as_slice(),
+            )
+        );
     }
 
     #[test]
@@ -2851,7 +2888,7 @@ mod tests {
         let got = trace_from_batches(&[7; 16], vec![dictionary_attr_batch()])
             .unwrap()
             .unwrap();
-        assert!(
+        assert2::assert!(
             got.spans[0]
                 .attributes
                 .iter()
@@ -2870,7 +2907,7 @@ mod tests {
         let got = trace_from_batches(&span.trace_id, vec![batch])
             .unwrap()
             .unwrap();
-        assert!(
+        assert2::assert!(
             got.spans[0]
                 .attributes
                 .iter()
@@ -3064,8 +3101,20 @@ mod tests {
         };
         // The span with the attribute carries its value; the other is the nil
         // group (NULL → empty label downstream).
-        assert!(sorted("attr.http.method") == vec![None, Some("GET".to_string())]);
-        assert!(sorted("attr.service.version") == vec![None, Some("1.2.3".to_string())]);
+        for (_name, column, expected) in [
+            (
+                "span method",
+                "attr.http.method",
+                vec![None, Some("GET".to_string())],
+            ),
+            (
+                "service version",
+                "attr.service.version",
+                vec![None, Some("1.2.3".to_string())],
+            ),
+        ] {
+            assert2::assert!(sorted(column) == expected);
+        }
     }
 
     #[tokio::test]
@@ -3087,7 +3136,7 @@ mod tests {
             .iter()
             .map(RecordBatch::num_rows)
             .sum();
-        assert!(rows == 0);
+        assert2::assert!(rows == 0);
     }
 
     #[tokio::test]
@@ -3134,17 +3183,20 @@ mod tests {
         );
 
         let store = CrabkaSpanStore::new(blocks, shared(index), None);
-        assert!(
-            store.tag_names("tenant", None, 0, 10_000).await.unwrap()[0].tags
-                == vec!["service.name"]
+        assert2::assert!(
+            store.tag_names("tenant", None, 0, 10_000).await.unwrap()[0]
+                .tags
+                .clone()
+                == vec!["service.name".to_string()]
         );
-        assert!(
+        assert2::assert!(
             store
                 .tag_values("tenant", "service.name", 0, 10_000)
                 .await
                 .unwrap()[0]
                 .value
-                == "api"
+                .clone()
+                == "api".to_string()
         );
     }
 
@@ -3206,14 +3258,14 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             status_values
                 == vec![TypedValue {
                     type_: "int".into(),
                     value: "504".into(),
                 }]
         );
-        assert!(
+        assert2::assert!(
             retryable_values
                 == vec![TypedValue {
                     type_: "bool".into(),
@@ -3392,31 +3444,61 @@ mod tests {
             .tag_names("tenant", Some(TagScope::Intrinsic), 0, 10)
             .await
             .unwrap();
-        assert!(intrinsic.len() == 1);
-        check!(intrinsic[0].scope == TagScope::Intrinsic);
-        check!(intrinsic[0].tags.contains(&"span:duration".to_string()));
-        check!(intrinsic[0].tags.contains(&"trace:id".to_string()));
+        check!(
+            (
+                intrinsic.len(),
+                intrinsic[0].scope,
+                intrinsic[0].tags.contains(&"span:duration".to_string()),
+                intrinsic[0].tags.contains(&"trace:id".to_string()),
+            ) == (1, TagScope::Intrinsic, true, true)
+        );
 
         let event = store
             .tag_names("tenant", Some(TagScope::Event), 0, 10)
             .await
             .unwrap();
-        assert!(event.len() == 1);
-        assert!(event[0].tags == vec!["event:name", "event:timeSinceStart"]);
+        check!(
+            event
+                .iter()
+                .map(|entry| (&entry.scope, &entry.tags))
+                .collect::<Vec<_>>()
+                == vec![(
+                    &TagScope::Event,
+                    &vec!["event:name".into(), "event:timeSinceStart".into()]
+                )]
+        );
 
         let link = store
             .tag_names("tenant", Some(TagScope::Link), 0, 10)
             .await
             .unwrap();
-        assert!(link.len() == 1);
-        assert!(link[0].tags == vec!["link:spanID", "link:traceID"]);
+        check!(
+            link.iter()
+                .map(|entry| (&entry.scope, &entry.tags))
+                .collect::<Vec<_>>()
+                == vec![(
+                    &TagScope::Link,
+                    &vec!["link:spanID".into(), "link:traceID".into()]
+                )]
+        );
 
         let instrumentation = store
             .tag_names("tenant", Some(TagScope::Instrumentation), 0, 10)
             .await
             .unwrap();
-        assert!(instrumentation.len() == 1);
-        assert!(instrumentation[0].tags == vec!["instrumentation:name", "instrumentation:version"]);
+        check!(
+            instrumentation
+                .iter()
+                .map(|entry| (&entry.scope, &entry.tags))
+                .collect::<Vec<_>>()
+                == vec![(
+                    &TagScope::Instrumentation,
+                    &vec![
+                        "instrumentation:name".into(),
+                        "instrumentation:version".into(),
+                    ]
+                )]
+        );
     }
 
     #[tokio::test]
@@ -3448,7 +3530,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             tags == vec![ScopedTag {
                 scope: TagScope::Span,
                 tags: vec!["http.method".to_string()],
@@ -3540,7 +3622,7 @@ mod tests {
             })
             .collect::<Vec<_>>();
 
-        assert!(names == vec!["second-rg"]);
+        assert2::assert!(names == vec!["second-rg"]);
     }
 
     #[tokio::test]
@@ -3605,7 +3687,7 @@ mod tests {
             .map(RecordBatch::num_rows)
             .sum();
 
-        assert!(rows == 0);
+        assert2::assert!(rows == 0);
     }
 
     #[tokio::test]
@@ -3629,7 +3711,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             values
                 == vec![TypedValue {
                     type_: "string".into(),
@@ -3666,7 +3748,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
+        assert2::assert!(
             values
                 == vec![TypedValue {
                     type_: "string".into(),
@@ -3744,8 +3826,10 @@ mod tests {
     }
 
     fn assert_cloud_region_resource_attr(attrs: &[(String, AttrValue)]) {
-        assert!(attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into()))));
-        assert!(
+        assert2::assert!(
+            attrs.contains(&("cloud.region".into(), AttrValue::Str("us-east-1".into())))
+        );
+        assert2::assert!(
             !attrs
                 .iter()
                 .any(|(key, _)| key == "__resource.cloud.region")
@@ -3795,29 +3879,31 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(trace.spans.len() == 1);
         check!(
-            trace.spans[0].attributes
-                == vec![
-                    ("http.status_code".into(), AttrValue::Int(504)),
-                    ("retryable".into(), AttrValue::Bool(true)),
-                ]
-        );
-        check!(
-            trace.spans[0].events
-                == vec![EventRef {
-                    time_since_start_nano: 50,
-                    name: "exception".into(),
-                    attributes: vec![("exception.type".into(), AttrValue::Str("timeout".into()))],
-                }]
-        );
-        check!(
-            trace.spans[0].links
-                == vec![LinkRef {
-                    trace_id: [9; 16],
-                    span_id: [8; 8],
-                    attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
-                }]
+            trace
+                .spans
+                .iter()
+                .map(|span| (&span.attributes, &span.events, &span.links))
+                .collect::<Vec<_>>()
+                == vec![(
+                    &vec![
+                        ("http.status_code".into(), AttrValue::Int(504)),
+                        ("retryable".into(), AttrValue::Bool(true)),
+                    ],
+                    &vec![EventRef {
+                        time_since_start_nano: 50,
+                        name: "exception".into(),
+                        attributes: vec![(
+                            "exception.type".into(),
+                            AttrValue::Str("timeout".into())
+                        )],
+                    }],
+                    &vec![LinkRef {
+                        trace_id: [9; 16],
+                        span_id: [8; 8],
+                        attributes: vec![("link.kind".into(), AttrValue::Str("retry".into()))],
+                    }],
+                )]
         );
     }
 
@@ -3885,8 +3971,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(trace.spans.len() == 1);
-        assert!(trace.spans[0].span_id == late.span_id);
+        check!(
+            trace
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>()
+                == vec![late.span_id]
+        );
     }
 
     #[tokio::test]
@@ -3944,8 +4036,14 @@ mod tests {
             .unwrap()
             .unwrap();
 
-        assert!(trace.spans.len() == 1);
-        assert!(trace.spans[0].span_id == span.span_id);
+        check!(
+            trace
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>()
+                == vec![span.span_id]
+        );
     }
 
     #[tokio::test]
@@ -4079,9 +4177,14 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        check!(trace.spans.len() == 2);
-        check!(trace.spans.iter().any(|s| s.span_id == root.span_id));
-        check!(trace.spans.iter().any(|s| s.span_id == child.span_id));
+        check!(
+            trace
+                .spans
+                .iter()
+                .map(|span| span.span_id)
+                .collect::<Vec<_>>()
+                == vec![root.span_id, child.span_id]
+        );
     }
 
     #[tokio::test]
@@ -4145,10 +4248,22 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 1);
-        check!(resp.traces[0].trace_id == root.trace_id);
-        assert!(resp.traces[0].span_sets[0].spans.len() == 1);
-        check!(resp.traces[0].span_sets[0].spans[0].span_id == child.span_id);
+        check!(
+            resp.traces
+                .iter()
+                .map(|trace| {
+                    (
+                        trace.trace_id,
+                        trace
+                            .span_sets
+                            .iter()
+                            .flat_map(|set| set.spans.iter().map(|span| span.span_id))
+                            .collect::<Vec<_>>(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                == vec![(root.trace_id, vec![child.span_id])]
+        );
     }
 
     #[tokio::test]
@@ -4238,16 +4353,12 @@ mod tests {
             .await
             .unwrap();
 
-        check!(resp.traces.len() == 2);
         check!(
             resp.traces
                 .iter()
-                .any(|trace| trace.trace_id == matching.trace_id)
-        );
-        check!(
-            resp.traces
-                .iter()
-                .any(|trace| trace.trace_id == split_events.trace_id)
+                .map(|trace| trace.trace_id)
+                .collect::<BTreeSet<_>>()
+                == BTreeSet::from([matching.trace_id, split_events.trace_id])
         );
 
         let resp = engine
@@ -4261,21 +4372,12 @@ mod tests {
             .await
             .unwrap();
 
-        check!(resp.traces.len() == 3);
         check!(
             resp.traces
                 .iter()
-                .any(|trace| trace.trace_id == matching.trace_id)
-        );
-        check!(
-            resp.traces
-                .iter()
-                .any(|trace| trace.trace_id == other.trace_id)
-        );
-        check!(
-            resp.traces
-                .iter()
-                .any(|trace| trace.trace_id == split_events.trace_id)
+                .map(|trace| trace.trace_id)
+                .collect::<BTreeSet<_>>()
+                == BTreeSet::from([matching.trace_id, other.trace_id, split_events.trace_id])
         );
 
         let resp = engine
@@ -4289,21 +4391,12 @@ mod tests {
             .await
             .unwrap();
 
-        check!(resp.traces.len() == 3);
         check!(
             resp.traces
                 .iter()
-                .any(|trace| trace.trace_id == matching.trace_id)
-        );
-        check!(
-            resp.traces
-                .iter()
-                .any(|trace| trace.trace_id == other.trace_id)
-        );
-        check!(
-            resp.traces
-                .iter()
-                .any(|trace| trace.trace_id == split_events.trace_id)
+                .map(|trace| trace.trace_id)
+                .collect::<BTreeSet<_>>()
+                == BTreeSet::from([matching.trace_id, other.trace_id, split_events.trace_id])
         );
 
         let resp = engine
@@ -4317,8 +4410,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == matching.trace_id);
+        assert2::assert!(resp.traces.len() == 1);
+        assert2::assert!(resp.traces[0].trace_id == matching.trace_id);
 
         let resp = engine
             .search("tenant", "{ event:name != nil }", 0, 10_000, 10)
@@ -4365,7 +4458,7 @@ mod tests {
             .iter()
             .find(|series| series.labels == vec![("name".into(), "cache.hit".into())])
             .unwrap();
-        assert!(cache_hit.points == vec![(0, 2.0), (10_000, 0.0)]);
+        assert2::assert!(cache_hit.points == vec![(0, 2.0), (10_000, 0.0)]);
 
         let mut series = engine
             .query_range(
@@ -4383,7 +4476,7 @@ mod tests {
         // `by(event.exception.type)` groups by an event ATTRIBUTE, so the series
         // label key carries its `event.` scope (matching real Tempo, per the
         // live-Tempo differential) — unlike the bare `event:name` intrinsic above.
-        assert!(series.iter().any(|series| series.labels
+        assert2::assert!(series.iter().any(|series| series.labels
             == vec![("event.exception.type".into(), "timeout".into())]
             && series.points == vec![(0, 3.0), (10_000, 0.0)]));
 
@@ -4400,7 +4493,7 @@ mod tests {
             .series;
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(series.iter().any(|series| series.labels
+        assert2::assert!(series.iter().any(|series| series.labels
             == vec![("spanID".into(), "0606060606060606".into())]
             && series.points == vec![(0, 1.0), (10_000, 0.0)]));
     }
@@ -4463,15 +4556,15 @@ mod tests {
             .search("tenant", "{ span.http.method = \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == repeated.trace_id);
+        assert2::assert!(resp.traces.len() == 1);
+        assert2::assert!(resp.traces[0].trace_id == repeated.trace_id);
 
         let resp = engine
             .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == other.trace_id);
+        assert2::assert!(resp.traces.len() == 1);
+        assert2::assert!(resp.traces[0].trace_id == other.trace_id);
     }
 
     #[tokio::test]
@@ -4526,13 +4619,13 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resource.traces.len() == 1);
+        assert2::assert!(resource.traces.len() == 1);
 
         let bare = engine
             .search("tenant", "{ .service.name = \"api\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(bare.traces.len() == 1);
+        assert2::assert!(bare.traces.len() == 1);
 
         let resource_attr = engine
             .search(
@@ -4544,7 +4637,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(resource_attr.traces.len() == 1);
+        assert2::assert!(resource_attr.traces.len() == 1);
 
         let trace = engine
             .trace_by_id("tenant", &span.trace_id)
@@ -4558,13 +4651,13 @@ mod tests {
             .search("tenant", "{ .cloud.region = \"us-east-1\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(bare_attr.traces.len() == 1);
+        assert2::assert!(bare_attr.traces.len() == 1);
 
         let span = engine
             .search("tenant", "{ span.service.name = \"api\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(span.traces.is_empty());
+        assert2::assert!(span.traces.is_empty());
     }
 
     #[tokio::test]
@@ -4639,17 +4732,21 @@ mod tests {
             .series;
 
         series.sort_by(|a, b| a.labels.cmp(&b.labels));
-        assert!(series.len() == 2);
-        for (i, service) in ["billing", "checkout"].into_iter().enumerate() {
-            check!(
-                series[i].labels == vec![("resource.service.name".into(), service.into())],
-                "series {i}"
-            );
-            check!(
-                series[i].points == vec![(0, 1.0), (10_000, 0.0)],
-                "series {i}"
-            );
-        }
+        check!(
+            series
+                .iter()
+                .map(|series| (series.labels.clone(), series.points.clone()))
+                .collect::<Vec<_>>()
+                == ["billing", "checkout"]
+                    .into_iter()
+                    .map(|service| {
+                        (
+                            vec![("resource.service.name".into(), service.into())],
+                            vec![(0, 1.0), (10_000, 0.0)],
+                        )
+                    })
+                    .collect::<Vec<_>>()
+        );
     }
 
     #[tokio::test]
@@ -4710,22 +4807,31 @@ mod tests {
             .search("tenant", "{ span.http.method = \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(resp.traces.len() == 1);
-        check!(resp.traces[0].trace_id == [1; 16]);
         check!(
-            resp.traces[0].span_sets[0].spans[0].attributes
-                == vec![
-                    ("http.method".into(), AttrValue::Str("GET".into())),
-                    ("http.method".into(), AttrValue::Str("POST".into())),
-                ]
+            resp.traces
+                .iter()
+                .map(|trace| {
+                    (
+                        trace.trace_id,
+                        trace.span_sets[0].spans[0].attributes.clone(),
+                    )
+                })
+                .collect::<Vec<_>>()
+                == vec![(
+                    [1; 16],
+                    vec![
+                        ("http.method".into(), AttrValue::Str("GET".into())),
+                        ("http.method".into(), AttrValue::Str("POST".into())),
+                    ],
+                )]
         );
 
         let resp = engine
             .search("tenant", "{ span.http.method != \"POST\" }", 0, 10_000, 10)
             .await
             .unwrap();
-        assert!(resp.traces.len() == 1);
-        assert!(resp.traces[0].trace_id == [3; 16]);
+        assert2::assert!(resp.traces.len() == 1);
+        assert2::assert!(resp.traces[0].trace_id == [3; 16]);
     }
 
     fn block_attr_span_row(
@@ -4783,7 +4889,7 @@ mod tests {
             .search("tenant", "{ span:name = \"missing\" }", 0, 10, 10)
             .await
             .unwrap();
-        assert!(resp.traces.is_empty());
+        assert2::assert!(resp.traces.is_empty());
     }
 
     /// Verify that a live `ArcSwap` is observed: `candidate_blocks` returns nothing
@@ -4802,7 +4908,7 @@ mod tests {
 
         // Before swap: no candidate blocks.
         let before = handle.load().candidate_blocks("tenant", 0, i64::MAX);
-        assert!(before.is_empty());
+        assert2::assert!(before.is_empty());
 
         // Swap in an index with one block.
         let mut new_index = TraceIndex::new();
@@ -4823,12 +4929,12 @@ mod tests {
 
         // After swap: candidate_blocks via the same handle now returns the new block.
         let after = handle.load().candidate_blocks("tenant", 0, 10_000);
-        assert!(!after.is_empty());
-        assert!(after[0] == "blocks/swap-test.parquet");
+        assert2::assert!(!after.is_empty());
+        assert2::assert!(after.first().map(String::as_str) == Some("blocks/swap-test.parquet"));
 
         // Any subsequent load() call through the store's field would return
         // the same result — both the store and the caller share the same Arc.
         let via_handle = handle.load().candidate_blocks("tenant", 0, 10_000);
-        assert!(via_handle == after);
+        assert2::assert!(via_handle == after);
     }
 }

@@ -155,8 +155,6 @@ impl Goal for DiskCapacity {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         capacity::{BrokerCapacities, BrokerCapacity},
@@ -247,8 +245,12 @@ mod tests {
             caps_with_disk(1, 1_000_000),
             Arc::new(UsageStore::default()),
         );
-        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
-        assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(
+            (
+                DiskCapacity.propose(&s, &ctx).is_empty(),
+                DiskCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -260,11 +262,11 @@ mod tests {
         let store = store_with_disk(samples);
         let ctx = ctx_with(caps_with_disk(1, 1000), store);
         let mvs = DiskCapacity.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected eviction; got {mvs:?}");
+        assert2::assert!(!mvs.is_empty());
         for m in &mvs {
             let before = m.old_replicas.iter().filter(|x| **x == 1).count();
             let after = m.new_replicas.iter().filter(|x| **x == 1).count();
-            assert!(after < before, "movement must reduce broker 1's replicas");
+            assert2::assert!(after < before);
         }
     }
 
@@ -275,7 +277,7 @@ mod tests {
         let samples: Vec<_> = (0..3).map(|i| (1, "t", i, 500.0)).collect();
         let store = store_with_disk(samples);
         let ctx = ctx_with(caps_with_disk(1, 1000), store);
-        assert!(!DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(!DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 
     #[test]
@@ -285,8 +287,12 @@ mod tests {
         let samples: Vec<_> = (0..2).map(|i| (1, "t", i, 500.0)).collect();
         let store = store_with_disk(samples);
         let ctx = ctx_with(caps_with_disk(1, 1000), store);
-        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
-        assert!(DiskCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(
+            (
+                DiskCapacity.propose(&s, &ctx).is_empty(),
+                DiskCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -320,8 +326,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert2::assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]
@@ -348,8 +353,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![2]);
+        assert2::assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![2]]);
     }
 
     #[test]
@@ -383,8 +387,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert2::assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]
@@ -394,7 +397,7 @@ mod tests {
         let store = store_with_disk(vec![(1, "hot", 0, 1500.0)]);
         let ctx = ctx_with(caps_with_disk(1, 1000), store);
 
-        assert!(DiskCapacity.propose(&s, &ctx).is_empty());
+        assert2::assert!(DiskCapacity.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -406,7 +409,7 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "hot".into(),
                 partition: 0,
@@ -429,6 +432,6 @@ mod tests {
 
         let mvs = DiskCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

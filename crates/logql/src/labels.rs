@@ -230,10 +230,10 @@ fn parse_decimal_sample_literal(value: &str) -> Option<(i128, u128)> {
         return None;
     }
 
-    let (mantissa, exponent) = match value.find(|ch| matches!(ch, 'e' | 'E')) {
+    let (mantissa, exponent) = match value.find(['e', 'E']) {
         Some(index) => {
             let exponent_text = &value[index + 1..];
-            if exponent_text.find(|ch| matches!(ch, 'e' | 'E')).is_some() {
+            if exponent_text.find(['e', 'E']).is_some() {
                 return None;
             }
             (&value[..index], parse_decimal_exponent(exponent_text)?)
@@ -438,17 +438,19 @@ mod tests {
             LabelFormatAssignment::template("summary", "{{.method}} {{.status}}").unwrap();
         let format = LabelFormat::new(vec![route.clone(), summary.clone()]).unwrap();
 
-        assert_eq!(format.assignments(), &[route.clone(), summary]);
-        assert_eq!(route.destination(), "route");
-        assert!(matches!(route.value(), LabelFormatValue::Rename(source) if source == "path"));
+        assert2::assert!(format.assignments() == &[route.clone(), summary]);
+        assert2::assert!(route.destination() == "route");
+        assert2::assert!(
+            matches!(route.value(), LabelFormatValue::Rename(source) if source == "path")
+        );
     }
 
     #[test]
     fn unwrap_expression_accessors_and_validation_use_label() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        assert_eq!(expression.label(), "size");
-        assert_eq!(expression.conversion(), UnwrapConversion::Bytes);
+        assert2::assert!(expression.label() == "size");
+        assert2::assert!(expression.conversion() == UnwrapConversion::Bytes);
         check!(UnwrapExpression::new("").is_err());
         check!(UnwrapExpression::bytes("").is_err());
         check!(UnwrapExpression::duration("").is_err());
@@ -458,30 +460,46 @@ mod tests {
     fn unwrap_bytes_conversion_accepts_only_integer_bytes_in_range() {
         let expression = UnwrapExpression::bytes("size").unwrap();
 
-        assert_eq!(expression.convert_sample_value("1B"), Some("1".to_string()));
-        assert_eq!(expression.convert_sample_value("1.5B"), None);
+        for (_name, input, expected) in [
+            ("integer bytes", "1B", Some("1".to_string())),
+            ("fractional bytes", "1.5B", None),
+        ] {
+            assert2::assert!(expression.convert_sample_value(input) == expected);
+        }
     }
 
     #[test]
     fn raw_sample_literals_preserve_zero_and_signs() {
-        assert_eq!(parse_raw_sample_literal("0"), Some("0".to_string()));
-        assert_eq!(parse_raw_sample_literal("+12.5"), Some("12.5".to_string()));
-        assert_eq!(parse_raw_sample_literal("-12.5"), Some("-12.5".to_string()));
+        for (_name, input, expected) in [
+            ("zero", "0", Some("0".to_string())),
+            ("explicit positive", "+12.5", Some("12.5".to_string())),
+            ("negative", "-12.5", Some("-12.5".to_string())),
+        ] {
+            assert2::assert!(parse_raw_sample_literal(input) == expected);
+        }
     }
 
     #[test]
     fn raw_sample_literals_accept_fractional_boundary_forms() {
-        assert_eq!(parse_raw_sample_literal(".5"), Some("0.5".to_string()));
-        assert_eq!(parse_raw_sample_literal("1."), Some("1".to_string()));
-        assert_eq!(parse_raw_sample_literal("1e2"), Some("100".to_string()));
-        assert_eq!(parse_raw_sample_literal("1e-2"), Some("0.01".to_string()));
+        for (_name, input, expected) in [
+            ("leading decimal point", ".5", "0.5"),
+            ("trailing decimal point", "1.", "1"),
+            ("positive exponent", "1e2", "100"),
+            ("negative exponent", "1e-2", "0.01"),
+        ] {
+            assert2::assert!(parse_raw_sample_literal(input) == Some(expected.to_string()));
+        }
     }
 
     #[test]
     fn raw_sample_literals_reject_invalid_digits() {
-        assert_eq!(parse_raw_sample_literal("12a.3"), None);
-        assert_eq!(parse_raw_sample_literal("12.3a"), None);
-        assert_eq!(parse_raw_sample_literal("1e2e3"), None);
+        for (_name, input) in [
+            ("letter before decimal", "12a.3"),
+            ("letter after decimal", "12.3a"),
+            ("repeated exponent", "1e2e3"),
+        ] {
+            assert2::assert!(parse_raw_sample_literal(input) == None);
+        }
     }
 
     #[test]
@@ -491,14 +509,12 @@ mod tests {
         let selections =
             LabelSelectionSet::new(vec![drop_level.clone(), drop_debug_app.clone()]).unwrap();
 
-        assert_eq!(selections.selections(), &[drop_level, drop_debug_app]);
+        assert2::assert!(selections.selections() == &[drop_level, drop_debug_app]);
 
         let mut fields = labels(&[("app", "debug-api"), ("level", "warn"), ("status", "500")]);
         selections.apply_drop(&mut fields);
 
-        assert_eq!(fields.get("status"), Some(&"500".to_string()));
-        assert!(!fields.contains_key("app"));
-        assert!(!fields.contains_key("level"));
+        assert2::assert!(fields == labels(&[("status", "500")]));
     }
 
     #[test]
@@ -507,15 +523,11 @@ mod tests {
         let regex = LabelSelection::regex("app", "api|worker").unwrap();
         let bare = LabelSelection::name("level").unwrap();
 
-        assert_eq!(
-            exact.matcher(),
-            Some(&LabelSelectionMatcher::Equal("500".to_string()))
+        assert2::assert!(exact.matcher() == Some(&LabelSelectionMatcher::Equal("500".to_string())));
+        assert2::assert!(
+            regex.matcher() == Some(&LabelSelectionMatcher::Regex("api|worker".to_string()))
         );
-        assert_eq!(
-            regex.matcher(),
-            Some(&LabelSelectionMatcher::Regex("api|worker".to_string()))
-        );
-        assert_eq!(bare.matcher(), None);
+        assert2::assert!(bare.matcher() == None);
     }
 
     #[test]
@@ -534,11 +546,7 @@ mod tests {
             (&regex, &fields, true),
             (&regex, &frontend, false),
         ] {
-            assert_eq!(
-                selection.matches(candidate),
-                expected,
-                "{selection:?} against {candidate:?}"
-            );
+            assert2::assert!(selection.matches(candidate) == expected);
         }
     }
 

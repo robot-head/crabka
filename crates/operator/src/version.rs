@@ -199,191 +199,136 @@ pub fn evaluate(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
-    fn parse_major_minor_patch() {
-        assert!(
-            KafkaVersion::parse("3.7.1").unwrap()
-                == KafkaVersion {
+    fn parse_success_cases() {
+        for (_name, input, expected) in [
+            (
+                "major minor patch",
+                "3.7.1",
+                KafkaVersion {
                     major: 3,
                     minor: 7,
-                    patch: 1
-                }
-        );
-    }
-
-    #[test]
-    fn parse_major_minor() {
-        let v = KafkaVersion::parse("3.7").unwrap();
-        assert!(v.metadata_key() == (3, 7));
-        assert!(v.short() == "3.7");
-    }
-
-    #[test]
-    fn parse_bare_major() {
-        assert!(KafkaVersion::parse("4").unwrap().metadata_key() == (4, 0));
-    }
-
-    #[test]
-    fn parse_strips_ibp_suffix() {
-        assert!(KafkaVersion::parse("3.7-IV2").unwrap().short() == "3.7");
+                    patch: 1,
+                },
+            ),
+            (
+                "major minor",
+                "3.7",
+                KafkaVersion {
+                    major: 3,
+                    minor: 7,
+                    patch: 0,
+                },
+            ),
+            (
+                "bare major",
+                "4",
+                KafkaVersion {
+                    major: 4,
+                    minor: 0,
+                    patch: 0,
+                },
+            ),
+            (
+                "IBP suffix",
+                "3.7-IV2",
+                KafkaVersion {
+                    major: 3,
+                    minor: 7,
+                    patch: 0,
+                },
+            ),
+        ] {
+            assert2::assert!(KafkaVersion::parse(input).unwrap() == expected);
+        }
     }
 
     #[test]
     fn parse_rejects_junk() {
         for input in ["banana", "", "3.x", "1.2.3.4"] {
-            assert!(KafkaVersion::parse(input).is_err(), "case {input:?}");
+            assert2::assert!(KafkaVersion::parse(input).is_err());
         }
     }
 
     #[test]
-    fn evaluate_default_tracks_binary() {
-        let out = evaluate("3.7.0", None, None);
-        assert!(
-            out == VersionOutcome::Valid {
-                resolved_metadata: "3.7".into()
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_explicit_pin_below_binary_ok() {
-        let out = evaluate("3.7.0", Some("3.6"), None);
-        assert!(
-            out == VersionOutcome::Valid {
-                resolved_metadata: "3.6".into()
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_pin_equal_binary_ok() {
-        let out = evaluate("3.7", Some("3.7-IV4"), None);
-        assert!(
-            out == VersionOutcome::Valid {
-                resolved_metadata: "3.7".into()
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_pin_above_binary_rejected() {
-        let out = evaluate("3.6.0", Some("3.7"), None);
-        match out {
-            VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::MetadataVersionTooHigh);
-            }
-            other @ VersionOutcome::Valid { .. } => {
-                panic!("expected MetadataVersionTooHigh, got {other:?}")
-            }
+    fn evaluate_cases() {
+        for (_name, binary, pin, finalized, expected) in [
+            ("default tracks binary", "3.7.0", None, None, Ok("3.7")),
+            (
+                "explicit pin below binary",
+                "3.7.0",
+                Some("3.6"),
+                None,
+                Ok("3.6"),
+            ),
+            ("pin equals binary", "3.7", Some("3.7-IV4"), None, Ok("3.7")),
+            (
+                "pin above binary",
+                "3.6.0",
+                Some("3.7"),
+                None,
+                Err(VersionReason::MetadataVersionTooHigh),
+            ),
+            (
+                "metadata downgrade",
+                "3.7.0",
+                Some("3.6"),
+                Some("3.7"),
+                Err(VersionReason::MetadataVersionDowngrade),
+            ),
+            (
+                "binary downgrade",
+                "3.6.0",
+                None,
+                Some("3.7"),
+                Err(VersionReason::MetadataVersionDowngrade),
+            ),
+            ("same finalized", "3.7.0", None, Some("3.7"), Ok("3.7")),
+            (
+                "upgrade above finalized",
+                "3.8.0",
+                None,
+                Some("3.7"),
+                Ok("3.8"),
+            ),
+            (
+                "invalid binary",
+                "nope",
+                None,
+                None,
+                Err(VersionReason::InvalidVersion),
+            ),
+            (
+                "invalid pin",
+                "3.7.0",
+                Some("nope"),
+                None,
+                Err(VersionReason::InvalidVersion),
+            ),
+            (
+                "unparseable finalized ignored",
+                "3.7.0",
+                None,
+                Some("garbage"),
+                Ok("3.7"),
+            ),
+            (
+                "below broker minimum",
+                "3.2.0",
+                None,
+                None,
+                Err(VersionReason::MetadataVersionTooLow),
+            ),
+            ("at broker minimum", "3.7.0", None, None, Ok("3.7")),
+        ] {
+            let actual = match evaluate(binary, pin, finalized) {
+                VersionOutcome::Valid { resolved_metadata } => Ok(resolved_metadata),
+                VersionOutcome::Invalid { reason, .. } => Err(reason),
+            };
+            assert2::assert!(actual == expected.map(str::to_string));
         }
-    }
-
-    #[test]
-    fn evaluate_metadata_downgrade_rejected() {
-        // Finalized at 3.7; pinning back to 3.6 is forbidden.
-        let out = evaluate("3.7.0", Some("3.6"), Some("3.7"));
-        match out {
-            VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::MetadataVersionDowngrade);
-            }
-            other @ VersionOutcome::Valid { .. } => {
-                panic!("expected MetadataVersionDowngrade, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn evaluate_binary_downgrade_below_finalized_rejected() {
-        // Finalized at 3.7, default-tracking; downgrading the binary to 3.6
-        // drags the resolved metadata to 3.6 < finalized 3.7.
-        let out = evaluate("3.6.0", None, Some("3.7"));
-        match out {
-            VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::MetadataVersionDowngrade);
-            }
-            other @ VersionOutcome::Valid { .. } => {
-                panic!("expected MetadataVersionDowngrade, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn evaluate_same_finalized_is_ok() {
-        let out = evaluate("3.7.0", None, Some("3.7"));
-        assert!(
-            out == VersionOutcome::Valid {
-                resolved_metadata: "3.7".into()
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_upgrade_above_finalized_ok() {
-        let out = evaluate("3.8.0", None, Some("3.7"));
-        assert!(
-            out == VersionOutcome::Valid {
-                resolved_metadata: "3.8".into()
-            }
-        );
-    }
-
-    #[test]
-    fn evaluate_invalid_binary() {
-        let out = evaluate("nope", None, None);
-        match out {
-            VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::InvalidVersion);
-            }
-            other @ VersionOutcome::Valid { .. } => {
-                panic!("expected InvalidVersion, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn evaluate_invalid_pin() {
-        let out = evaluate("3.7.0", Some("nope"), None);
-        match out {
-            VersionOutcome::Invalid { reason, .. } => {
-                assert!(reason == VersionReason::InvalidVersion);
-            }
-            other @ VersionOutcome::Valid { .. } => {
-                panic!("expected InvalidVersion, got {other:?}")
-            }
-        }
-    }
-
-    #[test]
-    fn evaluate_unparseable_finalized_is_ignored() {
-        // A malformed finalized value should not block progress.
-        let out = evaluate("3.7.0", None, Some("garbage"));
-        assert!(
-            out == VersionOutcome::Valid {
-                resolved_metadata: "3.7".into()
-            }
-        );
-    }
-
-    #[test]
-    fn resolved_below_broker_min_is_too_low() {
-        // 3.2 maps below the broker's metadata.version floor (3.3-IV3).
-        let out = evaluate("3.2.0", None, None);
-        assert!(matches!(
-            out,
-            VersionOutcome::Invalid {
-                reason: VersionReason::MetadataVersionTooLow,
-                ..
-            }
-        ));
-    }
-
-    #[test]
-    fn resolved_at_or_above_min_is_valid() {
-        let out = evaluate("3.7.0", None, None);
-        assert!(matches!(out, VersionOutcome::Valid { .. }));
     }
 }

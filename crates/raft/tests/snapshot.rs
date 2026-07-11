@@ -12,7 +12,7 @@
 
 use std::time::Duration;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_metadata::{FeatureLevelRecord, MetadataRecord, NodeId, TopicRecord};
 use crabka_raft::{BootstrapMode, Controller, ControllerConfig};
 use tempfile::TempDir;
@@ -67,9 +67,13 @@ async fn snapshot_then_restart_recovers_image() {
             ])
             .await
             .expect("submit records");
-        check!(controller.current_image().topic("t").is_some());
-        check!(controller.current_image().finalized_metadata_version() == Some(25));
-        check!(controller.current_image().voters().contains(NodeId(1)));
+        check!(
+            (
+                controller.current_image().topic("t").is_some(),
+                controller.current_image().finalized_metadata_version(),
+                controller.current_image().voters().contains(NodeId(1)),
+            ) == (true, Some(25), true)
+        );
 
         controller
             .trigger_snapshot()
@@ -78,10 +82,7 @@ async fn snapshot_then_restart_recovers_image() {
 
         // The checkpoint is written synchronously inside the engine before
         // `trigger_snapshot` returns; confirm it landed on disk.
-        assert!(
-            has_checkpoint(&dir.path().join("@metadata-0")),
-            "checkpoint must be written to disk"
-        );
+        assert2::assert!(has_checkpoint(&dir.path().join("@metadata-0")));
 
         controller.shutdown().await;
     }
@@ -96,10 +97,7 @@ async fn snapshot_then_restart_recovers_image() {
         let controller = Controller::start(cfg).await.expect("rejoin start");
         wait_for_leader(&controller).await;
 
-        assert!(
-            controller.current_image().topic("t").is_some(),
-            "topic 't' must survive snapshot + restart"
-        );
+        assert2::assert!(controller.current_image().topic("t").is_some());
         // The finalized feature + its epoch must be rebuilt from the on-disk
         // checkpoint, not silently dropped.
         let recovered = controller.current_image();

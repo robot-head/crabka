@@ -390,7 +390,7 @@ fn compute_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -420,7 +420,7 @@ mod tests {
     fn add_member_marks_dirty_first_time() {
         let mut g = GroupState::new("g");
         g.add_or_update_member(member("m1"));
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
         g.add_or_update_member(member("m1"));
         g.dirty = false;
         g.add_or_update_member(member("m1"));
-        assert!(!g.dirty);
+        assert2::assert!(!g.dirty);
     }
 
     #[test]
@@ -440,7 +440,7 @@ mod tests {
         let mut m = member("m1");
         m.subscribed_topic_names.insert("t".into());
         g.add_or_update_member(m);
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -449,7 +449,7 @@ mod tests {
         g.add_or_update_member(member("m1"));
         g.dirty = false;
         g.remove_member("m1");
-        assert!(g.dirty);
+        assert2::assert!(g.dirty);
     }
 
     #[test]
@@ -460,8 +460,7 @@ mod tests {
         g.add_or_update_member(m);
         g.add_or_update_member(member("m2"));
         let evicted = g.evict_expired(Instant::now(), Duration::from_mins(1));
-        assert!(evicted == vec!["m1".to_string()]);
-        assert!(g.members.contains_key("m2"));
+        assert2::assert!((evicted, g.members.contains_key("m2")) == (vec!["m1".to_string()], true));
     }
 
     #[test]
@@ -475,9 +474,17 @@ mod tests {
         target_for_m1.insert(t, vec![0, 1]);
         g.install_target([("m1".to_string(), target_for_m1)].into());
         let m = &g.members["m1"];
-        check!(m.partitions_pending_revocation[&t] == vec![2]);
-        check!(m.assigned_partitions[&t] == vec![0, 1]);
-        check!(m.assignment_state == MemberAssignmentState::UnrevokedPartitions);
+        check!(
+            (
+                &m.partitions_pending_revocation,
+                &m.assigned_partitions,
+                m.assignment_state,
+            ) == (
+                &HashMap::from([(t, vec![2])]),
+                &HashMap::from([(t, vec![0, 1])]),
+                MemberAssignmentState::UnrevokedPartitions,
+            )
+        );
     }
 
     #[test]
@@ -486,7 +493,7 @@ mod tests {
         let mut m = member("m1");
         m.instance_id = Some("inst1".into());
         g.add_or_update_member(m);
-        assert!(g.current_member_for_instance("inst1") == Some("m1"));
+        assert2::assert!(g.current_member_for_instance("inst1") == Some("m1"));
     }
 
     #[test]
@@ -494,18 +501,21 @@ mod tests {
         let mut g = GroupState::new("g");
         g.dirty = false;
         g.bump_epoch();
-        assert!(g.group_epoch == 1);
-        assert!(g.dirty);
+        assert2::assert!((g.group_epoch, g.dirty) == (1, true));
     }
 
     #[test]
     fn set_regex_compiles_and_caches() {
         let mut m = member("m1");
         m.set_regex(Some("^orders-.*".into()));
-        assert!(m.subscribed_topic_regex.as_deref() == Some("^orders-.*"));
         let re = m.compiled_regex().expect("valid regex must compile");
-        assert!(re.is_match("orders-eu"));
-        assert!(!re.is_match("shipments"));
+        assert2::assert!(
+            (
+                m.subscribed_topic_regex.as_deref(),
+                re.is_match("orders-eu"),
+                re.is_match("shipments"),
+            ) == (Some("^orders-.*"), true, false)
+        );
     }
 
     #[test]
@@ -514,18 +524,26 @@ mod tests {
         m.set_regex(Some("*invalid".into()));
         // Pattern string is retained, but no compiled regex is exposed —
         // the reconciler treats this as names-only, not match-everything.
-        assert!(m.subscribed_topic_regex.as_deref() == Some("*invalid"));
-        assert!(m.compiled_regex().is_none());
+        assert2::assert!(
+            (
+                m.subscribed_topic_regex.as_deref(),
+                m.compiled_regex().is_none(),
+            ) == (Some("*invalid"), true)
+        );
     }
 
     #[test]
     fn set_regex_none_clears_cache() {
         let mut m = member("m1");
         m.set_regex(Some("^a".into()));
-        assert!(m.compiled_regex().is_some());
+        assert2::assert!(m.compiled_regex().is_some());
         m.set_regex(None);
-        assert!(m.subscribed_topic_regex.is_none());
-        assert!(m.compiled_regex().is_none());
+        assert2::assert!(
+            (
+                m.subscribed_topic_regex.is_none(),
+                m.compiled_regex().is_none()
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -535,8 +553,12 @@ mod tests {
         m.subscribed_topic_regex = Some("^a".into());
         m.compiled_regex = None;
         m.sync_regex_cache();
-        assert!(m.subscribed_topic_regex.as_deref() == Some("^a"));
-        assert!(m.compiled_regex().expect("synced").is_match("apple"));
+        assert2::assert!(
+            (
+                m.subscribed_topic_regex.as_deref(),
+                m.compiled_regex().expect("synced").is_match("apple"),
+            ) == (Some("^a"), true)
+        );
     }
 
     #[test]
@@ -546,7 +568,6 @@ mod tests {
         g.group_epoch = 5;
         g.advance_member_epoch("m1");
         let m = &g.members["m1"];
-        assert!(m.member_epoch == 5);
-        assert!(m.previous_member_epoch == 0);
+        assert2::assert!((m.member_epoch, m.previous_member_epoch) == (5, 0));
     }
 }

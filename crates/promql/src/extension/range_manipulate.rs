@@ -525,7 +525,7 @@ mod tests {
         compute::concat_batches,
         datatypes::{DataType, Field, Int64Type, Schema},
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::{
         datasource::memory::MemorySourceConfig, physical_plan::collect, prelude::SessionContext,
     };
@@ -621,14 +621,14 @@ mod tests {
         check!(schema.field_with_name("timestamp").unwrap().data_type() == &DataType::Int64);
         check!(schema.field_with_name("job").unwrap().data_type() == &DataType::Utf8);
         // The range columns are dictionaries of lists.
-        assert!(matches!(
+        assert2::assert!(matches!(
             schema
                 .field_with_name("timestamp_range")
                 .unwrap()
                 .data_type(),
             DataType::Dictionary(_, _)
         ));
-        assert!(matches!(
+        assert2::assert!(matches!(
             schema.field_with_name("value_range").unwrap().data_type(),
             DataType::Dictionary(_, _)
         ));
@@ -640,7 +640,7 @@ mod tests {
         let (batch, schema) = series_batch(vec![100], vec![1.0]);
         let out = run(batch, schema, 100, 100, 60, 60).await;
         let cells = timestamp_cells(&out, "timestamp_range");
-        assert!(cells == vec![vec![100_i64]]);
+        assert2::assert!(cells == vec![vec![100_i64]]);
     }
 
     #[tokio::test]
@@ -651,8 +651,8 @@ mod tests {
         let out = run(batch, schema, 100, 100, 60, 60).await;
         let ts_cells = timestamp_cells(&out, "timestamp_range");
         let val_cells = value_cells(&out, "value_range");
-        assert!(ts_cells == vec![vec![41_i64]]);
-        assert!(val_cells == vec![vec![2.0_f64]]);
+        assert2::assert!(ts_cells == vec![vec![41_i64]]);
+        assert2::assert!(val_cells == vec![vec![2.0_f64]]);
     }
 
     #[tokio::test]
@@ -661,7 +661,7 @@ mod tests {
         let (batch, schema) = series_batch(vec![10, 20], vec![1.0, 2.0]);
         let out = run(batch, schema, 100, 100, 60, 60).await;
         let ts_cells = timestamp_cells(&out, "timestamp_range");
-        assert!(ts_cells == vec![Vec::<i64>::new()]);
+        assert2::assert!(ts_cells == vec![Vec::<i64>::new()]);
     }
 
     #[tokio::test]
@@ -706,8 +706,8 @@ mod tests {
         let ts_cells = timestamp_cells(&out, "timestamp_range");
         let val_cells = value_cells(&out, "value_range");
         // (0, 30] -> 10, 20, 30
-        assert!(ts_cells == vec![vec![10, 20, 30]]);
-        assert!(val_cells == vec![vec![1.0, 2.0, 3.0]]);
+        assert2::assert!(ts_cells == vec![vec![10, 20, 30]]);
+        assert2::assert!(val_cells == vec![vec![1.0, 2.0, 3.0]]);
     }
 
     #[tokio::test]
@@ -717,13 +717,13 @@ mod tests {
         // rows.
         let (batch, schema) = series_batch(vec![], vec![]);
         let out = run(batch, schema, 0, 120, 60, 60).await;
-        assert!(out.num_rows() == 0);
+        assert2::assert!(out.num_rows() == 0);
         let out_schema = out.schema();
         let names: Vec<&str> = out_schema
             .fields()
             .iter()
             .map(|f| f.name().as_str())
             .collect();
-        assert!(names == vec!["job", "timestamp", "timestamp_range", "value_range"]);
+        assert2::assert!(names == vec!["job", "timestamp", "timestamp_range", "value_range"]);
     }
 }

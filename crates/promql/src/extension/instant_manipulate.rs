@@ -268,7 +268,7 @@ mod tests {
         compute::concat_batches,
         datatypes::{DataType, Field, Schema},
     };
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::{
         catalog::MemTable,
         datasource::memory::MemorySourceConfig,
@@ -355,7 +355,7 @@ mod tests {
         let rewritten = node
             .with_exprs_and_inputs(vec![], vec![input.clone()])
             .expect("valid rewrite");
-        assert!(
+        assert2::assert!(
             rewritten
                 == InstantManipulate {
                     start_ms: 0,
@@ -439,13 +439,13 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(
+        assert2::assert!(
             (0..ts.len())
                 .map(|index| ts.value(index))
                 .collect::<Vec<_>>()
                 == vec![0, 60_000, 120_000]
         );
-        assert!(
+        assert2::assert!(
             (0..val.len())
                 .map(|index| val.value(index))
                 .collect::<Vec<_>>()
@@ -472,7 +472,7 @@ mod tests {
         let out = collect(Arc::new(exec), ctx.task_ctx()).await.unwrap();
 
         let rows = out.iter().map(RecordBatch::num_rows).sum::<usize>();
-        assert!(rows == 0);
+        assert2::assert!(rows == 0);
     }
 
     #[tokio::test]

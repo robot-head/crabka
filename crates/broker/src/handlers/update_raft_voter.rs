@@ -102,7 +102,6 @@ fn encode_resp(version: i16, resp: &UpdateRaftVoterResponse) -> Result<Bytes, Br
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::{
         owned::update_raft_voter_request::{KRaftVersionFeature, Listener},
         primitives::uuid::Uuid as ProtoUuid,
@@ -156,8 +155,8 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = UpdateRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert!(decoded.error_code == codes::INVALID_REQUEST);
-            assert!(cur.is_empty(), "all bytes consumed at v{version}");
+            assert2::assert!(decoded == resp);
+            assert2::assert!(cur.is_empty());
         }
     }
 
@@ -180,7 +179,7 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert2::assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
         broker_handle.shutdown().await;
     }
 
@@ -204,7 +203,7 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::INVALID_REQUEST);
+        assert2::assert!(resp.error_code == codes::INVALID_REQUEST);
         broker_handle.shutdown().await;
     }
 
@@ -228,7 +227,7 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
+        assert2::assert!(resp.error_code == codes::UNKNOWN_SERVER_ERROR);
         broker_handle.shutdown().await;
     }
 }

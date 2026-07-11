@@ -81,7 +81,6 @@ fn stringify(per_topic: &BTreeMap<String, BTreeSet<(i32, i32)>>) -> BTreeMap<Str
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -99,7 +98,7 @@ mod tests {
     #[test]
     fn empty_movements_returns_empty_targets() {
         let t = compute_throttle_targets(&[]);
-        assert!(
+        assert2::assert!(
             t == ThrottleTargets {
                 leader_brokers: BTreeSet::new(),
                 follower_brokers: BTreeSet::new(),
@@ -114,7 +113,7 @@ mod tests {
         // Move partition 0 from broker 1 to broker 2.
         let m = mv("t", 0, vec![1], vec![2]);
         let t = compute_throttle_targets(std::slice::from_ref(&m));
-        assert!(
+        assert2::assert!(
             t == ThrottleTargets {
                 leader_brokers: BTreeSet::from([1]),
                 follower_brokers: BTreeSet::from([2]),
@@ -130,7 +129,7 @@ mod tests {
         let m = mv("t", 5, vec![1], vec![1, 2]);
         let t = compute_throttle_targets(std::slice::from_ref(&m));
         // leader.replication.throttled.replicas covers the partition × source brokers.
-        assert!(
+        assert2::assert!(
             t == ThrottleTargets {
                 leader_brokers: BTreeSet::from([1]),
                 follower_brokers: BTreeSet::from([2]),
@@ -149,7 +148,7 @@ mod tests {
         ];
         let t = compute_throttle_targets(&ms);
         // Per-topic strings are sorted by (partition, broker).
-        assert!(
+        assert2::assert!(
             t == ThrottleTargets {
                 leader_brokers: BTreeSet::from([1, 2, 3]),
                 follower_brokers: BTreeSet::from([1, 2]),
@@ -169,6 +168,6 @@ mod tests {
     fn output_is_deterministic_across_input_orders() {
         let a = vec![mv("z", 1, vec![3], vec![4]), mv("a", 0, vec![1], vec![2])];
         let b = vec![mv("a", 0, vec![1], vec![2]), mv("z", 1, vec![3], vec![4])];
-        assert!(compute_throttle_targets(&a) == compute_throttle_targets(&b));
+        assert2::assert!(compute_throttle_targets(&a) == compute_throttle_targets(&b));
     }
 }

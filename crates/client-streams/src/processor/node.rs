@@ -405,8 +405,10 @@ mod tests {
         let rec = ErasedRecord::new(None, Box::new("hi".to_string()), 1);
         node.process(&mut d, rec).await.unwrap();
         let (_c, out) = buffer.pop_front().unwrap();
-        check!(out.key.is_none());
-        check!(*out.value.downcast::<String>().unwrap() == "HI");
+        check!(
+            (out.key.is_none(), *out.value.downcast::<String>().unwrap())
+                == (true, "HI".to_string())
+        );
     }
 
     #[tokio::test]
@@ -456,9 +458,13 @@ mod tests {
             1,
         );
         node.process(&mut d, rec).await.unwrap();
-        check!(output.len() == 1);
-        check!(output[0].topic == "out-topic");
-        check!(output[0].value.as_ref().unwrap().as_ref() == b"V");
+        check!(
+            (
+                output.len(),
+                output[0].topic.as_str(),
+                output[0].value.as_deref()
+            ) == (1, "out-topic", Some(b"V".as_slice()))
+        );
     }
 
     #[tokio::test]
@@ -481,9 +487,13 @@ mod tests {
         );
         let rec = ErasedRecord::new(None, Box::new("v".to_string()), 0);
         node.process(&mut d, rec).await.unwrap();
-        check!(output.len() == 1);
-        check!(output[0].key.is_none());
-        check!(output[0].value.as_ref().unwrap().as_ref() == b"v");
+        check!(
+            (
+                output.len(),
+                output[0].key.is_none(),
+                output[0].value.as_deref()
+            ) == (1, true, Some(b"v".as_slice()))
+        );
     }
 
     #[tokio::test]

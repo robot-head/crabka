@@ -23,7 +23,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle, NodeId};
 use crabka_client_core::Client;
 use tempfile::TempDir;
@@ -202,7 +201,7 @@ pub async fn start_with_deny_all_authz() -> InProcess {
 /// `broker_started_event_is_written_to_audit_topic` fetch pattern.
 pub async fn wait_for_audit_record<F>(
     client: &crabka_client_core::Client,
-    what: &str,
+    _what: &str,
     mut predicate: F,
 ) -> Vec<serde_json::Value>
 where
@@ -214,10 +213,7 @@ where
         if records.iter().any(&mut predicate) {
             return records;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "audit record '{what}' did not appear within 30s; last={records:?}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -232,10 +228,7 @@ pub async fn wait_for_audit_seq_count(
         if seqs.len() >= min_count {
             return seqs;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "audit seq count did not reach {min_count} within 30s; last={seqs:?}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
@@ -596,10 +589,9 @@ pub async fn start_n_node_with(
              (voter counts={counts:?})"
         )));
     }
-    assert!(
+    assert2::assert!(
         out.iter()
-            .any(|(h, _, _)| h.voter_count_for_test() >= n_usize),
-        "leader elected but voter set not committed to {n_usize}"
+            .any(|(h, _, _)| h.voter_count_for_test() >= n_usize)
     );
 
     Ok(out)

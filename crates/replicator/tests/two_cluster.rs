@@ -129,33 +129,17 @@ async fn selective_replication_naming_and_residency() {
     // --- assertions -------------------------------------------------------
 
     // Selective replication + naming: expected counts on target.
-    assert_eq!(
-        common::count(&target.bootstrap, "us-east.orders").await,
-        3,
-        "orders: expected 3 replicated records"
-    );
-    assert_eq!(
-        common::count(&target.bootstrap, "us-east.payments").await,
-        2,
-        "payments: expected 2 replicated records"
-    );
+    assert2::assert!(common::count(&target.bootstrap, "us-east.orders").await == 3);
+    assert2::assert!(common::count(&target.bootstrap, "us-east.payments").await == 2);
 
     // Excluded by selector glob `*.internal`.
     // Note: `audit.internal` contains a `.` so the supervisor's `is_remote`
     // heuristic also treats it as a remote topic — either guard suffices to
     // prevent it from appearing in the topic list sent to the worker.
-    assert_eq!(
-        common::count(&target.bootstrap, "us-east.audit.internal").await,
-        0,
-        "audit.internal: should be excluded by *.internal selector"
-    );
+    assert2::assert!(common::count(&target.bootstrap, "us-east.audit.internal").await == 0);
 
     // Blocked by residency policy: `customers` requires `gdpr` zone; target has none.
-    assert_eq!(
-        common::count(&target.bootstrap, "us-east.customers").await,
-        0,
-        "customers: should be blocked by residency policy (no gdpr zone on target)"
-    );
+    assert2::assert!(common::count(&target.bootstrap, "us-east.customers").await == 0);
 
     sup.shutdown().await;
 }
@@ -265,18 +249,10 @@ async fn active_active_loop_prevention() {
     // --- assertions -------------------------------------------------------
 
     // The looped topic must NOT exist on `a`.
-    assert_eq!(
-        common::count(&a.bootstrap, "cb.ca.orders").await,
-        0,
-        "loop prevention: cb.ca.orders must not exist on cluster ca"
-    );
+    assert2::assert!(common::count(&a.bootstrap, "cb.ca.orders").await == 0);
 
     // The original topic on `a` should be unchanged.
-    assert_eq!(
-        common::count(&a.bootstrap, "orders").await,
-        3,
-        "original orders on ca must remain at 3"
-    );
+    assert2::assert!(common::count(&a.bootstrap, "orders").await == 3);
 
     sup.shutdown().await;
 }

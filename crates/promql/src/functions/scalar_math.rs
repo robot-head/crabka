@@ -381,7 +381,6 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::{array::Float64Array, datatypes::Field};
-    use assert2::assert;
 
     use super::*;
 
@@ -451,10 +450,7 @@ mod tests {
             (ScalarMathOp::Log2, 8.0, 3.0),
         ] {
             let got = run(op, &[], &[input])[0];
-            assert!(
-                bits_eq(got, want),
-                "case {op:?}({input}): got {got}, want {want}"
-            );
+            assert2::assert!(bits_eq(got, want));
         }
     }
 
@@ -470,10 +466,7 @@ mod tests {
             (f64::NAN, f64::NAN),
         ] {
             let got = run(ScalarMathOp::Sgn, &[], &[input])[0];
-            assert!(
-                bits_eq(got, want),
-                "case sgn({input}): got {got}, want {want}"
-            );
+            assert2::assert!(bits_eq(got, want));
         }
     }
 
@@ -487,10 +480,7 @@ mod tests {
             (5.0, 13.0, 15.0),
         ] {
             let got = run(ScalarMathOp::Round, &[to_nearest], &[value])[0];
-            assert!(
-                bits_eq(got, want),
-                "case round({value}, to_nearest={to_nearest}): got {got}, want {want}"
-            );
+            assert2::assert!(bits_eq(got, want));
         }
     }
 
@@ -510,10 +500,7 @@ mod tests {
         ];
         for &(op, bounds, value, want) in cases {
             let got = run(op, bounds, &[value])[0];
-            assert!(
-                bits_eq(got, want),
-                "case {op:?}(bounds={bounds:?}, value={value}): got {got}, want {want}"
-            );
+            assert2::assert!(bits_eq(got, want));
         }
     }
 
@@ -521,7 +508,7 @@ mod tests {
     fn scalar_bound_array_must_have_non_null_first_value() {
         let values: ArrayRef = Arc::new(Float64Array::from(vec![1.0]));
 
-        assert!(
+        assert2::assert!(
             invoke_with_columns(
                 ScalarMathOp::ClampMin,
                 vec![
@@ -532,7 +519,7 @@ mod tests {
             )
             .is_err()
         );
-        assert!(
+        assert2::assert!(
             invoke_with_columns(
                 ScalarMathOp::ClampMin,
                 vec![
@@ -548,7 +535,7 @@ mod tests {
     #[test]
     fn nan_value_flows_through() {
         for op in [ScalarMathOp::Sin, ScalarMathOp::Abs, ScalarMathOp::Ceil] {
-            assert!(run(op, &[], &[f64::NAN])[0].is_nan(), "case {op:?}");
+            assert2::assert!(run(op, &[], &[f64::NAN])[0].is_nan());
         }
     }
 }

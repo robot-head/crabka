@@ -134,7 +134,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
     use crabka_metadata::{ClientQuotaRecord, MetadataRecord, QuotaEntity};
 
     use super::*;
@@ -205,8 +204,8 @@ mod tests {
     fn strict_exact_match_filters_correctly() {
         let stored = key(vec![("user", Some("alice"))]);
         let filter = vec![comp("user", MATCH_TYPE_EXACT, Some("alice"))];
-        assert!(entity_matches_filter(&stored, &filter, true));
-        assert!(!entity_matches_filter(&stored, &filter[..0], true)); // strict: type-count mismatch
+        assert2::assert!(entity_matches_filter(&stored, &filter, true));
+        assert2::assert!(!entity_matches_filter(&stored, &filter[..0], true)); // strict: type-count mismatch
     }
 
     #[test]
@@ -214,8 +213,8 @@ mod tests {
         // Stored has (user, client-id); filter only mentions user.
         let stored = key(vec![("client-id", Some("app1")), ("user", Some("alice"))]);
         let filter = vec![comp("user", MATCH_TYPE_EXACT, Some("alice"))];
-        assert!(entity_matches_filter(&stored, &filter, false));
-        assert!(!entity_matches_filter(&stored, &filter, true)); // strict rejects superset
+        assert2::assert!(entity_matches_filter(&stored, &filter, false));
+        assert2::assert!(!entity_matches_filter(&stored, &filter, true)); // strict rejects superset
     }
 
     #[test]
@@ -223,8 +222,8 @@ mod tests {
         let stored_default = key(vec![("user", None)]);
         let stored_named = key(vec![("user", Some("alice"))]);
         let filter = vec![comp("user", MATCH_TYPE_DEFAULT, None)];
-        assert!(entity_matches_filter(&stored_default, &filter, true));
-        assert!(!entity_matches_filter(&stored_named, &filter, true));
+        assert2::assert!(entity_matches_filter(&stored_default, &filter, true));
+        assert2::assert!(!entity_matches_filter(&stored_named, &filter, true));
     }
 
     #[test]
@@ -232,8 +231,8 @@ mod tests {
         let stored1 = key(vec![("user", Some("alice"))]);
         let stored2 = key(vec![("user", None)]);
         let filter = vec![comp("user", MATCH_TYPE_ANY, None)];
-        assert!(entity_matches_filter(&stored1, &filter, true));
-        assert!(entity_matches_filter(&stored2, &filter, true));
+        assert2::assert!(entity_matches_filter(&stored1, &filter, true));
+        assert2::assert!(entity_matches_filter(&stored2, &filter, true));
     }
 
     #[tokio::test]
@@ -261,7 +260,7 @@ mod tests {
             entries: None,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected, "{resp:?}");
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -298,32 +297,33 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&bytes);
 
-        check!(resp.throttle_time_ms == 0, "{resp:?}");
-        check!(resp.error_code == 0, "{resp:?}");
-        check!(resp.error_message == None, "{resp:?}");
-        let entries = resp.entries.expect("entries");
-        assert!(entries.len() == 1, "{entries:?}");
-        let entry = &entries[0];
-        assert!(entry.entity.len() == 2, "{entry:?}");
-        let by_type: std::collections::HashMap<_, _> = entry
-            .entity
-            .iter()
-            .map(|e| (e.entity_type.as_str(), e.entity_name.as_deref()))
-            .collect();
-        check!(
-            by_type.get("client-id") == Some(&Some("app-1")),
-            "{entry:?}"
-        );
-        check!(by_type.get("user") == Some(&Some("alice")), "{entry:?}");
-        check!(entry.values.len() == 1, "{entry:?}");
-        check!(
-            entry.values[0].key.as_str() == "producer_byte_rate",
-            "{entry:?}"
-        );
-        check!(
-            (entry.values[0].value - 2048.0).abs() < f64::EPSILON,
-            "{entry:?}"
-        );
+        let expected = DescribeClientQuotasResponse {
+            throttle_time_ms: 0,
+            error_code: 0,
+            error_message: None,
+            entries: Some(vec![EntryData {
+                entity: vec![
+                    EntityData {
+                        entity_type: "client-id".into(),
+                        entity_name: Some("app-1".into()),
+                        ..Default::default()
+                    },
+                    EntityData {
+                        entity_type: "user".into(),
+                        entity_name: Some("alice".into()),
+                        ..Default::default()
+                    },
+                ],
+                values: vec![ValueData {
+                    key: "producer_byte_rate".into(),
+                    value: 2048.0,
+                    ..Default::default()
+                }],
+                ..Default::default()
+            }]),
+            ..Default::default()
+        };
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -353,7 +353,7 @@ mod tests {
             entries: Some(Vec::new()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

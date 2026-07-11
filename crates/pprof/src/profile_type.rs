@@ -52,14 +52,13 @@ impl fmt::Display for ProfileType {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn parses_go_cpu() {
         let pt = ProfileType::parse("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
-        assert!(
+        assert2::assert!(
             pt == ProfileType {
                 name: "process_cpu".to_string(),
                 sample_type: "cpu".to_string(),
@@ -79,7 +78,7 @@ mod tests {
             "wall:wall:nanoseconds:wall:nanoseconds",
         ] {
             let pt = ProfileType::parse(input).unwrap();
-            assert!(format!("{pt}") == input);
+            assert2::assert!(format!("{pt}") == input);
         }
     }
 
@@ -88,7 +87,7 @@ mod tests {
         let input = "process_cpu:cpu:nanoseconds:cpu:nanoseconds:delta";
         let pt = ProfileType::parse(input).unwrap();
 
-        assert!(
+        assert2::assert!(
             pt == ProfileType {
                 name: "process_cpu".to_string(),
                 sample_type: "cpu".to_string(),
@@ -98,13 +97,13 @@ mod tests {
                 delta: true,
             }
         );
-        assert!(format!("{pt}") == input);
+        assert2::assert!(format!("{pt}") == input);
     }
 
     #[test]
     fn rejects_wrong_part_count() {
         for input in ["a:b:c:d", "a:b:c:d:e:f", "a:b::d:e", "a:b:c:d:e:cumulative"] {
-            assert!(ProfileType::parse(input).is_err(), "{input}");
+            assert2::assert!(ProfileType::parse(input).is_err());
         }
     }
 }

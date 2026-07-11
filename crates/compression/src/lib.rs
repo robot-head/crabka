@@ -137,26 +137,25 @@ fn zstd_decompress(_: &[u8], _: usize) -> Result<Bytes, CompressionError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn passthrough_none_compress() {
         let out = compress(CompressionType::None, b"abcdef").unwrap();
-        assert!(out.as_ref() == b"abcdef");
+        assert2::assert!(out.as_ref() == b"abcdef");
     }
 
     #[test]
     fn passthrough_none_decompress() {
         let out = decompress(CompressionType::None, b"abcdef", 1024).unwrap();
-        assert!(out.as_ref() == b"abcdef");
+        assert2::assert!(out.as_ref() == b"abcdef");
     }
 
     #[test]
     fn passthrough_none_decompress_respects_cap() {
         // Input larger than the cap is rejected even for the None passthrough.
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(CompressionType::None, b"abcdef", 3),
             Err(CompressionError::TooLarge { limit: 3 })
         ));
@@ -167,6 +166,6 @@ mod tests {
         // Boundary: input of exactly `max_output` bytes is allowed (the cap
         // check is `len > max_output`, not `>=`).
         let out = decompress(CompressionType::None, b"abcdef", 6).unwrap();
-        assert!(out.as_ref() == b"abcdef");
+        assert2::assert!(out.as_ref() == b"abcdef");
     }
 }

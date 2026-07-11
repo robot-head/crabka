@@ -71,6 +71,6 @@ mod tests {
     fn uuid_bytes_preserved() {
         let u = uuid::Uuid::from_u128(0x1234_5678_9abc_def0_1122_3344_5566_7788);
         let wire = to_wire_uuid(u);
-        assert_eq!(wire.0, *u.as_bytes());
+        assert2::assert!(wire.0 == *u.as_bytes());
     }
 }

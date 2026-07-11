@@ -187,7 +187,6 @@ fn denied_response(version: i16, req_bytes: &[u8]) -> Result<Bytes, BrokerError>
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -280,13 +279,16 @@ mod tests {
         let resp = GetReplicaLogInfoResponse::decode(&mut cur, version).unwrap();
 
         let row = &resp.topic_partition_log_info_list[0].partition_log_info[0];
-        assert!(row.error_code == codes::NONE);
-        assert!(
-            row.current_leader_epoch == 11,
-            "hosted partition must report its current_leader_epoch (11), got {}",
-            row.current_leader_epoch
-        );
-        assert!(row.last_written_leader_epoch == 11);
+        let expected = PartitionLogInfo {
+            partition: 0,
+            last_written_leader_epoch: 11,
+            current_leader_epoch: 11,
+            log_end_offset: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
+        };
+        assert2::assert!(row == &expected);
         broker_handle.shutdown().await;
     }
 
@@ -311,7 +313,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(cluster_action_denied(
+        assert2::assert!(cluster_action_denied(
             &authorizer,
             &image,
             &principal,
@@ -338,8 +340,8 @@ mod tests {
             .iter()
             .flat_map(|t| t.partition_log_info.iter().map(|p| p.error_code))
             .collect();
-        assert!(!codes_seen.is_empty());
-        assert!(
+        assert2::assert!(!codes_seen.is_empty());
+        assert2::assert!(
             codes_seen
                 .iter()
                 .all(|&c| c == codes::CLUSTER_AUTHORIZATION_FAILED)

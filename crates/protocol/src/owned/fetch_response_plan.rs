@@ -303,7 +303,7 @@ fn flush_inline(buf: &mut BytesMut, ops: &mut Vec<FetchWriteOp>) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::{
@@ -347,22 +347,17 @@ mod tests {
     /// The load-bearing golden test: for a hand-built multi-topic,
     /// multi-partition, multi-batch response, the write-plan's concatenated
     /// bytes must equal the generated `encode` output, at every version.
-    fn assert_plan_matches_encode(resp: &FetchResponse, version: i16) {
+    fn assert_plan_matches_encode(case_name: &str, resp: &FetchResponse, version: i16) {
         let mut canonical = BytesMut::new();
         resp.encode(&mut canonical, version).unwrap();
         let plan = resp.write_plan(version).unwrap();
         let assembled = concat_plan(&plan);
-        assert!(
-            &assembled[..] == &canonical[..],
-            "write_plan != encode at version {version}: plan_len={} encode_len={}",
-            assembled.len(),
-            canonical.len()
-        );
+        assert2::assert!(&assembled[..] == &canonical[..]);
         // The plan's total length must also equal encoded_len (the frame
         // length prefix the broker writes is derived from encoded_len).
         let plan_total: usize = plan.iter().map(FetchWriteOp::len).sum();
-        assert!(plan_total == resp.encoded_len(version));
-        assert!(plan_total == canonical.len());
+        assert2::assert!(plan_total == resp.encoded_len(version));
+        assert2::assert!(plan_total == canonical.len());
     }
 
     fn multi_partition_response(version: i16) -> FetchResponse {
@@ -462,28 +457,27 @@ mod tests {
     }
 
     #[test]
-    fn fetch_response_plan_matches_encode_all_versions() {
+    fn fetch_response_plan_cases_match_encode_all_versions() {
         // Cover non-flexible (4..=11, i32 prefix) and flexible (12..=18,
         // uvarint prefix + tagged buffers) — the canonical codec range.
-        for version in 4..=18 {
-            assert_plan_matches_encode(&multi_partition_response(version), version);
-        }
-    }
+        type TestCase1<'a> = (&'a str, fn(i16) -> FetchResponse);
+        let cases: [TestCase1<'_>; 4] = [
+            ("multi_partition", multi_partition_response),
+            ("populated", FetchResponse::populated),
+            ("default", |_| FetchResponse::default()),
+            ("empty_responses", |_| FetchResponse {
+                throttle_time_ms: 0,
+                session_id: 0,
+                responses: Vec::new(),
+                ..FetchResponse::default()
+            }),
+        ];
 
-    #[test]
-    fn fetch_response_plan_matches_encode_populated() {
-        // The generated `populated(version)` fixture also exercises the
-        // diverging_epoch / current_leader / snapshot_id tagged fields (set on
-        // v12+) and node_endpoints (v16+).
-        for version in 4..=18 {
-            assert_plan_matches_encode(&FetchResponse::populated(version), version);
-        }
-    }
-
-    #[test]
-    fn fetch_response_plan_matches_encode_default() {
-        for version in 4..=18 {
-            assert_plan_matches_encode(&FetchResponse::default(), version);
+        for (case_name, make_response) in cases {
+            for version in 4..=18 {
+                let response = make_response(version);
+                assert_plan_matches_encode(case_name, &response, version);
+            }
         }
     }
 
@@ -525,20 +519,7 @@ mod tests {
                 }],
                 ..FetchResponse::default()
             };
-            assert_plan_matches_encode(&resp, version);
-        }
-    }
-
-    #[test]
-    fn empty_responses_plan_matches_encode() {
-        for version in 4..=18 {
-            let resp = FetchResponse {
-                throttle_time_ms: 0,
-                session_id: 0,
-                responses: Vec::new(),
-                ..FetchResponse::default()
-            };
-            assert_plan_matches_encode(&resp, version);
+            assert_plan_matches_encode("truncated_trailing_batch", &resp, version);
         }
     }
 }

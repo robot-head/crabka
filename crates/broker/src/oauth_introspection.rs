@@ -126,7 +126,6 @@ impl IntrospectionClient for ReqwestIntrospectionClient {
 mod tests {
     use std::{net::SocketAddr, sync::Mutex};
 
-    use assert2::assert;
     use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
     use tokio_rustls::TlsAcceptor;
@@ -276,8 +275,8 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert!(resp.get("active").and_then(serde_json::Value::as_bool) == Some(true));
-        assert!(resp.get("sub").and_then(|v| v.as_str()) == Some("alice"));
+        assert2::assert!(resp.get("active").and_then(serde_json::Value::as_bool) == Some(true));
+        assert2::assert!(resp.get("sub").and_then(|v| v.as_str()) == Some("alice"));
         srv_shutdown.cancel();
     }
 
@@ -294,7 +293,7 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert!(resp.get("active").and_then(serde_json::Value::as_bool) == Some(false));
+        assert2::assert!(resp.get("active").and_then(serde_json::Value::as_bool) == Some(false));
         srv_shutdown.cancel();
     }
 
@@ -311,10 +310,7 @@ mod tests {
         )
         .unwrap();
         let err = client.introspect("tok").await.unwrap_err();
-        assert!(
-            matches!(err, IntrospectionError::Status(500)),
-            "got {err:?}"
-        );
+        assert2::assert!(matches!(err, IntrospectionError::Status(500)));
         srv_shutdown.cancel();
     }
 
@@ -337,8 +333,8 @@ mod tests {
         .unwrap();
         client.introspect("tok").await.unwrap();
         let ui = client.userinfo("tok").await.unwrap().unwrap();
-        assert!(ui.get("preferred_username").and_then(|v| v.as_str()) == Some("alice"));
-        assert!(observed.userinfo_auths.lock().unwrap().len() == 1);
+        assert2::assert!(ui.get("preferred_username").and_then(|v| v.as_str()) == Some("alice"));
+        assert2::assert!(observed.userinfo_auths.lock().unwrap().len() == 1);
         srv_shutdown.cancel();
     }
 
@@ -356,7 +352,7 @@ mod tests {
         )
         .unwrap();
         let ui = client.userinfo("tok").await.unwrap();
-        assert!(ui.is_none());
+        assert2::assert!(ui.is_none());
         srv_shutdown.cancel();
     }
 
@@ -374,8 +370,8 @@ mod tests {
         )
         .unwrap();
         let resp = client.introspect("tok").await.unwrap();
-        assert!(resp.get("client_id").and_then(|v| v.as_str()) == Some("kafka-client"));
-        assert!(resp.get("scope").and_then(|v| v.as_str()) == Some("kafka.write profile"));
+        assert2::assert!(resp.get("client_id").and_then(|v| v.as_str()) == Some("kafka-client"));
+        assert2::assert!(resp.get("scope").and_then(|v| v.as_str()) == Some("kafka.write profile"));
         srv_shutdown.cancel();
     }
 
@@ -394,9 +390,9 @@ mod tests {
         .unwrap();
         client.introspect("tok").await.unwrap();
         let auths = observed.introspect_auths.lock().unwrap();
-        assert!(auths.len() == 1);
+        assert2::assert!(auths.len() == 1);
         // base64("kafka-broker:shh") = "a2Fma2EtYnJva2VyOnNoaA=="
-        assert!(auths[0] == "Basic a2Fma2EtYnJva2VyOnNoaA==");
+        assert2::assert!(auths[0] == "Basic a2Fma2EtYnJva2VyOnNoaA==");
         srv_shutdown.cancel();
     }
 
@@ -415,8 +411,8 @@ mod tests {
         .unwrap();
         client.introspect("opaque-abc").await.unwrap();
         let bodies = observed.introspect_bodies.lock().unwrap();
-        assert!(bodies.len() == 1);
-        assert!(bodies[0] == "token=opaque-abc");
+        assert2::assert!(bodies.len() == 1);
+        assert2::assert!(bodies[0] == "token=opaque-abc");
         srv_shutdown.cancel();
     }
 
@@ -444,9 +440,6 @@ mod tests {
         )
         .unwrap();
         let err = client.introspect("tok").await.unwrap_err();
-        assert!(
-            matches!(err, IntrospectionError::Transport(_)),
-            "got {err:?}"
-        );
+        assert2::assert!(matches!(err, IntrospectionError::Transport(_)));
     }
 }

@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_traces::frontend::{
     QueryFrontend,
     backend::{MockQuerier, SearchPartial},
@@ -93,23 +93,27 @@ async fn sharded_search_equals_unsharded() {
 
     let resp = qf.search("t1", "{ }", 0, 300, 20, 10).await.unwrap();
 
-    check!(qf.backend_ref().search_calls().len() == 4);
-    // Unsharded baseline: trace 01 (spans 01,02 reunioned) + trace 02 (span 03).
-    check!(resp.traces.len() == 2);
-    // Newest-first: trace 02 starts at 150, trace 01 at min(50,40)=40.
-    check!(resp.traces[0].trace_id == "02");
-    check!(resp.traces[1].trace_id == "01");
     let t1_spans: usize = resp.traces[1]
         .span_sets
         .iter()
         .map(|ss| ss.spans.len())
         .sum();
-    check!(t1_spans == 2);
-    // metrics: 4 total jobs, 4 completed, 2 blocks, bytes summed = 600.
-    check!(resp.metrics.total_jobs == 4);
-    check!(resp.metrics.completed_jobs == 4);
-    check!(resp.metrics.total_blocks == 2);
-    check!(resp.metrics.inspected_bytes == 600);
+    check!(
+        (
+            qf.backend_ref().search_calls().len(),
+            resp.traces
+                .iter()
+                .map(|trace| trace.trace_id.as_str())
+                .collect::<Vec<_>>(),
+            t1_spans,
+            (
+                resp.metrics.total_jobs,
+                resp.metrics.completed_jobs,
+                resp.metrics.total_blocks,
+                resp.metrics.inspected_bytes,
+            ),
+        ) == (4, vec!["02", "01"], 2, (4, 4, 2, 600))
+    );
 }
 
 #[tokio::test]
@@ -131,11 +135,16 @@ async fn limit_and_spss_applied_after_merge() {
     let qf = QueryFrontend::new(Arc::new(backend), Arc::new(catalog), cfg);
     // limit 2 (newest-first => 300, 200), spss 2.
     let resp = qf.search("t1", "{ }", 0, 300, 2, 2).await.unwrap();
-    assert!(resp.traces.len() == 2);
-    assert!(resp.traces[0].start_time_unix_nano == "300");
+    assert2::assert!(
+        resp.traces
+            .iter()
+            .map(|trace| trace.start_time_unix_nano.as_str())
+            .collect::<Vec<_>>()
+            == vec!["300", "200"]
+    );
     for t in &resp.traces {
         for ss in &t.span_sets {
-            assert!(ss.spans.len() <= 2);
+            assert2::assert!(ss.spans.len() <= 2);
         }
     }
 }

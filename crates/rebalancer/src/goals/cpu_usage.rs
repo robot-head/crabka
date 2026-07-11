@@ -91,8 +91,6 @@ impl Goal for CpuUsage {
 mod tests {
     use std::{sync::Arc, time::Duration};
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         model::BrokerView,
@@ -180,7 +178,7 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let ctx = ctx_with(Arc::new(UsageStore::default()));
-        assert!(CpuUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(CpuUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -196,7 +194,7 @@ mod tests {
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(store);
         let mvs = CpuUsage.propose(&s, &ctx);
-        assert!(!mvs.is_empty(), "expected cpu-hot swaps");
+        assert2::assert!(!mvs.is_empty());
     }
 
     #[test]
@@ -212,16 +210,13 @@ mod tests {
         ];
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(store);
-        assert!(
-            CpuUsage.propose(&s, &ctx).is_empty(),
-            "within-threshold should no-op"
-        );
+        assert2::assert!(CpuUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
     fn imbalance_pct_uses_difference_times_100_over_total() {
         let totals = std::collections::HashMap::from([(1, 300.0), (2, 100.0)]);
-        assert!(CpuUsage::imbalance_pct(&totals) == 50);
+        assert2::assert!(CpuUsage::imbalance_pct(&totals) == 50);
     }
 
     #[test]
@@ -235,7 +230,7 @@ mod tests {
             .collect();
         let store = store_with_counter_pair(samples);
         let ctx = ctx_with(store);
-        assert!(CpuUsage.propose(&s, &ctx).is_empty());
+        assert2::assert!(CpuUsage.propose(&s, &ctx).is_empty());
     }
 
     #[test]
@@ -250,6 +245,6 @@ mod tests {
         let mut ctx = ctx_with(store);
         ctx.max_movements_per_proposal = 1;
         let mvs = CpuUsage.propose(&s, &ctx);
-        assert!(mvs.len() == 1);
+        assert2::assert!(mvs.len() == 1);
     }
 }

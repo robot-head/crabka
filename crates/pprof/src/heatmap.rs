@@ -87,7 +87,6 @@ fn bucket_index(offset: i128, span: i128, buckets: usize) -> usize {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -97,7 +96,7 @@ mod tests {
 
         let heatmap = bin_heatmap(&points, 0, 100, 2, 2);
 
-        assert!(
+        assert2::assert!(
             heatmap
                 == Heatmap {
                     start_ms: 0,
@@ -114,13 +113,13 @@ mod tests {
     #[test]
     fn bin_returns_empty_counts_for_invalid_ranges_or_zero_buckets() {
         let invalid_range = bin_heatmap(&[(10, 1)], 20, 10, 2, 2);
-        assert!(invalid_range.counts == vec![vec![0, 0], vec![0, 0]]);
+        assert2::assert!(invalid_range.counts == vec![vec![0, 0], vec![0, 0]]);
 
         let zero_time_buckets = bin_heatmap(&[(10, 1)], 0, 20, 0, 2);
-        assert!(zero_time_buckets.counts.is_empty());
+        assert2::assert!(zero_time_buckets.counts.is_empty());
 
         let zero_value_buckets = bin_heatmap(&[(10, 1)], 0, 20, 2, 0);
-        assert!(zero_value_buckets.counts == vec![Vec::<u64>::new(), Vec::new()]);
+        assert2::assert!(zero_value_buckets.counts == vec![Vec::<u64>::new(), Vec::new()]);
     }
 
     #[test]
@@ -136,7 +135,17 @@ mod tests {
 
         let heatmap = bin_heatmap(&points, 100, 200, 2, 2);
 
-        assert!(heatmap.min_value == 10 && heatmap.max_value == 30);
-        assert!(heatmap.counts == vec![vec![1, 1], vec![0, 2]]);
+        assert2::assert!(
+            heatmap
+                == Heatmap {
+                    start_ms: 100,
+                    end_ms: 200,
+                    time_buckets: 2,
+                    value_buckets: 2,
+                    min_value: 10,
+                    max_value: 30,
+                    counts: vec![vec![1, 1], vec![0, 2]],
+                }
+        );
     }
 }

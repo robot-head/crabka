@@ -422,14 +422,13 @@ fn decode_topic_partitions(buf: &mut &[u8]) -> Result<Vec<AssignedTopicPartition
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn group_metadata_value_roundtrip() {
         let v = GroupMetadataValue { epoch: 7 };
-        assert!(GroupMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(GroupMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -445,7 +444,7 @@ mod tests {
             rebalance_timeout_ms: 60_000,
             classic: None,
         };
-        assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -464,7 +463,7 @@ mod tests {
             rebalance_timeout_ms: 60_000,
             classic: None,
         };
-        assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(MemberMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -472,7 +471,7 @@ mod tests {
         let v = TargetAssignmentMetadataValue {
             assignment_epoch: 12,
         };
-        assert!(TargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(TargetAssignmentMetadataValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -483,7 +482,7 @@ mod tests {
                 partitions: vec![0, 1, 2],
             }],
         };
-        assert!(TargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(TargetAssignmentMemberValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -498,7 +497,7 @@ mod tests {
             }],
             partitions_pending_revocation: vec![],
         };
-        assert!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(CurrentMemberAssignmentValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -520,16 +519,16 @@ mod tests {
             }),
         };
         let decoded = MemberMetadataValue::decode(&v.encode()).unwrap();
-        assert!(decoded == v);
+        assert2::assert!(decoded == v);
 
         let mut native = v.clone();
         native.classic = None;
-        assert!(MemberMetadataValue::decode(&native.encode()).unwrap() == native);
+        assert2::assert!(MemberMetadataValue::decode(&native.encode()).unwrap() == native);
     }
 
     #[test]
     fn unknown_key_version_rejected() {
-        assert!(parse_key(99, &[]).is_err());
+        assert2::assert!(parse_key(99, &[]).is_err());
     }
 
     #[test]
@@ -541,6 +540,6 @@ mod tests {
         let kb = encode_key(&k);
         let mut r = &kb[..];
         let v = bytes::Buf::get_i16(&mut r);
-        assert!(parse_key(v, r).unwrap() == k);
+        assert2::assert!(parse_key(v, r).unwrap() == k);
     }
 }

@@ -1,7 +1,6 @@
 // Tests the coordinator's safety guards against an in-memory mock (no real raft).
 use std::{collections::BTreeSet, sync::Mutex as StdMutex};
 
-use assert2::assert;
 use crabka_metadata::{KRaftVersionRange, Voter, VoterEndpoint, VoterSet};
 use crabka_raft::{
     Node, NodeId, RaftError,
@@ -83,7 +82,7 @@ async fn add_voter_rejects_lagging_observer() {
         })
         .await
         .unwrap_err();
-    assert!(matches!(
+    assert2::assert!(matches!(
         err,
         RaftError::VoterNotCaughtUp { id: NodeId(2), .. }
     ));
@@ -108,10 +107,10 @@ async fn add_voter_succeeds_when_caught_up() {
         })
         .await
         .unwrap();
-    assert!(out == ReconfigOutcome::Committed);
+    assert2::assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([NodeId(1), NodeId(2)]));
-    assert!(st.submitted.len() == 1); // one V1Voters record
+    assert2::assert!(&st.membership == &Some(BTreeSet::from([NodeId(1), NodeId(2)])));
+    assert2::assert!(st.submitted.len() == 1);
 }
 
 #[tokio::test]
@@ -135,10 +134,10 @@ async fn add_voter_accepts_observer_at_lag_bound() {
         .await
         .unwrap();
 
-    assert!(out == ReconfigOutcome::Committed);
+    assert2::assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([NodeId(1), NodeId(2)]));
-    assert!(st.submitted.len() == 1);
+    assert2::assert!(&st.membership == &Some(BTreeSet::from([NodeId(1), NodeId(2)])));
+    assert2::assert!(st.submitted.len() == 1);
 }
 
 #[tokio::test]
@@ -157,7 +156,7 @@ async fn remove_last_voter_is_rejected() {
         })
         .await
         .unwrap_err();
-    assert!(matches!(err, RaftError::ReconfigRejected(_)));
+    assert2::assert!(matches!(err, RaftError::ReconfigRejected(_)));
 }
 
 #[tokio::test]
@@ -174,7 +173,7 @@ async fn add_voter_on_follower_reports_not_leader() {
         })
         .await
         .unwrap();
-    assert!(matches!(out, ReconfigOutcome::NotLeader { .. }));
+    assert2::assert!(matches!(out, ReconfigOutcome::NotLeader { .. }));
 }
 
 #[tokio::test]
@@ -195,7 +194,7 @@ async fn second_reconfig_reports_in_progress_when_lock_held() {
         })
         .await
         .unwrap_err();
-    assert!(matches!(err, RaftError::ReconfigInProgress));
+    assert2::assert!(matches!(err, RaftError::ReconfigInProgress));
 }
 
 #[tokio::test]
@@ -217,10 +216,10 @@ async fn update_voter_submits_record_without_membership_change() {
         .update_voter(UpdateVoter { voter: updated })
         .await
         .unwrap();
-    assert!(out == ReconfigOutcome::Committed);
+    assert2::assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.is_none()); // id set unchanged -> no change_membership
-    assert!(st.submitted.len() == 1); // one V1Voters record
+    assert2::assert!(st.membership.is_none());
+    assert2::assert!(st.submitted.len() == 1);
 }
 
 #[tokio::test]
@@ -239,10 +238,10 @@ async fn remove_non_last_voter_succeeds() {
         })
         .await
         .unwrap();
-    assert!(out == ReconfigOutcome::Committed);
+    assert2::assert!(out == ReconfigOutcome::Committed);
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.as_ref().unwrap() == &BTreeSet::from([NodeId(1)]));
-    assert!(st.submitted.len() == 1); // one V1Voters record
+    assert2::assert!(&st.membership == &Some(BTreeSet::from([NodeId(1)])));
+    assert2::assert!(st.submitted.len() == 1);
 }
 
 #[tokio::test]
@@ -262,8 +261,8 @@ async fn remove_voter_with_mismatched_directory_id_is_noop() {
         })
         .await
         .unwrap();
-    assert!(out == ReconfigOutcome::Committed); // idempotent no-op
+    assert2::assert!(out == ReconfigOutcome::Committed); // idempotent no-op
     let st = mock.0.lock().unwrap();
-    assert!(st.membership.is_none()); // current voter must NOT be removed
-    assert!(st.submitted.is_empty());
+    assert2::assert!(st.membership.is_none());
+    assert2::assert!(st.submitted.is_empty());
 }

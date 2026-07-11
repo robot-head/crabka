@@ -245,7 +245,6 @@ async fn describe_partition(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_log::Offset;
     use crabka_metadata::{MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::{
@@ -420,7 +419,7 @@ mod tests {
                 },
             ),
         ];
-        for (case, authorizer, share_enabled, groups, expected) in cases {
+        for (_case, authorizer, share_enabled, groups, expected) in cases {
             let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
             let broker = broker_handle.broker_arc_for_test();
             let principal = principal();
@@ -433,7 +432,7 @@ mod tests {
                 .expect("handle");
             let resp = decode_response(&resp);
 
-            assert!(resp == expected, "case: {case}");
+            assert2::assert!(resp == expected);
             broker_handle.shutdown().await;
         }
     }
@@ -483,7 +482,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(topic == expected);
+        assert2::assert!(topic == expected);
         broker_handle.shutdown().await;
     }
 }

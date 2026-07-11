@@ -34,7 +34,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use crabka_broker::{
     BootstrapMode, Broker, BrokerConfig, BrokerError, BrokerHandle,
     config::{InterBrokerCredentials, ListenerSpec},
@@ -289,18 +288,11 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("create topic");
-    assert!(
-        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
-        "create_topic: error_code={}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
 
     let leaders = partition_leaders(&admin, &cluster[0].0).await;
     let distinct: std::collections::BTreeSet<i32> = leaders.iter().map(|&(_, l)| l).collect();
-    assert!(
-        distinct.len() == 2,
-        "expected partition leadership split across both brokers, got {leaders:?}"
-    );
+    assert2::assert!(distinct.len() == 2);
 
     // Locate the transaction coordinator for TID.
     // The transaction coordinator partition (`__transaction_state[hash(TID)]`)
@@ -328,10 +320,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         if node >= 0 {
             break (node, host, port);
         }
-        assert!(
-            Instant::now() <= fc_deadline,
-            "txn coordinator never became available: {fc:?}"
-        );
+        assert2::assert!(Instant::now() <= fc_deadline);
         tokio::task::yield_now().await;
     };
 
@@ -356,7 +345,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("init producer id");
-    assert!(init.error_code == 0, "InitProducerId failed: {init:?}");
+    assert2::assert!(init.error_code == 0);
     let (pid, epoch) = (init.producer_id, init.producer_epoch);
 
     // AddPartitionsToTxn for the remote-led partition. Fill both the v4+
@@ -385,10 +374,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("add partitions to txn");
-    assert!(
-        add.error_code == 0,
-        "AddPartitionsToTxn top-level error: {add:?}"
-    );
+    assert2::assert!(add.error_code == 0);
 
     // EndTxn(commit): the coordinator fans a WriteTxnMarkers to the remote
     // partition's leader over the SASL_PLAINTEXT inter-broker listener. This is
@@ -404,11 +390,7 @@ async fn end_txn_marker_fanout_to_remote_leader_over_sasl() {
         })
         .await
         .expect("end txn");
-    assert!(
-        end.error_code == 0,
-        "EndTxn must succeed: remote marker fan-out over SASL inter-broker (error_code={})",
-        end.error_code
-    );
+    assert2::assert!(end.error_code == 0);
 
     admin.close();
     coord.close();

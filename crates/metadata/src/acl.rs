@@ -99,7 +99,7 @@ impl AclEntryFilter {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use serde_wincode::SerdeCompat;
     use wincode::{Deserialize as _, Serialize as _};
 
@@ -124,7 +124,7 @@ mod tests {
             operation: AclOperation::Read,
             permission_type: PermissionType::Allow,
         };
-        assert!(rt(&entry) == entry);
+        assert2::assert!(rt(&entry) == entry);
     }
 
     #[test]
@@ -138,7 +138,7 @@ mod tests {
             operation: Some(AclOperation::All),
             permission_type: None,
         };
-        assert!(rt(&filter) == filter);
+        assert2::assert!(rt(&filter) == filter);
     }
 
     #[test]
@@ -153,7 +153,7 @@ mod tests {
             operation: AclOperation::All,
             permission_type: PermissionType::Allow,
         };
-        assert!(f.matches(&entry));
+        assert2::assert!(f.matches(&entry));
     }
 
     #[test]
@@ -175,7 +175,6 @@ mod tests {
             resource_type: ResourceType::Group,
             ..topic_entry.clone()
         };
-        assert!(f.matches(&topic_entry));
-        assert!(!f.matches(&group_entry));
+        assert2::assert!((f.matches(&topic_entry), f.matches(&group_entry)) == (true, false));
     }
 }

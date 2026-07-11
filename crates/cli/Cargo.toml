@@ -22,6 +22,7 @@ path = "src/main.rs"
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 clap = { workspace = true }
 crabka-security = { workspace = true }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }
@@ -38,5 +39,4 @@ tracing-subscriber = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 tempfile = { workspace = true }

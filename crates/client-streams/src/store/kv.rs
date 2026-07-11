@@ -475,8 +475,7 @@ mod tests {
         check!(s.delete(&"a".to_string()).await == Some(2));
         check!(s.get(&"a".to_string()).await == None);
         let cl = s.take_changelog();
-        check!(cl.len() == 3);
-        check!(cl[2].1.is_none());
+        check!((cl.len(), cl[2].1.is_none()) == (3, true));
         check!(s.take_changelog().is_empty());
     }
 
@@ -500,9 +499,8 @@ mod tests {
         let r = s
             .range(&Bytes::from_static(&[1, 0]), &Bytes::from_static(&[2, 0]))
             .await; // [lo, hi)
-        assert_eq!(
-            r,
-            vec![
+        assert2::assert!(
+            r == vec![
                 (Bytes::from_static(&[1, 0]), Bytes::from_static(b"a")),
                 (Bytes::from_static(&[1, 5]), Bytes::from_static(b"b")),
             ]
@@ -525,14 +523,14 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(*got.downcast::<Option<i64>>().unwrap(), Some(2));
+        assert2::assert!(*got.downcast::<Option<i64>>().unwrap() == Some(2));
         let miss = q
             .iq2_execute(&Iq2Query::Key {
                 key: Box::new("z".to_string()),
             })
             .await
             .unwrap();
-        assert_eq!(*miss.downcast::<Option<i64>>().unwrap(), None);
+        assert2::assert!(*miss.downcast::<Option<i64>>().unwrap() == None);
 
         // RangeQuery inclusive [a,b] ascending.
         let r = q
@@ -543,9 +541,9 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *r.downcast::<Vec<(String, i64)>>().unwrap(),
-            vec![("a".to_string(), 1), ("b".to_string(), 2)]
+        assert2::assert!(
+            *r.downcast::<Vec<(String, i64)>>().unwrap()
+                == vec![("a".to_string(), 1), ("b".to_string(), 2)]
         );
 
         // Unbounded both sides, descending → all, reversed.
@@ -557,13 +555,13 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *all_desc.downcast::<Vec<(String, i64)>>().unwrap(),
-            vec![
-                ("c".to_string(), 3),
-                ("b".to_string(), 2),
-                ("a".to_string(), 1)
-            ]
+        assert2::assert!(
+            *all_desc.downcast::<Vec<(String, i64)>>().unwrap()
+                == vec![
+                    ("c".to_string(), 3),
+                    ("b".to_string(), 2),
+                    ("a".to_string(), 1)
+                ]
         );
 
         // Wrong key type → KeyTypeMismatch.
@@ -572,7 +570,7 @@ mod tests {
                 key: Box::new(7_i64),
             })
             .await;
-        assert_eq!(bad.err(), Some(Iq2Failure::KeyTypeMismatch));
+        assert2::assert!(bad.err() == Some(Iq2Failure::KeyTypeMismatch));
     }
 
     #[tokio::test]
@@ -615,9 +613,16 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
         let cl = s.take_changelog();
-        check!(cl.len() == 1);
-        check!(cl[0].0 == StringSerde.serialize("s-changelog", &"a".to_string()));
-        check!(cl[0].1 == Some(I64Serde.serialize("s-changelog", &2)));
+        check!(
+            (cl.len(), cl[0].0.as_ref(), cl[0].1.as_deref())
+                == (
+                    1,
+                    StringSerde
+                        .serialize("s-changelog", &"a".to_string())
+                        .as_ref(),
+                    Some(I64Serde.serialize("s-changelog", &2).as_ref())
+                )
+        );
     }
 
     #[tokio::test]
@@ -638,17 +643,23 @@ mod tests {
         // Flush into a single fake child index 7.
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[7]).await;
-        check!(buffer.len() == 1);
         let (child, rec) = &buffer[0];
-        check!(*child == 7);
-        // Timestamp comes from the dirty entry's record context.
-        check!(rec.timestamp == 7);
         let key = rec.key.as_ref().unwrap().downcast_ref::<String>().unwrap();
-        check!(key == "a");
         let change = rec.value.downcast_ref::<Change<i64>>().unwrap();
         // old = last-committed value (1); new = deduped latest (3).
-        check!(change.old == Some(1));
-        check!(change.new == Some(3));
+        check!(
+            (buffer.len(), *child, rec.timestamp, key.as_str(), change)
+                == (
+                    1,
+                    7,
+                    7,
+                    "a",
+                    &Change {
+                        old: Some(1),
+                        new: Some(3)
+                    }
+                )
+        );
 
         // Inner store now holds the write-through value.
         check!(s.get(&"a".to_string()).await == Some(3));
@@ -694,8 +705,7 @@ mod tests {
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;
         let cl = s.take_changelog();
-        check!(cl.len() == 1);
-        check!(cl[0].1.is_none());
+        check!((cl.len(), cl[0].1.is_none()) == (1, true));
     }
 
     /// `apply_changelog` on a cached store writes BELOW the cache (no dirty entry
@@ -759,8 +769,12 @@ mod tests {
         s.put("a".into(), 1).await;
         check!(s.get(&"a".to_string()).await == Some(1));
         let cl = s.take_changelog();
-        check!(cl.len() == 1);
-        check!(cl[0].1 == Some(I64Serde.serialize("s-changelog", &1)));
+        check!(
+            cl == vec![(
+                StringSerde.serialize("s-changelog", &"a".to_string()),
+                Some(I64Serde.serialize("s-changelog", &1)),
+            )]
+        );
         // No cache → flush_cache_into forwards nothing.
         let mut buffer = std::collections::VecDeque::new();
         s.flush_cache_into(&mut buffer, &[0]).await;

@@ -257,7 +257,6 @@ async fn build_producer(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::{
@@ -326,6 +325,6 @@ mod tests {
         .await
         .unwrap()
         .unwrap();
-        assert!(!raw.is_empty());
+        assert2::assert!(!raw.is_empty());
     }
 }

@@ -1107,10 +1107,7 @@ mod tests {
             })
             .await
             .expect("CreateTopics");
-        assert_eq!(
-            resp.topics[0].error_code, 0,
-            "topic create failed: {resp:?}"
-        );
+        assert2::assert!(resp.topics[0].error_code == 0);
     }
 
     #[test]
@@ -1151,18 +1148,15 @@ mod tests {
             ..Default::default()
         });
 
-        assert_eq!(
-            routes.fetch_route("routed-topic", 0).unwrap().topic_id,
-            topic_id
-        );
-        assert_eq!(routes.fetch_route("routed-topic", 0).unwrap().leader_id, 1);
-        assert_eq!(routes.fetch_route("routed-topic", 1).unwrap().leader_id, 2);
-        assert_eq!(
-            routes.broker_endpoints.get(&2),
-            Some(&BrokerEndpoint {
-                host: "broker-two".into(),
-                port: 29_092,
-            })
+        assert2::assert!(routes.fetch_route("routed-topic", 0).unwrap().topic_id == topic_id);
+        assert2::assert!(routes.fetch_route("routed-topic", 0).unwrap().leader_id == 1);
+        assert2::assert!(routes.fetch_route("routed-topic", 1).unwrap().leader_id == 2);
+        assert2::assert!(
+            routes.broker_endpoints.get(&2)
+                == Some(&BrokerEndpoint {
+                    host: "broker-two".into(),
+                    port: 29_092,
+                })
         );
     }
 
@@ -1203,9 +1197,9 @@ mod tests {
             ..Default::default()
         });
 
-        assert!(routes.fetch_route("routed-topic", 0).is_none());
-        assert_eq!(routes.fetch_route("routed-topic", 1).unwrap().leader_id, 2);
-        assert!(routes.broker_endpoints.is_empty());
+        assert2::assert!(routes.fetch_route("routed-topic", 0).is_none());
+        assert2::assert!(routes.fetch_route("routed-topic", 1).unwrap().leader_id == 2);
+        assert2::assert!(routes.broker_endpoints.is_empty());
     }
 
     /// Round-trip test: `committed` returns `None` before any commit, `Some(42)`
@@ -1238,10 +1232,7 @@ mod tests {
 
         // 1. No commit yet → None.
         let before = store.committed("ostore-topic", 0).await.unwrap();
-        assert_eq!(
-            before, None,
-            "expected no committed offset before first commit"
-        );
+        assert2::assert!(before == None);
 
         // 2. Commit offset 42.
         store
@@ -1251,7 +1242,7 @@ mod tests {
 
         // 3. Now reads back Some(42).
         let after = store.committed("ostore-topic", 0).await.unwrap();
-        assert_eq!(after, Some(42), "expected committed offset 42 after commit");
+        assert2::assert!(after == Some(42));
     }
 
     /// `abort_transaction` must consume the open guard: a second call with no
@@ -1307,7 +1298,7 @@ mod tests {
         // No transaction is open now, so a second abort must fail rather than
         // silently succeed again.
         let err = txn_producer.abort_transaction().await.unwrap_err();
-        assert!(matches!(
+        assert2::assert!(matches!(
             &err,
             StreamsClientError::Runtime(msg) if msg.contains("without an open transaction")
         ));

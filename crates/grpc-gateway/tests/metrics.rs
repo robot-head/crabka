@@ -94,20 +94,19 @@ async fn metrics_router_renders() {
 
     let (status, body) = render_metrics().await;
 
-    assert_eq!(status, StatusCode::OK, "expected 200 from /metrics");
-
-    for needle in [
+    let expected = [
         "crabka_gateway_sends",
         "crabka_gateway_produce_latency_seconds",
         "crabka_gateway_webhook_out",
         "crabka_gateway_webhook_in",
         "crabka_gateway_dead_letter",
-    ] {
-        assert!(
-            body.contains(needle),
-            "/metrics body missing {needle:?}; body:\n{body}"
-        );
-    }
+    ];
+    let missing: Vec<_> = expected
+        .into_iter()
+        .filter(|needle| !body.contains(needle))
+        .collect();
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(missing == Vec::<&str>::new());
 }
 
 /// `record_send` increments `crabka_gateway_sends_total` for the provided
@@ -130,11 +129,7 @@ async fn send_increments_sends_total() {
     let (_, after_text) = render_metrics().await;
     let after = count_for_label(&after_text, UNIQUE_LABEL);
 
-    assert_eq!(
-        after,
-        before + 3,
-        "expected {UNIQUE_LABEL} to increase by 3 (before={before}, after={after})"
-    );
+    assert2::assert!(after == before + 3);
 }
 
 /// Recording a webhook-out result and a dead-letter event causes those labeled
@@ -147,12 +142,6 @@ async fn webhook_out_and_dead_letter_present() {
 
     let (_, body) = render_metrics().await;
 
-    assert!(
-        body.contains(r#"crabka_gateway_webhook_out_total{result="p8_unique_wh"}"#),
-        "expected webhook_out_total{{result=\"p8_unique_wh\"}} in body:\n{body}"
-    );
-    assert!(
-        body.contains("crabka_gateway_dead_letter_total"),
-        "expected crabka_gateway_dead_letter_total in body:\n{body}"
-    );
+    assert2::assert!(body.contains(r#"crabka_gateway_webhook_out_total{result="p8_unique_wh"}"#));
+    assert2::assert!(body.contains("crabka_gateway_dead_letter_total"));
 }

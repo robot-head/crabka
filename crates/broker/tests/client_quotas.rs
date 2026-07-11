@@ -44,7 +44,6 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -259,12 +258,7 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert!(resp.topics.len() == 1);
-    assert!(
-        resp.topics[0].error_code == 0,
-        "CreateTopics({topic}) must succeed: {:?}",
-        resp.topics[0].error_message
-    );
+    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
 }
 
 /// Await until `handle` sees `(topic, partition)` present in its image.
@@ -400,7 +394,7 @@ async fn drive_describe_client_quotas_sasl(
     let resp = DescribeClientQuotasResponse::decode(&mut cur, VERSION)
         .expect("decode DescribeClientQuotasResponse");
 
-    assert!(resp.error_code == 0, "DescribeClientQuotas top-level error");
+    assert2::assert!(resp.error_code == 0);
 
     resp.entries
         .unwrap_or_default()
@@ -596,12 +590,7 @@ async fn alter_then_describe_round_trip() {
         false,
     )
     .await;
-    assert!(alter_resp.len() == 1, "one entry in response");
-    assert!(
-        alter_resp[0].1 == 0,
-        "alter should succeed; error_code={}",
-        alter_resp[0].1
-    );
+    assert2::assert!((alter_resp.len(), alter_resp[0].1) == (1, 0));
 
     // Await until the quota is visible in the committed metadata image.
     handle
@@ -637,10 +626,7 @@ async fn alter_then_describe_round_trip() {
                 .find(|(k, _)| k == "producer_byte_rate")
                 .map(|(_, v)| *v)
         });
-    assert!(
-        pbr == Some(1024.0),
-        "expected producer_byte_rate=1024 from describe; got {desc:?}"
-    );
+    assert2::assert!(pbr == Some(1024.0));
 
     handle.shutdown().await;
 }
@@ -680,7 +666,7 @@ async fn producer_byte_rate_throttles_produce() {
         false,
     )
     .await;
-    assert!(alter_resp[0].1 == 0, "alter quota must succeed");
+    assert2::assert!(alter_resp[0].1 == 0);
 
     // Wait for the quota to appear in the image before producing.
     handle
@@ -710,25 +696,14 @@ async fn producer_byte_rate_throttles_produce() {
             // Not TOPIC_AUTHORIZATION_FAILED — this is the response we want.
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "ACL still not applied after 15s; error_code=29"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     let part = &resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "produce must succeed, error_code={}",
-        part.error_code
-    );
-    assert!(
-        resp.throttle_time_ms > 0,
-        "expected throttle_time_ms > 0, got {}",
-        resp.throttle_time_ms
-    );
+    assert2::assert!(part.error_code == 0);
+    assert2::assert!(resp.throttle_time_ms > 0);
 
     handle.shutdown().await;
 }
@@ -768,7 +743,7 @@ async fn request_percentage_throttles_produce() {
         false,
     )
     .await;
-    assert!(alter_resp[0].1 == 0, "alter quota must succeed");
+    assert2::assert!(alter_resp[0].1 == 0);
 
     // Wait for the quota to appear in the image before producing.
     handle
@@ -795,25 +770,14 @@ async fn request_percentage_throttles_produce() {
         if ec != 29 {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "ACL still not applied after 15s; error_code=29"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     let part = &resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "produce must succeed, error_code={}",
-        part.error_code
-    );
-    assert!(
-        resp.throttle_time_ms > 0,
-        "expected request-quota throttle_time_ms > 0, got {}",
-        resp.throttle_time_ms
-    );
+    assert2::assert!(part.error_code == 0);
+    assert2::assert!(resp.throttle_time_ms > 0);
 
     handle.shutdown().await;
 }
@@ -847,10 +811,7 @@ async fn consumer_byte_rate_throttles_fetch() {
         false,
     )
     .await;
-    assert!(
-        alter_resp[0].1 == 0,
-        "alter consumer_byte_rate must succeed"
-    );
+    assert2::assert!(alter_resp[0].1 == 0);
 
     // Wait for the quota to appear in the image.
     handle
@@ -868,11 +829,7 @@ async fn consumer_byte_rate_throttles_fetch() {
     let produce_resp =
         drive_produce_sasl(addr, "admin", b"admin-secret", "throttle-fetch", 1024, 8).await;
     let part = &produce_resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "admin produce must succeed, error_code={}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
 
     // Alice fetches. Rate = 128 bytes/sec, data = 8 KB → throttle fires.
     // Retry loop: auth can lag.
@@ -883,20 +840,12 @@ async fn consumer_byte_rate_throttles_fetch() {
         if r.error_code == 0 {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "fetch error after 15s; error_code={}",
-            r.error_code
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network fetch attempts, deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
-    assert!(
-        fetch_resp.throttle_time_ms > 0,
-        "expected consumer throttle_time_ms > 0, got {}",
-        fetch_resp.throttle_time_ms
-    );
+    assert2::assert!(fetch_resp.throttle_time_ms > 0);
 
     handle.shutdown().await;
 }
@@ -936,7 +885,7 @@ async fn user_specific_overrides_user_default() {
         false,
     )
     .await;
-    assert!(alter_default[0].1 == 0, "alter default quota must succeed");
+    assert2::assert!(alter_default[0].1 == 0);
 
     // Set tight user-specific quota (user=alice) producer_byte_rate=128.
     let alter_alice = drive_alter_client_quotas_sasl(
@@ -950,7 +899,7 @@ async fn user_specific_overrides_user_default() {
         false,
     )
     .await;
-    assert!(alter_alice[0].1 == 0, "alter alice quota must succeed");
+    assert2::assert!(alter_alice[0].1 == 0);
 
     // Wait for both quotas to appear in the image.
     handle
@@ -987,28 +936,17 @@ async fn user_specific_overrides_user_default() {
         if ec != 29 {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "ACL still not applied after 15s; error_code=29"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network produce attempts (ACL propagation), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     let part = &resp.responses[0].partition_responses[0];
-    assert!(
-        part.error_code == 0,
-        "produce must succeed, error_code={}",
-        part.error_code
-    );
+    assert2::assert!(part.error_code == 0);
     // The alice-specific 128-byte-rate quota fires → throttle_time_ms > 0.
     // If only the default (8192) applied, 8 KB would fit in the burst window
     // and throttle_time_ms would be 0.
-    assert!(
-        resp.throttle_time_ms > 0,
-        "expected throttle_time_ms > 0 because alice-specific rate=128 applies; got {}",
-        resp.throttle_time_ms
-    );
+    assert2::assert!(resp.throttle_time_ms > 0);
 
     handle.shutdown().await;
 }
@@ -1049,18 +987,12 @@ async fn non_super_user_denied() {
         if r.iter().all(|(_, ec)| *ec == 31) {
             break r;
         }
-        assert!(
-            Instant::now() <= deadline,
-            "compat shim still active after 5s; got {r:?}"
-        );
+        assert2::assert!(Instant::now() <= deadline);
         // real-time wait (not a progress poll): retry cadence between network AlterClientQuotas attempts (shim disable), deadline-guarded
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     handle.shutdown().await;
 
-    assert!(
-        resp.iter().all(|(_, ec)| *ec == 31),
-        "all entries must carry CLUSTER_AUTHORIZATION_FAILED (31); got {resp:?}"
-    );
+    assert2::assert!(resp.iter().all(|(_, ec)| *ec == 31));
 }

@@ -200,7 +200,6 @@ fn encode_error_response(
 mod tests {
     use std::net::SocketAddr;
 
-    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -270,7 +269,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -297,7 +296,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -353,7 +352,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

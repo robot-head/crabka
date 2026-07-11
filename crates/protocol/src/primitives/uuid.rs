@@ -27,7 +27,7 @@ pub fn get_uuid<B: Buf>(buf: &mut B) -> Result<Uuid, ProtocolError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::BytesMut;
 
     use super::*;
@@ -37,8 +37,8 @@ mod tests {
         let u = Uuid([0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]);
         let mut buf = BytesMut::new();
         put_uuid(&mut buf, u);
-        assert!(buf.len() == 16);
+        assert2::assert!(buf.len() == 16);
         let mut cur = &buf[..];
-        assert!(get_uuid(&mut cur).unwrap() == u);
+        assert2::assert!(get_uuid(&mut cur).unwrap() == u);
     }
 }

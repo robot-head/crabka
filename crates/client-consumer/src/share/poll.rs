@@ -534,7 +534,7 @@ fn build_ack_topics(acks: Vec<(WireUuid, i32, i64, i64, i8)>) -> Vec<Acknowledge
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_client_core::Client;
     use crabka_protocol::tagged_fields::UnknownTaggedFields;
     use tokio::sync::Mutex;
@@ -571,7 +571,7 @@ mod tests {
     }
 
     fn only<T>(items: &[T]) -> &T {
-        assert!(items.len() == 1);
+        assert2::assert!(items.len() == 1);
         &items[0]
     }
 
@@ -596,7 +596,7 @@ mod tests {
             vec![topic.clone()],
         );
 
-        assert!(
+        assert2::assert!(
             req == ShareFetchRequest {
                 group_id: Some("group-a".into()),
                 member_id: Some("member-a".into()),
@@ -621,7 +621,7 @@ mod tests {
             Duration::from_millis(u64::from(u32::MAX)),
             Vec::new(),
         );
-        assert!(saturated.max_wait_ms == i32::MAX);
+        assert2::assert!(saturated.max_wait_ms == i32::MAX);
     }
 
     #[test]
@@ -645,20 +645,24 @@ mod tests {
         );
 
         let topic = topics.iter().find(|topic| topic.topic_id == id(7)).unwrap();
-        assert!(topic.partitions.len() == 2);
+        assert2::assert!(topic.partitions.len() == 2);
         let part = topic
             .partitions
             .iter()
             .find(|part| part.partition_index == 2)
             .unwrap();
-        assert!(part.partition_max_bytes == PARTITION_MAX_BYTES);
-        assert!(part.acknowledgement_batches == vec![ack]);
+        assert2::assert!(
+            (
+                part.partition_max_bytes,
+                part.acknowledgement_batches.as_slice()
+            ) == (PARTITION_MAX_BYTES, &[ack][..])
+        );
         let empty = topic
             .partitions
             .iter()
             .find(|part| part.partition_index == 3)
             .unwrap();
-        assert!(empty.acknowledgement_batches.is_empty());
+        assert2::assert!(empty.acknowledgement_batches.is_empty());
     }
 
     #[test]
@@ -668,7 +672,7 @@ mod tests {
         let req =
             build_share_ack_request("group-a".into(), "member-a".into(), 5, true, topics.clone());
 
-        assert!(
+        assert2::assert!(
             req == ShareAcknowledgeRequest {
                 group_id: Some("group-a".into()),
                 member_id: Some("member-a".into()),
@@ -682,14 +686,26 @@ mod tests {
 
     #[test]
     fn response_and_record_helpers_preserve_boundaries() {
-        check!(!response_has_error(0));
-        check!(response_has_error(17));
-        check!(range_len(10, 12) == 3);
-        check!(range_len(12, 10) == 0);
-        check!(offset_in_range(10, 10, 12));
-        check!(offset_in_range(10, 12, 12));
-        check!(!offset_in_range(10, 9, 12));
-        check!(!offset_in_range(10, 13, 12));
+        for (name, code, expected) in [("success", 0, false), ("error", 17, true)] {
+            check!(response_has_error(code) == expected, "case {name}");
+        }
+        for (name, first, last, expected) in [
+            ("inclusive range", 10, 12, 3),
+            ("reversed range", 12, 10, 0),
+        ] {
+            check!(range_len(first, last) == expected, "case {name}");
+        }
+        for (name, first, offset, last, expected) in [
+            ("lower bound", 10, 10, 12, true),
+            ("upper bound", 10, 12, 12, true),
+            ("below range", 10, 9, 12, false),
+            ("above range", 10, 13, 12, false),
+        ] {
+            check!(
+                offset_in_range(first, offset, last) == expected,
+                "case {name}"
+            );
+        }
         check!(record_offset(100, 7) == 107);
         check!(record_timestamp(1000, 33) == 1033);
     }
@@ -707,7 +723,7 @@ mod tests {
         };
 
         let mut implicit = test_consumer(ShareAckMode::Implicit).await;
-        assert!(
+        assert2::assert!(
             implicit
                 .acknowledge(&record, ShareAckType::Accept)
                 .unwrap_err()
@@ -719,7 +735,9 @@ mod tests {
         explicit
             .acknowledge(&record, ShareAckType::Release)
             .unwrap();
-        assert!(explicit.pending_acks == vec![(id(7), 2, 10, 10, ShareAckType::Release.wire())]);
+        assert2::assert!(
+            explicit.pending_acks == vec![(id(7), 2, 10, 10, ShareAckType::Release.wire())]
+        );
     }
 
     #[tokio::test]
@@ -735,7 +753,7 @@ mod tests {
         };
         let mut consumer = test_consumer(ShareAckMode::Implicit).await;
 
-        assert!(
+        assert2::assert!(
             consumer
                 .renew(&record)
                 .await
@@ -752,9 +770,9 @@ mod tests {
 
         let acks = consumer.take_piggyback_acks();
 
-        assert!(consumer.prev_delivered.is_empty());
+        assert2::assert!(consumer.prev_delivered.is_empty());
         let batch = only(acks.get(&(id(7), 2)).unwrap());
-        assert!(
+        assert2::assert!(
             *batch
                 == FetchAckBatch {
                     first_offset: 10,
@@ -773,10 +791,14 @@ mod tests {
 
         let acks = consumer.take_piggyback_acks();
 
-        assert!(consumer.prev_delivered.is_empty());
-        assert!(consumer.pending_acks.is_empty());
+        assert2::assert!(
+            (
+                consumer.prev_delivered.is_empty(),
+                consumer.pending_acks.is_empty()
+            ) == (true, true)
+        );
         let batch = only(acks.get(&(id(7), 2)).unwrap());
-        assert!(
+        assert2::assert!(
             *batch
                 == FetchAckBatch {
                     first_offset: 10,
@@ -801,7 +823,7 @@ mod tests {
             ("topic-b", id(8)),
             ("missing", WireUuid::default()),
         ] {
-            assert!(consumer.topic_id_for(name) == expected, "name: {name}");
+            assert2::assert!(consumer.topic_id_for(name) == expected);
         }
     }
 
@@ -814,14 +836,14 @@ mod tests {
         ]);
 
         let topic = topics.iter().find(|topic| topic.topic_id == id(7)).unwrap();
-        assert!(topic.partitions.len() == 2);
+        assert2::assert!(topic.partitions.len() == 2);
         let part = topic
             .partitions
             .iter()
             .find(|part| part.partition_index == 2)
             .unwrap();
         let batch = only(&part.acknowledgement_batches);
-        assert!(
+        assert2::assert!(
             *batch
                 == AckAckBatch {
                     first_offset: 10,
@@ -833,7 +855,7 @@ mod tests {
 
         let renew = build_ack_topics(vec![(id(7), 2, 10, 10, 0)]);
         let renew_batch = only(&only(&only(&renew).partitions).acknowledgement_batches);
-        assert!(
+        assert2::assert!(
             *renew_batch
                 == AckAckBatch {
                     first_offset: 10,

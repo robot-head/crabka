@@ -1,5 +1,4 @@
 //! KIP-516: Metadata by `topic_id` error semantics.
-use assert2::assert;
 mod support;
 
 use crabka_protocol::{
@@ -51,7 +50,7 @@ async fn metadata_unknown_topic_id_returns_unknown_topic_id() {
         .iter()
         .find(|t| t.topic_id == bogus)
         .expect("topic entry echoing the requested id");
-    assert!(t.error_code == 100); // UNKNOWN_TOPIC_ID
+    assert2::assert!(t.error_code == 100); // UNKNOWN_TOPIC_ID
 }
 
 #[tokio::test]
@@ -92,5 +91,5 @@ async fn metadata_inconsistent_name_and_id_returns_inconsistent() {
         .iter()
         .find(|t| t.topic_id == id_b || t.name.as_deref() == Some("m_a"))
         .expect("topic entry");
-    assert!(t.error_code == 103); // INCONSISTENT_TOPIC_ID
+    assert2::assert!(t.error_code == 103); // INCONSISTENT_TOPIC_ID
 }

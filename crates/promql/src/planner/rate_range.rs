@@ -276,7 +276,7 @@ fn build_leaf_batch(
 #[cfg(test)]
 mod tests {
     use arrow::array::{Float64Array, StringArray};
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -367,7 +367,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(approx_eq(value.value(0), 2.0));
+        assert2::assert!(approx_eq(value.value(0), 2.0));
     }
 
     /// A single-sample window has no rate; the UDF emits NULL (not a NaN
@@ -394,6 +394,6 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(value.is_null(0));
+        assert2::assert!(value.is_null(0));
     }
 }

@@ -37,10 +37,7 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert_eq!(
-        resp.error_code, 0,
-        "streams.version finalize failed: {resp:?}"
-    );
+    assert2::assert!(resp.error_code == 0);
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -57,10 +54,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert_eq!(
-        resp.topics[0].error_code, 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 // ─── Upper processor ──────────────────────────────────────────────────────────
@@ -205,9 +199,8 @@ async fn kafka_streams_processes_records_end_to_end() {
 
     let mut got = got;
     got.sort();
-    assert_eq!(
-        got,
-        vec![
+    assert2::assert!(
+        got == vec![
             "HELLO".to_string(),
             "STREAMS".to_string(),
             "WORLD".to_string()

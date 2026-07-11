@@ -26,6 +26,7 @@ path = "src/report_main.rs"
 workspace = true
 
 [dependencies]
+assert2 = { workspace = true }
 anyhow = { workspace = true }
 bytes = { workspace = true }
 chrono = { version = "0.4", default-features = false, features = ["clock", "serde"] }
@@ -57,6 +58,5 @@ tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["test-util", "macros", "rt-multi-thread"] }

@@ -148,7 +148,7 @@ impl From<RecordsError> for LegacyRecordsError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+
     use bytes::Bytes;
     use crabka_protocol::records::{Record, RecordBatch};
 
@@ -195,55 +195,29 @@ mod tests {
     }
 
     #[test]
-    fn down_then_up_v1_uncompressed() {
-        let v2 = v2_batch(CompressionType::None);
-        let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert!(round.base_offset == 1000);
-        assert!(round.records.len() == 3);
-        for (i, r) in round.records.iter().enumerate() {
-            check!(r.offset_delta == i as i32);
-            check!(r.key == v2.records[i].key);
-            check!(r.value == v2.records[i].value);
-            check!(r.timestamp_delta == v2.records[i].timestamp_delta);
-            check!(r.headers.is_empty(), "headers dropped in down-conversion");
+    fn down_then_up_round_trips_complete_batches() {
+        for (_name, magic, codec) in [
+            ("v1 uncompressed", Magic::V1, CompressionType::None),
+            ("v0 uncompressed", Magic::V0, CompressionType::None),
+            ("v1 gzip", Magic::V1, CompressionType::Gzip),
+            ("v1 snappy", Magic::V1, CompressionType::Snappy),
+        ] {
+            let v2 = v2_batch(codec);
+            let legacy_bytes = v2_to_legacy(&v2, magic).unwrap();
+            let round = legacy_to_v2(&legacy_bytes).unwrap();
+
+            let mut expected = v2;
+            expected.partition_leader_epoch = -1;
+            expected.attributes = Attributes::default();
+            if magic == Magic::V0 {
+                expected.base_timestamp = -1;
+                expected.max_timestamp = -1;
+                for record in &mut expected.records {
+                    record.timestamp_delta = 0;
+                }
+            }
+            assert2::assert!(round == expected);
         }
-    }
-
-    #[test]
-    fn down_then_up_v0_no_timestamps() {
-        let v2 = v2_batch(CompressionType::None);
-        let legacy_bytes = v2_to_legacy(&v2, Magic::V0).unwrap();
-        let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert!(round.records.len() == 3);
-        // v0 has no timestamps, so all deltas collapse to 0.
-        for r in &round.records {
-            assert!(r.timestamp_delta == 0);
-        }
-    }
-
-    #[test]
-    fn down_v1_gzip_then_up_preserves_offsets() {
-        let v2 = v2_batch(CompressionType::Gzip);
-        let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert!(round.base_offset == 1000);
-        let offsets: Vec<_> = round
-            .records
-            .iter()
-            .map(|r| 1000i64 + i64::from(r.offset_delta))
-            .collect();
-        assert!(offsets == vec![1000, 1001, 1002]);
-    }
-
-    #[test]
-    fn down_v1_snappy_then_up_preserves_payloads() {
-        let v2 = v2_batch(CompressionType::Snappy);
-        let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert!(round.records.len() == 3);
-        check!(round.records[2].value == Some(Bytes::from_static(b"3")));
-        check!(round.records[2].key == None);
     }
 
     #[test]
@@ -251,10 +225,7 @@ mod tests {
         let mut v2 = v2_batch(CompressionType::None);
         v2.attributes = v2.attributes.with_control(true);
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        assert!(
-            legacy_bytes.is_empty(),
-            "control batch must produce empty MessageSet"
-        );
+        assert2::assert!(legacy_bytes.is_empty());
     }
 
     #[test]
@@ -263,7 +234,7 @@ mod tests {
         v2.records.clear();
         v2.last_offset_delta = 0;
         let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        assert!(legacy_bytes.is_empty());
+        assert2::assert!(legacy_bytes.is_empty());
     }
 
     #[test]
@@ -277,7 +248,28 @@ mod tests {
         let mut cur: &[u8] = &legacy_bytes;
         let recs = decode_message_set(&mut cur, legacy_bytes.len()).unwrap();
         // No structural representation of headers in v0/v1.
-        assert!(recs.len() == 3);
+        assert2::assert!(
+            recs == vec![
+                ParsedRecord {
+                    offset: Offset(1000),
+                    timestamp: Some(1_700_000_000),
+                    key: Some(Bytes::from_static(b"a")),
+                    value: Some(Bytes::from_static(b"1")),
+                },
+                ParsedRecord {
+                    offset: Offset(1001),
+                    timestamp: Some(1_700_000_100),
+                    key: Some(Bytes::from_static(b"b")),
+                    value: Some(Bytes::from_static(b"2")),
+                },
+                ParsedRecord {
+                    offset: Offset(1002),
+                    timestamp: Some(1_700_000_500),
+                    key: None,
+                    value: Some(Bytes::from_static(b"3")),
+                },
+            ]
+        );
     }
 
     // --- mutation-coverage tests --------------------------------------------
@@ -297,41 +289,25 @@ mod tests {
         let _offset = cur.get_i64();
         let size = cur.get_i32() as usize;
         let msg = crate::message::Message::decode_from(&mut cur, size).unwrap();
-        assert!(msg.compression() == CompressionType::Gzip);
+        assert2::assert!(msg.compression() == CompressionType::Gzip);
     }
 
     #[test]
     fn up_convert_empty_set_returns_sentinels() {
         let rb = legacy_to_v2(&[]).unwrap();
-        check!(rb.records.is_empty());
-        check!(rb.base_offset == 0);
-        check!(rb.partition_leader_epoch == -1);
-        check!(rb.producer_id == -1);
-        check!(rb.producer_epoch == -1);
-        check!(rb.base_sequence == -1);
-    }
-
-    #[test]
-    fn up_convert_v0_timestamps_default_to_minus_one() {
-        // v0 carries no timestamps, so base/max timestamp fall back to -1.
-        let v2 = v2_batch(CompressionType::None);
-        let legacy_bytes = v2_to_legacy(&v2, Magic::V0).unwrap();
-        let round = legacy_to_v2(&legacy_bytes).unwrap();
-        assert!(round.base_timestamp == -1);
-        assert!(round.max_timestamp == -1);
-    }
-
-    #[test]
-    fn up_convert_sets_offsets_and_sentinels() {
-        // Offsets 1000..=1002 -> last_offset_delta = 1002 - 1000 = 2, and the
-        // producer/leader-epoch sentinels are -1.
-        let v2 = v2_batch(CompressionType::None);
-        let legacy_bytes = v2_to_legacy(&v2, Magic::V1).unwrap();
-        let round = legacy_to_v2(&legacy_bytes).unwrap();
-        check!(round.last_offset_delta == 2);
-        check!(round.partition_leader_epoch == -1);
-        check!(round.producer_id == -1);
-        check!(round.producer_epoch == -1);
-        check!(round.base_sequence == -1);
+        assert2::assert!(
+            rb == RecordBatch {
+                base_offset: 0,
+                partition_leader_epoch: -1,
+                attributes: Attributes::default(),
+                last_offset_delta: 0,
+                base_timestamp: 0,
+                max_timestamp: 0,
+                producer_id: -1,
+                producer_epoch: -1,
+                base_sequence: -1,
+                records: Vec::new(),
+            }
+        );
     }
 }

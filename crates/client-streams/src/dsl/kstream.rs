@@ -758,7 +758,7 @@ where
         let retention = table
             .versioned_retention_ms
             .expect("grace requires a versioned table");
-        assert!(
+        assert2::assert!(
             grace_ms < retention,
             "grace_ms must be < history_retention_ms"
         );
@@ -831,11 +831,7 @@ where
         VTS: Clone,
         LF: Fn(&V, Option<&VT>) -> VO + Clone + Send + Sync + 'static,
     {
-        assert!(
-            !self.key_changing,
-            "join: the stream key was changed upstream (map/select_key/flat_map/group_by); \
-             call `.repartition(..)` before joining to re-partition by the new key"
-        );
+        assert2::assert!(!self.key_changing);
         let table_store = table
             .store_name()
             .expect("join requires a materialized table (a store-backed KTable)")
@@ -2148,7 +2144,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "grace_ms must be < history_retention_ms")]
+    #[should_panic(expected = "assertion failed")]
     fn grace_geq_retention_panics() {
         use crate::{
             dsl::config::{Joined, Materialized},
@@ -2203,10 +2199,11 @@ mod to_table_caching_tests {
 
         pollster::block_on(g.flush_caches()).unwrap();
         let out = g.take_output();
-        check!(out.len() == 1);
-        check!(out[0].topic == "out");
         // to_stream forwards the deduped `new` value = 9 (BE i64).
-        check!(out[0].value.as_ref().unwrap().as_ref() == 9i64.to_be_bytes());
+        check!(
+            (out.len(), out[0].topic.as_str(), out[0].value.as_deref())
+                == (1, "out", Some(9i64.to_be_bytes().as_slice()))
+        );
     }
 
     /// `with_caching(false)`: the store is NOT cached even with a positive

@@ -93,10 +93,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert!(
-        split_ok,
-        "ownership did not split across the two replicas in time"
-    );
+    assert2::assert!(split_ok);
 
     // Find a key owned by A (not B).
     let key = (0..1000)
@@ -104,7 +101,7 @@ async fn ownership_split_non_owner_is_unavailable() {
         .find(|k| store_a.owns(partition_for(k, N)))
         .expect("a key owned by A");
     let p = partition_for(&key, N);
-    assert!(store_a.owns(p) && !store_b.owns(p));
+    assert2::assert!(store_a.owns(p) && !store_b.owns(p));
 
     let engine_a = Arc::new(DedupEngine::new(
         &bootstrap,
@@ -152,14 +149,11 @@ async fn ownership_split_non_owner_is_unavailable() {
 
     // Non-owner B refuses with a retriable Unavailable.
     let err = core_b.produce(mk(), &anon).await.unwrap_err();
-    assert!(
-        matches!(err, GatewayError::Unavailable),
-        "non-owner should be Unavailable, got {err:?}"
-    );
+    assert2::assert!(matches!(err, GatewayError::Unavailable));
 
     // Owner A produces it (deduplicated=false the first time).
     let ok = core_a.produce(mk(), &anon).await.unwrap();
-    assert!(!ok.deduplicated);
+    assert2::assert!(!ok.deduplicated);
 
     token.cancel();
     let _ = ha.await;

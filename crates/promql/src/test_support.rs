@@ -157,7 +157,7 @@ impl QueryResultExt for QueryResult {
         let QueryResult::InstantVector(samples) = self else {
             panic!("expected instant vector");
         };
-        assert_eq!(samples.len(), 1, "expected exactly one sample");
+        assert2::assert!(samples.len() == 1);
         &samples[0]
     }
 
@@ -209,7 +209,6 @@ impl InstantSampleExt for InstantSample {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -218,6 +217,6 @@ mod tests {
         let store = store_with_series("up", &[(0, 1.0)]);
         let result = eval_instant(&store, "up", 0).await;
 
-        assert!((result.single().value_f64() - 1.0).abs() < f64::EPSILON);
+        assert2::assert!((result.single().value_f64() - 1.0).abs() < f64::EPSILON);
     }
 }

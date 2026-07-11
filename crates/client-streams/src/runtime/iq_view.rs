@@ -300,15 +300,21 @@ mod tests {
             key_serde: Box::new(StringSerde),
             value_serde: Box::new(I64Serde),
         };
-        assert_eq!(view.get(&"b".to_string()).await.unwrap(), Some(2));
-        assert_eq!(view.get(&"z".to_string()).await.unwrap(), None);
+        let hits = (
+            view.get(&"b".to_string()).await.unwrap(),
+            view.get(&"z".to_string()).await.unwrap(),
+        );
         let r = view
             .range(&"a".to_string(), &"b".to_string())
             .await
             .unwrap();
-        assert_eq!(r, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
-        assert_eq!(view.all().await.unwrap().len(), 3);
-        assert_eq!(view.approximate_num_entries().await.unwrap(), 3);
+        let counts = (
+            view.all().await.unwrap().len(),
+            view.approximate_num_entries().await.unwrap(),
+        );
+        assert2::assert!(hits == (Some(2), None));
+        assert2::assert!(r == vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert2::assert!(counts == (3, 3));
     }
 
     async fn window_registry() -> StoreRegistry {
@@ -336,13 +342,10 @@ mod tests {
             key_serde: Box::new(StringSerde),
             value_serde: Box::new(I64Serde),
         };
-        assert_eq!(
-            view.fetch_single(&"k".to_string(), 0).await.unwrap(),
-            Some(10)
-        );
-        assert_eq!(view.fetch_single(&"k".to_string(), 5).await.unwrap(), None);
+        assert2::assert!(view.fetch_single(&"k".to_string(), 0).await.unwrap() == Some(10));
+        assert2::assert!(view.fetch_single(&"k".to_string(), 5).await.unwrap() == None);
         let r = view.fetch(&"k".to_string(), 0, 1000).await.unwrap();
-        assert_eq!(r, vec![(0, 10), (1000, 20)]);
+        assert2::assert!(r == vec![(0, 10), (1000, 20)]);
     }
 
     async fn session_registry() -> StoreRegistry {
@@ -371,9 +374,13 @@ mod tests {
             value_serde: Box::new(I64Serde),
         };
         let rows = view.fetch(&"k".to_string()).await.unwrap();
-        let got: Vec<(Window, i64)> = rows.into_iter().map(|(w, v)| (w.window, v)).collect();
-        assert!(got.contains(&(Window { start: 0, end: 10 }, 1)));
-        assert!(got.contains(&(Window { start: 20, end: 30 }, 2)));
-        assert_eq!(got.len(), 2);
+        let mut got: Vec<(Window, i64)> = rows.into_iter().map(|(w, v)| (w.window, v)).collect();
+        got.sort_by_key(|(window, _)| window.start);
+        assert2::assert!(
+            got == vec![
+                (Window { start: 0, end: 10 }, 1),
+                (Window { start: 20, end: 30 }, 2),
+            ]
+        );
     }
 }

@@ -79,9 +79,8 @@ mod tests {
     fn parses_request_header_prefix() {
         let body = req_frame(18, 3, 7, &[0xaa, 0xbb]);
         let p = parse_request_prefix(&body).unwrap();
-        assert_eq!(
-            p,
-            RequestPrefix {
+        assert2::assert!(
+            p == RequestPrefix {
                 api_key: ApiKey(18),
                 api_version: ApiVersion(3),
                 correlation_id: 7
@@ -99,6 +98,6 @@ mod tests {
         resp.extend_from_slice(&42i32.to_be_bytes());
         resp.extend_from_slice(&[0x01]);
         let got = pending.take(read_correlation_id(&resp).unwrap()).unwrap();
-        assert_eq!(got, (ApiKey(1), ApiVersion(11)));
+        assert2::assert!(got == (ApiKey(1), ApiVersion(11)));
     }
 }

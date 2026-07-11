@@ -23,7 +23,7 @@
 
 use std::{sync::Arc, time::Duration};
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -94,10 +94,7 @@ async fn create_topic(
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
     broker.wait_until_partition_present(topic, 0).await;
 }
 
@@ -133,11 +130,7 @@ async fn bootstrap_share_state(broker: &crabka_broker::BrokerHandle, client: &Cl
         })
         .await
         .expect("FindCoordinator(SHARE)");
-    assert!(
-        resp.coordinators[0].error_code == 0,
-        "FindCoordinator(SHARE) error: {}",
-        resp.coordinators[0].error_code
-    );
+    assert2::assert!(resp.coordinators[0].error_code == 0);
     // Wait until every state partition this single broker should lead is local,
     // so the share-state writes land durably.
     for p in 0..SHARE_STATE_PARTITIONS {
@@ -188,10 +181,7 @@ async fn wait_for_share_init(
         }
     })
     .await;
-    assert!(
-        res.is_ok(),
-        "share state for {group}:{tid}:{partition} never initialized within 30s"
-    );
+    assert2::assert!(res.is_ok());
 }
 
 /// Produce `n` records into `(topic, partition)` in a single batch. Each record
@@ -269,7 +259,7 @@ async fn join(client: &Client, group: &str, topic: &str) -> (String, i32) {
         })
         .await
         .expect("ShareGroupHeartbeat");
-    assert!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
+    assert2::assert!(resp.error_code == 0);
     let member_id = resp.member_id.expect("broker must mint a member id");
     let member_epoch = resp.member_epoch;
     (member_id, member_epoch)
@@ -327,11 +317,7 @@ async fn share_fetch(
 ) -> crabka_protocol::owned::share_fetch_response::PartitionData {
     let req = share_fetch_req(group, member, tid, partition, epoch, max_wait_ms, vec![]);
     let resp: ShareFetchResponse = client.send(req).await.expect("ShareFetch");
-    assert!(
-        resp.error_code == NONE,
-        "ShareFetch top-level error: {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == NONE);
     resp.responses[0].partitions[0].clone()
 }
 
@@ -372,11 +358,7 @@ async fn share_ack(
         ..Default::default()
     };
     let resp: ShareAcknowledgeResponse = client.send(req).await.expect("ShareAcknowledge");
-    assert!(
-        resp.error_code == NONE,
-        "ShareAcknowledge top-level error: {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == NONE);
     resp.responses[0].partitions[0].clone()
 }
 
@@ -416,11 +398,7 @@ async fn share_renew(
         ..Default::default()
     };
     let resp: ShareAcknowledgeResponse = client.send(req).await.expect("ShareAcknowledge renew");
-    assert!(
-        resp.error_code == NONE,
-        "ShareAcknowledge(renew) top-level error: {}",
-        resp.error_code
-    );
+    assert2::assert!(resp.error_code == NONE);
     resp.responses[0].partitions[0].clone()
 }
 
@@ -502,19 +480,11 @@ async fn consume_accept_restart() {
 
         // Accept offsets 0..2 (session epoch is now 1 after the open).
         let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 2, ACCEPT).await;
-        assert!(
-            ack.error_code == NONE,
-            "accept ack error: {}",
-            ack.error_code
-        );
+        assert2::assert!(ack.error_code == NONE);
 
         // Next fetch (epoch 2): the SPSO advanced past 2 — nothing left.
         let row2 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
-        assert!(
-            acquired_count(&row2) == 0,
-            "SPSO must have advanced; no records re-acquired, got {:?}",
-            row2.acquired_records
-        );
+        assert2::assert!(acquired_count(&row2) == 0);
 
         // Wait until the persister has landed the advanced SPSO (>= 3, past
         // offset 2) in __share_group_state before shutting down, so the
@@ -538,10 +508,7 @@ async fn consume_accept_restart() {
         broker.wait_for_share_state_summary("g1", tid, 0).await;
         let row = share_fetch(&client, "g1", &member, tid, 0, 0, 0).await;
         let acquired = acquired_count(&row);
-        assert!(
-            acquired == 0,
-            "recovered SPSO must skip the accepted records; re-acquired {acquired}"
-        );
+        assert2::assert!(acquired == 0);
     }
 }
 
@@ -561,25 +528,17 @@ async fn release_redelivers() {
     wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 2, "acquire both offsets");
-    assert!(row.acquired_records.iter().all(|r| r.delivery_count == 1));
+    assert2::assert!(acquired_count(&row) == 2);
+    assert2::assert!(row.acquired_records.iter().all(|r| r.delivery_count == 1));
 
     // Release offsets 0..1 (epoch 1).
     let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 1, RELEASE).await;
-    assert!(ack.error_code == NONE, "release error: {}", ack.error_code);
+    assert2::assert!(ack.error_code == NONE);
 
     // Next fetch (epoch 2): the same offsets are re-acquired at delivery_count 2.
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
-    assert!(
-        acquired_count(&row2) == 2,
-        "released offsets must be re-acquired, got {:?}",
-        row2.acquired_records
-    );
-    assert!(
-        row2.acquired_records.iter().all(|r| r.delivery_count == 2),
-        "redelivery must bump delivery_count to 2, got {:?}",
-        row2.acquired_records
-    );
+    assert2::assert!(acquired_count(&row2) == 2);
+    assert2::assert!(row2.acquired_records.iter().all(|r| r.delivery_count == 2));
 }
 
 /// Reject archives the records: they are never re-delivered AND the SPSO
@@ -599,19 +558,15 @@ async fn reject_archives() {
     wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 2, "acquire both offsets");
+    assert2::assert!(acquired_count(&row) == 2);
 
     // Reject offsets 0..1 (epoch 1) → archived.
     let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 1, REJECT).await;
-    assert!(ack.error_code == NONE, "reject error: {}", ack.error_code);
+    assert2::assert!(ack.error_code == NONE);
 
     // Next fetch (epoch 2): nothing re-acquired.
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
-    assert!(
-        acquired_count(&row2) == 0,
-        "rejected offsets must not be re-acquired, got {:?}",
-        row2.acquired_records
-    );
+    assert2::assert!(acquired_count(&row2) == 0);
 
     // Produce one more (offset 2). The SPSO advanced past the rejected pair, so
     // only the new offset is acquired — proving the rejected ones were skipped.
@@ -627,15 +582,9 @@ async fn reject_archives() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }
-    assert!(
-        acquired_count(&row3) == 1,
-        "only the new offset must be acquired, got {:?}",
-        row3.acquired_records
-    );
-    assert!(
-        row3.acquired_records[0].first_offset == 2 && row3.acquired_records[0].last_offset == 2,
-        "acquired offset must be 2 (past the rejected 0..1), got {:?}",
-        row3.acquired_records
+    assert2::assert!(acquired_count(&row3) == 1);
+    assert2::assert!(
+        row3.acquired_records[0].first_offset == 2 && row3.acquired_records[0].last_offset == 2
     );
 }
 
@@ -666,9 +615,9 @@ async fn acquire_past_leading_batch_returns_bytes() {
 
     // Acquire 0..2 and Reject them → archived, SPSO advances to 3.
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 3, "acquire all 3");
+    assert2::assert!(acquired_count(&row) == 3);
     let ack = share_ack(&client, "g1", &member, tid, 0, 1, 0, 2, REJECT).await;
-    assert!(ack.error_code == NONE, "reject error: {}", ack.error_code);
+    assert2::assert!(ack.error_code == NONE);
 
     // A separate single-record batch at offset 3 (this starts a new batch; the
     // acquired range 3..3 begins past the leading 0..2 batch).
@@ -686,16 +635,8 @@ async fn acquire_past_leading_batch_returns_bytes() {
         tokio::time::sleep(Duration::from_millis(100)).await;
         row3 = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
     }
-    assert!(
-        acquired_count(&row3) == 1,
-        "offset 3 must be acquired, got {:?}",
-        row3.acquired_records
-    );
-    assert!(
-        row3.acquired_records[0].first_offset == 3,
-        "acquired offset must be 3, got {:?}",
-        row3.acquired_records
-    );
+    assert2::assert!(acquired_count(&row3) == 1);
+    assert2::assert!(row3.acquired_records[0].first_offset == 3);
     let batches = row3
         .records
         .as_ref()
@@ -707,10 +648,7 @@ async fn acquire_past_leading_batch_returns_bytes() {
         .filter_map(|r| r.value.as_ref())
         .map(|v| String::from_utf8_lossy(v).into_owned())
         .collect();
-    assert!(
-        values == vec!["v0"],
-        "offset 3's record bytes must be returned, got {values:?}"
-    );
+    assert2::assert!(values == vec!["v0"]);
 }
 
 /// An acquired-but-unacknowledged lock that expires is reverted by the
@@ -731,8 +669,8 @@ async fn lock_timeout_redelivers() {
 
     // Fetch but DO NOT acknowledge.
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 1, "acquire the single offset");
-    assert!(row.acquired_records[0].delivery_count == 1);
+    assert2::assert!(acquired_count(&row) == 1);
+    assert2::assert!(row.acquired_records[0].delivery_count == 1);
 
     // Wait until the lock expires and the background sweeper reverts the
     // record to Available (acquired-batch count drops to 0).
@@ -742,16 +680,8 @@ async fn lock_timeout_redelivers() {
 
     // Next fetch (epoch 1) re-acquires the same offset at delivery_count 2.
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
-    assert!(
-        acquired_count(&row2) == 1,
-        "expired-lock offset must be re-acquired, got {:?}",
-        row2.acquired_records
-    );
-    assert!(
-        row2.acquired_records[0].delivery_count == 2,
-        "re-delivery after lock timeout must bump delivery_count to 2, got {}",
-        row2.acquired_records[0].delivery_count
-    );
+    assert2::assert!(acquired_count(&row2) == 1);
+    assert2::assert!(row2.acquired_records[0].delivery_count == 2);
 }
 
 /// A record that exhausts `max_delivery_attempts` without an Accept is archived
@@ -773,7 +703,7 @@ async fn delivery_limit_archives() {
 
     // Delivery 1 (no ack).
     let row1 = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(row1.acquired_records[0].delivery_count == 1);
+    assert2::assert!(row1.acquired_records[0].delivery_count == 1);
 
     // Wait until the lock expires and the sweeper reverts the record to Available
     // (acquired-batch count drops to 0), then re-fetch for delivery 2.
@@ -783,11 +713,7 @@ async fn delivery_limit_archives() {
 
     // Delivery 2 (no ack).
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
-    assert!(
-        acquired_count(&row2) == 1 && row2.acquired_records[0].delivery_count == 2,
-        "second delivery must be count 2, got {:?}",
-        row2.acquired_records
-    );
+    assert2::assert!(acquired_count(&row2) == 1 && row2.acquired_records[0].delivery_count == 2);
 
     // Wait until that lock expires too — the sweeper reverts the record back to
     // Available (delivery_count=2, which equals max_delivery_attempts). The
@@ -800,11 +726,7 @@ async fn delivery_limit_archives() {
     // Subsequent fetch: the acquire path detects delivery_count >= max_attempts
     // and archives the record — SPSO advances, nothing is returned.
     let row3 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
-    assert!(
-        acquired_count(&row3) == 0,
-        "poison record must be archived, not re-delivered, got {:?}",
-        row3.acquired_records
-    );
+    assert2::assert!(acquired_count(&row3) == 0);
 }
 
 /// The share-session epoch state machine rejects stale and unknown epochs.
@@ -827,11 +749,7 @@ async fn session_epoch_validation() {
         .send(share_fetch_req("g1", &member, tid, 0, 0, 0, vec![]))
         .await
         .expect("ShareFetch open");
-    assert!(
-        opened.error_code == NONE,
-        "open (epoch 0) must succeed, got {}",
-        opened.error_code
-    );
+    assert2::assert!(opened.error_code == NONE);
 
     // The stored epoch is now 1. A non-matching positive epoch (say 9) →
     // INVALID_SHARE_SESSION_EPOCH (123) at the top level.
@@ -839,11 +757,7 @@ async fn session_epoch_validation() {
         .send(share_fetch_req("g1", &member, tid, 0, 9, 0, vec![]))
         .await
         .expect("ShareFetch stale");
-    assert!(
-        stale.error_code == INVALID_SHARE_SESSION_EPOCH,
-        "stale epoch must be 123 (INVALID_SHARE_SESSION_EPOCH), got {}",
-        stale.error_code
-    );
+    assert2::assert!(stale.error_code == INVALID_SHARE_SESSION_EPOCH);
 
     // A member with no live session sending a non-zero epoch →
     // SHARE_SESSION_NOT_FOUND (122).
@@ -852,11 +766,7 @@ async fn session_epoch_validation() {
         .send(share_fetch_req("g1", &ghost, tid, 0, 5, 0, vec![]))
         .await
         .expect("ShareFetch unknown session");
-    assert!(
-        not_found.error_code == SHARE_SESSION_NOT_FOUND,
-        "unknown session must be 122 (SHARE_SESSION_NOT_FOUND), got {}",
-        not_found.error_code
-    );
+    assert2::assert!(not_found.error_code == SHARE_SESSION_NOT_FOUND);
 }
 
 // ────────────────────────────────────────────────────────────────────────
@@ -889,19 +799,15 @@ async fn renew_extends_lock_not_redelivered() {
     // Acquire offset 0 (lock 500ms, delivery_count 1). Epoch is now 1.
     let acquire_at = std::time::Instant::now();
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 1, "acquire the single offset");
-    assert!(row.acquired_records[0].delivery_count == 1);
+    assert2::assert!(acquired_count(&row) == 1);
+    assert2::assert!(row.acquired_records[0].delivery_count == 1);
 
     // Intentional calibrated timing: renew ~200ms in (before the 500ms lock
     // expires) to reset the deadline to renew-time + 500ms ≈ T0+700ms. Epoch
     // is now 2. This sleep proves renew timing; it is NOT a flaky state-guess.
     tokio::time::sleep(Duration::from_millis(200)).await;
     let renew = share_renew(&client, "g1", &member, tid, 0, 1, 0, 0).await;
-    assert!(
-        renew.error_code == NONE,
-        "renew must succeed for an acquired offset, got {}",
-        renew.error_code
-    );
+    assert2::assert!(renew.error_code == NONE);
 
     // Intentional calibrated timing: wait until ~600ms after the ORIGINAL
     // acquire — past the original 500ms deadline (un-renewed lock would have
@@ -914,11 +820,7 @@ async fn renew_extends_lock_not_redelivered() {
         tokio::time::sleep(rem).await;
     }
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 2, 0).await;
-    assert!(
-        acquired_count(&row2) == 0,
-        "renew must keep the lock; offset 0 must NOT be re-acquired, got {:?}",
-        row2.acquired_records
-    );
+    assert2::assert!(acquired_count(&row2) == 0);
 }
 
 /// F1 (control): the SAME timing WITHOUT a renew re-acquires the offset after
@@ -939,8 +841,8 @@ async fn no_renew_redelivers_after_lock_expiry() {
     wait_for_share_init(&broker, &client, "g1", "t", &member, member_epoch, tid, 0).await;
 
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 1, "acquire the single offset");
-    assert!(row.acquired_records[0].delivery_count == 1);
+    assert2::assert!(acquired_count(&row) == 1);
+    assert2::assert!(row.acquired_records[0].delivery_count == 1);
 
     // Intentional calibrated timing: no renew — wait 800ms (well past the 500ms
     // lock + a sweeper tick) so the record is reverted to Available and
@@ -948,16 +850,8 @@ async fn no_renew_redelivers_after_lock_expiry() {
     // WITHOUT a renew the lock IS swept; it is NOT a flaky state-guess.
     tokio::time::sleep(Duration::from_millis(800)).await;
     let row2 = share_fetch(&client, "g1", &member, tid, 0, 1, 0).await;
-    assert!(
-        acquired_count(&row2) == 1,
-        "without renew the expired lock must re-acquire, got {:?}",
-        row2.acquired_records
-    );
-    assert!(
-        row2.acquired_records[0].delivery_count == 2,
-        "re-delivery after lock timeout must bump delivery_count to 2, got {}",
-        row2.acquired_records[0].delivery_count
-    );
+    assert2::assert!(acquired_count(&row2) == 1);
+    assert2::assert!(row2.acquired_records[0].delivery_count == 2);
 }
 
 /// F2 (`read_committed`): with `isolation_level = ReadCommitted`, a share fetch
@@ -1014,11 +908,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
     // the LSO (still 0). Poll a few times to be sure it never spuriously acquires.
     for epoch in 0..6 {
         let row = share_fetch(&client, "g1", &member, tid, 0, epoch, 0).await;
-        assert!(
-            acquired_count(&row) == 0,
-            "read_committed must not surface open-txn records, got {:?}",
-            row.acquired_records
-        );
+        assert2::assert!(acquired_count(&row) == 0);
         // intentional: deliberately observe that nothing is acquired across a
         // window while the txn stays open (behavior under test, not a
         // state-settle guess).
@@ -1053,11 +943,7 @@ async fn read_committed_skips_open_txn_then_sees_committed() {
         // via ShareFetch.
         tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    assert!(
-        values == vec!["a", "b", "c"],
-        "after commit the read_committed fetch must surface the 3 committed \
-         records, got {values:?}"
-    );
+    assert2::assert!(values == vec!["a", "b", "c"]);
 
     producer.close().await.unwrap();
 }
@@ -1146,17 +1032,17 @@ async fn fragmented_window_records_match_acquired_offsets() {
 
     // Acquire 0..2 (epoch 0 opens; stored epoch is now 1).
     let row = fetch_until_acquired(&client, "g1", &member, tid, 0, 0).await;
-    assert!(acquired_count(&row) == 3, "acquire all 3 offsets");
+    assert2::assert!(acquired_count(&row) == 3);
 
     // Accept the MIDDLE offset (1) only; Release the outer offsets 0 and 2.
     // SPSO stays at 0 (offset 0 is not accepted), offset 1 becomes Acknowledged,
     // offsets 0 and 2 return to Available — a gap at offset 1 between them.
     let a1 = share_ack(&client, "g1", &member, tid, 0, 1, 1, 1, ACCEPT).await;
-    assert!(a1.error_code == NONE, "accept 1 error: {}", a1.error_code);
+    assert2::assert!(a1.error_code == NONE);
     let a0 = share_ack(&client, "g1", &member, tid, 0, 2, 0, 0, RELEASE).await;
-    assert!(a0.error_code == NONE, "release 0 error: {}", a0.error_code);
+    assert2::assert!(a0.error_code == NONE);
     let a2 = share_ack(&client, "g1", &member, tid, 0, 3, 2, 2, RELEASE).await;
-    assert!(a2.error_code == NONE, "release 2 error: {}", a2.error_code);
+    assert2::assert!(a2.error_code == NONE);
 
     // Re-fetch: the acquired set is the DISJOINT {0, 2} (offset 1 is gone). The
     // returned records payload must decode to exactly offsets {0, 2}.
@@ -1176,10 +1062,7 @@ async fn fragmented_window_records_match_acquired_offsets() {
         .iter()
         .flat_map(|r| r.first_offset..=r.last_offset)
         .collect();
-    assert!(
-        acquired_offsets == std::collections::BTreeSet::from([0, 2]),
-        "must re-acquire the disjoint set {{0, 2}}, got {acquired_offsets:?}"
-    );
+    assert2::assert!(acquired_offsets == std::collections::BTreeSet::from([0, 2]));
 
     // Decode the records payload and collect the absolute offsets it carries.
     let batches = row2
@@ -1196,11 +1079,7 @@ async fn fragmented_window_records_match_acquired_offsets() {
                 .map(move |r| base + i64::from(r.offset_delta))
         })
         .collect();
-    assert!(
-        record_offsets == acquired_offsets,
-        "records payload offsets {record_offsets:?} must equal acquired offsets \
-         {acquired_offsets:?} (gap offset 1 must be excluded)"
-    );
+    assert2::assert!(record_offsets == acquired_offsets);
     // Belt-and-suspenders: the gap offset's value (v1) must never appear.
     let values: Vec<String> = batches
         .iter()
@@ -1208,8 +1087,5 @@ async fn fragmented_window_records_match_acquired_offsets() {
         .filter_map(|r| r.value.as_ref())
         .map(|v| String::from_utf8_lossy(v).into_owned())
         .collect();
-    assert!(
-        !values.contains(&"v1".to_string()),
-        "the gap offset's value v1 must be excluded, got {values:?}"
-    );
+    assert2::assert!(!values.contains(&"v1".to_string()));
 }

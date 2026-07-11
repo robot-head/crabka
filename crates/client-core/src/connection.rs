@@ -732,14 +732,8 @@ mod io_task_tests {
         let started = Instant::now();
         // Hand-framed Metadata request; the server reads it then closes.
         let result = conn.raw_request(3, 0, Bytes::new()).await;
-        assert!(
-            matches!(result, Err(ClientError::Disconnected)),
-            "server close mid-request must yield Disconnected, got {result:?}"
-        );
-        assert!(
-            started.elapsed() < Duration::from_secs(4),
-            "drain must be prompt (reader EOF), not a request-timeout stall"
-        );
+        assert2::assert!(matches!(result, Err(ClientError::Disconnected)));
+        assert2::assert!(started.elapsed() < Duration::from_secs(4));
         server.await.unwrap();
     }
 }

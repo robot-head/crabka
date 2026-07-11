@@ -1256,7 +1256,7 @@ fn build_produce_data(prepared: PreparedBatch, leader_epoch: i32) -> ProduceData
 mod tests {
     use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{Bytes, BytesMut};
     use crabka_compression::CompressionType;
     use crabka_metadata::{
@@ -1336,23 +1336,20 @@ mod tests {
     #[test]
     fn topic_min_isr_defaults_to_one_when_unset() {
         let img = image_with_topic("t", &[1, 2, 3]);
-        assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert2::assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
     fn topic_min_isr_reads_override_when_set() {
         let mut img = image_with_topic("t", &[1, 2, 3]);
         set_min_isr(&mut img, "t", 3);
-        assert!(topic_min_insync_replicas(&img, "t") == 3);
+        assert2::assert!(topic_min_insync_replicas(&img, "t") == 3);
     }
 
     #[test]
     fn topic_min_isr_default_one_on_unknown_topic() {
         let img = MetadataImage::new(Uuid::nil());
-        assert!(
-            topic_min_insync_replicas(&img, "ghost") == 1,
-            "missing topic_config must default to 1, not crash"
-        );
+        assert2::assert!(topic_min_insync_replicas(&img, "ghost") == 1);
     }
 
     #[test]
@@ -1364,10 +1361,7 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert!(
-            topic_min_insync_replicas(&img, "t") == 1,
-            "unparseable value must fall back to permissive default 1"
-        );
+        assert2::assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
@@ -1381,7 +1375,7 @@ mod tests {
             topic: "t".into(),
             overrides: o,
         }));
-        assert!(topic_min_insync_replicas(&img, "t") == 1);
+        assert2::assert!(topic_min_insync_replicas(&img, "t") == 1);
     }
 
     #[test]
@@ -1407,7 +1401,7 @@ mod tests {
             ("gold".to_string(), 30),
             (crate::config_keys::DEFAULT_QOS_TIER.to_string(), 7),
         ]);
-        assert!(grouped == expected);
+        assert2::assert!(grouped == expected);
     }
 
     #[test]
@@ -1454,7 +1448,7 @@ mod tests {
             partition_responses: vec![error_partition(0), error_partition(4)],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -1476,10 +1470,7 @@ mod tests {
                 topic: "t".into(),
                 overrides,
             }));
-            assert!(
-                resolve_topic_compression(&img, "t") == want,
-                "compression.type {config_value:?}"
-            );
+            assert2::assert!(resolve_topic_compression(&img, "t") == want);
         }
     }
 
@@ -1504,20 +1495,13 @@ mod tests {
             ..Default::default()
         };
         let decoded = decode_owned_batch(
-            RecordsPayload::V2(vec![batch]),
+            RecordsPayload::V2(vec![batch.clone()]),
             "orders",
             &crate::metrics::BrokerMetrics::new(),
         )
         .expect("decode owned batch");
 
-        check!(decoded.last_offset_delta == 1);
-        check!(decoded.max_timestamp == 9876);
-        check!(decoded.producer_id == 22);
-        check!(decoded.producer_epoch == 3);
-        check!(decoded.base_sequence == 11);
-        assert!(decoded.records.len() == 2);
-        check!(decoded.records[0].value.as_deref() == Some(&b"a"[..]));
-        check!(decoded.records[1].value.as_deref() == Some(&b"b"[..]));
+        assert2::assert!(decoded == batch);
     }
 
     #[test]
@@ -1528,7 +1512,7 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .unwrap_err();
-        assert!(err == crate::codes::INVALID_REQUEST);
+        assert2::assert!(err == crate::codes::INVALID_REQUEST);
     }
 
     #[tokio::test]
@@ -1604,7 +1588,7 @@ mod tests {
             },
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -1687,7 +1671,7 @@ mod tests {
             },
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     /// Idempotent-retry (`Decision::Duplicate`) under `acks=all` re-waits for
@@ -1744,9 +1728,9 @@ mod tests {
                 .append(&mut batch)
                 .expect("seed source records");
         }
-        assert!(part.log_end_offset() == crabka_log::Offset(3));
+        assert2::assert!(part.log_end_offset() == crabka_log::Offset(3));
         part.set_follower_hw(crabka_log::Offset(2)).await;
-        assert!(part.high_watermark().await == crabka_log::Offset(2));
+        assert2::assert!(part.high_watermark().await == crabka_log::Offset(2));
         partitions.insert("orders".to_string(), crabka_ids::PartitionIndex(0), part);
 
         // Pre-seed the dedup tracker so the incoming batch is a Duplicate whose
@@ -1823,19 +1807,13 @@ mod tests {
         // Tuple match → 4096 bytes overage at 1024 B/s → throttle > 0.
         let delay_match =
             crate::quota::consume_producer_quota(&img, &buckets, "alice", "app-x", "default", 4096);
-        assert!(
-            delay_match > std::time::Duration::ZERO,
-            "tuple quota match should throttle on overage; got {delay_match:?}"
-        );
+        assert2::assert!(delay_match > std::time::Duration::ZERO);
         // No tuple match for client_id="other"; no (user=alice)-only quota exists.
         let buckets2 = crate::quota::QuotaBuckets::new();
         let delay_other = crate::quota::consume_producer_quota(
             &img, &buckets2, "alice", "other", "default", 4096,
         );
-        assert!(
-            delay_other == std::time::Duration::ZERO,
-            "non-matching client_id should not throttle; got {delay_other:?}"
-        );
+        assert2::assert!(delay_other == std::time::Duration::ZERO);
     }
 
     // ── verbatim passthrough predicate (prepare_batch + build_produce_data) ──
@@ -1845,7 +1823,7 @@ mod tests {
     // verbatim-vs-owned; `build_produce_data` maps the result to the writer's
     // `ProduceData`, stamping the leader epoch.
     mod verbatim {
-        use assert2::{assert, check};
+        use assert2::check;
         use bytes::{Bytes, BytesMut};
         use crabka_compression::CompressionType;
         use crabka_protocol::records::{Attributes, Record, RecordBatch, TimestampType};
@@ -1907,8 +1885,8 @@ mod tests {
                     "non-v2 zeroed slice",
                 ),
             ];
-            for (payload, want, label) in cases {
-                assert!(payload.message_count() == want, "case: {label}");
+            for (payload, want, _label) in cases {
+                assert2::assert!(payload.message_count() == want);
             }
         }
 
@@ -1932,10 +1910,23 @@ mod tests {
             let data = dispatch_slice(wire.clone(), None, 7);
             match data {
                 ProduceData::Verbatim(v) => {
-                    check!(&v.bytes[..] == &wire[..]);
-                    check!(v.leader_epoch == 7);
-                    check!(v.max_timestamp == 42);
-                    check!(v.last_offset_delta == 0);
+                    assert2::assert!(
+                        (
+                            v.bytes,
+                            v.last_offset_delta,
+                            v.max_timestamp,
+                            v.leader_epoch,
+                            v.producer_id,
+                            v.is_transactional,
+                        ) == (
+                            wire,
+                            0,
+                            42,
+                            crabka_log::LeaderEpoch(7),
+                            crabka_log::ProducerId(-1),
+                            false,
+                        )
+                    );
                 }
                 ProduceData::Owned(_) => panic!("expected Verbatim"),
             }
@@ -1948,7 +1939,7 @@ mod tests {
             b.attributes = b.attributes.with_compression(CompressionType::Lz4);
             let wire = encode(&b);
             let data = dispatch_slice(wire, Some(CompressionType::Lz4), 1);
-            assert!(matches!(data, ProduceData::Verbatim(_)));
+            assert2::assert!(matches!(data, ProduceData::Verbatim(_)));
         }
 
         #[test]
@@ -1956,7 +1947,7 @@ mod tests {
             // A wire-null records field is rejected as INVALID_REQUEST.
             let m = crate::metrics::BrokerMetrics::new();
             let err = prepare_batch(PartitionPayload::Null, None, "t", &m).unwrap_err();
-            assert!(err == crate::codes::INVALID_REQUEST);
+            assert2::assert!(err == crate::codes::INVALID_REQUEST);
         }
 
         #[test]
@@ -1965,7 +1956,7 @@ mod tests {
             let b = plain_batch();
             let wire = encode(&b);
             let data = dispatch_slice(wire, Some(CompressionType::Zstd), 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            assert2::assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -1976,7 +1967,7 @@ mod tests {
                 .with_timestamp_type(TimestampType::LogAppendTime);
             let wire = encode(&b);
             let data = dispatch_slice(wire, None, 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            assert2::assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -1985,7 +1976,7 @@ mod tests {
             b.attributes = Attributes::default().with_control(true);
             let wire = encode(&b);
             let data = dispatch_slice(wire, None, 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            assert2::assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -2000,7 +1991,7 @@ mod tests {
             let m = crate::metrics::BrokerMetrics::new();
             let err = prepare_batch(PartitionPayload::Slice(Bytes::from(wire)), None, "t", &m)
                 .unwrap_err();
-            assert!(err == crate::codes::INVALID_RECORD);
+            assert2::assert!(err == crate::codes::INVALID_RECORD);
         }
 
         #[test]
@@ -2011,7 +2002,7 @@ mod tests {
             b.encode(&mut two).unwrap();
             b.encode(&mut two).unwrap();
             let data = dispatch_slice(two.freeze(), None, 0);
-            assert!(matches!(data, ProduceData::Owned(_)));
+            assert2::assert!(matches!(data, ProduceData::Owned(_)));
         }
 
         #[test]
@@ -2024,8 +2015,8 @@ mod tests {
             let data = dispatch_slice(wire, None, 0);
             match data {
                 ProduceData::Verbatim(v) => {
-                    assert!(v.is_transactional);
-                    assert!(v.producer_id == crabka_log::ProducerId(100));
+                    assert2::assert!(v.is_transactional);
+                    assert2::assert!(v.producer_id == crabka_log::ProducerId(100));
                 }
                 ProduceData::Owned(_) => panic!("transactional data batch should pass through"),
             }
@@ -2056,12 +2047,7 @@ mod tests {
             let wire = encode(&b);
             // The compressed wire bytes must be far smaller than the raw payload,
             // so an accidental decompress would be obvious.
-            assert!(
-                wire.len() < big.len() / 4,
-                "lz4 wire ({} B) should be much smaller than raw ({} B)",
-                wire.len(),
-                big.len()
-            );
+            assert2::assert!(wire.len() < big.len() / 4);
 
             let data = dispatch_slice(wire.clone(), None, 3);
             match data {
@@ -2069,12 +2055,25 @@ mod tests {
                     // Stored bytes are the COMPRESSED wire bytes — verbatim, not
                     // re-encoded from decompressed records ("must stay compressed").
                     // Header fields came from the v2 header, no record decode.
-                    check!(&v.bytes[..] == &wire[..]);
                     check!(v.bytes.len() == wire.len());
                     check!(v.bytes.len() < big.len());
-                    check!(v.max_timestamp == 7_777);
-                    check!(v.last_offset_delta == 0);
-                    check!(v.leader_epoch == 3);
+                    assert2::assert!(
+                        (
+                            v.bytes,
+                            v.last_offset_delta,
+                            v.max_timestamp,
+                            v.leader_epoch,
+                            v.producer_id,
+                            v.is_transactional,
+                        ) == (
+                            wire,
+                            0,
+                            7_777,
+                            crabka_log::LeaderEpoch(3),
+                            crabka_log::ProducerId(-1),
+                            false,
+                        )
+                    );
                 }
                 ProduceData::Owned(_) => {
                     panic!("lz4 producer batch must pass through verbatim (no decompress)")
@@ -2102,21 +2101,35 @@ mod tests {
             let m = crate::metrics::BrokerMetrics::new();
             let prepared =
                 prepare_batch(PartitionPayload::Slice(wire.clone()), None, "t", &m).unwrap();
-            assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
-            check!(prepared.producer_id == 4242);
-            check!(prepared.producer_epoch == 9);
-            check!(prepared.base_sequence == 17);
-            check!(prepared.last_offset_delta == 2);
-            check!(prepared.max_timestamp == 555);
+            assert2::assert!(matches!(prepared.source, PreparedSource::Verbatim(_)));
+            assert2::assert!(
+                (
+                    prepared.attributes,
+                    prepared.last_offset_delta,
+                    prepared.max_timestamp,
+                    prepared.producer_id,
+                    prepared.producer_epoch,
+                    prepared.base_sequence,
+                ) == (b.attributes, 2, 555, 4242, 9, 17)
+            );
 
             // Cross-check: an owned decode of the same compressed bytes yields
             // the same header identity (proving the header read is correct).
             let mut cur: &[u8] = &wire;
             let owned = RecordBatch::decode(&mut cur).unwrap();
-            check!(owned.producer_id == prepared.producer_id);
-            check!(owned.producer_epoch == prepared.producer_epoch);
-            check!(owned.base_sequence == prepared.base_sequence);
-            check!(owned.last_offset_delta == prepared.last_offset_delta);
+            assert2::assert!(
+                (
+                    owned.producer_id,
+                    owned.producer_epoch,
+                    owned.base_sequence,
+                    owned.last_offset_delta,
+                ) == (
+                    prepared.producer_id,
+                    prepared.producer_epoch,
+                    prepared.base_sequence,
+                    prepared.last_offset_delta,
+                )
+            );
         }
     }
 }

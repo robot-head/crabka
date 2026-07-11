@@ -97,6 +97,16 @@ pub fn emit(
     out.push_str(&include_tokens.to_string());
     out.push('\n');
 
+    if namespace.is_none() && flavor == Flavor::Owned && type_name == "FetchResponse" {
+        let extension_tokens = quote! {
+            #[path = "fetch_response_plan.rs"]
+            mod plan;
+            pub use plan::FetchWriteOp;
+        };
+        out.push_str(&extension_tokens.to_string());
+        out.push('\n');
+    }
+
     // 5. #[cfg(test)] mod tests { ... } built with quote!.
     let tests_tokens = match flavor {
         Flavor::Owned => owned_tests_tokens(&type_name),
@@ -118,31 +128,32 @@ fn owned_tests_tokens(type_name: &str) -> TokenStream {
             use crate::{Decode, Encode};
             use bytes::BytesMut;
 
-            fn roundtrip(msg: &#ty, v: i16) {
+            fn roundtrip(case: &str, msg: &#ty, v: i16) {
                 let mut buf = BytesMut::new();
                 msg.encode(&mut buf, v).unwrap();
-                assert!(msg.encoded_len(v) == buf.len());
+                assert2::assert!(
+                    msg.encoded_len(v) == buf.len(),
+                    "case {case}, version {v}"
+                );
                 let bytes = buf.freeze();
                 let mut cur = &bytes[..];
                 let decoded = #ty::decode(&mut cur, v).unwrap();
-                assert!(cur.is_empty());
+                assert2::assert!(cur.is_empty(), "case {case}, version {v}");
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();
-                assert!(&reencoded[..] == &bytes[..]);
+                assert2::assert!(&reencoded[..] == &bytes[..]);
                 let _ = default_json(v);
             }
 
             #[test]
-            fn default_roundtrips_all_versions() {
+            fn roundtrip_cases_all_versions() {
                 for v in MIN_VERSION..=MAX_VERSION {
-                    roundtrip(&#ty::default(), v);
-                }
-            }
-
-            #[test]
-            fn populated_roundtrips_all_versions() {
-                for v in MIN_VERSION..=MAX_VERSION {
-                    roundtrip(&#ty::populated(v), v);
+                    for (case, msg) in [
+                        ("default", #ty::default()),
+                        ("populated", #ty::populated(v)),
+                    ] {
+                        roundtrip(case, &msg, v);
+                    }
                 }
             }
         }
@@ -163,37 +174,31 @@ fn borrowed_tests_tokens(type_name: &str) -> TokenStream {
             use crate::{DecodeBorrow, Encode};
             use bytes::BytesMut;
 
-            fn check(msg_bytes: &bytes::Bytes, v: i16) {
+            fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
                 let mut cur: &[u8] = msg_bytes;
                 let decoded = #ty::decode_borrow(&mut cur, v).unwrap();
-                assert!(cur.is_empty());
-                assert!(decoded.encoded_len(v) == msg_bytes.len());
+                assert2::assert!(cur.is_empty(), "case {case}, version {v}");
+                assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();
-                assert!(&reencoded[..] == &msg_bytes[..]);
+                assert2::assert!(&reencoded[..] == &msg_bytes[..]);
                 let owned = decoded.to_owned();
                 let mut owned_buf = BytesMut::new();
                 owned.encode(&mut owned_buf, v).unwrap();
-                assert!(&owned_buf[..] == &msg_bytes[..]);
+                assert2::assert!(&owned_buf[..] == &msg_bytes[..]);
             }
 
             #[test]
-            fn default_roundtrips_all_versions() {
+            fn roundtrip_cases_all_versions() {
                 for v in MIN_VERSION..=MAX_VERSION {
-                    let msg = #ty::default();
-                    let mut buf = BytesMut::new();
-                    msg.encode(&mut buf, v).unwrap();
-                    check(&buf.freeze(), v);
-                }
-            }
-
-            #[test]
-            fn populated_roundtrips_all_versions() {
-                for v in MIN_VERSION..=MAX_VERSION {
-                    let msg = #ty::populated(v);
-                    let mut buf = BytesMut::new();
-                    msg.encode(&mut buf, v).unwrap();
-                    check(&buf.freeze(), v);
+                    for (case, msg) in [
+                        ("default", #ty::default()),
+                        ("populated", #ty::populated(v)),
+                    ] {
+                        let mut buf = BytesMut::new();
+                        msg.encode(&mut buf, v).unwrap();
+                        check(case, &buf.freeze(), v);
+                    }
                 }
             }
         }

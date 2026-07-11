@@ -7,7 +7,7 @@ use arrow::{
     array::{DictionaryArray, StringArray},
     datatypes::Int32Type,
 };
-use assert2::{assert, check};
+use assert2::check;
 use bytes::Bytes;
 use crabka_blockstore::{BlockWriter, PromotedSpanAttr, TraceIndex, read_block};
 use crabka_client_consumer::ConsumerRecord;
@@ -122,8 +122,10 @@ fn group_by_trace_orders_spans_per_tenant_trace() {
     let grouped = group_by_trace(&records);
     let group = &grouped[&("tenant-a".to_string(), [1; 16])];
 
-    assert!(group.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[1; 8], [2; 8]]);
-    assert!(grouped[&("tenant-b".to_string(), [1; 16])][0].span_id == [9; 8]);
+    assert2::assert!(
+        group.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[1; 8], [2; 8]]
+    );
+    assert2::assert!(grouped[&("tenant-b".to_string(), [1; 16])][0].span_id == [9; 8]);
 }
 
 #[test]
@@ -145,11 +147,20 @@ fn decode_consumer_records_groups_by_partition_and_tracks_offsets() {
     ])
     .unwrap();
 
-    check!(windows.len() == 2);
-    check!(windows[&1].offset_range == (11, 12));
-    check!(windows[&1].records.len() == 2);
-    check!(windows[&2].offset_range == (7, 7));
-    check!(windows[&2].records[0].tenant == "tenant-b");
+    check!(
+        windows
+            .iter()
+            .map(|(partition, window)| {
+                (
+                    *partition,
+                    window.offset_range,
+                    window.records.len(),
+                    window.records[0].tenant.as_str(),
+                )
+            })
+            .collect::<Vec<_>>()
+            == vec![(1, (11, 12), 2, "tenant-a"), (2, (7, 7), 1, "tenant-b")]
+    );
 }
 
 #[tokio::test]
@@ -167,11 +178,18 @@ async fn build_blocks_writes_span_block_and_updates_trace_index() {
         .await
         .unwrap();
 
-    check!(metas.len() == 1);
-    check!(metas[0].tenant == "tenant-a");
-    check!(metas[0].row_count == 2);
-    check!(metas[0].min_ts == 100);
-    check!(metas[0].max_ts == 200);
+    check!(
+        metas
+            .iter()
+            .map(|meta| (
+                meta.tenant.as_str(),
+                meta.row_count,
+                meta.min_ts,
+                meta.max_ts
+            ))
+            .collect::<Vec<_>>()
+            == vec![("tenant-a", 2, 100, 200)]
+    );
 
     let batches = read_block(store, &metas[0].object_key).await.unwrap();
     check!(
@@ -223,7 +241,7 @@ async fn replaying_same_offset_window_is_idempotent_in_trace_index() {
             == vec![first[0].object_key.clone()]
     );
     let batches = read_block(store, &first[0].object_key).await.unwrap();
-    assert!(
+    assert2::assert!(
         batches
             .iter()
             .map(arrow::record_batch::RecordBatch::num_rows)
@@ -265,14 +283,14 @@ async fn replaying_saved_partition_window_after_restart_is_idempotent() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         store
             .head(&object_store::path::Path::from("index/traces.json"))
             .await
             .is_err()
     );
 
-    assert!(
+    assert2::assert!(
         reloaded.candidate_blocks_for_trace("tenant-a", &[1; 16], 0, 1_000)
             == vec![
                 "traces/tenant-a/00007/00000000000000000010-00000000000000000011-100.parquet"
@@ -320,17 +338,17 @@ async fn multiple_polls_below_threshold_flush_one_block_per_partition() {
 
     let mut accumulator = FlushAccumulator::new();
     accumulator.merge(poll1, Instant::now());
-    assert!(!accumulator.should_flush(&config, Instant::now()));
+    assert2::assert!(!accumulator.should_flush(&config, Instant::now()));
     accumulator.merge(poll2, Instant::now());
-    assert!(!accumulator.should_flush(&config, Instant::now()));
+    assert2::assert!(!accumulator.should_flush(&config, Instant::now()));
     accumulator.merge(poll3, Instant::now());
-    assert!(!accumulator.should_flush(&config, Instant::now()));
-    assert!(accumulator.record_count() == 3);
+    assert2::assert!(!accumulator.should_flush(&config, Instant::now()));
+    assert2::assert!(accumulator.record_count() == 3);
 
     // A single flush of the merged buffer writes ONE block for the partition
     // (not one block per poll), covering the full offset range 10..=12.
     let windows = accumulator.take();
-    assert!(accumulator.is_empty());
+    assert2::assert!(accumulator.is_empty());
     let mut index = TraceIndex::new();
     flush_partition_windows(&writer, &mut index, store.clone(), &config, windows)
         .await
@@ -374,14 +392,14 @@ async fn accumulator_flushes_on_record_count_threshold() {
         Instant::now(),
     );
     // One record buffered, below the threshold of 2.
-    assert!(!accumulator.should_flush(&config, Instant::now()));
+    assert2::assert!(!accumulator.should_flush(&config, Instant::now()));
 
     accumulator.merge(
         decode_consumer_records(&[consumer_record(0, 2, &rec("t", [1; 16], 2, None, 2))]).unwrap(),
         Instant::now(),
     );
     // Two records buffered -> threshold reached.
-    assert!(accumulator.should_flush(&config, Instant::now()));
+    assert2::assert!(accumulator.should_flush(&config, Instant::now()));
 }
 
 #[tokio::test]
@@ -406,10 +424,12 @@ async fn accumulator_flushes_on_age_for_low_traffic_stream() {
     );
 
     // Far below the record threshold, and the oldest record is young.
-    assert!(!accumulator.should_flush(&config, start + std::time::Duration::from_secs(59)));
+    assert2::assert!(
+        !accumulator.should_flush(&config, start + std::time::Duration::from_secs(59))
+    );
     // Once the oldest buffered record ages past flush_max_age, flush anyway so a
     // low-traffic stream stays queryable.
-    assert!(accumulator.should_flush(&config, start + std::time::Duration::from_mins(1)));
+    assert2::assert!(accumulator.should_flush(&config, start + std::time::Duration::from_mins(1)));
 }
 
 #[tokio::test]
@@ -449,10 +469,10 @@ async fn shutdown_drain_flushes_remaining_buffer_without_losing_spans() {
         .unwrap(),
         Instant::now(),
     );
-    assert!(!accumulator.should_flush(&config, Instant::now()));
+    assert2::assert!(!accumulator.should_flush(&config, Instant::now()));
 
     // The shutdown drain path: a non-empty buffer is flushed before exit.
-    assert!(!accumulator.is_empty());
+    assert2::assert!(!accumulator.is_empty());
     let windows = accumulator.take();
     let mut index = TraceIndex::new();
     flush_partition_windows(&writer, &mut index, store.clone(), &config, windows)
@@ -462,7 +482,7 @@ async fn shutdown_drain_flushes_remaining_buffer_without_losing_spans() {
     // No spans lost: both buffered spans land in the durable block.
     let key = "traces/tenant-a/00003/00000000000000000005-00000000000000000006-100.parquet";
     let batches = read_block(store, key).await.unwrap();
-    assert!(
+    assert2::assert!(
         batches
             .iter()
             .map(arrow::record_batch::RecordBatch::num_rows)
@@ -497,8 +517,7 @@ async fn merged_buffer_offset_range_is_stable_for_idempotent_keying() {
 
     let windows = accumulator.take();
     let window = &windows[&7];
-    assert!(window.offset_range == (10, 12));
-    assert!(window.records.len() == 3);
+    assert2::assert!((window.offset_range, window.records.len()) == ((10, 12), 3));
 }
 
 #[tokio::test]
@@ -520,10 +539,14 @@ async fn build_blocks_with_prefix_scopes_block_keys() {
     .await
     .unwrap();
 
-    check!(metas.len() == 1);
     check!(
-        metas[0].object_key
-            == "tempo/traces/traces/tenant-a/00007/00000000000000000010-00000000000000000020-100.parquet"
+        metas
+            .iter()
+            .map(|meta| meta.object_key.as_str())
+            .collect::<Vec<_>>()
+            == vec![
+                "tempo/traces/traces/tenant-a/00007/00000000000000000010-00000000000000000020-100.parquet"
+            ]
     );
     check!(read_block(store, &metas[0].object_key).await.is_ok());
     check!(
@@ -564,7 +587,7 @@ async fn build_blocks_promotes_configured_attribute_columns() {
         .downcast_ref::<StringArray>()
         .unwrap();
     let key = usize::try_from(methods.keys().value(0)).unwrap();
-    assert!(values.value(key) == "GET");
+    assert2::assert!(values.value(key) == "GET");
 }
 
 /// Shared, ordered event log: object-store `put`s and consumer `commit`s push
@@ -778,7 +801,7 @@ async fn run_commits_offsets_only_after_a_durable_block_write() {
     .unwrap();
 
     // Commit happened exactly once.
-    assert!(commit_calls.load(Ordering::SeqCst) == 1);
+    assert2::assert!(commit_calls.load(Ordering::SeqCst) == 1);
 
     // ...and strictly AFTER the durable writes: every `put` marker precedes the
     // single `commit` marker. Reordering `flush_and_commit` to commit-before-flush
@@ -796,14 +819,14 @@ async fn run_commits_offsets_only_after_a_durable_block_write() {
     // The block is durable and the index references it: no data lost.
     let key = "traces/tenant-a/00003/00000000000000000010-00000000000000000011-100.parquet";
     let batches = read_block(object_store, key).await.unwrap();
-    assert!(
+    assert2::assert!(
         batches
             .iter()
             .map(arrow::record_batch::RecordBatch::num_rows)
             .sum::<usize>()
             == 2
     );
-    assert!(
+    assert2::assert!(
         index
             .lock()
             .await
@@ -848,13 +871,13 @@ async fn run_does_not_commit_when_the_flush_write_fails() {
     .await;
 
     // The drain flush failed, so `run` propagates the error...
-    assert!(result.is_err());
+    assert2::assert!(result.is_err());
     // ...and offsets were NOT committed: they stay behind the undurable data so a
     // restart re-reads them (at-least-once). Committing on the error path would
     // make this counter non-zero.
-    assert!(commit_calls.load(Ordering::SeqCst) == 0);
+    assert2::assert!(commit_calls.load(Ordering::SeqCst) == 0);
     let recorded = events.lock().expect("events lock").clone();
-    assert!(recorded.iter().all(|e| e != "commit"));
+    assert2::assert!(recorded.iter().all(|e| e != "commit"));
 }
 
 #[tokio::test]
@@ -900,22 +923,22 @@ async fn run_drains_remaining_buffer_exactly_once_on_shutdown() {
 
     // Exactly one drain commit. Deleting the `if !accumulator.is_empty()` drain
     // block leaves the buffer unflushed -> zero commits -> this fails.
-    assert!(commit_calls.load(Ordering::SeqCst) == 1);
+    assert2::assert!(commit_calls.load(Ordering::SeqCst) == 1);
     let recorded = events.lock().expect("events lock").clone();
-    assert!(recorded.iter().filter(|e| *e == "commit").count() == 1);
+    assert2::assert!(recorded.iter().filter(|e| *e == "commit").count() == 1);
 
     // No spans dropped: all four buffered spans land in the single drained block,
     // whose key spans the merged offset range 5..=8.
     let key = "traces/tenant-a/00003/00000000000000000005-00000000000000000008-100.parquet";
     let batches = read_block(object_store, key).await.unwrap();
-    assert!(
+    assert2::assert!(
         batches
             .iter()
             .map(arrow::record_batch::RecordBatch::num_rows)
             .sum::<usize>()
             == 4
     );
-    assert!(
+    assert2::assert!(
         index
             .lock()
             .await

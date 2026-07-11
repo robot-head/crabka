@@ -26,7 +26,6 @@ impl From<datafusion::error::DataFusionError> for TraceqlError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -34,12 +33,12 @@ mod tests {
     fn datafusion_error_maps_to_exec() {
         let dfe = datafusion::error::DataFusionError::Plan("boom".into());
         let te: TraceqlError = dfe.into();
-        assert!(matches!(te, TraceqlError::Exec(_)));
+        assert2::assert!(matches!(te, TraceqlError::Exec(_)));
     }
 
     #[test]
     fn display_includes_category() {
         let e = TraceqlError::Unsupported("negated structural op".into());
-        assert!(format!("{e}").contains("unsupported"));
+        assert2::assert!(format!("{e}").contains("unsupported"));
     }
 }

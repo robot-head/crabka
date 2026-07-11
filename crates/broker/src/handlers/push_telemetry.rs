@@ -181,7 +181,7 @@ fn flatten_for_prometheus(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::Bytes;
     use crabka_compression::CompressionType;
     use crabka_protocol::{owned::push_telemetry_response, primitives::uuid::Uuid as ProtoUuid};
@@ -252,8 +252,12 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::INVALID_REQUEST);
+        let expected = PushTelemetryResponse {
+            throttle_time_ms: 0,
+            error_code: codes::INVALID_REQUEST,
+            ..Default::default()
+        };
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -302,8 +306,12 @@ mod tests {
         .expect("handle");
         let resp = decode_response(&resp);
 
-        assert!(resp.throttle_time_ms == 0);
-        assert!(resp.error_code == codes::NONE);
+        let expected = PushTelemetryResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            ..Default::default()
+        };
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -341,24 +349,21 @@ mod tests {
 
         let points = flatten_for_prometheus(&md, "instance-1", "client-a");
 
-        assert!(points.len() == 4, "{points:?}");
+        assert2::assert!(points.len() == 4);
         check!(
             points[0].client_instance_id.as_str() == "instance-1",
             "{points:?}"
         );
         check!(points[0].client_id.as_str() == "client-a", "{points:?}");
         let cases = [
-            (0usize, "cpu.utilization", 0.75f64),
-            (1, "requests.total", 42.0),
-            (2, "latency.ms_count", 3.0),
-            (3, "latency.ms_sum", 9.5),
+            ("gauge point", 0usize, "cpu.utilization", 0.75f64),
+            ("sum point", 1, "requests.total", 42.0),
+            ("histogram count point", 2, "latency.ms_count", 3.0),
+            ("histogram sum point", 3, "latency.ms_sum", 9.5),
         ];
-        for (idx, metric, value) in cases {
-            assert!(points[idx].metric == metric, "point {idx}: {points:?}");
-            assert!(
-                (points[idx].value - value).abs() < f64::EPSILON,
-                "point {idx}: {points:?}"
-            );
+        for (_case, idx, metric, value) in cases {
+            assert2::assert!(points[idx].metric == metric);
+            assert2::assert!((points[idx].value - value).abs() < f64::EPSILON);
         }
     }
 }

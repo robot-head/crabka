@@ -34,7 +34,7 @@ where
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -77,11 +77,11 @@ mod tests {
             ),
         ] {
             let path = dir.path().join(file);
-            assert!(path.exists(), "case {file:?}");
+            assert2::assert!(path.exists());
             let yaml = std::fs::read_to_string(&path).unwrap();
-            assert!(yaml.contains(plural), "case {file:?}");
+            assert2::assert!(yaml.contains(plural));
             if let Some(short) = short_name {
-                assert!(yaml.contains(short), "case {file:?}");
+                assert2::assert!(yaml.contains(short));
             }
         }
     }

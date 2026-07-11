@@ -215,7 +215,7 @@ pub struct KafkaNodePoolStatus {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+
     use kube::CustomResourceExt as _;
 
     use super::*;
@@ -223,20 +223,18 @@ mod tests {
     #[test]
     fn crd_metadata_is_correct() {
         let crd = KafkaNodePool::crd();
-        check!(crd.spec.group == "crabka.io");
-        check!(crd.spec.names.kind == "KafkaNodePool");
-        check!(crd.spec.names.plural == "kafkanodepools");
-        check!(
+        assert2::assert!(crd.spec.group.as_str() == "crabka.io");
+        assert2::assert!(crd.spec.names.kind.as_str() == "KafkaNodePool");
+        assert2::assert!(crd.spec.names.plural.as_str() == "kafkanodepools");
+        assert2::assert!(crd.spec.names.short_names == Some(vec!["knp".to_string()]));
+        assert2::assert!(
             crd.spec
-                .names
-                .short_names
-                .as_ref()
-                .is_some_and(|v| v.contains(&"knp".to_string())),
-            "expected shortname `knp`, got {:?}",
-            crd.spec.names.short_names
+                .versions
+                .iter()
+                .map(|v| v.name.as_str())
+                .collect::<Vec<_>>()
+                == vec!["v1alpha1"]
         );
-        check!(crd.spec.versions.len() == 1);
-        check!(crd.spec.versions[0].name == "v1alpha1");
     }
 
     #[test]
@@ -254,23 +252,17 @@ mod tests {
             },
         );
         let json = serde_json::to_string(&pool).unwrap();
-        assert!(
-            json.contains("\"nodeIdStart\""),
-            "expected camelCase wire shape, got: {json}"
-        );
-        assert!(
-            json.contains("\"Controller\""),
-            "roles serialized in UpperCamelCase, got: {json}"
-        );
+        assert2::assert!(json.contains("\"nodeIdStart\""));
+        assert2::assert!(json.contains("\"Controller\""));
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
+        assert2::assert!(back.spec == pool.spec);
     }
 
     #[test]
     fn spec_defaults_replicas_to_one() {
         let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
         let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
-        assert!(
+        assert2::assert!(
             spec == KafkaNodePoolSpec {
                 roles: vec![NodeRole::Controller, NodeRole::Broker],
                 replicas: 1,
@@ -333,85 +325,37 @@ mod tests {
 
         let json = serde_json::to_string(&pool).unwrap();
         for want in ["\"team\":\"platform\"", "\"dedicated\"", "\"nodeSelector\""] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            assert2::assert!(json.contains(want));
         }
         let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
+        assert2::assert!(back.spec == pool.spec);
     }
 
     #[test]
-    fn storage_ephemeral_round_trips_through_json() {
-        let pool = KafkaNodePool::new(
-            "brokers",
-            KafkaNodePoolSpec {
-                roles: vec![NodeRole::Controller, NodeRole::Broker],
-                replicas: 1,
-                node_id_start: 0,
-                image: None,
-                resources: None,
-                template: None,
-                storage: Some(Storage::Ephemeral),
-            },
-        );
-        let json = serde_json::to_string(&pool).unwrap();
-        assert!(
-            json.contains("\"storage\":{\"type\":\"Ephemeral\"}"),
-            "expected flat tagged shape, got: {json}"
-        );
-        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
-    }
-
-    #[test]
-    fn storage_persistent_claim_round_trips_through_json() {
-        let pool = KafkaNodePool::new(
-            "brokers",
-            KafkaNodePoolSpec {
-                roles: vec![NodeRole::Controller, NodeRole::Broker],
-                replicas: 1,
-                node_id_start: 0,
-                image: None,
-                resources: None,
-                template: None,
-                storage: Some(Storage::PersistentClaim(PersistentClaimSpec {
+    fn storage_json_round_trip_cases() {
+        for (_name, storage, expected_fragments) in [
+            (
+                "ephemeral",
+                Storage::Ephemeral,
+                vec!["\"storage\":{\"type\":\"Ephemeral\"}"],
+            ),
+            (
+                "persistent claim",
+                Storage::PersistentClaim(PersistentClaimSpec {
                     size: "10Gi".into(),
                     class: Some("fast-ssd".into()),
                     delete_claim: true,
-                })),
-            },
-        );
-        let json = serde_json::to_string(&pool).unwrap();
-        for want in [
-            "\"type\":\"PersistentClaim\"",
-            "\"size\":\"10Gi\"",
-            "\"class\":\"fast-ssd\"",
-            "\"deleteClaim\":true",
-        ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
-        }
-        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
-    }
-
-    #[test]
-    fn spec_defaults_storage_to_none() {
-        let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
-        let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
-        assert!(spec.storage.is_none());
-    }
-
-    #[test]
-    fn storage_jbod_round_trips_through_json() {
-        let pool = KafkaNodePool::new(
-            "brokers",
-            KafkaNodePoolSpec {
-                roles: vec![NodeRole::Controller, NodeRole::Broker],
-                replicas: 1,
-                node_id_start: 0,
-                image: None,
-                resources: None,
-                template: None,
-                storage: Some(Storage::Jbod(JbodSpec {
+                }),
+                vec![
+                    "\"type\":\"PersistentClaim\"",
+                    "\"size\":\"10Gi\"",
+                    "\"class\":\"fast-ssd\"",
+                    "\"deleteClaim\":true",
+                ],
+            ),
+            (
+                "JBOD",
+                Storage::Jbod(JbodSpec {
                     volumes: vec![
                         JbodVolume {
                             id: 0,
@@ -425,22 +369,43 @@ mod tests {
                         },
                     ],
                     delete_claim: true,
-                })),
-            },
-        );
-        let json = serde_json::to_string(&pool).unwrap();
-        for want in [
-            "\"type\":\"Jbod\"",
-            "\"volumes\":[",
-            "\"id\":0",
-            "\"size\":\"20Gi\"",
-            "\"class\":\"fast-ssd\"",
-            "\"deleteClaim\":true",
+                }),
+                vec![
+                    "\"type\":\"Jbod\"",
+                    "\"volumes\":[",
+                    "\"id\":0",
+                    "\"size\":\"20Gi\"",
+                    "\"class\":\"fast-ssd\"",
+                    "\"deleteClaim\":true",
+                ],
+            ),
         ] {
-            assert!(json.contains(want), "case {want:?}; got: {json}");
+            let pool = KafkaNodePool::new(
+                "brokers",
+                KafkaNodePoolSpec {
+                    roles: vec![NodeRole::Controller, NodeRole::Broker],
+                    replicas: 1,
+                    node_id_start: 0,
+                    image: None,
+                    resources: None,
+                    template: None,
+                    storage: Some(storage),
+                },
+            );
+            let json = serde_json::to_string(&pool).unwrap();
+            for fragment in expected_fragments {
+                assert2::assert!(json.contains(fragment));
+            }
+            let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
+            assert2::assert!(back.spec == pool.spec);
         }
-        let back: KafkaNodePool = serde_json::from_str(&json).unwrap();
-        assert!(back.spec == pool.spec);
+    }
+
+    #[test]
+    fn spec_defaults_storage_to_none() {
+        let json = r#"{"roles":["Controller","Broker"],"nodeIdStart":0}"#;
+        let spec: KafkaNodePoolSpec = serde_json::from_str(json).unwrap();
+        assert2::assert!(spec.storage.is_none());
     }
 
     #[test]
@@ -457,7 +422,7 @@ mod tests {
         match spec.storage {
             Some(Storage::Jbod(j)) => {
                 // deleteClaim defaults to false.
-                assert!(
+                assert2::assert!(
                     j == JbodSpec {
                         volumes: vec![
                             JbodVolume {

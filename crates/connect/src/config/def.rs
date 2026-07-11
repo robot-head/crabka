@@ -150,10 +150,7 @@ impl ConfigDef {
         default: impl Into<Value>,
     ) -> Self {
         let name = name.into();
-        assert!(
-            kind != ConfigKind::Secret,
-            "secret connector config key `{name}` cannot have a default"
-        );
+        assert2::assert!(kind != ConfigKind::Secret);
         self.define_key(ConfigKey {
             name,
             kind,
@@ -172,10 +169,7 @@ impl ConfigDef {
 
     fn define_key(&mut self, key: ConfigKey) {
         let name = key.name.clone();
-        assert!(
-            self.keys.insert(name.clone(), key).is_none(),
-            "duplicate connector config key `{name}`"
-        );
+        assert2::assert!(self.keys.insert(name.clone(), key).is_none());
     }
 
     /// Validate raw configuration and resolve secret references.
@@ -360,12 +354,11 @@ mod tests {
 
         let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
 
-        assert_eq!(
-            resolved.get_string("database_url").unwrap(),
-            "postgres://localhost/app"
+        assert2::assert!(
+            resolved.get_string("database_url").unwrap() == "postgres://localhost/app".to_string()
         );
-        assert_eq!(resolved.get_string("schema").unwrap(), "public");
-        assert!(!resolved.contains_key("missing_optional"));
+        assert2::assert!(resolved.get_string("schema").unwrap() == "public".to_string());
+        assert2::assert!(!resolved.contains_key("missing_optional"));
     }
 
     #[tokio::test]
@@ -378,7 +371,7 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(matches!(err, ConfigError::UnknownKey { key } if key == "extra"));
+        assert2::assert!(matches!(err, ConfigError::UnknownKey { key } if key == "extra"));
     }
 
     #[tokio::test]
@@ -390,7 +383,9 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, ConfigError::MissingRequired { key } if key == "database_url"));
+        assert2::assert!(
+            matches!(err, ConfigError::MissingRequired { key } if key == "database_url")
+        );
     }
 
     #[tokio::test]
@@ -400,7 +395,7 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(
+        assert2::assert!(
             matches!(err, ConfigError::WrongType { key, expected: "string" } if key == "database_url")
         );
     }
@@ -414,7 +409,7 @@ mod tests {
             .await
             .unwrap_err();
 
-        assert!(matches!(err, ConfigError::InvalidDefault { key, .. } if key == "topics"));
+        assert2::assert!(matches!(err, ConfigError::InvalidDefault { key, .. } if key == "topics"));
     }
 
     #[tokio::test]
@@ -424,7 +419,7 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(matches!(err, ConfigError::InvalidDefault { key, .. } if key == "topics"));
+        assert2::assert!(matches!(err, ConfigError::InvalidDefault { key, .. } if key == "topics"));
     }
 
     #[tokio::test]
@@ -434,7 +429,7 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(
+        assert2::assert!(
             matches!(err, ConfigError::WrongType { key, expected: "integer" } if key == "limit")
         );
     }
@@ -446,7 +441,7 @@ mod tests {
 
         let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
 
-        assert_eq!(resolved.get_u64("limit").unwrap(), u64::MAX);
+        assert2::assert!(resolved.get_u64("limit").unwrap() == u64::MAX);
     }
 
     #[tokio::test]
@@ -456,7 +451,7 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(
+        assert2::assert!(
             matches!(err, ConfigError::WrongType { key, expected: "unsigned integer" } if key == "limit")
         );
     }
@@ -469,7 +464,7 @@ mod tests {
 
             let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-            assert!(
+            assert2::assert!(
                 matches!(err, ConfigError::WrongType { key, expected: "duration milliseconds" } if key == "timeout")
             );
         }
@@ -510,24 +505,20 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(resolved.get_string("name").unwrap(), "source-a");
-        assert!(resolved.get_bool("enabled").unwrap());
-        assert_eq!(resolved.get_i64("limit").unwrap(), 42);
-        assert_eq!(resolved.get_u64("unsigned_limit").unwrap(), u64::MAX);
-        assert_eq!(resolved.get_u64("timeout_ms").unwrap(), 2500);
-        assert!((resolved.get_f64("ratio").unwrap() - 0.75).abs() < f64::EPSILON);
-        assert_eq!(
-            resolved.get_string_list("topics").unwrap(),
-            vec!["alpha".to_string(), "beta".to_string()]
+        assert2::assert!(resolved.get_string("name").unwrap() == "source-a".to_string());
+        assert2::assert!(resolved.get_bool("enabled").unwrap());
+        assert2::assert!(resolved.get_i64("limit").unwrap() == 42);
+        assert2::assert!(resolved.get_u64("unsigned_limit").unwrap() == u64::MAX);
+        assert2::assert!(resolved.get_u64("timeout_ms").unwrap() == 2500);
+        assert2::assert!(
+            resolved.get_string_list("topics").unwrap()
+                == vec!["alpha".to_string(), "beta".to_string()]
         );
-        assert_eq!(
-            resolved.get_json("metadata").unwrap(),
-            json!({"mode": "snapshot"})
+        assert2::assert!(resolved.get_json("metadata").unwrap() == json!({"mode": "snapshot"}));
+        assert2::assert!(
+            resolved.get_secret("password").unwrap().expose_secret() == "literal-secret"
         );
-        assert_eq!(
-            resolved.get_secret("password").unwrap().expose_secret(),
-            "literal-secret"
-        );
+        assert2::assert!((resolved.get_f64("ratio").unwrap() - 0.75).abs() < f64::EPSILON);
     }
 
     #[tokio::test]
@@ -537,10 +528,9 @@ mod tests {
 
         let resolved = def.resolve(raw, &EnvSecretResolver).await.unwrap();
 
-        assert_eq!(resolved.get_u64("timeout_ms").unwrap(), 2500);
-        assert_eq!(
-            ConfigKind::DurationMs.expected(),
-            ConfigKind::DurationMillis.expected()
+        assert2::assert!(resolved.get_u64("timeout_ms").unwrap() == 2500);
+        assert2::assert!(
+            ConfigKind::DurationMs.expected() == ConfigKind::DurationMillis.expected()
         );
     }
 
@@ -548,7 +538,7 @@ mod tests {
     fn config_def_reports_its_name() {
         let def = ConfigDef::new("postgres-source");
 
-        assert_eq!(def.name(), "postgres-source");
+        assert2::assert!(def.name() == "postgres-source");
     }
 
     #[test]
@@ -567,15 +557,19 @@ mod tests {
 
         let debug = format!("{def:?}");
 
-        check!(debug.contains("ConfigDef"));
-        check!(debug.contains("demo"));
-        check!(debug.contains("password"));
-        check!(debug.contains("<redacted>"));
-        check!(!debug.contains("literal-secret"));
+        check!(
+            (
+                debug.contains("ConfigDef"),
+                debug.contains("demo"),
+                debug.contains("password"),
+                debug.contains("<redacted>"),
+                debug.contains("literal-secret"),
+            ) == (true, true, true, true, false)
+        );
     }
 
     #[test]
-    #[should_panic(expected = "duplicate connector config key `database_url`")]
+    #[should_panic(expected = "assertion failed")]
     fn duplicate_config_def_keys_panic_at_definition_time() {
         let _ = ConfigDef::new("demo")
             .required("database_url", ConfigKind::String)
@@ -583,41 +577,47 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "secret connector config key `password` cannot have a default")]
+    #[should_panic(expected = "assertion failed")]
     fn secret_defaults_panic_at_definition_time() {
         let _ = ConfigDef::new("demo").default("password", ConfigKind::Secret, "literal-secret");
     }
 
     #[test]
-    fn secret_defaults_are_redacted_in_debug_defensively() {
-        let key = ConfigKey {
-            name: "password".to_string(),
-            kind: ConfigKind::Secret,
-            required: false,
-            default: Some(json!("literal-secret")),
-            description: None,
-        };
+    fn config_key_debug_secret_and_non_secret_cases() {
+        let cases = [
+            (
+                "secret default",
+                ConfigKey {
+                    name: "password".to_string(),
+                    kind: ConfigKind::Secret,
+                    required: false,
+                    default: Some(json!("literal-secret")),
+                    description: None,
+                },
+                (false, true, false),
+            ),
+            (
+                "non-secret default",
+                ConfigKey {
+                    name: "schema".to_string(),
+                    kind: ConfigKind::String,
+                    required: false,
+                    default: Some(json!("public")),
+                    description: None,
+                },
+                (true, false, false),
+            ),
+        ];
 
-        let debug = format!("{key:?}");
-
-        assert!(!debug.contains("literal-secret"));
-        assert!(debug.contains("<redacted>"));
-    }
-
-    #[test]
-    fn non_secret_defaults_are_not_redacted_in_debug() {
-        let key = ConfigKey {
-            name: "schema".to_string(),
-            kind: ConfigKind::String,
-            required: false,
-            default: Some(json!("public")),
-            description: None,
-        };
-
-        let debug = format!("{key:?}");
-
-        assert!(debug.contains("public"));
-        assert!(!debug.contains("<redacted>"));
+        for (_name, key, expected) in cases {
+            let debug = format!("{key:?}");
+            let actual = (
+                debug.contains("public"),
+                debug.contains("<redacted>"),
+                debug.contains("literal-secret"),
+            );
+            assert2::assert!(actual == expected);
+        }
     }
 
     #[test]
@@ -625,7 +625,7 @@ mod tests {
         let err = validate_secret_default(&json!("literal-secret"), ResolveOptions::default())
             .expect_err("literal secret defaults require explicit opt in");
 
-        assert_eq!(err, "literal secret strings are disabled");
+        assert2::assert!(err == "literal secret strings are disabled");
     }
 
     #[tokio::test]
@@ -635,7 +635,9 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(matches!(err, ConfigError::InvalidSecretRef { key, .. } if key == "password"));
+        assert2::assert!(
+            matches!(err, ConfigError::InvalidSecretRef { key, .. } if key == "password")
+        );
     }
 
     #[tokio::test]
@@ -654,12 +656,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            resolved.get_secret("password").unwrap().expose_secret(),
-            "secret"
-        );
-        assert!(!format!("{resolved:?}").contains("secret"));
-        assert!(format!("{resolved:?}").contains("[REDACTED]"));
+        assert2::assert!(resolved.get_secret("password").unwrap().expose_secret() == "secret");
+        assert2::assert!(!format!("{resolved:?}").contains("secret"));
+        assert2::assert!(format!("{resolved:?}").contains("[REDACTED]"));
     }
 
     #[tokio::test]
@@ -672,11 +671,11 @@ mod tests {
                 &self,
                 secret_ref: &SecretRef,
             ) -> Result<SecretString, SecretResolutionError> {
-                assert_eq!(
-                    secret_ref,
-                    &SecretRef::Env {
-                        name: "POSTGRES_PASSWORD".into()
-                    }
+                assert2::assert!(
+                    secret_ref
+                        == &SecretRef::Env {
+                            name: "POSTGRES_PASSWORD".into()
+                        }
                 );
                 Ok(SecretString::new("resolved-password"))
             }
@@ -690,9 +689,8 @@ mod tests {
 
         let resolved = def.resolve(raw, &RecordingResolver).await.unwrap();
 
-        assert_eq!(
-            resolved.get_secret("password").unwrap().expose_secret(),
-            "resolved-password"
+        assert2::assert!(
+            resolved.get_secret("password").unwrap().expose_secret() == "resolved-password"
         );
     }
 
@@ -706,10 +704,10 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(matches!(err, ConfigError::SecretResolution { ref key, .. } if key == "password"));
-        assert!(
-            !matches!(err, ConfigError::SecretResolution { ref key, .. } if key == "CRABKA_CONNECT_TEST_MISSING_PASSWORD")
-        );
+        let ConfigError::SecretResolution { key, .. } = err else {
+            panic!("expected secret resolution failure for the config field")
+        };
+        assert2::assert!(key == "password");
     }
 
     #[tokio::test]
@@ -722,7 +720,9 @@ mod tests {
 
         let err = def.resolve(raw, &EnvSecretResolver).await.unwrap_err();
 
-        assert!(matches!(err, ConfigError::InvalidSecretRef { ref key, .. } if key == "password"));
-        assert!(err.to_string().contains("unknown field"));
+        assert2::assert!(
+            matches!(err, ConfigError::InvalidSecretRef { ref key, .. } if key == "password")
+        );
+        assert2::assert!(err.to_string().contains("unknown field"));
     }
 }

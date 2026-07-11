@@ -79,7 +79,6 @@ pub fn assign_nested_set(spans: &[Span]) -> Vec<NestedSet> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::span::{AttrValue, KeyValue, SpanKind, StatusCode};
@@ -118,14 +117,13 @@ mod tests {
         let ns = assign_nested_set(&spans);
         let root = ns[0];
         for child in &ns[1..] {
-            assert!(child.left > root.left);
-            assert!(child.right < root.right);
+            assert2::assert!(child.left > root.left);
+            assert2::assert!(child.right < root.right);
         }
         // Pre-order intervals: span 3 nests inside span 2, while the sibling
         // span 4 falls outside span 2's interval.
-        assert_eq!(
-            ns,
-            vec![
+        assert2::assert!(
+            ns == vec![
                 NestedSet {
                     left: 1,
                     right: 8,
@@ -154,7 +152,7 @@ mod tests {
     fn child_parent_id_equals_parent_left() {
         let spans = vec![span(1, None), span(2, Some(1))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[1].parent_id == ns[0].left);
+        assert2::assert!(ns[1].parent_id == ns[0].left);
     }
 
     #[test]
@@ -164,15 +162,15 @@ mod tests {
         // matching Tempo so `nestedSetParent < 0` selects them.
         let spans = vec![span(1, None), span(2, Some(99))];
         let ns = assign_nested_set(&spans);
-        assert!(ns[0].parent_id == -1);
-        assert!(ns[1].parent_id == -1);
+        assert2::assert!(ns[0].parent_id == -1);
+        assert2::assert!(ns[1].parent_id == -1);
     }
 
     #[test]
     fn every_interval_has_left_before_right() {
         let spans = vec![span(1, None), span(2, Some(1)), span(3, Some(1))];
         for ns in assign_nested_set(&spans) {
-            assert!(ns.left < ns.right);
+            assert2::assert!(ns.left < ns.right);
         }
     }
 }

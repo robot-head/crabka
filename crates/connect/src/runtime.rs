@@ -816,8 +816,12 @@ mod tests {
 
         // The one non-empty interval opened exactly one transaction and
         // committed it; idle backoff intervals opened none (begins == commits).
-        check!(begins.load(Ordering::SeqCst) == 1);
-        check!(commits.load(Ordering::SeqCst) == 1);
+        check!(
+            (
+                begins.load(Ordering::SeqCst),
+                commits.load(Ordering::SeqCst)
+            ) == (1, 1)
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -921,8 +925,7 @@ mod tests {
 
         // The loop fails on the first delivery; shutdown surfaces that error.
         let result = shutdown(handle).await;
-        check!(result.is_err());
-        check!(aborts.load(Ordering::SeqCst) == 1);
+        check!((result.is_err(), aborts.load(Ordering::SeqCst)) == (true, 1));
     }
 
     /// A source whose `seek` always fails — to prove a restored checkpoint the
@@ -1176,8 +1179,7 @@ mod tests {
         let _ = collect(&mut rx, 4).await;
         shutdown(handle).await.unwrap();
         let sizes = puts.lock().unwrap().clone();
-        check!(sizes.iter().all(|&n| n <= 2));
-        check!(sizes.iter().sum::<usize>() == 4);
+        check!((sizes.iter().all(|&n| n <= 2), sizes.iter().sum::<usize>()) == (true, 4));
     }
 
     #[tokio::test]

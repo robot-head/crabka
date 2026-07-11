@@ -524,7 +524,6 @@ async fn handle_groups(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_log::Offset;
 
     use super::*;
@@ -606,11 +605,7 @@ mod tests {
             .iter()
             .find(|p| p.partition_index == 0)
             .expect("partition 0 row");
-        assert!(
-            part.committed_offset == 42,
-            "committed_offset must echo the seeded value (42), got {}",
-            part.committed_offset
-        );
+        assert2::assert!(part.committed_offset == 42);
         broker_handle.shutdown().await;
     }
 }

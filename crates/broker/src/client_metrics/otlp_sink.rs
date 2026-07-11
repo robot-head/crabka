@@ -96,9 +96,9 @@ mod tests {
             resource_metrics: vec![ResourceMetrics::default()],
         };
         let req = build_export_request(md, "abc-123");
-        assert_eq!(req.resource_metrics.len(), 1);
+        assert2::assert!(req.resource_metrics.len() == 1);
         let res = req.resource_metrics[0].resource.as_ref().expect("resource");
-        assert!(
+        assert2::assert!(
             res.attributes
                 .iter()
                 .any(|kv| kv.key == "client_instance_id")
@@ -108,7 +108,7 @@ mod tests {
     #[test]
     fn disabled_forwarder_is_noop() {
         let f = OtlpForwarder::disabled();
-        assert!(!f.is_enabled());
+        assert2::assert!(!f.is_enabled());
         f.forward(MetricsData::default(), "x");
     }
 }

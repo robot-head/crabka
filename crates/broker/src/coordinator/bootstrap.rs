@@ -657,7 +657,7 @@ mod tests {
         time::{Duration, Instant},
     };
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_raft::ControllerHandle;
     use tempfile::tempdir;
 
@@ -676,7 +676,7 @@ mod tests {
         let mut rx = handle.watch_leader();
         let deadline = Instant::now() + Duration::from_secs(5);
         while rx.borrow().is_none() {
-            assert!(Instant::now() < deadline, "no leader elected in 5s");
+            assert2::assert!(Instant::now() < deadline);
             let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
         }
         handle
@@ -753,11 +753,17 @@ mod tests {
         }
 
         // Type locked + seed reconstructed.
-        assert!(coord.group_type("sg") == Some(crate::coordinator::unified::GroupType::Share));
+        assert2::assert!(
+            coord.group_type("sg") == Some(crate::coordinator::unified::GroupType::Share)
+        );
         let seed = coord.cached_share_seed("sg").expect("seed cached");
-        check!(seed.group_epoch == 4);
-        check!(seed.members.contains_key("m1"));
-        check!(seed.current_per_member["m1"].member_epoch == 4);
+        check!(
+            (
+                seed.group_epoch,
+                seed.members.keys().collect::<Vec<_>>(),
+                seed.current_per_member["m1"].member_epoch,
+            ) == (4, vec![&"m1".to_string()], 4)
+        );
 
         // A member tombstone scrubs the member from the seed.
         let tomb_key =
@@ -768,7 +774,7 @@ mod tests {
             .unwrap();
         apply_tombstone(&coord, tomb_key);
         let seed = coord.cached_share_seed("sg").expect("seed still present");
-        assert!(!seed.members.contains_key("m1"), "tombstone removed member");
+        assert2::assert!(!seed.members.contains_key("m1"));
     }
 
     /// Replaying a streams-group's records (group metadata, member metadata,
@@ -851,11 +857,17 @@ mod tests {
         }
 
         // Type locked to Streams + seed reconstructed.
-        assert!(coord.group_type("stg") == Some(crate::coordinator::unified::GroupType::Streams));
+        assert2::assert!(
+            coord.group_type("stg") == Some(crate::coordinator::unified::GroupType::Streams)
+        );
         let seed = coord.cached_streams_seed("stg").expect("seed cached");
-        check!(seed.group_epoch == 7);
-        check!(seed.members.contains_key("m1"));
-        check!(seed.current_per_member["m1"].member_epoch == 7);
+        check!(
+            (
+                seed.group_epoch,
+                seed.members.keys().collect::<Vec<_>>(),
+                seed.current_per_member["m1"].member_epoch,
+            ) == (7, vec![&"m1".to_string()], 7)
+        );
 
         // A member tombstone scrubs the member from the seed.
         let tomb_key = persistence::parse_key(&sp::encode_streams_key(
@@ -869,7 +881,7 @@ mod tests {
         let seed = coord
             .cached_streams_seed("stg")
             .expect("seed still present");
-        assert!(!seed.members.contains_key("m1"), "tombstone removed member");
+        assert2::assert!(!seed.members.contains_key("m1"));
     }
 
     fn test_coordinator(
@@ -968,14 +980,8 @@ mod tests {
         // (no conflicting duplicate landed in the log).
         let image = controller.current_image();
         let count = image.topics().filter(|t| t.name == OFFSETS_TOPIC).count();
-        assert!(
-            count == 1,
-            "expected exactly one __consumer_offsets, got {count}"
-        );
-        assert!(
-            image.topic(OFFSETS_TOPIC).unwrap().topic_id == id_after_first,
-            "topic_id changed across boots — a duplicate TopicRecord was submitted"
-        );
+        assert2::assert!(count == 1);
+        assert2::assert!(image.topic(OFFSETS_TOPIC).unwrap().topic_id == id_after_first);
     }
 
     #[test]
@@ -1003,13 +1009,25 @@ mod tests {
             }],
         };
         apply_group_metadata(&mut g, v, 0);
-        check!(g.generation_id == 5);
-        check!(g.protocol_type.as_deref() == Some("consumer"));
-        check!(g.leader_id.as_deref() == Some("m1"));
-        check!(g.state == ClassicGroupState::Stable);
-        check!(g.members.contains_key("m1"));
-        check!(g.members["m1"].assignment.as_deref() == Some(b"asn" as &[u8]));
-        check!(g.current_member_id_for_instance("inst") == Some("m1"));
+        check!(
+            (
+                g.generation_id,
+                g.protocol_type.as_deref(),
+                g.leader_id.as_deref(),
+                g.state,
+                g.members.keys().collect::<Vec<_>>(),
+                g.members["m1"].assignment.as_deref(),
+                g.current_member_id_for_instance("inst"),
+            ) == (
+                5,
+                Some("consumer"),
+                Some("m1"),
+                ClassicGroupState::Stable,
+                vec![&"m1".to_string()],
+                Some(b"asn" as &[u8]),
+                Some("m1"),
+            )
+        );
 
         // No members → Empty state.
         let mut empty = ClassicState::new("g2");
@@ -1025,7 +1043,7 @@ mod tests {
             },
             0,
         );
-        assert!(empty.state == ClassicGroupState::Empty);
+        assert2::assert!(empty.state == ClassicGroupState::Empty);
     }
 
     /// Build a bare `GroupCoordinator` with no metadata/persister wiring — the
@@ -1158,14 +1176,14 @@ mod tests {
 
         // The group must NOT be next-gen, and the classic describe path must
         // surface it with member "m1".
-        assert!(coord.group_type("g") != Some(GroupType::NextGen));
+        assert2::assert!(coord.group_type("g") != Some(GroupType::NextGen));
         let snap = coord
             .describe_group("g")
             .await
             .expect("classic group present");
-        assert!(snap.members.iter().any(|m| m.member_id == "m1"));
+        assert2::assert!(snap.members.iter().any(|m| m.member_id == "m1"));
         // And there is no next-gen consumer actor for "g".
-        assert!(
+        assert2::assert!(
             coord.find("g").is_some_and(
                 |h| h.kind == crate::coordinator::unified::actor::GroupKindTag::Classic
             )
@@ -1220,13 +1238,13 @@ mod tests {
         finalize(&coord, acc);
 
         // The group must replay CLASSIC, not resurrect as next-gen.
-        assert!(coord.group_type("g") != Some(GroupType::NextGen));
+        assert2::assert!(coord.group_type("g") != Some(GroupType::NextGen));
         let snap = coord
             .describe_group("g")
             .await
             .expect("classic group present");
-        assert!(snap.members.iter().any(|m| m.member_id == "m1"));
-        assert!(
+        assert2::assert!(snap.members.iter().any(|m| m.member_id == "m1"));
+        assert2::assert!(
             coord.find("g").is_some_and(
                 |h| h.kind == crate::coordinator::unified::actor::GroupKindTag::Classic
             )
@@ -1275,7 +1293,7 @@ mod tests {
         // — the exact hazard the k6 tombstone prevents. `finalize` derives its
         // next-gen id set from `coordinator.seeds`, so this stray seed is what
         // makes it suppress the classic k2 reconstruction.
-        assert!(coord.seeds.contains_key("g"));
+        assert2::assert!(coord.seeds.contains_key("g"));
 
         finalize(&coord, acc);
 
@@ -1284,7 +1302,7 @@ mod tests {
         // produced. (Asserting the spawned actor's kind, set synchronously at
         // spawn, avoids the async `group_types` mark the actor records only as
         // it processes its seed.)
-        assert!(
+        assert2::assert!(
             coord.find("g").is_some_and(
                 |h| h.kind == crate::coordinator::unified::actor::GroupKindTag::Consumer
             )
@@ -1335,9 +1353,9 @@ mod tests {
         }
         finalize(&coord, acc);
 
-        assert!(coord.group_type("g") != Some(GroupType::Classic));
+        assert2::assert!(coord.group_type("g") != Some(GroupType::Classic));
         let handle = coord.find("g").expect("consumer actor present");
-        assert!(handle.kind == crate::coordinator::unified::actor::GroupKindTag::Consumer);
+        assert2::assert!(handle.kind == crate::coordinator::unified::actor::GroupKindTag::Consumer);
     }
 
     /// PROBLEM B (facade not restored): a k5 `MemberMetadataValue` carrying a
@@ -1396,7 +1414,7 @@ mod tests {
         finalize(&coord, acc);
 
         let handle = coord.find("g").expect("consumer actor present");
-        assert!(handle.kind == GroupKindTag::Consumer);
+        assert2::assert!(handle.kind == GroupKindTag::Consumer);
         let (tx, rx) = oneshot::channel();
         handle
             .tx
@@ -1409,7 +1427,7 @@ mod tests {
             .iter()
             .find(|m| m.member_id == "m1")
             .expect("member m1 present");
-        assert!(m1.is_classic, "facade reconstructed from k5 classic block");
+        assert2::assert!(m1.is_classic);
     }
 
     /// `replay_records` must walk EVERY batch in the log, not just the first.
@@ -1491,9 +1509,16 @@ mod tests {
 
         // All three commits present — the second batch is only reached when the
         // cursor arithmetic `base_offset + last_offset_delta + 1` is exact.
-        check!(committed.len() == 3);
-        check!(committed[&("t".to_string(), 0)].offset == 100);
-        check!(committed[&("t".to_string(), 1)].offset == 101);
-        check!(committed[&("t".to_string(), 2)].offset == 202);
+        check!(
+            committed
+                .iter()
+                .map(|((topic, partition), value)| ((topic.clone(), *partition), value.offset))
+                .collect::<HashMap<_, _>>()
+                == HashMap::from([
+                    (("t".to_string(), 0), Offset(100)),
+                    (("t".to_string(), 1), Offset(101)),
+                    (("t".to_string(), 2), Offset(202)),
+                ])
+        );
     }
 }

@@ -602,7 +602,7 @@ acl_wire_enum!(
 mod tests {
     use std::sync::{Arc, Mutex};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use bytes::{Buf, BytesMut};
     use crabka_client_core::MockBroker;
     use crabka_protocol::{
@@ -656,10 +656,10 @@ mod tests {
 
     fn request_body_after_header(mut body: &[u8], flexible_header: bool) -> &[u8] {
         let client_id_len = body.get_i16();
-        assert!(client_id_len >= 0);
+        assert2::assert!(client_id_len >= 0);
         body.advance(usize::try_from(client_id_len).expect("client id length is non-negative"));
         if flexible_header {
-            assert!(body.get_u8() == 0);
+            assert2::assert!(body.get_u8() == 0);
         }
         body
     }
@@ -678,54 +678,62 @@ mod tests {
 
     #[test]
     fn resource_type_round_trips() {
-        for rt in [
-            ResourceType::Topic,
-            ResourceType::Group,
-            ResourceType::Cluster,
-            ResourceType::TransactionalId,
+        for (_name, rt) in [
+            ("topic", ResourceType::Topic),
+            ("group", ResourceType::Group),
+            ("cluster", ResourceType::Cluster),
+            ("transactional id", ResourceType::TransactionalId),
         ] {
-            assert!(wire_to_resource_type(resource_type_to_wire(rt)).unwrap() == rt);
+            assert2::assert!(wire_to_resource_type(resource_type_to_wire(rt)).unwrap() == rt);
         }
     }
 
     #[test]
     fn pattern_type_round_trips() {
-        for pt in [PatternType::Literal, PatternType::Prefixed] {
-            assert!(wire_to_pattern_type(pattern_type_to_wire(pt)).unwrap() == pt);
+        for (_name, pt) in [
+            ("literal", PatternType::Literal),
+            ("prefixed", PatternType::Prefixed),
+        ] {
+            assert2::assert!(wire_to_pattern_type(pattern_type_to_wire(pt)).unwrap() == pt);
         }
     }
 
     #[test]
     fn permission_round_trips() {
-        for p in [PermissionType::Allow, PermissionType::Deny] {
-            assert!(wire_to_permission(permission_to_wire(p)).unwrap() == p);
+        for (_name, permission) in [
+            ("allow", PermissionType::Allow),
+            ("deny", PermissionType::Deny),
+        ] {
+            assert2::assert!(
+                wire_to_permission(permission_to_wire(permission)).unwrap() == permission
+            );
         }
     }
 
     #[test]
     fn operation_round_trips() {
-        for op in [
-            AclOperation::All,
-            AclOperation::Read,
-            AclOperation::Write,
-            AclOperation::Create,
-            AclOperation::Delete,
-            AclOperation::Alter,
-            AclOperation::Describe,
-            AclOperation::ClusterAction,
-            AclOperation::DescribeConfigs,
-            AclOperation::AlterConfigs,
-            AclOperation::IdempotentWrite,
+        for (_name, operation) in [
+            ("all", AclOperation::All),
+            ("read", AclOperation::Read),
+            ("write", AclOperation::Write),
+            ("create", AclOperation::Create),
+            ("delete", AclOperation::Delete),
+            ("alter", AclOperation::Alter),
+            ("describe", AclOperation::Describe),
+            ("cluster action", AclOperation::ClusterAction),
+            ("describe configs", AclOperation::DescribeConfigs),
+            ("alter configs", AclOperation::AlterConfigs),
+            ("idempotent write", AclOperation::IdempotentWrite),
             // KIP-939: TWO_PHASE_COMMIT (wire byte 15).
-            AclOperation::TwoPhaseCommit,
+            ("two phase commit", AclOperation::TwoPhaseCommit),
         ] {
-            assert!(wire_to_operation(operation_to_wire(op)).unwrap() == op);
+            assert2::assert!(wire_to_operation(operation_to_wire(operation)).unwrap() == operation);
         }
     }
 
     #[test]
     fn wire_to_unknown_resource_type_errors() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             wire_to_resource_type(99),
             Err(AdminError::Protocol(_))
         ));
@@ -733,7 +741,7 @@ mod tests {
         // `DescribeAcls`/`DeleteAcls` responses can never silently
         // claim an "any-type" match — Kafka never returns this in real
         // responses.
-        assert!(matches!(
+        assert2::assert!(matches!(
             wire_to_resource_type(1),
             Err(AdminError::Protocol(_))
         ));
@@ -746,7 +754,7 @@ mod tests {
             ..sample_entry()
         };
         let c = acl_to_creation(&e);
-        assert!(
+        assert2::assert!(
             c == AclCreation {
                 resource_type: 2,
                 resource_name: "orders".to_string(),
@@ -773,7 +781,7 @@ mod tests {
                     request_body_after_header(body, version >= create_acls_request::FLEXIBLE_MIN);
                 let request = CreateAclsRequest::decode(&mut body, version)
                     .expect("create ACLs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &CreateAclsResponse {
@@ -803,19 +811,19 @@ mod tests {
             .await
             .expect("create ACL response maps");
 
-        assert!(outcomes.len() == 1);
         let error = outcomes[0]
             .error
             .as_ref()
             .expect("broker error is surfaced");
-        assert!(error.code == 36);
-        assert!(error.message == Some("acl exists".into()));
+        assert2::assert!(
+            (outcomes.len(), error.code, error.message.as_deref()) == (1, 36, Some("acl exists"))
+        );
         let request = seen_request
             .lock()
             .expect("request capture lock")
             .take()
             .expect("create ACLs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == CreateAclsRequest {
                     creations: vec![AclCreation {
@@ -839,7 +847,7 @@ mod tests {
         let f = AclEntryFilter::default();
         let w = acl_filter_to_wire(&f);
         // 1 == Kafka's `AclBindingFilter.ANY` discriminant (`WIRE_ANY`).
-        assert!(
+        assert2::assert!(
             w == DeleteAclsFilter {
                 resource_type_filter: 1,
                 resource_name_filter: None,
@@ -865,7 +873,7 @@ mod tests {
             permission_type: Some(PermissionType::Allow),
         };
         let w = acl_filter_to_wire(&f);
-        assert!(
+        assert2::assert!(
             w == DeleteAclsFilter {
                 resource_type_filter: 2,
                 resource_name_filter: Some("orders".to_string()),
@@ -892,7 +900,7 @@ mod tests {
                     request_body_after_header(body, version >= delete_acls_request::FLEXIBLE_MIN);
                 let request = DeleteAclsRequest::decode(&mut body, version)
                     .expect("delete ACLs request decodes");
-                assert!(body.is_empty());
+                assert2::assert!(body.is_empty());
                 *captured_request.lock().expect("request capture lock") = Some(request);
                 return Some(encode_at(
                     &DeleteAclsResponse {
@@ -931,15 +939,19 @@ mod tests {
             .await
             .expect("delete ACL response maps");
 
-        assert!(outcomes.len() == 1);
-        assert!(outcomes[0].error.is_none());
-        assert!(outcomes[0].matched == vec![sample_entry()]);
+        assert2::assert!(
+            (
+                outcomes.len(),
+                outcomes[0].error.as_ref(),
+                outcomes[0].matched.as_slice()
+            ) == (1, None, [sample_entry()].as_slice())
+        );
         let request = seen_request
             .lock()
             .expect("request capture lock")
             .take()
             .expect("delete ACLs request was captured");
-        assert!(
+        assert2::assert!(
             request
                 == DeleteAclsRequest {
                     filters: vec![DeleteAclsFilter {
@@ -970,11 +982,15 @@ mod tests {
             ..Default::default()
         });
 
-        assert!(outcomes.len() == 1);
-        assert!(outcomes[0].username == "alice");
         let error = outcomes[0].error.as_ref().expect("error is preserved");
-        assert!(error.code == 42);
-        assert!(error.message == Some("bad credentials".into()));
+        assert2::assert!(
+            (
+                outcomes.len(),
+                outcomes[0].username.as_str(),
+                error.code,
+                error.message.as_deref()
+            ) == (1, "alice", 42, Some("bad credentials"))
+        );
     }
 
     #[test]
@@ -986,16 +1002,18 @@ mod tests {
             iterations: 4096,
         }];
         let req = build_alter_scram_request_sha512(&upserts, &[], &rng).unwrap();
-        assert!(req.upsertions.len() == 1);
         let u = &req.upsertions[0];
-        check!(u.name == "alice");
-        check!(u.mechanism == 2); // SCRAM_SHA_512_WIRE, KIP-554
-        check!(u.iterations == 4096);
-        check!(u.salt.len() == 16);
-        // SHA-512 output is 64 bytes — KIP-554 mandates the wire field
-        // carries the PBKDF2 intermediate, not the raw password.
-        check!(u.salted_password.len() == 64);
-        check!(u.salted_password.as_ref() != b"hunter2");
+        check!(
+            (
+                req.upsertions.len(),
+                u.name.as_str(),
+                u.mechanism,
+                u.iterations,
+                u.salt.len(),
+                u.salted_password.len(),
+                u.salted_password.as_ref() != b"hunter2",
+            ) == (1, "alice", 2, 4096, 16, 64, true)
+        );
     }
 
     #[test]
@@ -1005,7 +1023,7 @@ mod tests {
             username: "alice".into(),
         }];
         let req = build_alter_scram_request_sha512(&[], &dels, &rng).unwrap();
-        assert!(
+        assert2::assert!(
             req == AlterUserScramCredentialsRequest {
                 deletions: vec![ScramCredentialDeletion {
                     name: "alice".to_string(),
@@ -1034,7 +1052,7 @@ mod tests {
             },
         ];
         let req = build_alter_scram_request_sha512(&upserts, &[], &rng).unwrap();
-        assert!(req.upsertions[0].salt != req.upsertions[1].salt);
+        assert2::assert!(req.upsertions[0].salt != req.upsertions[1].salt);
     }
 
     #[test]
@@ -1045,7 +1063,7 @@ mod tests {
         };
         let r = filter_to_describe_request(&f);
         // 1 == Kafka's `AclBindingFilter.ANY` discriminant (`WIRE_ANY`).
-        assert!(
+        assert2::assert!(
             r == DescribeAclsRequest {
                 resource_type_filter: 1,
                 resource_name_filter: None,
@@ -1077,10 +1095,15 @@ mod tests {
                 name,
                 message,
             } => {
-                check!(api == "DescribeUserScramCredentials");
-                check!(code == 31);
-                check!(name == "CLUSTER_AUTHORIZATION_FAILED");
-                check!(message == Some("cluster auth denied".to_string()));
+                check!(
+                    (api, code, name, message.as_deref())
+                        == (
+                            "DescribeUserScramCredentials",
+                            31,
+                            "CLUSTER_AUTHORIZATION_FAILED",
+                            Some("cluster auth denied"),
+                        )
+                );
             }
             other => panic!("expected broker error, got {other:?}"),
         }
@@ -1113,11 +1136,15 @@ mod tests {
         let users = parse_describe_user_scram_credentials_response(resp)
             .expect("valid SCRAM describe response should parse");
 
-        assert!(users.len() == 1);
-        check!(users[0].username == "alice");
         check!(
-            users[0].credentials
-                == vec![
+            (
+                users.len(),
+                users[0].username.as_str(),
+                users[0].credentials.as_slice(),
+            ) == (
+                1,
+                "alice",
+                [
                     UserScramCredential {
                         mechanism: "SCRAM-SHA-256".to_string(),
                         iterations: 4096,
@@ -1127,6 +1154,8 @@ mod tests {
                         iterations: 8192,
                     },
                 ]
+                .as_slice(),
+            )
         );
     }
 
@@ -1147,15 +1176,20 @@ mod tests {
         let users = parse_describe_user_scram_credentials_response(resp)
             .expect("per-user SCRAM describe errors should parse into rows");
 
-        check!(users.len() == 1);
-        check!(users[0].username == "ghost");
         check!(
-            users[0].error
-                == Some(KafkaError {
+            (
+                users.len(),
+                users[0].username.as_str(),
+                users[0].error.as_ref()
+            ) == (
+                1,
+                "ghost",
+                Some(&KafkaError {
                     code: 91,
                     name: "RESOURCE_NOT_FOUND",
                     message: Some("no such SCRAM user".to_string()),
                 })
+            )
         );
     }
 
@@ -1176,15 +1210,20 @@ mod tests {
         let users = parse_describe_user_scram_credentials_response(resp)
             .expect("per-user SCRAM describe errors should parse into rows");
 
-        check!(users.len() == 1);
-        check!(users[0].username == "alice");
         check!(
-            users[0].error
-                == Some(KafkaError {
+            (
+                users.len(),
+                users[0].username.as_str(),
+                users[0].error.as_ref()
+            ) == (
+                1,
+                "alice",
+                Some(&KafkaError {
                     code: 92,
                     name: "DUPLICATE_RESOURCE",
                     message: Some("duplicate user".to_string()),
                 })
+            )
         );
     }
 
@@ -1210,22 +1249,24 @@ mod tests {
 
         let users = parse_alter_scram_results(resp);
 
-        check!(users.len() == 2);
         check!(
-            users[0].error
-                == Some(KafkaError {
+            (
+                users.len(),
+                users[0].error.as_ref(),
+                users[1].error.as_ref(),
+            ) == (
+                2,
+                Some(&KafkaError {
                     code: 33,
                     name: "UNSUPPORTED_SASL_MECHANISM",
                     message: Some("unknown mechanism".to_string()),
-                })
-        );
-        check!(
-            users[1].error
-                == Some(KafkaError {
+                }),
+                Some(&KafkaError {
                     code: 93,
                     name: "UNACCEPTABLE_CREDENTIAL",
                     message: Some("too many iterations".to_string()),
-                })
+                }),
+            )
         );
     }
 
@@ -1243,7 +1284,7 @@ mod tests {
 
         let r = filter_to_describe_request(&f);
 
-        assert!(
+        assert2::assert!(
             r == DescribeAclsRequest {
                 resource_type_filter: 2,
                 resource_name_filter: Some("orders".to_string()),

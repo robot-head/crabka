@@ -65,7 +65,6 @@ pub fn read_send_nanos(value: &[u8], scenario_id: u64) -> Option<u64> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -74,37 +73,37 @@ mod tests {
         let mut t = template(64);
         let b = stamp_into(&mut t, 0xdead_beef);
         let n = read_send_nanos(&b, 0xdead_beef).expect("magic+sid match");
-        assert!(n > 0);
+        assert2::assert!(n > 0);
     }
 
     #[test]
     fn rejects_wrong_scenario_id() {
         let mut t = template(64);
         let b = stamp_into(&mut t, 42);
-        assert!(read_send_nanos(&b, 7).is_none());
+        assert2::assert!(read_send_nanos(&b, 7).is_none());
     }
 
     #[test]
     fn rejects_short() {
-        assert!(read_send_nanos(&[0u8; 8], 0).is_none());
+        assert2::assert!(read_send_nanos(&[0u8; 8], 0).is_none());
     }
 
     #[test]
     fn rejects_bad_magic() {
         let mut b = vec![0u8; HEADER_LEN];
         b[16..24].copy_from_slice(&123u64.to_be_bytes());
-        assert!(read_send_nanos(&b, 0).is_none());
+        assert2::assert!(read_send_nanos(&b, 0).is_none());
     }
 
     #[test]
     fn template_size_honoured_above_header() {
         let t = template(1024);
-        assert!(t.len() == 1024);
+        assert2::assert!(t.len() == 1024);
     }
 
     #[test]
     fn template_min_size_is_header() {
         let t = template(0);
-        assert!(t.len() == HEADER_LEN);
+        assert2::assert!(t.len() == HEADER_LEN);
     }
 }

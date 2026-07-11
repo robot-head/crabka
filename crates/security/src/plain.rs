@@ -40,7 +40,6 @@ pub fn verify_plain<S: BuildHasher>(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -53,17 +52,19 @@ mod tests {
     #[test]
     fn correct_creds_pass() {
         let p = verify_plain(&creds(), "alice", b"wonderland").unwrap();
-        assert!(p.name == "alice");
-        assert!(p.auth_method == AuthMethod::SaslPlain);
+        assert2::assert!(p.name.as_str() == "alice");
+        assert2::assert!(p.auth_method == AuthMethod::SaslPlain);
     }
 
     #[test]
     fn wrong_password_fails() {
-        assert!(verify_plain(&creds(), "alice", b"hunter2") == Err(AuthError::BadPassword));
+        assert2::assert!(
+            verify_plain(&creds(), "alice", b"hunter2") == Err(AuthError::BadPassword)
+        );
     }
 
     #[test]
     fn unknown_user_fails() {
-        assert!(verify_plain(&creds(), "bob", b"anything") == Err(AuthError::UnknownUser));
+        assert2::assert!(verify_plain(&creds(), "bob", b"anything") == Err(AuthError::UnknownUser));
     }
 }

@@ -306,7 +306,7 @@ impl ShareConsumer {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::tagged_fields::UnknownTaggedFields;
 
     use super::*;
@@ -343,7 +343,7 @@ mod tests {
     fn join_heartbeat_request_preserves_group_member_epoch_and_subscription() {
         let req = build_join_heartbeat_request("group-a".into(), vec!["topic-a".into()]);
 
-        assert!(
+        assert2::assert!(
             req == ShareGroupHeartbeatRequest {
                 group_id: "group-a".into(),
                 member_id: String::new(),
@@ -357,19 +357,30 @@ mod tests {
 
     #[test]
     fn join_response_helpers_preserve_error_interval_and_assignment_boundaries() {
-        check!(!response_has_error(0));
-        check!(response_has_error(17));
-        check!(
-            heartbeat_interval_from_response(2500, Duration::from_secs(3))
-                == Duration::from_millis(2500)
-        );
-        check!(
-            heartbeat_interval_from_response(0, Duration::from_secs(3)) == Duration::from_secs(3)
-        );
-        check!(!has_assignment_partitions(0));
-        check!(has_assignment_partitions(1));
-        check!(should_stage_implicit_accepts(ShareAckMode::Implicit));
-        check!(!should_stage_implicit_accepts(ShareAckMode::Explicit));
+        for (name, code, expected) in [("success", 0, false), ("error", 17, true)] {
+            check!(response_has_error(code) == expected, "case {name}");
+        }
+        for (name, broker_ms, expected) in [
+            ("broker interval", 2500, Duration::from_millis(2500)),
+            ("fallback interval", 0, Duration::from_secs(3)),
+        ] {
+            check!(
+                heartbeat_interval_from_response(broker_ms, Duration::from_secs(3)) == expected,
+                "case {name}"
+            );
+        }
+        for (name, count, expected) in [("empty", 0, false), ("present", 1, true)] {
+            check!(has_assignment_partitions(count) == expected, "case {name}");
+        }
+        for (name, mode, expected) in [
+            ("implicit", ShareAckMode::Implicit, true),
+            ("explicit", ShareAckMode::Explicit, false),
+        ] {
+            check!(
+                should_stage_implicit_accepts(mode) == expected,
+                "case {name}"
+            );
+        }
     }
 
     #[test]
@@ -379,8 +390,8 @@ mod tests {
 
         stage_implicit_accepts(&mut prev, &mut pending);
 
-        assert!(prev.is_empty());
-        assert!(
+        assert2::assert!(prev.is_empty());
+        assert2::assert!(
             pending
                 == vec![(
                     id(7),
@@ -396,17 +407,21 @@ mod tests {
     async fn accessors_return_share_identity_and_assignment() {
         let consumer = test_consumer().await;
 
-        check!(consumer.group_id() == "group-a");
-        check!(consumer.member_id() == "member-a");
-        check!(consumer.assignment().await == vec![("topic-a".into(), 2)]);
+        check!(
+            (
+                consumer.group_id(),
+                consumer.member_id(),
+                consumer.assignment().await
+            ) == ("group-a", "member-a", vec![("topic-a".into(), 2)])
+        );
     }
 
     #[tokio::test]
     async fn close_cancels_shutdown_token_without_spawned_handle() {
         let mut consumer = test_consumer().await;
 
-        assert!(!consumer.shutdown.is_cancelled());
+        assert2::assert!(!consumer.shutdown.is_cancelled());
         consumer.close().await.unwrap();
-        assert!(consumer.shutdown.is_cancelled());
+        assert2::assert!(consumer.shutdown.is_cancelled());
     }
 }

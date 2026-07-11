@@ -14,7 +14,7 @@
 
 use std::{io, net::SocketAddr};
 
-use assert2::{assert, check};
+use assert2::check;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_metadata::{
@@ -389,7 +389,7 @@ async fn controller_mutation_rate_throttles_create_topics() {
         false,
     )
     .await;
-    assert!(alter[0].1 == 0, "alter should succeed");
+    assert2::assert!(alter[0].1 == 0);
 
     // Wait until the controller_mutation_rate quota is committed to this
     // broker's metadata image. The CreateTopics handler reads the rate
@@ -434,8 +434,8 @@ async fn unthrottled_create_topics_unaffected() {
 
     let (throttle_ms, err_code) =
         drive_create_topics_sasl(addr, "admin", "admin-secret", "unthrottled-topic", 10).await;
-    assert!(err_code == 0);
-    assert!(throttle_ms == 0);
+    assert2::assert!(err_code == 0);
+    assert2::assert!(throttle_ms == 0);
 }
 
 /// Test 3: Pre-create topic as admin (no quota); set rate=2.0 for alice;
@@ -474,7 +474,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
 
     // Pre-create topic as admin (no quota for admin) with 10 partitions.
     let (_, ec) = drive_create_topics_sasl(addr, "admin", "admin-secret", "to-delete", 10).await;
-    assert!(ec == 0);
+    assert2::assert!(ec == 0);
 
     // Grant alice Topic Delete on "to-delete".
     let alice_delete_acl = MetadataRecord::V1AccessControlEntry(AclEntry {
@@ -511,7 +511,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
         false,
     )
     .await;
-    assert!(alter[0].1 == 0);
+    assert2::assert!(alter[0].1 == 0);
     // Wait for alice's controller_mutation_rate quota to land in the image
     // before deleting; DeleteTopics reads the rate from the image on consume.
     handle
@@ -524,9 +524,6 @@ async fn controller_mutation_rate_throttles_delete_topics() {
 
     let (throttle_ms, err_code) =
         drive_delete_topics_sasl(addr, "alice", "alice-secret", "to-delete").await;
-    assert!(err_code == 0);
-    assert!(
-        throttle_ms > 0,
-        "expected throttle_time_ms > 0, got {throttle_ms}"
-    );
+    assert2::assert!(err_code == 0);
+    assert2::assert!(throttle_ms > 0);
 }

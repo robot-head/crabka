@@ -2707,39 +2707,31 @@ mod tests {
 
     #[test]
     fn template_helpers_trim_body_suffixes_and_literal_boundaries() {
-        assert_eq!(trim_template_body_end("prefix body \n\t", 7, 14), 11);
-        assert_eq!(trim_template_body_end("prefix \n\t", 7, 9), 7);
+        assert2::assert!(trim_template_body_end("prefix body \n\t", 7, 14) == 11);
+        assert2::assert!(trim_template_body_end("prefix \n\t", 7, 9) == 7);
 
-        assert!(parse_template_parts("").unwrap().is_empty());
-        assert_eq!(
-            parse_template_parts("literal").unwrap(),
-            vec![TemplatePart::Literal("literal".to_string())]
+        assert2::assert!(parse_template_parts("").unwrap().is_empty());
+        assert2::assert!(
+            parse_template_parts("literal").unwrap()
+                == vec![TemplatePart::Literal("literal".to_string())]
         );
     }
 
     #[test]
     fn template_helpers_skip_leading_whitespace_from_current_position() {
-        assert_eq!(skip_leading_template_whitespace("abc \n\tdef", 3), 6);
-        assert_eq!(skip_leading_template_whitespace("abc", 1), 1);
-        assert_eq!(skip_leading_template_whitespace("abc", 10), 3);
+        assert2::assert!(skip_leading_template_whitespace("abc \n\tdef", 3) == 6);
+        assert2::assert!(skip_leading_template_whitespace("abc", 1) == 1);
+        assert2::assert!(skip_leading_template_whitespace("abc", 10) == 3);
     }
 
     #[test]
     fn template_helpers_classify_invalid_variable_boundaries() {
         for (ch, expected) in [('|', true), (' ', true), ('\n', true), ('_', false)] {
-            assert_eq!(
-                is_template_control_assignment_variable_char(ch),
-                expected,
-                "control-assignment boundary: {ch:?}"
-            );
+            assert2::assert!(is_template_control_assignment_variable_char(ch) == expected);
         }
 
         for (ch, expected) in [('.', true), (' ', true), ('\t', true), ('_', false)] {
-            assert_eq!(
-                is_template_variable_name_char_invalid(ch),
-                expected,
-                "variable-name boundary: {ch:?}"
-            );
+            assert2::assert!(is_template_variable_name_char_invalid(ch) == expected);
         }
     }
 
@@ -2751,10 +2743,8 @@ mod tests {
             ("`ok`", 5, false),
             ("`ok", 3, false),
         ] {
-            assert_eq!(
-                ensure_template_quoted_token("`ok`", 0, token, end, '`').is_ok(),
-                expected_ok,
-                "quoted token {token:?} ending at {end}"
+            assert2::assert!(
+                ensure_template_quoted_token("`ok`", 0, token, end, '`').is_ok() == expected_ok
             );
         }
 
@@ -2765,77 +2755,73 @@ mod tests {
             ("ok)", 3, false),
             ("(ok", 3, false),
         ] {
-            assert_eq!(
-                ensure_template_parenthesized_token("(ok)", 0, token, end).is_ok(),
-                expected_ok,
-                "parenthesized token {token:?} ending at {end}"
+            assert2::assert!(
+                ensure_template_parenthesized_token("(ok)", 0, token, end).is_ok() == expected_ok
             );
         }
     }
 
     #[test]
     fn template_parenthesized_tokens_ignore_parentheses_inside_strings() {
-        assert_eq!(
-            parse_template_parenthesized_token(r#"(printf "a)b") tail"#, 0).unwrap(),
-            (r#"(printf "a)b")"#.to_string(), 14)
+        assert2::assert!(
+            parse_template_parenthesized_token(r#"(printf "a)b") tail"#, 0).unwrap()
+                == (r#"(printf "a)b")"#.to_string(), 14)
         );
-        assert_eq!(
-            parse_template_parenthesized_token(r#"(printf `c)d`) tail"#, 0).unwrap(),
-            ("(printf `c)d`)".to_string(), 14)
+        assert2::assert!(
+            parse_template_parenthesized_token(r#"(printf `c)d`) tail"#, 0).unwrap()
+                == ("(printf `c)d`)".to_string(), 14)
         );
-        assert_eq!(
-            tokenize_template_command(r#"print (printf "a)b") (printf `c)d`)"#).unwrap(),
-            vec![
-                "print".to_string(),
-                r#"(printf "a)b")"#.to_string(),
-                "(printf `c)d`)".to_string(),
-            ]
+        assert2::assert!(
+            tokenize_template_command(r#"print (printf "a)b") (printf `c)d`)"#).unwrap()
+                == vec![
+                    "print".to_string(),
+                    r#"(printf "a)b")"#.to_string(),
+                    "(printf `c)d`)".to_string(),
+                ]
         );
     }
 
     #[test]
     fn template_quoted_tokens_advance_from_the_opening_quote() {
-        assert_eq!(
-            parse_template_quoted_token(r#"x "a\"b" tail"#, 2, '"').unwrap(),
-            (r#""a\"b""#.to_string(), 8)
+        assert2::assert!(
+            parse_template_quoted_token(r#"x "a\"b" tail"#, 2, '"').unwrap()
+                == (r#""a\"b""#.to_string(), 8)
         );
-        assert_eq!(
-            parse_template_quoted_token("x `a b` tail", 2, '`').unwrap(),
-            ("`a b`".to_string(), 7)
+        assert2::assert!(
+            parse_template_quoted_token("x `a b` tail", 2, '`').unwrap()
+                == ("`a b`".to_string(), 7)
         );
-        assert_eq!(
-            tokenize_template_command(r#"print "a b" `c d`"#).unwrap(),
-            vec![
-                "print".to_string(),
-                r#""a b""#.to_string(),
-                "`c d`".to_string(),
-            ]
+        assert2::assert!(
+            tokenize_template_command(r#"print "a b" `c d`"#).unwrap()
+                == vec![
+                    "print".to_string(),
+                    r#""a b""#.to_string(),
+                    "`c d`".to_string(),
+                ]
         );
     }
 
     #[test]
     fn quoted_template_token_values_require_matching_wrappers() {
-        assert_eq!(quoted_template_token_value("abc").unwrap(), None);
-        assert_eq!(quoted_template_token_value("`").unwrap(), None);
-        assert_eq!(quoted_template_token_value("\"").unwrap(), None);
-        assert_eq!(
-            quoted_template_token_value("``").unwrap(),
-            Some(String::new())
-        );
-        assert_eq!(
-            quoted_template_token_value("\"\"").unwrap(),
-            Some(String::new())
-        );
-        assert_eq!(quoted_template_token_value("`unterminated").unwrap(), None);
-        assert_eq!(quoted_template_token_value("unterminated`").unwrap(), None);
-        assert_eq!(quoted_template_token_value("\"unterminated").unwrap(), None);
-        assert_eq!(quoted_template_token_value("unterminated\"").unwrap(), None);
+        for (_name, input, expected) in [
+            ("unquoted", "abc", None),
+            ("single backtick", "`", None),
+            ("single quote", "\"", None),
+            ("empty backticks", "``", Some(String::new())),
+            ("empty quotes", "\"\"", Some(String::new())),
+            ("missing closing backtick", "`unterminated", None),
+            ("missing opening backtick", "unterminated`", None),
+            ("missing closing quote", "\"unterminated", None),
+            ("missing opening quote", "unterminated\"", None),
+        ] {
+            assert2::assert!(quoted_template_token_value(input).unwrap() == expected);
+        }
     }
 
     #[test]
     fn template_trim_right_allows_adjacent_literal() {
         let format = LineFormat::new(r#"{{ "ok" -}}tail"#).unwrap();
-        assert_eq!(format.render("line", &BTreeMap::new()), "oktail");
+        assert2::assert!(format.render("line", &BTreeMap::new()) == "oktail");
     }
 
     #[test]
@@ -2863,11 +2849,7 @@ mod tests {
             ("{{ trimSuffix \"/\" }}", ""),
         ] {
             let format = LineFormat::new(template).unwrap();
-            assert_eq!(
-                format.render("raw", &BTreeMap::new()),
-                expected,
-                "template should tolerate missing args: {template}"
-            );
+            assert2::assert!(format.render("raw", &BTreeMap::new()) == expected);
         }
     }
 
@@ -2876,19 +2858,17 @@ mod tests {
         let one = vec!["9".to_string()];
         let two = vec!["9".to_string(), "4".to_string()];
 
-        assert_eq!(
-            format_template_integer_binary(&one, |left, right| Some(left - right)),
-            ""
+        assert2::assert!(
+            format_template_integer_binary(&one, |left, right| Some(left - right)) == ""
         );
-        assert_eq!(
-            format_template_integer_binary(&two, |left, right| Some(left - right)),
-            "5"
+        assert2::assert!(
+            format_template_integer_binary(&two, |left, right| Some(left - right)) == "5"
         );
-        assert_eq!(format_template_ordering(&one, Ordering::is_lt), "false");
-        assert_eq!(format_template_ordering(&two, Ordering::is_gt), "true");
+        assert2::assert!(format_template_ordering(&one, Ordering::is_lt) == "false");
+        assert2::assert!(format_template_ordering(&two, Ordering::is_gt) == "true");
 
-        assert_eq!(template_compare_values("NaN", "2"), Some(Ordering::Greater));
-        assert_eq!(template_compare_values("1", "inf"), Some(Ordering::Less));
+        assert2::assert!(template_compare_values("NaN", "2") == Some(Ordering::Greater));
+        assert2::assert!(template_compare_values("1", "inf") == Some(Ordering::Less));
     }
 
     #[test]
@@ -2898,44 +2878,37 @@ mod tests {
         let scalar = TemplateRuntimeValue::Integer(7);
 
         for (value, expected) in [(&plain, true), (&json_string, true), (&scalar, false)] {
-            assert_eq!(
-                template_value_is_collection(value),
-                expected,
-                "collection check: {value:?}"
-            );
+            assert2::assert!(template_value_is_collection(value) == expected);
         }
 
-        assert_eq!(
-            template_index_value(&plain, "1"),
-            Some(TemplateRuntimeValue::Integer(i64::from(b'b')))
+        assert2::assert!(
+            template_index_value(&plain, "1")
+                == Some(TemplateRuntimeValue::Integer(i64::from(b'b')))
         );
-        assert_eq!(
-            template_index_value(&json_string, "1"),
-            Some(TemplateRuntimeValue::Integer(i64::from(b'y')))
+        assert2::assert!(
+            template_index_value(&json_string, "1")
+                == Some(TemplateRuntimeValue::Integer(i64::from(b'y')))
         );
-        assert_eq!(template_index_value(&scalar, "0"), None);
+        assert2::assert!(template_index_value(&scalar, "0") == None);
 
-        assert_eq!(
+        assert2::assert!(
             evaluate_template_index(&[
                 plain.clone(),
                 TemplateRuntimeValue::String("2".to_string())
-            ]),
-            TemplateRuntimeValue::Integer(i64::from(b'c'))
+            ]) == TemplateRuntimeValue::Integer(i64::from(b'c'))
         );
-        assert_eq!(
+        assert2::assert!(
             evaluate_template_index(&[
                 json_string.clone(),
                 TemplateRuntimeValue::String("0".to_string())
-            ]),
-            TemplateRuntimeValue::Integer(i64::from(b'x'))
+            ]) == TemplateRuntimeValue::Integer(i64::from(b'x'))
         );
-        assert_eq!(
+        assert2::assert!(
             evaluate_template_slice(&[
                 json_string,
                 TemplateRuntimeValue::String("1".to_string()),
                 TemplateRuntimeValue::String("3".to_string()),
-            ]),
-            TemplateRuntimeValue::String("yz".to_string())
+            ]) == TemplateRuntimeValue::String("yz".to_string())
         );
     }
 
@@ -2948,16 +2921,16 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(template_slice_bounds(5, &bounds(&[0, 2, 5])), Some((0, 2)));
-        assert_eq!(template_slice_bounds(5, &bounds(&[0, 2, 5, 5])), None);
+        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 2, 5])) == Some((0, 2)));
+        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 2, 5, 5])) == None);
 
-        assert_eq!(template_slice_bounds(5, &bounds(&[0, 3, 3])), Some((0, 3)));
-        assert_eq!(template_slice_bounds(5, &bounds(&[0, 5, 5])), Some((0, 5)));
-        assert_eq!(template_slice_bounds(5, &bounds(&[0, 4, 3])), None);
-        assert_eq!(template_slice_bounds(5, &bounds(&[0, 3, 6])), None);
+        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 3, 3])) == Some((0, 3)));
+        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 5, 5])) == Some((0, 5)));
+        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 4, 3])) == None);
+        assert2::assert!(template_slice_bounds(5, &bounds(&[0, 3, 6])) == None);
 
-        assert_eq!(template_slice_bounds(5, &bounds(&[4, 2])), None);
-        assert_eq!(template_slice_bounds(5, &bounds(&[1, 6])), None);
+        assert2::assert!(template_slice_bounds(5, &bounds(&[4, 2])) == None);
+        assert2::assert!(template_slice_bounds(5, &bounds(&[1, 6])) == None);
     }
 
     #[test]
@@ -2969,25 +2942,16 @@ mod tests {
                 .collect::<Vec<_>>()
         };
 
-        assert_eq!(format_template_float(-0.0), "0");
-        assert_eq!(format_template_float_round(&args(&["1"])), "");
-        assert_eq!(format_template_float_round(&args(&["-1.6", "0"])), "-2");
-        assert_eq!(
-            format_template_float_round(&args(&["1.24", "1", "0.5"])),
-            "1.2"
-        );
-        assert_eq!(
-            format_template_float_round(&args(&["1.24", "1", "NaN"])),
-            ""
-        );
-        assert_eq!(format_template_float_round(&args(&["1.2", "400"])), "");
+        assert2::assert!(format_template_float(-0.0) == "0");
+        assert2::assert!(format_template_float_round(&args(&["1"])) == "");
+        assert2::assert!(format_template_float_round(&args(&["-1.6", "0"])) == "-2");
+        assert2::assert!(format_template_float_round(&args(&["1.24", "1", "0.5"])) == "1.2");
+        assert2::assert!(format_template_float_round(&args(&["1.24", "1", "NaN"])) == "");
+        assert2::assert!(format_template_float_round(&args(&["1.2", "400"])) == "");
 
-        assert_eq!(format_template_bytes("1.5"), "1.5");
-        assert_eq!(format_template_bytes("1kB"), "1000");
-        assert_eq!(
-            format_template_bytes("100000000000000000000"),
-            "100000000000000000000"
-        );
+        assert2::assert!(format_template_bytes("1.5") == "1.5");
+        assert2::assert!(format_template_bytes("1kB") == "1000");
+        assert2::assert!(format_template_bytes("100000000000000000000") == "100000000000000000000");
     }
 
     #[test]
@@ -3000,34 +2964,31 @@ mod tests {
         };
         let timestamp_ns = "1704197045123456789";
 
-        assert_eq!(
+        assert2::assert!(
             format_template_date(&args(&[
                 "2006-01-02T15:04:05.000000000Z07:00",
                 timestamp_ns,
                 "ignored",
-            ])),
-            "2024-01-02T12:04:05.123456789Z"
+            ])) == "2024-01-02T12:04:05.123456789Z"
         );
-        assert_eq!(
+        assert2::assert!(
             format_template_to_date(&args(&[
                 "2006-01-02T15:04:05.999999999 -07:00",
                 "2024-01-02T12:04:05.123456789 +00:00",
                 "ignored",
-            ])),
-            timestamp_ns
+            ])) == timestamp_ns
         );
-        assert_eq!(
+        assert2::assert!(
             format_template_to_date_in_zone(&args(&[
                 "2006-01-02 15:04:05",
                 "America/New_York",
                 "2024-01-02 07:04:05",
                 "ignored",
-            ])),
-            "1704197045000000000"
+            ])) == "1704197045000000000"
         );
-        assert_eq!(format_template_date(&args(&["2006"])), "");
-        assert_eq!(format_template_to_date(&args(&["2006"])), "");
-        assert_eq!(format_template_to_date_in_zone(&args(&["2006", "UTC"])), "");
+        assert2::assert!(format_template_date(&args(&["2006"])) == "");
+        assert2::assert!(format_template_to_date(&args(&["2006"])) == "");
+        assert2::assert!(format_template_to_date_in_zone(&args(&["2006", "UTC"])) == "");
     }
 
     #[test]
@@ -3035,12 +2996,11 @@ mod tests {
         let timestamp = time::OffsetDateTime::from_unix_timestamp_nanos(1704197045123456789)
             .expect("test timestamp should be valid");
 
-        assert_eq!(
+        assert2::assert!(
             format_go_time_layout(
                 "2006|06|15|04|05|01|1|02|2|Z07:00|-07:00|.000000000|.",
                 timestamp,
-            ),
-            "2024|24|12|04|05|01|1|02|2|Z|+00:00|.123456789|."
+            ) == "2024|24|12|04|05|01|1|02|2|Z|+00:00|.123456789|."
         );
 
         let parsed = parse_go_time_layout_value(
@@ -3048,87 +3008,71 @@ mod tests {
             "24|7|8|09|10|11|.123456789|+02:30|-03:15|.",
         )
         .expect("layout value should parse");
-        assert_eq!(parsed.year, 2024);
-        assert_eq!(parsed.month, 7);
-        assert_eq!(parsed.day, 8);
-        assert_eq!(parsed.hour, 9);
-        assert_eq!(parsed.minute, 10);
-        assert_eq!(parsed.second, 11);
-        assert_eq!(parsed.nanosecond, 123_456_789);
-        assert_eq!(parsed.offset_seconds, Some(-11_700));
+        assert2::assert!(parsed.year == 2024);
+        assert2::assert!(parsed.month == 7);
+        assert2::assert!(parsed.day == 8);
+        assert2::assert!(parsed.hour == 9);
+        assert2::assert!(parsed.minute == 10);
+        assert2::assert!(parsed.second == 11);
+        assert2::assert!(parsed.nanosecond == 123_456_789);
+        assert2::assert!(parsed.offset_seconds == Some(-11_700));
     }
 
     #[test]
     fn go_time_low_level_parsers_consume_expected_widths() {
         let mut pos = 0;
-        assert_eq!(
-            parse_variable_template_digits("123x", &mut pos, 2),
-            Some(12)
+        assert2::assert!(parse_variable_template_digits("123x", &mut pos, 2) == Some(12));
+        assert2::assert!(pos == 2);
+
+        pos = 0;
+        assert2::assert!(parse_variable_template_digits("x12", &mut pos, 2) == None);
+        assert2::assert!(pos == 0);
+
+        pos = 0;
+        assert2::assert!(
+            parse_template_fractional_nanoseconds(".1234x", &mut pos, 3) == Some(123_000_000)
         );
-        assert_eq!(pos, 2);
+        assert2::assert!(pos == 4);
 
         pos = 0;
-        assert_eq!(parse_variable_template_digits("x12", &mut pos, 2), None);
-        assert_eq!(pos, 0);
+        assert2::assert!(parse_template_fractional_nanoseconds(".x", &mut pos, 3) == None);
+        assert2::assert!(pos == 1);
 
         pos = 0;
-        assert_eq!(
-            parse_template_fractional_nanoseconds(".1234x", &mut pos, 3),
-            Some(123_000_000)
-        );
-        assert_eq!(pos, 4);
+        assert2::assert!(parse_template_timezone_offset("Z!", &mut pos) == Some(0));
+        assert2::assert!(pos == 1);
 
         pos = 0;
-        assert_eq!(
-            parse_template_fractional_nanoseconds(".x", &mut pos, 3),
-            None
-        );
-        assert_eq!(pos, 1);
+        assert2::assert!(parse_template_timezone_offset("+02:30", &mut pos) == Some(9_000));
+        assert2::assert!(pos == 6);
 
         pos = 0;
-        assert_eq!(parse_template_timezone_offset("Z!", &mut pos), Some(0));
-        assert_eq!(pos, 1);
-
-        pos = 0;
-        assert_eq!(
-            parse_template_timezone_offset("+02:30", &mut pos),
-            Some(9_000)
-        );
-        assert_eq!(pos, 6);
-
-        pos = 0;
-        assert_eq!(
-            parse_template_timezone_offset("+12:34", &mut pos),
-            Some(45_240)
-        );
-        assert_eq!(pos, 6);
+        assert2::assert!(parse_template_timezone_offset("+12:34", &mut pos) == Some(45_240));
+        assert2::assert!(pos == 6);
 
         pos = 1;
-        assert_eq!(
-            parse_template_timezone_offset("x-03:15", &mut pos),
-            Some(-11_700)
-        );
-        assert_eq!(pos, 7);
+        assert2::assert!(parse_template_timezone_offset("x-03:15", &mut pos) == Some(-11_700));
+        assert2::assert!(pos == 7);
 
         pos = 0;
-        assert_eq!(parse_template_timezone_offset("UTC", &mut pos), None);
-        assert_eq!(pos, 0);
+        assert2::assert!(parse_template_timezone_offset("UTC", &mut pos) == None);
+        assert2::assert!(pos == 0);
     }
 
     #[test]
     fn template_string_escape_helpers_cover_special_bytes() {
-        assert_eq!(substring_template_string("abcdef", 2, 0), "");
-        assert_eq!(substring_template_string("abcdef", 2, -1), "cdef");
+        assert2::assert!(substring_template_string("abcdef", 2, 0) == "");
+        assert2::assert!(substring_template_string("abcdef", 2, -1) == "cdef");
 
-        assert_eq!(
-            js_escape_template_string("\\'\"\n\r\t\u{2028}\u{2029}\u{0001}"),
-            r#"\\\'\"\u000A\u000D\u0009\u2028\u2029\u0001"#
+        assert2::assert!(
+            js_escape_template_string("\\'\"\n\r\t\u{2028}\u{2029}\u{0001}")
+                == r#"\\\'\"\u000A\u000D\u0009\u2028\u2029\u0001"#
         );
 
         let mut escaped = "prefix".to_string();
         push_template_unicode_escape(&mut escaped, 0x1f);
-        assert_eq!(escaped, r"prefix\u001F");
+        assert2::assert!(escaped == r"prefix\u001F");
 
-        assert_eq!(urldecode_template_string("%7a%2F%3f%zz%A"), "z/?%zz%A");
+        assert2::assert!(urldecode_template_string("%7a%2F%3f%zz%A") == "z/?%zz%A");
     }
 }

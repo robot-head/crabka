@@ -1,5 +1,5 @@
 use arrow::{array::AsArray, datatypes::Int64Type};
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
 use crabka_metrics::{
     BucketSpan, NativeHistogram, ResetHint, SamplePayload, WalExemplar, WalRecord,
@@ -186,15 +186,12 @@ fn row_matches_rejects_outside_bounds_before_matching_labels() {
     let fp = labels.fingerprint();
 
     for (ts_ms, want) in [(999, false), (1_000, true), (2_000, true), (2_001, false)] {
-        assert!(
-            row_matches(fp, &labels, ts_ms, &matchers, 1_000, 2_000) == want,
-            "case {ts_ms}"
-        );
+        assert2::assert!(row_matches(fp, &labels, ts_ms, &matchers, 1_000, 2_000) == want);
     }
 
     let mismatch =
         prepare_matchers(&[LabelMatcher::new("job", MatchOp::Eq, "worker")]).expect("matchers");
-    assert!(!row_matches(fp, &labels, 1_500, &mismatch, 1_000, 2_000));
+    assert2::assert!(!row_matches(fp, &labels, 1_500, &mismatch, 1_000, 2_000));
 }
 
 #[tokio::test]
@@ -277,7 +274,7 @@ async fn replay_wal_records_populates_queryable_head() {
 
 #[tokio::test]
 async fn bulk_wal_replay_and_retention_are_observable() {
-    assert!(DEFAULT_RETENTION_MS == 21_600_000);
+    assert2::assert!(DEFAULT_RETENTION_MS == 21_600_000);
 
     let records = [
         float_record(
@@ -295,9 +292,9 @@ async fn bulk_wal_replay_and_retention_are_observable() {
     ];
 
     let mut store = InMemoryMetricStore::with_retention_ms(5_000);
-    assert!(store.retention_ms() == 5_000);
+    assert2::assert!(store.retention_ms() == 5_000);
     store.set_retention_ms(7_000);
-    assert!(store.retention_ms() == 7_000);
+    assert2::assert!(store.retention_ms() == 7_000);
     store.apply_wal_records(&records);
 
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
@@ -305,19 +302,19 @@ async fn bulk_wal_replay_and_retention_are_observable() {
         .series("tenant-a", &matchers, 0, 30_000)
         .await
         .unwrap();
-    assert!(series.len() == 2);
+    assert2::assert!(series.len() == 2);
 
     let head = WalHead::with_retention_ms(9_000);
-    assert!(head.retention_ms() == 9_000);
+    assert2::assert!(head.retention_ms() == 9_000);
     head.apply_wal_records(&records);
     let jobs = head
         .label_values("tenant-a", "job", &matchers, 0, 30_000)
         .await
         .unwrap();
-    assert!(jobs == vec!["api".to_string(), "worker".to_string()]);
+    assert2::assert!(jobs == vec!["api".to_string(), "worker".to_string()]);
 
     let stats = head.prune(20_000);
-    assert!(
+    assert2::assert!(
         stats
             == PruneStats {
                 samples_dropped: 1,
@@ -328,7 +325,7 @@ async fn bulk_wal_replay_and_retention_are_observable() {
         .label_values("tenant-a", "job", &matchers, 0, 30_000)
         .await
         .unwrap();
-    assert!(jobs == vec!["worker".to_string()]);
+    assert2::assert!(jobs == vec!["worker".to_string()]);
 }
 
 #[tokio::test]
@@ -392,9 +389,9 @@ async fn wal_head_delegates_metadata_cardinality_stats_and_blocks() {
             == expected_label_value_cardinality()
     );
     let stats = head.tsdb_stats("tenant-a").await.unwrap();
-    check!(stats.head_stats.num_series == 3);
-    check!(stats.head_stats.num_samples == 3);
-    check!(stats.series_count_by_metric_name == expected_metric_name_stats());
+    assert2::assert!(stats.head_stats.num_series == 3);
+    assert2::assert!(stats.head_stats.num_samples == 3);
+    assert2::assert!(stats.series_count_by_metric_name == expected_metric_name_stats());
     check!(head.tsdb_blocks("tenant-a").await.unwrap()[0].id == "block-a");
 }
 
@@ -425,7 +422,7 @@ async fn cloned_wal_head_sees_records_replayed_through_original_handle() {
         panic!("expected vector");
     };
 
-    assert!(vector[0].value == SampleValue::Float(1.0));
+    assert2::assert!(vector[0].value == SampleValue::Float(1.0));
 }
 
 #[tokio::test]
@@ -442,8 +439,8 @@ async fn scan_filters_by_matcher_and_time_and_registers_float_table() {
     ];
     let result = store.scan("t", &matchers, 0, 1500).await.unwrap();
     let table = result.float_table.clone().unwrap();
-    assert!(result.histogram_table.is_none());
-    assert!(count_rows(&result, &table).await == 1);
+    assert2::assert!(result.histogram_table.is_none());
+    assert2::assert!(count_rows(&result, &table).await == 1);
 }
 
 #[tokio::test]
@@ -479,9 +476,9 @@ async fn scan_filters_histograms_by_matcher_tenant_and_time() {
         LabelMatcher::new("job", MatchOp::Eq, "api"),
     ];
     let result = store.scan("t", &matchers, 0, 1_500).await.unwrap();
-    assert!(result.float_table.is_none());
+    assert2::assert!(result.float_table.is_none());
     let table = result.histogram_table.clone().unwrap();
-    assert!(count_rows(&result, &table).await == 1);
+    assert2::assert!(count_rows(&result, &table).await == 1);
 }
 
 #[tokio::test]
@@ -490,8 +487,8 @@ async fn scan_with_no_match_returns_none_tables() {
     store.push_float("t", lbls(&[("__name__", "up")]), 1000, 1.0);
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "absent")];
     let result = store.scan("t", &matchers, 0, 5000).await.unwrap();
-    assert!(result.float_table.is_none());
-    assert!(result.histogram_table.is_none());
+    assert2::assert!(result.float_table.is_none());
+    assert2::assert!(result.histogram_table.is_none());
 }
 
 #[tokio::test]
@@ -503,8 +500,8 @@ async fn scan_validates_regex_matchers_before_row_iteration() {
         panic!("expected invalid regex to fail before scanning rows");
     };
 
-    assert!(matches!(error, PromqlError::Plan(_)));
-    assert!(error.to_string().contains("bad regex"));
+    assert2::assert!(matches!(error, PromqlError::Plan(_)));
+    assert2::assert!(error.to_string().contains("bad regex"));
 }
 
 #[tokio::test]
@@ -517,7 +514,7 @@ async fn label_values_returns_distinct_for_name() {
         .label_values("t", "job", &matchers, 0, 10)
         .await
         .unwrap();
-    assert!(values == vec!["a".to_string(), "b".to_string()]);
+    assert2::assert!(values == vec!["a".to_string(), "b".to_string()]);
 }
 
 #[tokio::test]
@@ -534,7 +531,7 @@ async fn series_filters_histograms_by_matcher_and_time() {
         LabelMatcher::new("job", MatchOp::Eq, "api"),
     ];
     let series = store.series("t", &matchers, 0, 1_500).await.unwrap();
-    assert!(series == vec![api]);
+    assert2::assert!(series == vec![api]);
 }
 
 #[tokio::test]
@@ -544,7 +541,7 @@ async fn regex_matchers_are_anchored_and_absent_labels_match_empty() {
     store.push_float("t", lbls(&[("__name__", "up")]), 1, 2.0);
 
     let anchored = [LabelMatcher::new("job", MatchOp::Re, "a")];
-    assert!(
+    assert2::assert!(
         store
             .scan("t", &anchored, 0, 10)
             .await
@@ -554,7 +551,7 @@ async fn regex_matchers_are_anchored_and_absent_labels_match_empty() {
     );
 
     let empty = [LabelMatcher::new("missing", MatchOp::Eq, "")];
-    assert!(
+    assert2::assert!(
         store
             .scan("t", &empty, 0, 10)
             .await
@@ -581,8 +578,8 @@ async fn query_shard_matcher_filters_by_series_fingerprint_modulo() {
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .collect::<Vec<_>>();
-    assert!(!expected.is_empty());
-    assert!(expected.len() < series.len());
+    assert2::assert!(!expected.is_empty());
+    assert2::assert!(expected.len() < series.len());
 
     let matchers = [
         LabelMatcher::new("__name__", MatchOp::Eq, "up"),
@@ -590,7 +587,7 @@ async fn query_shard_matcher_filters_by_series_fingerprint_modulo() {
     ];
     let got = store.series("t", &matchers, 0, 10).await.unwrap();
 
-    assert!(got == expected);
+    assert2::assert!(got == expected);
 }
 
 #[tokio::test]
@@ -610,8 +607,8 @@ async fn query_shard_neq_matcher_excludes_matching_fingerprint_modulo() {
         .collect::<BTreeMap<_, _>>()
         .into_values()
         .collect::<Vec<_>>();
-    assert!(!expected.is_empty());
-    assert!(expected.len() < series.len());
+    assert2::assert!(!expected.is_empty());
+    assert2::assert!(expected.len() < series.len());
 
     let matchers = [
         LabelMatcher::new("__name__", MatchOp::Eq, "up"),
@@ -619,7 +616,7 @@ async fn query_shard_neq_matcher_excludes_matching_fingerprint_modulo() {
     ];
     let got = store.series("t", &matchers, 0, 10).await.unwrap();
 
-    assert!(got == expected);
+    assert2::assert!(got == expected);
 }
 
 #[tokio::test]
@@ -636,8 +633,8 @@ async fn prune_drops_old_samples() {
 
     // now = 10_000, retention = 1_000 -> cutoff = 9_000; ts < 9_000 dropped.
     let stats = store.prune(10_000);
-    assert!(stats.samples_dropped == 3);
-    assert!(stats.series_dropped == 0);
+    assert2::assert!(stats.samples_dropped == 3);
+    assert2::assert!(stats.series_dropped == 0);
 
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
     let remaining = store
@@ -652,9 +649,9 @@ async fn prune_drops_old_samples() {
         .unwrap();
     let output = df.collect().await.unwrap();
     let count = output[0].column(0).as_primitive::<Int64Type>().value(0);
-    assert!(count == 2);
+    assert2::assert!(count == 2);
     // The old histogram sample is gone.
-    assert!(remaining.histogram_table.is_none());
+    assert2::assert!(remaining.histogram_table.is_none());
 }
 
 #[tokio::test]
@@ -671,7 +668,7 @@ async fn prune_counts_partial_histogram_and_exemplar_retention() {
     store.push_exemplar("t", live.clone(), lbls(&[("trace_id", "new")]), 9_000, 2.0);
 
     let stats = store.prune(10_000);
-    assert!(
+    assert2::assert!(
         stats
             == PruneStats {
                 samples_dropped: 4,
@@ -711,22 +708,22 @@ async fn prune_removes_emptied_series_from_index() {
     store.push_float("t", fresh.clone(), 9_900, 2.0);
 
     let stats = store.prune(10_000);
-    assert!(stats.samples_dropped == 1);
-    assert!(stats.series_dropped == 1);
+    assert2::assert!(stats.samples_dropped == 1);
+    assert2::assert!(stats.series_dropped == 1);
 
     let matchers = [LabelMatcher::new("__name__", MatchOp::Eq, "up")];
     let series = store
         .series("t", &matchers, i64::MIN, i64::MAX)
         .await
         .unwrap();
-    assert!(series == vec![fresh.clone()]);
+    assert2::assert!(series == vec![fresh.clone()]);
 
     // The emptied series' label value no longer appears on the label surface.
     let jobs = store
         .label_values("t", "job", &matchers, i64::MIN, i64::MAX)
         .await
         .unwrap();
-    assert!(jobs == vec!["new".to_string()]);
+    assert2::assert!(jobs == vec!["new".to_string()]);
 }
 
 #[tokio::test]
@@ -743,7 +740,7 @@ async fn store_cardinality_and_tsdb_stats_include_float_and_hist_series() {
     );
 
     let stats = store.tsdb_stats("tenant-a").await.unwrap();
-    check!(
+    assert2::assert!(
         stats.head_stats
             == TsdbHeadStats {
                 num_series: 3,
@@ -753,9 +750,9 @@ async fn store_cardinality_and_tsdb_stats_include_float_and_hist_series() {
                 max_time: 3_000,
             }
     );
-    check!(stats.label_value_count_by_label_name == expected_label_value_count_stats());
-    check!(stats.memory_in_bytes_by_label_name == expected_label_memory_stats());
-    check!(stats.series_count_by_label_value_pair == expected_label_pair_stats());
+    assert2::assert!(stats.label_value_count_by_label_name == expected_label_value_count_stats());
+    assert2::assert!(stats.memory_in_bytes_by_label_name == expected_label_memory_stats());
+    assert2::assert!(stats.series_count_by_label_value_pair == expected_label_pair_stats());
 }
 
 #[test]
@@ -773,8 +770,8 @@ fn offsets_track_low_and_high_water() {
     };
 
     // No offsets ingested yet.
-    assert!(head.high_water_offset(PartitionIndex(0)).is_none());
-    assert!(head.low_water_offset(PartitionIndex(0)).is_none());
+    assert2::assert!(head.high_water_offset(PartitionIndex(0)) == None);
+    assert2::assert!(head.low_water_offset(PartitionIndex(0)) == None);
 
     head.apply_wal_record_at(&record(10), PartitionIndex(0), Offset(5));
     head.apply_wal_record_at(&record(20), PartitionIndex(0), Offset(6));
@@ -787,18 +784,14 @@ fn offsets_track_low_and_high_water() {
         (1, Some(100), Some(100)),
         (2, None, None),
     ] {
-        assert!(
-            head.high_water_offset(PartitionIndex(partition)) == want_high.map(Offset),
-            "high water case {partition}"
+        assert2::assert!(
+            head.high_water_offset(PartitionIndex(partition)) == want_high.map(Offset)
         );
-        assert!(
-            head.low_water_offset(PartitionIndex(partition)) == want_low.map(Offset),
-            "low water case {partition}"
-        );
+        assert2::assert!(head.low_water_offset(PartitionIndex(partition)) == want_low.map(Offset));
     }
 
     // Pruning does not move offsets (they track ingestion, not retention).
     head.prune(i64::MAX);
-    assert!(head.high_water_offset(PartitionIndex(0)) == Some(Offset(6)));
-    assert!(head.low_water_offset(PartitionIndex(0)) == Some(Offset(5)));
+    assert2::assert!(head.high_water_offset(PartitionIndex(0)) == Some(Offset(6)));
+    assert2::assert!(head.low_water_offset(PartitionIndex(0)) == Some(Offset(5)));
 }

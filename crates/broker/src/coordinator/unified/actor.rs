@@ -1932,7 +1932,7 @@ mod consumer_group_composition_model;
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_log::Offset;
 
     use super::*;
@@ -2008,7 +2008,7 @@ mod tests {
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
         );
-        assert!(state.state == ClassicGroupState::PreparingRebalance);
+        assert2::assert!(state.state == ClassicGroupState::PreparingRebalance);
 
         let (tx1, _rx1) = tokio::sync::oneshot::channel();
         let (tx2, _rx2) = tokio::sync::oneshot::channel();
@@ -2017,10 +2017,7 @@ mod tests {
 
         complete_classic_rebalance(&mut state, &mut joiners, &mut followers);
 
-        assert!(
-            state.rebalance_deadline.is_none(),
-            "a failed protocol vote must not leave an already-fired deadline armed"
-        );
+        assert2::assert!(state.rebalance_deadline.is_none());
     }
 
     #[tokio::test]
@@ -2105,14 +2102,11 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == 0);
+        assert2::assert!(resp.error_code == 0);
         let batches = log.batches().await;
-        assert!(
-            batches.len() == 1,
-            "first join should write exactly one batch"
-        );
+        assert2::assert!(batches.len() == 1);
         // Minimum: k3 (group metadata) + k5 (member metadata) + k8 (current).
-        assert!(batches[0].records.len() >= 3);
+        assert2::assert!(batches[0].records.len() >= 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2140,9 +2134,13 @@ mod tests {
         // The join must succeed, echo the client-supplied member id, and
         // advance the epoch off 0. The client-id first-join takes the same
         // flush path as the empty-id case and persists exactly one batch.
-        check!(resp.error_code == 0);
-        check!(resp.member_id.as_deref() == Some("client-uuid-1"));
-        check!(resp.member_epoch >= 1);
+        check!(
+            (
+                resp.error_code,
+                resp.member_id.as_deref(),
+                resp.member_epoch >= 1,
+            ) == (codes::NONE, Some("client-uuid-1"), true)
+        );
         check!(log.batches().await.len() == 1);
     }
 
@@ -2168,7 +2166,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().error_code == 0);
+        assert2::assert!(rx.await.unwrap().error_code == 0);
 
         // Same id re-sending epoch 0 is now a known member at a higher epoch →
         // stale, not a re-join.
@@ -2189,7 +2187,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().error_code == codes::STALE_MEMBER_EPOCH);
+        assert2::assert!(rx.await.unwrap().error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2236,10 +2234,7 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
         let batches_after_steady = log.batches().await.len();
-        assert!(
-            batches_after_steady == batches_after_join,
-            "steady-state heartbeat should not write"
-        );
+        assert2::assert!(batches_after_steady == batches_after_join);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2283,12 +2278,9 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
         let batches = log.batches().await;
-        assert!(batches.len() == pre_leave + 1);
+        assert2::assert!(batches.len() == pre_leave + 1);
         let leave_batch = &batches[batches.len() - 1];
-        assert!(
-            leave_batch.records.iter().any(|r| r.value.is_none()),
-            "leave batch must contain at least one tombstone"
-        );
+        assert2::assert!(leave_batch.records.iter().any(|r| r.value.is_none()));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2314,25 +2306,22 @@ mod tests {
             })
             .await;
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        assert2::assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
 
         // Wait for the actor to drain and drop its receiver.
         await_until("actor mpsc closed after exit", || handle.tx.is_closed()).await;
-        assert!(
-            handle.tx.is_closed(),
-            "actor mpsc should be closed after exit"
-        );
+        assert2::assert!(handle.tx.is_closed());
 
         // get_or_create should respawn a fresh actor.
         let fresh = coord.get_or_create_consumer("g");
-        assert!(!fresh.tx.is_closed());
+        assert2::assert!(!fresh.tx.is_closed());
     }
 
     #[test]
     fn pending_records_empty_yields_empty_batch() {
         let p = PendingRecords::default();
         let batch = p.into_batch("g", 0);
-        assert!(batch.records.is_empty());
+        assert2::assert!(batch.records.is_empty());
     }
 
     #[test]
@@ -2359,10 +2348,8 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert!(batch.records.len() == 3);
         let deltas: Vec<i32> = batch.records.iter().map(|r| r.offset_delta).collect();
-        assert!(deltas == vec![0, 1, 2]);
-        assert!(batch.last_offset_delta == 2);
+        assert2::assert!((deltas, batch.last_offset_delta) == (vec![0, 1, 2], 2));
     }
 
     #[test]
@@ -2372,8 +2359,7 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert!(batch.records.len() == 1);
-        assert!(batch.records[0].value.is_none());
+        assert2::assert!((batch.records.len(), batch.records[0].value.is_none()) == (1, true));
     }
 
     /// Regression for the epoch double-bump: a single session-timeout
@@ -2416,7 +2402,7 @@ mod tests {
             .expect("50ms is always within Instant range");
         state.add_or_update_member(m);
         run_reconcile(&mut state, &config, &*metadata);
-        assert!(!state.dirty, "baseline must be clean before eviction");
+        assert2::assert!(!state.dirty);
         let epoch_before = state.group_epoch;
 
         // One eviction tick.
@@ -2424,14 +2410,8 @@ mod tests {
             .await
             .expect("tick should succeed");
 
-        assert!(
-            state.members.is_empty(),
-            "expired member must have been evicted"
-        );
-        assert!(
-            state.group_epoch == epoch_before + 1,
-            "a single eviction must advance the group epoch by exactly 1"
-        );
+        assert2::assert!(state.members.is_empty());
+        assert2::assert!(state.group_epoch == epoch_before + 1);
     }
 
     #[test]
@@ -2522,7 +2502,7 @@ mod tests {
                 },
             )]),
         };
-        assert!(seed == expected);
+        assert2::assert!(seed == expected);
     }
 
     // ---------------------------------------------------------------------
@@ -2563,7 +2543,7 @@ mod tests {
         state.members.insert("m1".into(), m);
 
         let picked = pick_assignor(&state, &config);
-        assert!(picked.name() == "uniform");
+        assert2::assert!(picked.name() == "uniform");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2605,11 +2585,8 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == 0);
-        assert!(
-            calls.load(Ordering::SeqCst) >= 1,
-            "custom assignor must be invoked at least once",
-        );
+        assert2::assert!(resp.error_code == 0);
+        assert2::assert!(calls.load(Ordering::SeqCst) >= 1);
     }
 
     // ── classic actor arms + coordinator admin surface ──────────────
@@ -2637,7 +2614,7 @@ mod tests {
             .await
             .unwrap();
         let r = rx.await.unwrap();
-        assert!(r.error_code == codes::MEMBER_ID_REQUIRED);
+        assert2::assert!(r.error_code == codes::MEMBER_ID_REQUIRED);
 
         // ClassicInspect → empty view.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2647,7 +2624,7 @@ mod tests {
             .await
             .unwrap();
         let view = rx.await.unwrap();
-        assert!(view.group_id == "g" && view.members.is_empty());
+        assert2::assert!((view.group_id.as_str(), view.members.is_empty()) == ("g", true));
 
         // Admin surface lists/describes the classic group, then deletes it (empty).
         let listed = coord.list_groups().await;
@@ -2691,7 +2668,15 @@ mod tests {
             .await
             .unwrap();
         let committed = rx.await.unwrap();
-        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
+        let entry = committed.get(&("t".to_string(), 0)).unwrap();
+        assert2::assert!(
+            (
+                entry.offset,
+                entry.leader_epoch,
+                entry.metadata.as_str(),
+                entry.commit_timestamp_ms,
+            ) == (Offset(42), 1, "", 0)
+        );
 
         // Classic offset-commit validate: a simple consumer (no member/instance)
         // is allowed. `ValidateCommit` dispatches on the live (classic) kind.
@@ -2706,7 +2691,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap() == Ok(()));
+        assert2::assert!(rx.await.unwrap() == Ok(()));
 
         // Classic Heartbeat for an unknown member on an empty group.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2723,7 +2708,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap() == codes::UNKNOWN_MEMBER_ID);
+        assert2::assert!(rx.await.unwrap() == codes::UNKNOWN_MEMBER_ID);
 
         // RemoveCommitted clears the entry.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2742,7 +2727,7 @@ mod tests {
             .send(GroupActorMessage::FetchCommitted { reply: tx })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().is_empty());
+        assert2::assert!(rx.await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2788,9 +2773,18 @@ mod tests {
             .send(GroupActorMessage::FetchCommitted { reply: tx })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == 7);
+        let committed = rx.await.unwrap();
+        let entry = committed.get(&("t".to_string(), 0)).unwrap();
+        assert2::assert!(
+            (
+                entry.offset,
+                entry.leader_epoch,
+                entry.metadata.as_str(),
+                entry.commit_timestamp_ms,
+            ) == (Offset(7), 0, "", 0)
+        );
         // Non-empty group cannot be deleted.
-        assert!(
+        assert2::assert!(
             coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty)
         );
     }
@@ -2804,11 +2798,11 @@ mod tests {
         // Consumer owns "c" → a classic get-or-create returns that same actor.
         let c_consumer = coord.get_or_create_consumer("c");
         let c_classic = coord.get_or_create_classic("c");
-        assert!(Arc::ptr_eq(&c_consumer, &c_classic));
+        assert2::assert!(Arc::ptr_eq(&c_consumer, &c_classic));
         // Classic owns "k" → a consumer get-or-create returns that same actor.
         let k_classic = coord.get_or_create_classic("k");
         let k_consumer = coord.get_or_create_consumer("k");
-        assert!(Arc::ptr_eq(&k_classic, &k_consumer));
+        assert2::assert!(Arc::ptr_eq(&k_classic, &k_consumer));
     }
 
     /// KIP-848 live migration: the tick must dispatch on the LIVE `group.kind`,
@@ -2867,7 +2861,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(parked, "actor should park on the session-expiry tick sleep");
+        assert2::assert!(parked);
 
         timeline.advance(SESSION_EXPIRY_TICK_INTERVAL);
 
@@ -2877,8 +2871,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert!(reparked, "actor should re-park after processing the tick");
-        assert!(!handle.tx.is_closed());
+        assert2::assert!(reparked);
+        assert2::assert!(!handle.tx.is_closed());
     }
 
     /// KIP-848 upgrade trigger: a `ConsumerGroupHeartbeat` for a *classic* group
@@ -2936,7 +2930,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == codes::NONE);
+        assert2::assert!(resp.error_code == codes::NONE);
 
         // Describe now reports 2 members: the hosted classic member and the new
         // native consumer member.
@@ -2950,9 +2944,9 @@ mod tests {
         // The hosted classic member must survive the upgrade, the new native
         // consumer member must be present, and the upgrade batch tombstoned
         // the classic k2 GroupMetadata record.
-        check!(describe.members.len() == 2);
-        check!(describe.members.iter().any(|m| m.is_classic));
-        check!(describe.members.iter().any(|m| !m.is_classic));
+        let mut member_kinds: Vec<bool> = describe.members.iter().map(|m| m.is_classic).collect();
+        member_kinds.sort_unstable();
+        check!(member_kinds == vec![false, true]);
         check!(log.has_classic_group_metadata_tombstone("g").await);
     }
 
@@ -3038,7 +3032,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == codes::NONE);
+        assert2::assert!(resp.error_code == codes::NONE);
 
         // The native heartbeat minted a transient consumer member to drive the
         // upgrade. Have it leave so the group hosts only the classic member(s)
@@ -3059,7 +3053,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().error_code == codes::NONE);
+        assert2::assert!(rx.await.unwrap().error_code == codes::NONE);
         handle
     }
 
@@ -3145,17 +3139,20 @@ mod tests {
 
         // 1. Heartbeat: the upgrade gave m-classic a target that differs from
         //    its (empty) last-synced assignment → it owes a re-sync.
-        assert!(
-            classic_heartbeat(&handle, "m-classic").await == codes::REBALANCE_IN_PROGRESS,
-            "post-upgrade heartbeat must signal a re-sync"
+        assert2::assert!(
+            classic_heartbeat(&handle, "m-classic").await == codes::REBALANCE_IN_PROGRESS
         );
 
         // 2. JoinGroup (rejoin of the existing member, unchanged subscription):
         //    success, server-assigned single-member view at group_epoch, self leader.
         let join = classic_join(&handle, "m-classic", "t").await;
-        check!(join.error_code == codes::NONE);
-        check!(join.leader.as_str() == "m-classic");
-        check!(join.member_id.as_str() == "m-classic");
+        check!(
+            (
+                join.error_code,
+                join.leader.as_str(),
+                join.member_id.as_str(),
+            ) == (codes::NONE, "m-classic", "m-classic")
+        );
         // Generation equals the group epoch (read it back from Describe).
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -3164,28 +3161,23 @@ mod tests {
             .await
             .unwrap();
         let describe = rx.await.unwrap();
-        assert!(join.generation_id == describe.group_epoch);
+        assert2::assert!(join.generation_id == describe.group_epoch);
 
         // 3. SyncGroup: returns the translated target assignment for "t".
         let sync = classic_sync(&handle, "m-classic", join.generation_id).await;
-        assert!(sync.error_code == codes::NONE);
-        assert!(sync.protocol_type.as_deref() == Some("consumer"));
+        assert2::assert!(
+            (sync.error_code, sync.protocol_type.as_deref()) == (codes::NONE, Some("consumer"))
+        );
         let asn = decode_assignment(&sync.assignment);
         let t_assign = asn
             .assigned_partitions
             .iter()
             .find(|tp| tp.topic == "t")
             .expect("assignment contains topic t");
-        assert!(
-            !t_assign.partitions.is_empty(),
-            "m-classic must own partitions of t"
-        );
+        assert2::assert!(!t_assign.partitions.is_empty());
 
         // 4. Heartbeat again: now in sync → NONE.
-        assert!(
-            classic_heartbeat(&handle, "m-classic").await == codes::NONE,
-            "after sync the member is in sync → NONE"
-        );
+        assert2::assert!(classic_heartbeat(&handle, "m-classic").await == codes::NONE);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3205,8 +3197,7 @@ mod tests {
 
         // A brand-new classic member m2 joins the already-upgraded group.
         let join2 = classic_join(&handle, "m2", "t").await;
-        assert!(join2.error_code == codes::NONE);
-        assert!(join2.leader == "m2");
+        assert2::assert!((join2.error_code, join2.leader.as_str()) == (codes::NONE, "m2"));
 
         // Both members re-sync at the (new) group epoch to pick up the
         // rebalanced two-way split.
@@ -3219,8 +3210,9 @@ mod tests {
         let epoch = rx.await.unwrap().group_epoch;
         let sync_c = classic_sync(&handle, "m-classic", epoch).await;
         let sync2 = classic_sync(&handle, "m2", epoch).await;
-        assert!(sync_c.error_code == codes::NONE);
-        assert!(sync2.error_code == codes::NONE);
+        for (_case, sync) in [("hosted classic", &sync_c), ("new classic", &sync2)] {
+            assert2::assert!(sync.error_code == codes::NONE);
+        }
 
         // Collect each member's partitions of "t".
         let parts = |s: &SyncResult| -> Vec<i32> {
@@ -3233,21 +3225,15 @@ mod tests {
         };
         let p_c = parts(&sync_c);
         let p_2 = parts(&sync2);
-        assert!(!p_2.is_empty(), "the new member must receive an assignment");
+        assert2::assert!(!p_2.is_empty());
 
         // Disjoint, and together cover {0, 1}.
         let set_c: std::collections::HashSet<i32> = p_c.iter().copied().collect();
         let set_2: std::collections::HashSet<i32> = p_2.iter().copied().collect();
-        assert!(
-            set_c.is_disjoint(&set_2),
-            "the two members must hold disjoint partitions"
-        );
+        assert2::assert!(set_c.is_disjoint(&set_2));
         let mut union: Vec<i32> = set_c.union(&set_2).copied().collect();
         union.sort_unstable();
-        assert!(
-            union == vec![0, 1],
-            "the union of partitions must be {{0, 1}}"
-        );
+        assert2::assert!(union == vec![0, 1]);
     }
 
     /// KIP-848 DOWNGRADE trigger: a consumer group that hosts a classic member
@@ -3305,7 +3291,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert!(resp.error_code == codes::NONE);
+        assert2::assert!(resp.error_code == codes::NONE);
         let native_id = resp.member_id.expect("native member id");
 
         // The native consumer member leaves (member_epoch == -1). It was the
@@ -3325,7 +3311,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert!(rx.await.unwrap().error_code == codes::NONE);
+        assert2::assert!(rx.await.unwrap().error_code == codes::NONE);
 
         // The group is now classic again. `describe_group` only returns
         // classic groups; it must surface "g" with the hosted classic member
@@ -3340,8 +3326,9 @@ mod tests {
         // record (which would otherwise survive log compaction and resurrect
         // the group as next-gen), and wrote a classic k2 GroupMetadata
         // (non-tombstone) for "g".
-        check!(snap.members.len() == 1);
-        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
+        let mut member_ids: Vec<&str> = snap.members.iter().map(|m| m.member_id.as_str()).collect();
+        member_ids.sort_unstable();
+        check!(member_ids == vec!["m-classic"]);
         check!(log.has_next_gen_group_metadata_tombstone("g").await);
         check!(log.has_next_gen_target_metadata_tombstone("g").await);
         check!(log_has_classic_group_metadata_write(&log, "g").await);
@@ -3377,16 +3364,18 @@ mod tests {
         // an assigned hosted-classic member has non-empty assignment bytes.
         // generation_id mirrors the group epoch (the next-gen analogue of a
         // classic group's generation) and must have advanced off 0.
-        check!(snap.group_id.as_str() == "g");
-        check!(!snap.members.is_empty());
-        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
-        check!(snap.protocol_type.as_deref() == Some("consumer"));
         check!(
-            snap.members
-                .iter()
-                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty())
+            (
+                snap.group_id.as_str(),
+                snap.members.is_empty(),
+                snap.members.iter().any(|m| m.member_id == "m-classic"),
+                snap.protocol_type.as_deref(),
+                snap.members
+                    .iter()
+                    .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
+                snap.generation_id >= 1,
+            ) == ("g", false, true, Some("consumer"), true, true)
         );
-        check!(snap.generation_id >= 1);
 
         // `list_groups` produces the wire `group_type="classic"` rows; an
         // upgraded (consumer-kind) group is NOT a classic row, so it does not
@@ -3394,14 +3383,8 @@ mod tests {
         // `consumer_group_ids()` tagged `group_type="consumer"` (so it is neither
         // double-counted nor mislabeled). Assert both halves of that contract.
         let listed = coord.list_groups().await;
-        assert!(
-            !listed.iter().any(|s| s.group_id == "g"),
-            "an upgraded consumer group must not be reported as a classic row"
-        );
-        assert!(
-            coord.consumer_group_ids().contains(&"g".to_string()),
-            "the upgraded consumer group must be listed for the wire `consumer` pass"
-        );
+        assert2::assert!(!listed.iter().any(|s| s.group_id == "g"));
+        assert2::assert!(coord.consumer_group_ids().contains(&"g".to_string()));
     }
 
     /// `true` iff some appended record WRITES (non-null value) a classic k2
@@ -3584,7 +3567,7 @@ mod tests {
         // A native consumer "c1" heartbeats → in-place UPGRADE; the group is now
         // consumer-kind and hosts both m1 (classic facade) and c1.
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(up.error_code == codes::NONE);
+        assert2::assert!(up.error_code == codes::NONE);
         let c1 = up.member_id.expect("native member id");
         let describe = {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -3595,25 +3578,19 @@ mod tests {
                 .unwrap();
             rx.await.unwrap()
         };
-        assert!(
-            describe.members.len() == 2,
-            "upgraded group hosts both m1 and c1"
-        );
+        assert2::assert!(describe.members.len() == 2);
 
         // c1 leaves (member_epoch -1). It was the only native member → DOWNGRADE
         // back to classic.
         let leave = consumer_heartbeat(&handle, &c1, -1, None).await;
-        assert!(leave.error_code == codes::NONE);
+        assert2::assert!(leave.error_code == codes::NONE);
 
         // The group is classic again, with m1 restored and still assigned.
         let snap = coord
             .describe_group("g")
             .await
             .expect("group downgraded back to classic");
-        assert!(
-            snap.members.iter().any(|m| m.member_id == "m1"),
-            "m1 must survive the upgrade→downgrade round trip"
-        );
+        assert2::assert!(snap.members.iter().any(|m| m.member_id == "m1"));
         let m1 = snap
             .members
             .iter()
@@ -3640,10 +3617,7 @@ mod tests {
             .expect("decoded assignment must contain topic t");
         let mut parts = tp.partitions.clone();
         parts.sort_unstable();
-        assert!(
-            parts == vec![0, 1],
-            "m1 (sole surviving member) must own BOTH partitions after the downgrade re-reconcile; got {parts:?}"
-        );
+        assert2::assert!(parts == vec![0, 1]);
     }
 
     /// Scenario 2: KIP-345 static identity must survive both flips. A classic
@@ -3661,10 +3635,10 @@ mod tests {
         // Upgrade via a native consumer heartbeat, then downgrade by having that
         // native member leave.
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(up.error_code == codes::NONE);
+        assert2::assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert!(leave.error_code == codes::NONE);
+        assert2::assert!(leave.error_code == codes::NONE);
 
         // The group is classic again; the restored member must still carry the
         // static identity (convert_classic_to_consumer maps instance_id and
@@ -3675,10 +3649,7 @@ mod tests {
             .iter()
             .find(|m| m.member_id == "m1")
             .expect("m1 restored as a classic member");
-        assert!(
-            m1.group_instance_id.as_deref() == Some("inst-a"),
-            "the static identity must survive both flips"
-        );
+        assert2::assert!(m1.group_instance_id.as_deref() == Some("inst-a"));
     }
 
     /// Scenario 3: under `Disabled` policy a classic group stays classic — a
@@ -3693,22 +3664,13 @@ mod tests {
 
         // A native consumer heartbeat must be rejected (no upgrade is allowed).
         let resp = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(
-            resp.error_code != codes::NONE,
-            "Disabled policy must reject the upgrade heartbeat"
-        );
-        assert!(
-            resp.error_code == codes::GROUP_ID_NOT_FOUND,
-            "an un-upgradable classic group surfaces as GROUP_ID_NOT_FOUND"
-        );
+        assert2::assert!(resp.error_code != codes::NONE);
+        assert2::assert!(resp.error_code == codes::GROUP_ID_NOT_FOUND);
 
         // The group is untouched: still classic, still hosting m1.
         let view = classic_inspect(&handle).await;
-        assert!(
-            view.members.iter().any(|m| m.member_id == "m1"),
-            "the group must remain classic with m1 intact"
-        );
-        assert!(handle.kind == GroupKindTag::Classic);
+        assert2::assert!(view.members.iter().any(|m| m.member_id == "m1"));
+        assert2::assert!(handle.kind == GroupKindTag::Classic);
     }
 
     /// Scenario 4: committed offsets live on the kind-agnostic `Group` container
@@ -3745,21 +3707,19 @@ mod tests {
 
         // Upgrade → the offset must still be readable.
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(up.error_code == codes::NONE);
+        assert2::assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let after_upgrade = fetch_committed(&handle).await;
-        assert!(
-            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99)),
-            "committed offset must survive the upgrade"
+        assert2::assert!(
+            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99))
         );
 
         // Downgrade → the offset must STILL be there.
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert!(leave.error_code == codes::NONE);
+        assert2::assert!(leave.error_code == codes::NONE);
         let after_downgrade = fetch_committed(&handle).await;
-        assert!(
-            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99)),
-            "committed offset must survive the downgrade too"
+        assert2::assert!(
+            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99))
         );
     }
 
@@ -3786,18 +3746,15 @@ mod tests {
         // SPAWN the actor as a consumer group: the first RPC is a native
         // ConsumerGroupHeartbeat, so the handle's spawn-time `kind == Consumer`.
         let handle = coord.get_or_create_consumer("g");
-        assert!(
-            handle.kind == GroupKindTag::Consumer,
-            "the group must be spawned consumer-kind"
-        );
+        assert2::assert!(handle.kind == GroupKindTag::Consumer);
 
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(up.error_code == codes::NONE);
+        assert2::assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
 
         // A CLASSIC member joins the (consumer-kind) group as a hosted member.
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert!(join.error_code == codes::NONE);
+        assert2::assert!(join.error_code == codes::NONE);
 
         // The native consumer member leaves (member_epoch -1). It was the only
         // native member and a hosted classic member remains → DOWNGRADE in
@@ -3807,7 +3764,7 @@ mod tests {
         // more message (the `classic_inspect` below) to be sure the in-place
         // flip has completed before validating.
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert!(leave.error_code == codes::NONE);
+        assert2::assert!(leave.error_code == codes::NONE);
 
         // The hosted classic member was re-expressed as a classic member. Read
         // the restored classic generation it must commit against. This
@@ -3817,14 +3774,8 @@ mod tests {
         let view = classic_inspect(&handle).await;
         // The handle's spawn-time `kind` is unchanged (and stale) — validation
         // must NOT consult it.
-        assert!(
-            handle.kind == GroupKindTag::Consumer,
-            "spawn-time kind unchanged"
-        );
-        assert!(
-            view.members.iter().any(|m| m.member_id == "m-classic"),
-            "the hosted classic member must survive the downgrade"
-        );
+        assert2::assert!(handle.kind == GroupKindTag::Consumer);
+        assert2::assert!(view.members.iter().any(|m| m.member_id == "m-classic"));
         let generation = view.generation_id;
 
         // Prove the fix at the routing boundary `offset_commit::validate` uses:
@@ -3844,11 +3795,7 @@ mod tests {
             .await
             .unwrap();
         let result = rx.await.unwrap();
-        assert!(
-            result == Ok(()),
-            "ValidateCommit must dispatch on the live (classic) kind and accept \
-             the downgraded member (got {result:?})"
-        );
+        assert2::assert!(result == Ok(()));
     }
 
     /// Regression (user-requested): a group that downgraded in place becomes
@@ -3867,14 +3814,14 @@ mod tests {
 
         // SPAWN consumer-kind; host a classic member; downgrade.
         let handle = coord.get_or_create_consumer("g");
-        assert!(handle.kind == GroupKindTag::Consumer);
+        assert2::assert!(handle.kind == GroupKindTag::Consumer);
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(up.error_code == codes::NONE);
+        assert2::assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert!(join.error_code == codes::NONE);
+        assert2::assert!(join.error_code == codes::NONE);
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert!(leave.error_code == codes::NONE);
+        assert2::assert!(leave.error_code == codes::NONE);
 
         // Barrier: only a classic-kind group answers `ClassicInspect`, so this
         // round-trip guarantees the downgrade completed. The lone hosted classic
@@ -3895,16 +3842,10 @@ mod tests {
         // Drain the last hosted classic member so the group is empty, then it
         // must be deletable.
         let resp = classic_leave(&handle, "m-classic").await;
-        assert!(!resp.is_empty());
+        assert2::assert!(!resp.is_empty());
         let view = classic_inspect(&handle).await;
-        assert!(
-            view.members.is_empty(),
-            "the group must be empty after the classic member leaves"
-        );
-        assert!(
-            coord.delete_group("g").await == Ok(()),
-            "an empty downgraded group must be deletable"
-        );
+        assert2::assert!(view.members.is_empty());
+        assert2::assert!(coord.delete_group("g").await == Ok(()));
     }
 
     /// Regression (user-requested): an UPGRADED group runs the consumer epoch
@@ -3925,15 +3866,15 @@ mod tests {
         // a native consumer heartbeat in. The handle's spawn-time `kind` stays
         // the stale `Classic`.
         let handle = seed_classic_member(&coord, "m1", "t", None);
-        assert!(handle.kind == GroupKindTag::Classic);
+        assert2::assert!(handle.kind == GroupKindTag::Classic);
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert!(up.error_code == codes::NONE);
+        assert2::assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let current_epoch = up.member_epoch;
 
         // The handle's spawn-time kind is the stale `Classic`; validation must
         // not consult it — it must run the consumer epoch fence.
-        assert!(handle.kind == GroupKindTag::Classic);
+        assert2::assert!(handle.kind == GroupKindTag::Classic);
 
         let cases = [
             // STALE epoch (< current) → STALE_MEMBER_EPOCH.
@@ -3943,12 +3884,9 @@ mod tests {
             // The current epoch is accepted.
             (current_epoch, Ok(()), "current"),
         ];
-        for (epoch, want, label) in cases {
+        for (epoch, want, _label) in cases {
             let got = validate_commit(&handle, &native, epoch).await;
-            assert!(
-                got == want,
-                "an upgraded group must run the consumer epoch fence ({label}, epoch {epoch}); got {got:?}"
-            );
+            assert2::assert!(got == want);
         }
     }
 
@@ -3976,9 +3914,13 @@ mod tests {
         let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
         // First join succeeds, advances to group epoch 1, targets all
         // partitions of "t", and must persist records.
-        check!(step.response.error_code == 0);
-        check!(step.response.member_epoch == 1);
-        check!(group.target.per_member["m1"][&topic_id].clone() == vec![0, 1]);
-        check!(!step.pending.is_empty());
+        check!(
+            (
+                step.response.error_code,
+                step.response.member_epoch,
+                &group.target.per_member["m1"][&topic_id],
+                step.pending.is_empty(),
+            ) == (codes::NONE, 1, &vec![0, 1], false)
+        );
     }
 }

@@ -235,10 +235,7 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
         }
         tokio::time::sleep(Duration::from_millis(500)).await;
     }
-    assert!(
-        ready,
-        "replicas did not reach a stable split + converged routing"
-    );
+    assert2::assert!(ready);
 
     // Pick a key owned by B (so submitting through A must forward to B).
     let key = (0..1000)
@@ -246,11 +243,8 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
         .find(|k| gw_b.store.owns(partition_for(k, N)))
         .expect("a key owned by B");
     let p = partition_for(&key, N);
-    assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
-    assert_eq!(
-        gw_a.membership.owner_of(p).as_deref(),
-        Some(gw_b.addr.as_str())
-    );
+    assert2::assert!(gw_b.store.owns(p) && !gw_a.store.owns(p));
+    assert2::assert!(gw_a.membership.owner_of(p).as_deref() == Some(gw_b.addr.as_str()));
 
     let mk = || GatewayRecord {
         topic: USER_TOPIC.into(),
@@ -273,15 +267,16 @@ async fn keyed_record_forwards_to_owner_and_dedups() {
 
     // Submit through A → forwarded to B → produced (not deduplicated).
     let first = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(!first.deduplicated, "first forward should produce");
 
     // Same key through A again → forwarded to B → B's map hit → deduplicated.
     let second = gw_a.state.produce.produce(mk(), &anon).await.unwrap();
-    assert!(second.deduplicated, "second forward should dedup");
-    assert_eq!(first.offset, second.offset);
+    assert2::assert!(!first.deduplicated);
+    assert2::assert!(second.deduplicated);
+    assert2::assert!(first.offset == first.offset);
+    assert2::assert!(second.offset == first.offset);
 
     // Exactly one record with that value landed in the user topic.
-    assert_eq!(count_in_user_topic(&bootstrap, &key).await, 1);
+    assert2::assert!(count_in_user_topic(&bootstrap, &key).await == 1);
 
     gw_a.token.cancel();
     gw_b.token.cancel();
@@ -328,5 +323,5 @@ async fn no_known_owner_is_unavailable() {
         groups: vec![],
     };
     let err = produce.produce(rec, &anon).await.unwrap_err();
-    assert!(matches!(err, GatewayError::Unavailable));
+    assert2::assert!(matches!(err, GatewayError::Unavailable));
 }

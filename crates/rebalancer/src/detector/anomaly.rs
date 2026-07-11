@@ -58,7 +58,6 @@ pub struct Anomaly {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -71,7 +70,7 @@ mod tests {
             AnomalyKind::SlowBroker,
         ];
         let strs: Vec<&'static str> = kinds.iter().map(|k| k.as_str()).collect();
-        assert!(
+        assert2::assert!(
             strs == vec![
                 "BrokerDeath",
                 "UnderReplicatedPartitions",
@@ -82,7 +81,7 @@ mod tests {
         let mut sorted = strs.clone();
         sorted.sort_unstable();
         sorted.dedup();
-        assert!(sorted.len() == 4);
+        assert2::assert!(sorted.len() == 4);
     }
 
     #[test]
@@ -102,7 +101,7 @@ mod tests {
         for k in cases {
             let json = serde_json::to_string(&k).expect("serialize");
             let back: AnomalyKey = serde_json::from_str(&json).expect("deserialize");
-            assert!(k == back);
+            assert2::assert!(k == back);
         }
     }
 
@@ -120,7 +119,6 @@ mod tests {
             mute_until_ms: None,
             details: "broker 1 down".into(),
         };
-        assert!(a.resolved_at_ms == None);
-        assert!(a.mute_until_ms == None);
+        assert2::assert!((a.resolved_at_ms, a.mute_until_ms) == (None, None));
     }
 }

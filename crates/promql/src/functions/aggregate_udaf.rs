@@ -190,7 +190,6 @@ pub fn register_aggregate_udafs(ctx: &SessionContext) {
 #[cfg(test)]
 mod tests {
     use arrow::array::{BooleanArray, Float64Array};
-    use assert2::assert;
     use datafusion::execution::FunctionRegistry;
 
     use super::*;
@@ -226,10 +225,7 @@ mod tests {
             (Extremum::Min, &[f64::NAN, 5.0][..], 5.0),
             (Extremum::Max, &[f64::NAN, 5.0][..], 5.0),
         ] {
-            assert!(
-                bits_eq(float(run(extremum, samples)), want),
-                "case {extremum:?} over {samples:?}"
-            );
+            assert2::assert!(bits_eq(float(run(extremum, samples)), want));
         }
     }
 
@@ -242,16 +238,15 @@ mod tests {
             (Extremum::Min, &[f64::NAN][..]),
             (Extremum::Max, &[f64::NAN][..]),
         ] {
-            assert!(
-                float(run(extremum, samples)).is_nan(),
-                "case {extremum:?} over {samples:?}"
-            );
+            assert2::assert!(float(run(extremum, samples)).is_nan());
         }
     }
 
     #[test]
     fn handles_infinities() {
-        assert!(float(run(Extremum::Min, &[f64::INFINITY, 1.0, f64::NEG_INFINITY])).is_infinite());
+        assert2::assert!(
+            float(run(Extremum::Min, &[f64::INFINITY, 1.0, f64::NEG_INFINITY])).is_infinite()
+        );
         for (extremum, samples, want) in [
             (
                 Extremum::Min,
@@ -265,10 +260,7 @@ mod tests {
                 f64::NEG_INFINITY,
             ),
         ] {
-            assert!(
-                bits_eq(float(run(extremum, samples)), want),
-                "case {extremum:?} over {samples:?}"
-            );
+            assert2::assert!(bits_eq(float(run(extremum, samples)), want));
         }
     }
 
@@ -282,10 +274,7 @@ mod tests {
             (Extremum::Max, [0.0, -0.0], 0.0),
             (Extremum::Max, [-0.0, 0.0], -0.0),
         ] {
-            assert!(
-                bits_eq(float(run(extremum, &samples)), want),
-                "case {extremum:?} over {samples:?}"
-            );
+            assert2::assert!(bits_eq(float(run(extremum, &samples)), want));
         }
     }
 
@@ -294,14 +283,14 @@ mod tests {
         let mut acc = PromExtremumAccumulator::new(Extremum::Min);
         let empty: ArrayRef = Arc::new(Float64Array::from(Vec::<f64>::new()));
         acc.update_batch(&[empty]).unwrap();
-        assert!(acc.evaluate().unwrap() == ScalarValue::Float64(None));
+        assert2::assert!(acc.evaluate().unwrap() == ScalarValue::Float64(None));
     }
 
     #[test]
     fn accumulator_size_reports_struct_size() {
         let acc = PromExtremumAccumulator::new(Extremum::Min);
-        assert!(acc.size() == std::mem::size_of_val(&acc));
-        assert!(acc.size() > 1);
+        assert2::assert!(acc.size() == std::mem::size_of_val(&acc));
+        assert2::assert!(acc.size() > 1);
     }
 
     #[test]
@@ -342,7 +331,7 @@ mod tests {
 
         let mut merged = PromExtremumAccumulator::new(Extremum::Min);
         merged.merge_batch(&[running, seen]).unwrap();
-        assert!(bits_eq(float(merged.evaluate().unwrap()), 2.0));
+        assert2::assert!(bits_eq(float(merged.evaluate().unwrap()), 2.0));
     }
 
     #[test]
@@ -352,7 +341,7 @@ mod tests {
 
         let mut merged = PromExtremumAccumulator::new(Extremum::Min);
         merged.merge_batch(&[running, seen]).unwrap();
-        assert!(merged.evaluate().unwrap() == ScalarValue::Float64(None));
+        assert2::assert!(merged.evaluate().unwrap() == ScalarValue::Float64(None));
     }
 
     #[test]
@@ -371,7 +360,7 @@ mod tests {
         }])) as ArrayRef;
         let mut merged = PromExtremumAccumulator::new(Extremum::Max);
         merged.merge_batch(&[running, seen]).unwrap();
-        assert!(float(merged.evaluate().unwrap()).is_nan());
+        assert2::assert!(float(merged.evaluate().unwrap()).is_nan());
     }
 
     #[test]
@@ -379,7 +368,7 @@ mod tests {
         let ctx = SessionContext::new();
         register_aggregate_udafs(&ctx);
 
-        assert!(ctx.udaf(PROM_MIN_UDAF_NAME).is_ok());
-        assert!(ctx.udaf(PROM_MAX_UDAF_NAME).is_ok());
+        assert2::assert!(ctx.udaf(PROM_MIN_UDAF_NAME).is_ok());
+        assert2::assert!(ctx.udaf(PROM_MAX_UDAF_NAME).is_ok());
     }
 }

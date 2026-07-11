@@ -16,7 +16,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_operator::{
     controller::kafka::reconcile,
     crd::{
@@ -162,8 +162,8 @@ fn assert_listeners_invalid_with_reason(
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    check!(valid["status"] == "False", "body = {body}");
-    check!(valid["reason"] == expected_reason, "body = {body}");
+    assert2::assert!(valid["status"].as_str() == Some("False"));
+    assert2::assert!(valid["reason"].as_str() == Some(expected_reason));
 
     // The ConfigMap PATCH must be absent on the validation-fail path.
     check!(
@@ -238,7 +238,7 @@ async fn oauth_listener_renders_oauthbearer_toml_block() {
         "jwks_refresh_interval_ms = 300000",
         "allowable_clock_skew_ms = 30000",
     ] {
-        assert!(toml.contains(needle), "missing {needle:?} in TOML: {toml}");
+        assert2::assert!(toml.contains(needle));
     }
 }
 
@@ -262,11 +262,8 @@ async fn oauth_listener_appends_oauthbearer_to_sasl_mechanisms() {
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c2");
 
-    assert!(
-        toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"),
-        "TOML: {toml}"
-    );
-    assert!(toml.contains("protocol = \"SaslSsl\""), "TOML: {toml}");
+    assert2::assert!(toml.contains("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }"));
+    assert2::assert!(toml.contains("protocol = \"SaslSsl\""));
 }
 
 // ── test 3: enable_oauth_bearer=false keeps the block, drops the mechanism ──
@@ -289,8 +286,8 @@ async fn oauth_listener_with_enable_false_omits_mechanism_but_keeps_config_block
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c3");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(!toml.contains("sasl_config"), "TOML: {toml}");
+    assert2::assert!(toml.contains("[oauthbearer]"));
+    assert2::assert!(!toml.contains("sasl_config"));
 }
 
 // ── test 4: oauth without transport TLS → ListenersValid=False ──────────────
@@ -369,83 +366,67 @@ async fn oauth_listener_with_http_jwks_uri_reconciles_but_emits_weak_auth_event(
         });
     let body: serde_json::Value =
         serde_json::from_slice(event_post.body()).expect("event body is JSON");
-    assert!(body["reason"] == "WeakAuth", "event body = {body}");
-    assert!(body["type"] == "Warning", "event body = {body}");
+    assert2::assert!(body["reason"].as_str() == Some("WeakAuth"));
+    assert2::assert!(body["type"].as_str() == Some("Warning"));
     let msg = body["message"]
         .as_str()
         .unwrap_or_else(|| panic!("event message missing; body = {body}"));
-    assert!(
-        msg.contains("http://") && msg.contains("oauth"),
-        "WeakAuth message must mention http:// + listener name; got: {msg}"
-    );
+    assert2::assert!(msg.contains("http://") && msg.contains("oauth"));
 
     // Reconcile must still succeed — Ready=True path. Verify the ConfigMap
     // PATCH was issued (proves we made it past validation).
     let _ = extract_broker0_toml(&observed, "c5");
 }
 
-// ── test 6: ftp:// JWKS rejected ────────────────────────────────────────────
-
-/// Non-http(s) JWKS URI schemes are rejected with reason
-/// `ListenerOauthInvalidUri`. Duplicates T3's
-/// `validate_listeners_rejects_oauth_with_ftp_jwks_uri` at the unit
-/// level; this asserts the status condition surface.
 #[tokio::test]
-async fn oauth_listener_with_ftp_jwks_uri_rejected() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns6", "c6", 1, 1)];
-    let rules = rules_for_invalid_listeners("c6", "ns6", &items);
-    let (ctx, state) = build_ctx("ns6", rules);
+async fn invalid_oauth_listener_reconcile_cases() {
+    let mut ftp_jwks = oauth_cfg_minimal();
+    ftp_jwks.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
+    let mut empty_issuer = oauth_cfg_minimal();
+    empty_issuer.valid_issuer_uri = String::new();
+    let mut short_refresh = oauth_cfg_minimal();
+    short_refresh.jwks_refresh_seconds = Some(29);
 
-    let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_endpoint_uri = Some("ftp://issuer.example.com/jwks".into());
-    let kafka =
-        kafka_cr_with_listeners("c6", "ns6", vec![oauth_listener("oauth", 9095, true, cfg)]);
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
+    for (case, namespace, cluster, config, expected_reason) in [
+        (
+            "non-HTTP JWKS URI",
+            "ns6",
+            "c6",
+            ftp_jwks,
+            "ListenerOauthInvalidUri",
+        ),
+        (
+            "empty issuer URI",
+            "ns7",
+            "c7",
+            empty_issuer,
+            "ListenerOauthInvalidUri",
+        ),
+        (
+            "JWKS refresh below 30 seconds",
+            "ns8",
+            "c8",
+            short_refresh,
+            "ListenerOauthInvalidRefresh",
+        ),
+    ] {
+        let items = vec![shared::fake_pool_list_item(
+            "brokers", namespace, cluster, 1, 1,
+        )];
+        let rules = rules_for_invalid_listeners(cluster, namespace, &items);
+        let (ctx, state) = build_ctx(namespace, rules);
+        let kafka = kafka_cr_with_listeners(
+            cluster,
+            namespace,
+            vec![oauth_listener("oauth", 9095, true, config)],
+        );
+        reconcile(Arc::new(kafka), ctx)
+            .await
+            .unwrap_or_else(|error| panic!("{case}: reconcile failed: {error}"));
 
-    let observed = state.take_observed();
-    assert_listeners_invalid_with_reason(&observed, "c6", "ListenerOauthInvalidUri");
-}
-
-// ── test 7: empty issuer URI rejected ───────────────────────────────────────
-
-/// An empty `validIssuerUri` is rejected with reason
-/// `ListenerOauthInvalidUri`. Duplicates T3's
-/// `validate_listeners_rejects_oauth_with_empty_issuer_uri`.
-#[tokio::test]
-async fn oauth_listener_with_empty_issuer_uri_rejected() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns7", "c7", 1, 1)];
-    let rules = rules_for_invalid_listeners("c7", "ns7", &items);
-    let (ctx, state) = build_ctx("ns7", rules);
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.valid_issuer_uri = String::new();
-    let kafka =
-        kafka_cr_with_listeners("c7", "ns7", vec![oauth_listener("oauth", 9095, true, cfg)]);
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_listeners_invalid_with_reason(&observed, "c7", "ListenerOauthInvalidUri");
-}
-
-// ── test 8: jwks_refresh < 30 rejected ──────────────────────────────────────
-
-/// `jwksRefreshSeconds: 29` is rejected with reason
-/// `ListenerOauthInvalidRefresh`. Duplicates T3's
-/// `validate_listeners_rejects_oauth_with_short_jwks_refresh`.
-#[tokio::test]
-async fn oauth_listener_with_jwks_refresh_below_30_rejected() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns8", "c8", 1, 1)];
-    let rules = rules_for_invalid_listeners("c8", "ns8", &items);
-    let (ctx, state) = build_ctx("ns8", rules);
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_refresh_seconds = Some(29);
-    let kafka =
-        kafka_cr_with_listeners("c8", "ns8", vec![oauth_listener("oauth", 9095, true, cfg)]);
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    assert_listeners_invalid_with_reason(&observed, "c8", "ListenerOauthInvalidRefresh");
+        let observed = state.take_observed();
+        assert_listeners_invalid_with_reason(&observed, cluster, expected_reason);
+    }
 }
 
 // No test for the legacy
@@ -480,16 +461,12 @@ async fn two_oauth_listeners_with_identical_config_reconcile_clean() {
     let toml = extract_broker0_toml(&observed, "c10");
 
     // Exactly one [oauthbearer] block.
-    assert!(
-        toml.matches("[oauthbearer]").count() == 1,
-        "expected exactly one [oauthbearer] block; TOML: {toml}"
-    );
+    assert2::assert!(toml.matches("[oauthbearer]").count() == 1);
     // Both listeners advertise OAUTHBEARER.
-    assert!(
+    assert2::assert!(
         toml.matches("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }")
             .count()
-            == 2,
-        "both listeners must advertise OAUTHBEARER; TOML: {toml}"
+            == 2
     );
 
     // Ready=True wiring.
@@ -505,7 +482,7 @@ async fn two_oauth_listeners_with_identical_config_reconcile_clean() {
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
+    assert2::assert!(valid["status"] == "True");
 }
 
 // ── test 11: two oauth listeners differing only in enable_oauth_bearer ──────
@@ -537,16 +514,12 @@ async fn two_oauth_listeners_differing_only_in_enable_oauth_bearer_reconcile_cle
     let toml = extract_broker0_toml(&observed, "c11");
 
     // Single broker-global [oauthbearer] block.
-    assert!(
-        toml.matches("[oauthbearer]").count() == 1,
-        "expected exactly one [oauthbearer] block; TOML: {toml}"
-    );
+    assert2::assert!(toml.matches("[oauthbearer]").count() == 1);
     // Only the enable=true listener advertises the mechanism.
-    assert!(
+    assert2::assert!(
         toml.matches("sasl_config = { enabled_mechanisms = [\"OAUTHBEARER\"] }")
             .count()
-            == 1,
-        "only the enable=true listener must advertise OAUTHBEARER; TOML: {toml}"
+            == 1
     );
 
     // Ready=True wiring.
@@ -562,7 +535,7 @@ async fn two_oauth_listeners_differing_only_in_enable_oauth_bearer_reconcile_cle
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
+    assert2::assert!(valid["status"] == "True");
 }
 
 // ── test 12: divergent oauth configs rejected with ConflictingOAuthConfig ───
@@ -737,17 +710,11 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
     let mgd_bytes = base64::engine::general_purpose::STANDARD
         .decode(mgd_b64)
         .expect("managed Secret ca.crt is base64");
-    assert!(
-        mgd_bytes == pem.to_vec(),
-        "managed Secret bundle must match source PEM bytes"
-    );
+    assert2::assert!(mgd_bytes == pem.to_vec());
 
     // (2) ConfigMap render contains the idp_tls_trust pointer.
     let toml = extract_broker0_toml(&observed, "c14");
-    assert!(
-        toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""),
-        "broker-0.toml must reference the mounted trust bundle; TOML: {toml}"
-    );
+    assert2::assert!(toml.contains("idp_tls_trust = \"/etc/crabka/oauth-jwks-trust/ca.crt\""));
 
     // (3) ListenersValid=True on the status PATCH.
     let status_patch = observed
@@ -762,7 +729,7 @@ async fn oauth_listener_with_tls_trusted_certificates_reconciles_renders_idp_tls
         .iter()
         .find(|c| c["type"] == "ListenersValid")
         .unwrap_or_else(|| panic!("ListenersValid present; body = {body}"));
-    assert!(valid["status"] == "True", "body = {body}");
+    assert2::assert!(valid["status"] == "True");
 }
 
 // ── test 15: divergent access_token_is_jwt rejected with ConflictingOAuthConfig
@@ -861,11 +828,8 @@ async fn oauth_listener_with_max_seconds_without_reauthentication_renders_broker
     let observed = state.take_observed();
     let toml = extract_broker0_toml(&observed, "c16");
 
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("max_session_lifetime_seconds = 300"),
-        "expected rendered broker TOML to include max_session_lifetime_seconds = 300;\nTOML: {toml}"
-    );
+    assert2::assert!(toml.contains("[oauthbearer]"));
+    assert2::assert!(toml.contains("max_session_lifetime_seconds = 300"));
 }
 
 // ── test 17: divergent maxSecondsWithoutReauthentication → ConflictingOAuthConfig
@@ -910,58 +874,87 @@ async fn two_oauth_listeners_with_divergent_max_seconds_without_reauthentication
 /// TOML multi-line literal string (triple-single-quoted so no escape
 /// processing collides with the `'` chars inside the path predicate).
 #[tokio::test]
-async fn oauth_listener_with_custom_claim_check_expression_renders_broker_toml_key() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns18", "c18", 1, 1)];
-    let (ctx, state) = build_ctx("ns18", happy_path_rules("c18", "ns18", &items));
-
+async fn oauth_optional_fields_render_broker_toml_cases() {
     let mut cfg = oauth_cfg_minimal();
     cfg.custom_claim_check = Some("$.scope[?@ == 'kafka.write']".into());
-    let kafka = kafka_cr_with_listeners(
-        "c18",
-        "ns18",
-        vec![oauth_listener("oauth", 9095, true, cfg)],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
+    let mut valid_type = oauth_cfg_minimal();
+    valid_type.valid_token_type = Some("JWT".into());
+    let mut fallback = oauth_cfg_minimal();
+    fallback.fallback_user_name_claim = Some("client_id".into());
+    fallback.fallback_user_name_prefix = Some("service-account-".into());
+    let mut groups = oauth_cfg_minimal();
+    groups.groups_claim = Some("$.realm_access.roles[*]".into());
+    groups.groups_claim_delimiter = Some(",".into());
+    let mut jwks = oauth_cfg_minimal();
+    jwks.jwks_min_refresh_pause_seconds = Some(2);
+    jwks.jwks_expiry_seconds = Some(3600);
+    jwks.jwks_ignore_key_use = Some(true);
+    for (_name, namespace, cluster, cfg, expected_fragments) in [
+        (
+            "custom claim check",
+            "ns18",
+            "c18",
+            cfg,
+            vec!["custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"],
+        ),
+        (
+            "valid token type",
+            "ns19",
+            "c19",
+            valid_type,
+            vec!["valid_token_type = \"JWT\""],
+        ),
+        (
+            "fallback username mapping",
+            "ns21",
+            "c21",
+            fallback,
+            vec![
+                "fallback_user_name_claim = \"client_id\"",
+                "fallback_user_name_prefix = \"service-account-\"",
+            ],
+        ),
+        (
+            "groups mapping",
+            "ns22",
+            "c22",
+            groups,
+            vec![
+                "groups_claim = '''$.realm_access.roles[*]'''",
+                "groups_claim_delimiter = \",\"",
+            ],
+        ),
+        (
+            "JWKS refresh policy",
+            "ns23",
+            "c23",
+            jwks,
+            vec![
+                "jwks_min_refresh_pause_seconds = 2",
+                "jwks_expiry_seconds = 3600",
+                "jwks_ignore_key_use = true",
+            ],
+        ),
+    ] {
+        let items = vec![shared::fake_pool_list_item(
+            "brokers", namespace, cluster, 1, 1,
+        )];
+        let (ctx, state) = build_ctx(namespace, happy_path_rules(cluster, namespace, &items));
+        let kafka = kafka_cr_with_listeners(
+            cluster,
+            namespace,
+            vec![oauth_listener("oauth", 9095, true, cfg)],
+        );
+        reconcile(Arc::new(kafka), ctx).await.unwrap();
 
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c18");
-
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("custom_claim_check = '''$.scope[?@ == 'kafka.write']'''"),
-        "expected custom_claim_check render; got:\n{toml}"
-    );
-}
-
-// ── validTokenType renders to broker TOML ─────────────────────────────────
-
-/// An OAuth listener with `validTokenType: JWT` reconciles
-/// cleanly (JWT-mode is the only mode that accepts the field) and the
-/// rendered broker-config ConfigMap embeds the value under
-/// `[oauthbearer].valid_token_type` as a basic TOML string. The broker
-/// JWT validators enforce the `typ` header check at token-verify time.
-#[tokio::test]
-async fn oauth_listener_with_valid_token_type_renders_broker_toml_key() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns19", "c19", 1, 1)];
-    let (ctx, state) = build_ctx("ns19", happy_path_rules("c19", "ns19", &items));
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.valid_token_type = Some("JWT".into());
-    let kafka = kafka_cr_with_listeners(
-        "c19",
-        "ns19",
-        vec![oauth_listener("oauth", 9095, true, cfg)],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c19");
-
-    assert!(toml.contains("[oauthbearer]"), "TOML: {toml}");
-    assert!(
-        toml.contains("valid_token_type = \"JWT\""),
-        "expected valid_token_type render; got:\n{toml}"
-    );
+        let toml = extract_broker0_toml(&state.take_observed(), cluster);
+        assert2::assert!(toml.contains("[oauthbearer]"));
+        assert2::assert!(
+            expected_fragments
+                .iter()
+                .all(|fragment| toml.contains(fragment))
+        );
+    }
 }
 
 // ── validTokenType in introspection mode → reject ─────────────────────────
@@ -971,7 +964,7 @@ async fn oauth_listener_with_valid_token_type_renders_broker_toml_key() {
 /// responses carry no JWT header so a `typ` check has nothing to bind
 /// against. The reconciler must patch `ListenersValid=False` with reason
 /// `ListenerOauthValidTokenTypeRejectedInIntrospectionMode`. Mirrors the
-/// `validate_listeners_rejects_valid_token_type_in_introspection_mode`
+/// `validate_listeners_rejects_introspection_only_oauth_fields_cases`
 /// unit test at the integration layer.
 #[tokio::test]
 async fn oauth_listener_valid_token_type_in_introspection_mode_rejected_with_listeners_valid_false()
@@ -1008,130 +1001,46 @@ async fn oauth_listener_valid_token_type_in_introspection_mode_rejected_with_lis
 
 // ── fallbackUserNameClaim + prefix render to broker TOML ──────────────────
 
-/// An OAuth listener with `fallbackUserNameClaim: "client_id"`
-/// and `fallbackUserNamePrefix: "service-account-"` reconciles cleanly
-/// and the rendered broker-config ConfigMap embeds both keys under
-/// `[oauthbearer]`. The broker's principal extractor consults the
-/// fallback claim only when `userNameClaim` (default `sub`) is
-/// absent/empty on the incoming token, then prepends the prefix to the
-/// resolved name. Strimzi convention for Keycloak service-account
-/// tokens whose `sub` is a UUID.
-#[tokio::test]
-async fn oauth_listener_with_fallback_user_name_claim_renders_broker_toml_key() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns21", "c21", 1, 1)];
-    let (ctx, state) = build_ctx("ns21", happy_path_rules("c21", "ns21", &items));
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.fallback_user_name_claim = Some("client_id".into());
-    cfg.fallback_user_name_prefix = Some("service-account-".into());
-    let kafka = kafka_cr_with_listeners(
-        "c21",
-        "ns21",
-        vec![oauth_listener("oauth", 9095, true, cfg)],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c21");
-
-    for needle in [
-        "[oauthbearer]",
-        "fallback_user_name_claim = \"client_id\"",
-        "fallback_user_name_prefix = \"service-account-\"",
-    ] {
-        assert!(toml.contains(needle), "missing {needle:?} in TOML:\n{toml}");
-    }
-}
-
+// An OAuth listener with `fallbackUserNameClaim: "client_id"`
+// and `fallbackUserNamePrefix: "service-account-"` reconciles cleanly
+// and the rendered broker-config ConfigMap embeds both keys under
+// `[oauthbearer]`. The broker's principal extractor consults the
+// fallback claim only when `userNameClaim` (default `sub`) is
+// absent/empty on the incoming token, then prepends the prefix to the
+// resolved name. Strimzi convention for Keycloak service-account
+// tokens whose `sub` is a UUID.
 // ── groupsClaim JsonPath + delimiter render to broker TOML ────────────────
 
-/// An OAuth listener with `groupsClaim:
-/// "$.realm_access.roles[*]"` (RFC 9535 JsonPath, evaluated by
-/// jsonpath-rust on the broker) and `groupsClaimDelimiter: ","`
-/// reconciles cleanly and the rendered broker-config ConfigMap embeds
-/// both keys under `[oauthbearer]`. The path is emitted as a TOML
-/// multi-line literal string (triple-single-quoted) so the `[*]`
-/// selector and any future predicate single-quotes survive without
-/// escape collisions. The delimiter is a plain TOML basic string. The
-/// resolved groups are attached to the Kafka principal but no
-/// broker-side authorizer reads them yet.
-#[tokio::test]
-async fn oauth_listener_with_groups_claim_renders_broker_toml_key() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns22", "c22", 1, 1)];
-    let (ctx, state) = build_ctx("ns22", happy_path_rules("c22", "ns22", &items));
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.groups_claim = Some("$.realm_access.roles[*]".into());
-    cfg.groups_claim_delimiter = Some(",".into());
-    let kafka = kafka_cr_with_listeners(
-        "c22",
-        "ns22",
-        vec![oauth_listener("oauth", 9095, true, cfg)],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c22");
-
-    for needle in [
-        "[oauthbearer]",
-        "groups_claim = '''$.realm_access.roles[*]'''",
-        "groups_claim_delimiter = \",\"",
-    ] {
-        assert!(toml.contains(needle), "missing {needle:?} in TOML:\n{toml}");
-    }
-}
-
+// An OAuth listener with `groupsClaim:
+// "$.realm_access.roles[*]"` (RFC 9535 JsonPath, evaluated by
+// jsonpath-rust on the broker) and `groupsClaimDelimiter: ","`
+// reconciles cleanly and the rendered broker-config ConfigMap embeds
+// both keys under `[oauthbearer]`. The path is emitted as a TOML
+// multi-line literal string (triple-single-quoted) so the `[*]`
+// selector and any future predicate single-quotes survive without
+// escape collisions. The delimiter is a plain TOML basic string. The
+// resolved groups are attached to the Kafka principal but no
+// broker-side authorizer reads them yet.
 // ── JWKS refresher policy fields render to broker TOML ────────────────────
 
-/// An OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
-/// `jwksExpirySeconds: 3600`, and `jwksIgnoreKeyUse: true` reconciles
-/// cleanly and the rendered broker-config ConfigMap embeds all three
-/// keys under `[oauthbearer]`. The broker's JWKS refresher consumes
-/// them: `min_on_demand_pause` rate-limits on-demand refreshes,
-/// `expiry_ms` is the hard fail-closed cache age the signed-JWT
-/// validator pre-checks against `last_successful_fetch`, and
-/// `ignore_key_use` toggles whether `use=enc` JWK entries are filtered
-/// out at parse time.
-#[tokio::test]
-async fn oauth_listener_with_jwks_policies_renders_broker_toml_keys() {
-    let items = vec![shared::fake_pool_list_item("brokers", "ns23", "c23", 1, 1)];
-    let (ctx, state) = build_ctx("ns23", happy_path_rules("c23", "ns23", &items));
-
-    let mut cfg = oauth_cfg_minimal();
-    cfg.jwks_min_refresh_pause_seconds = Some(2);
-    cfg.jwks_expiry_seconds = Some(3600);
-    cfg.jwks_ignore_key_use = Some(true);
-    let kafka = kafka_cr_with_listeners(
-        "c23",
-        "ns23",
-        vec![oauth_listener("oauth", 9095, true, cfg)],
-    );
-    reconcile(Arc::new(kafka), ctx).await.unwrap();
-
-    let observed = state.take_observed();
-    let toml = extract_broker0_toml(&observed, "c23");
-
-    for needle in [
-        "[oauthbearer]",
-        "jwks_min_refresh_pause_seconds = 2",
-        "jwks_expiry_seconds = 3600",
-        "jwks_ignore_key_use = true",
-    ] {
-        assert!(toml.contains(needle), "missing {needle:?} in TOML:\n{toml}");
-    }
-}
-
+// An OAuth listener with `jwksMinRefreshPauseSeconds: 2`,
+// `jwksExpirySeconds: 3600`, and `jwksIgnoreKeyUse: true` reconciles
+// cleanly and the rendered broker-config ConfigMap embeds all three
+// keys under `[oauthbearer]`. The broker's JWKS refresher consumes
+// them: `min_on_demand_pause` rate-limits on-demand refreshes,
+// `expiry_ms` is the hard fail-closed cache age the signed-JWT
+// validator pre-checks against `last_successful_fetch`, and
+// `ignore_key_use` toggles whether `use=enc` JWK entries are filtered
+// out at parse time.
 // ── JWKS policy fields rejected on introspection-mode ─────────────────────
 
-/// The 3 JWKS refresher policy fields
-/// (`jwksMinRefreshPauseSeconds`, `jwksExpirySeconds`,
-/// `jwksIgnoreKeyUse`) are JWT-mode only — the broker's introspection
-/// validator does not consult a JWKS, so setting any of them on an
-/// `accessTokenIsJwt: false` listener is rejected at reconcile with
-/// `ListenersValid=False` reason
-/// `ListenerOauthJwksFieldsRejectedInIntrospectionMode`. Mirrors the
-/// `validTokenType` and other cross-mode rejection shapes.
+// The 3 JWKS refresher policy fields (`jwksMinRefreshPauseSeconds`,
+// `jwksExpirySeconds`, `jwksIgnoreKeyUse`) are JWT-mode only — the broker's
+// introspection validator does not consult a JWKS, so setting any of them on
+// an `accessTokenIsJwt: false` listener is rejected at reconcile with
+// `ListenersValid=False` reason
+// `ListenerOauthJwksFieldsRejectedInIntrospectionMode`. Mirrors the
+// `validTokenType` and other cross-mode rejection shapes.
 #[tokio::test]
 async fn oauth_listener_jwks_fields_in_introspection_mode_rejected_with_listeners_valid_false() {
     let items = vec![shared::fake_pool_list_item("brokers", "ns24", "c24", 1, 1)];

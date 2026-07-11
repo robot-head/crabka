@@ -186,7 +186,7 @@ pub fn scan_all(log_dirs: &[PathBuf]) -> Result<Vec<(String, i32, PathBuf)>, Bro
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -199,23 +199,25 @@ mod tests {
             .expect("path has a file name")
             .to_str()
             .expect("file name is utf-8");
-        assert!(parse_partition_dir(name) == Some(("foo".to_string(), 7)));
+        assert2::assert!(parse_partition_dir(name) == Some(("foo".to_string(), 7)));
     }
 
     #[test]
     fn rejects_negative_partition() {
-        assert!(parse_partition_dir("foo--1") == None);
+        assert2::assert!(parse_partition_dir("foo--1") == None);
     }
 
     #[test]
     fn rejects_no_dash() {
-        assert!(parse_partition_dir("foo") == None);
+        assert2::assert!(parse_partition_dir("foo") == None);
     }
 
     #[test]
     fn handles_topic_with_dashes() {
         // Topic names can themselves contain hyphens; rsplit takes the last.
-        assert!(parse_partition_dir("my-cool-topic-3") == Some(("my-cool-topic".to_string(), 3)));
+        assert2::assert!(
+            parse_partition_dir("my-cool-topic-3") == Some(("my-cool-topic".to_string(), 3))
+        );
     }
 
     #[test]
@@ -223,8 +225,8 @@ mod tests {
         let dir = tempdir().expect("tempdir");
         let log_dir = dir.path().join("does-not-exist");
         let out = scan(&log_dir).expect("scan ok");
-        assert!(out.is_empty());
-        assert!(log_dir.exists());
+        assert2::assert!(out.is_empty());
+        assert2::assert!(log_dir.exists());
     }
 
     #[test]
@@ -236,7 +238,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("not_a_partition")).expect("mkdir other");
         let mut out = scan(dir.path()).expect("scan ok");
         out.sort();
-        assert!(out == vec![("bar".into(), 0), ("foo".into(), 0), ("foo".into(), 1),]);
+        assert2::assert!(out == vec![("bar".into(), 0), ("foo".into(), 0), ("foo".into(), 1),]);
     }
 
     #[test]
@@ -246,13 +248,13 @@ mod tests {
         std::fs::create_dir(dir.path().join("foo-1")).unwrap();
         std::fs::create_dir(dir.path().join("__cluster_metadata")).unwrap();
         std::fs::write(dir.path().join("bootstrap.json"), b"{}").unwrap();
-        assert!(count_partitions(dir.path()) == 2);
+        assert2::assert!(count_partitions(dir.path()) == 2);
     }
 
     #[test]
     fn count_partitions_missing_dir_is_zero() {
         let dir = tempdir().expect("tempdir");
-        assert!(count_partitions(&dir.path().join("nope")) == 0);
+        assert2::assert!(count_partitions(&dir.path().join("nope")) == 0);
     }
 
     #[test]
@@ -263,7 +265,7 @@ mod tests {
         // Pre-create the partition in the *second* dir.
         std::fs::create_dir(b.path().join("t-0")).unwrap();
         let placed = place_partition_dir(&dirs, "t", 0);
-        assert!(placed == b.path().join("t-0"));
+        assert2::assert!(placed == b.path().join("t-0"));
     }
 
     #[test]
@@ -272,11 +274,11 @@ mod tests {
         let b = tempdir().unwrap();
         let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
         // Empty cluster: tie → first dir.
-        assert!(place_partition_dir(&dirs, "t", 0) == a.path().join("t-0"));
+        assert2::assert!(place_partition_dir(&dirs, "t", 0) == a.path().join("t-0"));
         // Load `a` with two partitions; next placement should go to `b`.
         std::fs::create_dir(a.path().join("t-0")).unwrap();
         std::fs::create_dir(a.path().join("t-1")).unwrap();
-        assert!(place_partition_dir(&dirs, "t", 2) == b.path().join("t-2"));
+        assert2::assert!(place_partition_dir(&dirs, "t", 2) == b.path().join("t-2"));
     }
 
     #[test]
@@ -287,7 +289,7 @@ mod tests {
         std::fs::create_dir(b.path().join("bar-1")).unwrap();
         let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
         let out = scan_all(&dirs).expect("scan_all ok");
-        assert!(
+        assert2::assert!(
             out == vec![
                 ("bar".to_string(), 1, b.path().to_path_buf()),
                 ("foo".to_string(), 0, a.path().to_path_buf()),
@@ -303,16 +305,16 @@ mod tests {
             .expect("path has a file name")
             .to_str()
             .expect("file name is utf-8");
-        assert!(name == "foo-7-future");
-        assert!(parse_future_partition_dir(name) == Some(("foo".to_string(), 7)));
+        assert2::assert!(name == "foo-7-future");
+        assert2::assert!(parse_future_partition_dir(name) == Some(("foo".to_string(), 7)));
     }
 
     #[test]
     fn parse_future_rejects_non_future_name() {
         // Plain partition dir has no `-future` suffix.
-        assert!(parse_future_partition_dir("foo-7") == None);
+        assert2::assert!(parse_future_partition_dir("foo-7") == None);
         // Suffix present but the remainder isn't a partition dir.
-        assert!(parse_future_partition_dir("garbage-future") == None);
+        assert2::assert!(parse_future_partition_dir("garbage-future") == None);
     }
 
     #[test]
@@ -321,7 +323,7 @@ mod tests {
         std::fs::create_dir(dir.path().join("foo-0")).unwrap();
         std::fs::create_dir(dir.path().join("foo-1-future")).unwrap();
         let out = scan(dir.path()).expect("scan ok");
-        assert!(out == vec![("foo".into(), 0)]);
+        assert2::assert!(out == vec![("foo".into(), 0)]);
     }
 
     #[test]
@@ -332,14 +334,14 @@ mod tests {
         std::fs::create_dir(dir.path().join("bar-3-future")).unwrap();
         let mut out = scan_future(dir.path()).expect("scan_future ok");
         out.sort();
-        assert!(out == vec![("bar".into(), 3), ("foo".into(), 1)]);
+        assert2::assert!(out == vec![("bar".into(), 3), ("foo".into(), 1)]);
     }
 
     #[test]
     fn scan_future_missing_dir_is_empty() {
         let dir = tempdir().unwrap();
         let missing = dir.path().join("nope");
-        assert!(scan_future(&missing).expect("ok").is_empty());
+        assert2::assert!(scan_future(&missing).expect("ok").is_empty());
     }
 
     #[test]
@@ -349,7 +351,7 @@ mod tests {
         let dir = tempdir().unwrap();
         std::fs::create_dir(dir.path().join("foo-0")).unwrap();
         std::fs::create_dir(dir.path().join("foo-1-future")).unwrap();
-        assert!(count_partitions(dir.path()) == 1);
+        assert2::assert!(count_partitions(dir.path()) == 1);
     }
 
     #[test]
@@ -360,6 +362,6 @@ mod tests {
         std::fs::create_dir(b.path().join("foo-0")).unwrap();
         let dirs = vec![a.path().to_path_buf(), b.path().to_path_buf()];
         let out = scan_all(&dirs).expect("scan_all ok");
-        assert!(out == vec![("foo".to_string(), 0, a.path().to_path_buf())]);
+        assert2::assert!(out == vec![("foo".to_string(), 0, a.path().to_path_buf())]);
     }
 }

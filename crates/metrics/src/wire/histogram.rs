@@ -257,7 +257,6 @@ fn counts(float_counts: &[f64], deltas: &[i64]) -> Vec<f64> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
 
     use super::*;
 
@@ -285,12 +284,12 @@ mod tests {
 
         let native = v1_histogram_to_native(&histogram).unwrap();
 
-        check!(!native.is_float);
-        check!((native.count - 9.0).abs() < f64::EPSILON);
-        check!((native.zero_count - 1.0).abs() < f64::EPSILON);
-        check!(native.positive_counts == vec![4.0, 3.0, 6.0]);
-        check!(native.negative_counts == vec![2.0, 3.0]);
-        check!(native.reset_hint == ResetHint::Yes);
+        assert2::assert!(!native.is_float);
+        assert2::assert!((native.count - 9.0).abs() < f64::EPSILON);
+        assert2::assert!((native.zero_count - 1.0).abs() < f64::EPSILON);
+        assert2::assert!(native.positive_counts == vec![4.0, 3.0, 6.0]);
+        assert2::assert!(native.negative_counts == vec![2.0, 3.0]);
+        assert2::assert!(native.reset_hint == ResetHint::Yes);
     }
 
     #[test]
@@ -312,12 +311,12 @@ mod tests {
 
         let native = v2_histogram_to_native(&histogram).unwrap();
 
-        check!(native.is_float);
-        check!(native.is_nhcb());
-        check!(native.positive_counts == vec![1.5, 2.5]);
-        check!(native.custom_values == Some(vec![0.1, 0.2, 0.3]));
-        check!(native.start_timestamp_ms == Some(7));
-        check!(native.reset_hint == ResetHint::Gauge);
+        assert2::assert!(native.is_float);
+        assert2::assert!(native.is_nhcb());
+        assert2::assert!(native.positive_counts == vec![1.5, 2.5]);
+        assert2::assert!(native.custom_values == Some(vec![0.1, 0.2, 0.3]));
+        assert2::assert!(native.start_timestamp_ms == Some(7));
+        assert2::assert!(native.reset_hint == ResetHint::Gauge);
     }
 
     #[test]
@@ -332,11 +331,11 @@ mod tests {
                 ..Default::default()
             };
 
-            assert!(matches!(
+            assert2::assert!(matches!(
                 v1_histogram_to_native(&v1),
                 Err(WireError::Invalid(_))
             ));
-            assert!(matches!(
+            assert2::assert!(matches!(
                 v2_histogram_to_native(&v2),
                 Err(WireError::Invalid(_))
             ));
@@ -359,8 +358,10 @@ mod tests {
 
         let err = v1_histogram_to_native(&histogram).unwrap_err();
 
-        assert!(matches!(err, WireError::Invalid(_)));
-        assert!(format!("{err}").contains("positive spans declare 3 buckets but 2 counts"));
+        assert2::assert!(matches!(err, WireError::Invalid(_)));
+        assert2::assert!(
+            format!("{err}").contains("positive spans declare 3 buckets but 2 counts")
+        );
     }
 
     #[test]
@@ -379,8 +380,10 @@ mod tests {
 
         let err = v2_histogram_to_native(&histogram).unwrap_err();
 
-        assert!(matches!(err, WireError::Invalid(_)));
-        assert!(format!("{err}").contains("negative spans declare 1 buckets but 2 counts"));
+        assert2::assert!(matches!(err, WireError::Invalid(_)));
+        assert2::assert!(
+            format!("{err}").contains("negative spans declare 1 buckets but 2 counts")
+        );
     }
 
     #[test]
@@ -400,8 +403,8 @@ mod tests {
 
         let err = v2_histogram_to_native(&histogram).unwrap_err();
 
-        assert!(matches!(err, WireError::Invalid(_)));
-        assert!(format!("{err}").contains("custom values"));
+        assert2::assert!(matches!(err, WireError::Invalid(_)));
+        assert2::assert!(format!("{err}").contains("custom values"));
     }
 
     #[test]
@@ -425,7 +428,7 @@ mod tests {
 
         let err = v1_histogram_to_native(&histogram).unwrap_err();
 
-        assert!(matches!(err, WireError::Invalid(_)));
-        assert!(format!("{err}").contains("must not carry negative buckets"));
+        assert2::assert!(matches!(err, WireError::Invalid(_)));
+        assert2::assert!(format!("{err}").contains("must not carry negative buckets"));
     }
 }

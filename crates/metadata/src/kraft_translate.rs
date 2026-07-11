@@ -1108,7 +1108,7 @@ fn topic_name_for_id(image: &MetadataImage, id: uuid::Uuid) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -1125,7 +1125,7 @@ mod tests {
 
     fn round_trip(rec: &MetadataRecord, image: &MetadataImage) {
         let k = to_kraft(rec, image).unwrap();
-        assert!(from_kraft(&k, image).unwrap() == *rec);
+        assert2::assert!(from_kraft(&k, image).unwrap() == *rec);
     }
 
     // ---------- aligned variants ----------
@@ -1209,18 +1209,21 @@ mod tests {
             panic!("expected RegisterBroker");
         };
 
-        check!(!k.fenced);
-        assert!(k.end_points.len() == 2);
-        for (i, name, protocol) in [
-            (0, "", ListenerProtocol::Plaintext),
-            (1, "EXTERNAL", ListenerProtocol::SaslSsl),
-        ] {
-            check!(k.end_points[i].name == name, "name of endpoint {i}");
-            check!(
-                k.end_points[i].security_protocol == protocol_to_wire(protocol),
-                "protocol of endpoint {i}"
-            );
-        }
+        check!(
+            (
+                k.fenced,
+                k.end_points
+                    .iter()
+                    .map(|endpoint| (endpoint.name.as_str(), endpoint.security_protocol))
+                    .collect::<Vec<_>>(),
+            ) == (
+                false,
+                vec![
+                    ("", protocol_to_wire(ListenerProtocol::Plaintext)),
+                    ("EXTERNAL", protocol_to_wire(ListenerProtocol::SaslSsl),),
+                ],
+            )
+        );
     }
 
     #[test]
@@ -1379,16 +1382,16 @@ mod tests {
             ..AclEntryFilter::default()
         });
         let records = to_kraft_records(&del, &image).unwrap();
-        assert!(records.len() == 2); // e1, e2 — not e3
+        assert2::assert!(records.len() == 2); // e1, e2 — not e3
         // Each RemoveAccessControlEntry decodes back to a pinned filter that
         // removes exactly its entry. Applying both clears e1+e2, keeps e3.
         for k in &records {
             let back = from_kraft(k, &image).unwrap();
             image.apply(&back);
         }
-        assert!(image.all_acls().count() == 1);
+        assert2::assert!(image.all_acls().count() == 1);
         let survivor = image.all_acls().next().unwrap();
-        assert!(*survivor == e3);
+        assert2::assert!(*survivor == e3);
     }
 
     #[test]
@@ -1403,7 +1406,7 @@ mod tests {
             resource_type: Some(ResourceType::Group),
             ..AclEntryFilter::default()
         });
-        assert!(to_kraft_records(&del, &image).unwrap().is_empty());
+        assert2::assert!(to_kraft_records(&del, &image).unwrap().is_empty());
     }
 
     #[test]
@@ -1503,7 +1506,7 @@ mod tests {
         });
         // The carrier is an `Unknown` record, not a modeled KIP-631 variant.
         let k = to_kraft(&rec, &img()).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             k,
             crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
                 if api_key == PRIVATE_CLIENT_METRICS_KEY
@@ -1518,7 +1521,7 @@ mod tests {
         // a snapshot preserves `finalized_features_epoch`.
         let rec = MetadataRecord::V1FeaturesEpoch(FeaturesEpochRecord { epoch: 42 });
         let k = to_kraft(&rec, &img()).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             k,
             crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
                 if api_key == PRIVATE_FEATURES_EPOCH_KEY
@@ -1540,7 +1543,7 @@ mod tests {
             directory: uuid::Uuid::from_u128(0xAB),
         });
         let k = to_kraft(&rec, &img()).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             k,
             crabka_protocol::records::metadata::KraftMetadataRecord::Unknown { api_key, .. }
                 if api_key == PRIVATE_PARTITION_DIR_ASSIGNMENT_KEY
@@ -1553,9 +1556,17 @@ mod tests {
         let v = MetadataRecord::V1Voters(VotersRecord {
             voters: crate::voters::VoterSet::default(),
         });
-        assert!(to_kraft(&v, &img()) == Err(TranslateError::NoCounterpart("V1Voters")));
         let k = MetadataRecord::V1KRaftVersion(KRaftVersionRecord { kraft_version: 1 });
-        assert!(to_kraft(&k, &img()) == Err(TranslateError::NoCounterpart("V1KRaftVersion")));
+        for (_name, record, expected) in [
+            ("voter record", v, TranslateError::NoCounterpart("V1Voters")),
+            (
+                "KRaft version record",
+                k,
+                TranslateError::NoCounterpart("V1KRaftVersion"),
+            ),
+        ] {
+            assert2::assert!(to_kraft(&record, &img()) == Err(expected));
+        }
     }
 
     // ---------- topic / partition / config with image context ----------
@@ -1586,14 +1597,14 @@ mod tests {
         image.apply(&part);
         for rec in [&topic, &part] {
             let k = to_kraft(rec, &image).unwrap();
-            assert!(from_kraft(&k, &image).unwrap() == *rec);
+            assert2::assert!(from_kraft(&k, &image).unwrap() == *rec);
         }
         let cfg = MetadataRecord::V1TopicConfig(TopicConfigRecord {
             topic: "t".into(),
             overrides: [("retention.ms".to_string(), "9".to_string())].into(),
         });
         let k = to_kraft(&cfg, &image).unwrap();
-        assert!(from_kraft(&k, &image).unwrap() == cfg);
+        assert2::assert!(from_kraft(&k, &image).unwrap() == cfg);
     }
 
     #[test]
@@ -1630,14 +1641,14 @@ mod tests {
             .into(),
         });
         let records = to_kraft_records(&cfg, &image).unwrap();
-        assert!(records.len() == 2);
+        assert2::assert!(records.len() == 2);
         // Each decodes back to a single-key mergeable singleton.
         for k in &records {
             let back = from_kraft(k, &image).unwrap();
             match back {
                 MetadataRecord::V1TopicConfig(tc) => {
-                    assert!(tc.topic == "t");
-                    assert!(tc.overrides.len() == 1);
+                    assert2::assert!(tc.topic.as_str() == "t");
+                    assert2::assert!(tc.overrides.len() == 1);
                 }
                 other => panic!("expected V1TopicConfig singleton, got {other:?}"),
             }
@@ -1658,12 +1669,12 @@ mod tests {
             overrides: [("retention.ms".to_string(), "9".to_string())].into(),
         });
         let records = to_kraft_records(&cfg, &image).unwrap();
-        assert!(records.len() == 1);
+        assert2::assert!(records.len() == 1);
         let KraftMetadataRecord::Config(c) = &records[0] else {
             panic!("expected Config");
         };
-        assert!(c.name == "retention.ms");
-        assert!(c.value == Some("9".to_string()));
+        assert2::assert!(c.name.as_str() == "retention.ms");
+        assert2::assert!(c.value.as_deref() == Some("9"));
     }
 
     /// Seed `image` with topic `t` and the config map `kv`.
@@ -1694,7 +1705,7 @@ mod tests {
         });
         let records = to_kraft_records(&submit, &image).unwrap();
         // One set (a=9) + one tombstone (b removed).
-        assert!(records.len() == 2);
+        assert2::assert!(records.len() == 2);
         // Apply the fanned records in order against the live image; the merge
         // reproduces the new whole map exactly.
         for k in &records {
@@ -1703,7 +1714,7 @@ mod tests {
         }
         let want: std::collections::BTreeMap<String, String> =
             [("a".to_string(), "9".to_string())].into();
-        assert!(image.topic_config("t") == Some(&want));
+        assert2::assert!(image.topic_config("t") == Some(&want));
     }
 
     #[test]
@@ -1716,13 +1727,13 @@ mod tests {
             overrides: std::collections::BTreeMap::new(),
         });
         let records = to_kraft_records(&submit, &image).unwrap();
-        assert!(records.len() == 2);
+        assert2::assert!(records.len() == 2);
         for k in &records {
             let back = from_kraft(k, &image).unwrap();
             image.apply(&back);
         }
         // All overrides gone (apply of an empty whole-map removes the entry).
-        assert!(image.topic_config("t").is_none());
+        assert2::assert!(image.topic_config("t").is_none());
     }
 
     #[test]
@@ -1735,9 +1746,9 @@ mod tests {
             level: 25,
         });
         let values = to_kraft_values(&rec, &image).unwrap();
-        assert!(values.len() == 1);
+        assert2::assert!(values.len() == 1);
         let back = from_kraft_value(&values[0], &image).unwrap();
-        assert!(back == rec);
+        assert2::assert!(back == rec);
     }
 
     #[test]
@@ -1764,12 +1775,9 @@ mod tests {
             partition_epoch: 0,
         });
         let values = super::to_kraft_values(&rec, &image).expect("encode");
-        assert!(values.len() == 1);
+        assert2::assert!(values.len() == 1);
         let decoded = super::from_kraft_value(&values[0], &image).expect("decode");
-        assert!(
-            decoded == rec,
-            "directories must survive the KRaft round trip"
-        );
+        assert2::assert!(decoded == rec);
     }
 
     #[test]
@@ -1799,8 +1807,8 @@ mod tests {
             panic!("expected Partition");
         };
 
-        assert!(k.adding_replicas == vec![3]);
-        assert!(k.removing_replicas == vec![2]);
+        assert2::assert!(k.adding_replicas == vec![3]);
+        assert2::assert!(k.removing_replicas == vec![2]);
     }
 
     #[test]
@@ -1815,7 +1823,7 @@ mod tests {
         )
         .unwrap_err();
 
-        assert!(err == TranslateError::NoCounterpart("Unknown"));
+        assert2::assert!(err == TranslateError::NoCounterpart("Unknown"));
     }
 
     #[test]
@@ -1827,7 +1835,7 @@ mod tests {
             });
         let err = from_kraft(&remove_unknown, &img()).unwrap_err();
 
-        assert!(matches!(err, TranslateError::UnknownAclId(_)));
+        assert2::assert!(matches!(err, TranslateError::UnknownAclId(_)));
 
         let mut image_with_different_acl = img();
         image_with_different_acl.apply(&MetadataRecord::V1AccessControlEntry(acl(
@@ -1837,7 +1845,7 @@ mod tests {
         )));
         let err = from_kraft(&remove_unknown, &image_with_different_acl).unwrap_err();
 
-        assert!(matches!(err, TranslateError::UnknownAclId(_)));
+        assert2::assert!(matches!(err, TranslateError::UnknownAclId(_)));
     }
 
     #[test]
@@ -1888,7 +1896,7 @@ mod tests {
                 "Unknown",
             ),
         ] {
-            assert!(kraft_variant_name(&record) == want, "variant {want}");
+            assert2::assert!(kraft_variant_name(&record) == want);
         }
     }
 
@@ -1915,6 +1923,6 @@ mod tests {
                 partition_epoch: 0,
             }));
         }
-        assert!(image.topic_partition_count("t") == 3);
+        assert2::assert!(image.topic_partition_count("t") == 3);
     }
 }

@@ -293,13 +293,14 @@ signature_encoding = "hex"
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let wr = parse_response(resp).await;
-    assert!(!wr.deduplicated);
-    assert!(wr.offset >= 0);
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(!wr.deduplicated);
+    assert2::assert!(wr.offset >= 0);
 
     // Verify the record landed in the topic.
-    assert_eq!(count_topic(&bootstrap, topic, "vhp-verify").await, 1);
+    assert2::assert!(count_topic(&bootstrap, topic, "vhp-verify").await == 1);
 
     token.cancel();
     broker.shutdown().await;
@@ -357,10 +358,10 @@ signature_encoding = "hex"
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert2::assert!(resp.status() == StatusCode::UNAUTHORIZED);
 
     // Nothing should have been produced.
-    assert_eq!(count_topic(&bootstrap, topic, "ihr-verify").await, 0);
+    assert2::assert!(count_topic(&bootstrap, topic, "ihr-verify").await == 0);
 
     token.cancel();
     broker.shutdown().await;
@@ -428,12 +429,8 @@ idempotency_source = "json:$.id"
         )
         .await
         .unwrap();
-    assert_eq!(first_resp.status(), StatusCode::OK);
+    let first_status = first_resp.status();
     let first = parse_response(first_resp).await;
-    assert!(
-        !first.deduplicated,
-        "first delivery must not be deduplicated"
-    );
 
     // Provider redelivery (same id) → deduplicated, same offset.
     let second_resp = app
@@ -448,20 +445,17 @@ idempotency_source = "json:$.id"
         )
         .await
         .unwrap();
-    assert_eq!(second_resp.status(), StatusCode::OK);
+    let second_status = second_resp.status();
     let second = parse_response(second_resp).await;
-    assert!(second.deduplicated, "redelivery must be deduplicated");
-    assert_eq!(
-        first.offset, second.offset,
-        "deduplicated response must return original offset"
-    );
+    assert2::assert!(first_status == StatusCode::OK);
+    assert2::assert!(!first.deduplicated);
+    assert2::assert!(second_status == StatusCode::OK);
+    assert2::assert!(second.deduplicated);
+    assert2::assert!(first.offset == first.offset);
+    assert2::assert!(second.offset == first.offset);
 
     // Exactly one record in the topic (EOS guarantee).
-    assert_eq!(
-        count_topic(&bootstrap, topic, "jpd-verify").await,
-        1,
-        "exactly one record must be in the topic after dedup"
-    );
+    assert2::assert!(count_topic(&bootstrap, topic, "jpd-verify").await == 1);
 
     token.cancel();
     broker.shutdown().await;
@@ -528,9 +522,8 @@ idempotency_source = "header:X-Delivery"
         )
         .await
         .unwrap();
-    assert_eq!(first_resp.status(), StatusCode::OK);
+    let first_status = first_resp.status();
     let first = parse_response(first_resp).await;
-    assert!(!first.deduplicated);
 
     // Second POST with same delivery id → dedup.
     let second_resp = app
@@ -545,13 +538,14 @@ idempotency_source = "header:X-Delivery"
         )
         .await
         .unwrap();
-    assert_eq!(second_resp.status(), StatusCode::OK);
+    let second_status = second_resp.status();
     let second = parse_response(second_resp).await;
-    assert!(
-        second.deduplicated,
-        "second with same X-Delivery must dedup"
-    );
-    assert_eq!(first.offset, second.offset);
+    assert2::assert!(first_status == StatusCode::OK);
+    assert2::assert!(!first.deduplicated);
+    assert2::assert!(second_status == StatusCode::OK);
+    assert2::assert!(second.deduplicated);
+    assert2::assert!(first.offset == first.offset);
+    assert2::assert!(second.offset == first.offset);
 
     token.cancel();
     broker.shutdown().await;
@@ -602,9 +596,10 @@ async fn generic_produce_route() {
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::OK);
+    let status = resp.status();
     let first = parse_response(resp).await;
-    assert!(!first.deduplicated);
+    assert2::assert!(status == StatusCode::OK);
+    assert2::assert!(!first.deduplicated);
 
     // Same idempotency key twice → second is deduplicated.
     let idem_key = "gpr-key-1";
@@ -621,9 +616,8 @@ async fn generic_produce_route() {
         )
         .await
         .unwrap();
-    assert_eq!(resp1.status(), StatusCode::OK);
+    let first_status = resp1.status();
     let keyed_first = parse_response(resp1).await;
-    assert!(!keyed_first.deduplicated);
 
     let resp2 = app
         .oneshot(
@@ -636,13 +630,14 @@ async fn generic_produce_route() {
         )
         .await
         .unwrap();
-    assert_eq!(resp2.status(), StatusCode::OK);
+    let second_status = resp2.status();
     let keyed_second = parse_response(resp2).await;
-    assert!(
-        keyed_second.deduplicated,
-        "second with same Idempotency-Key must dedup"
-    );
-    assert_eq!(keyed_first.offset, keyed_second.offset);
+    assert2::assert!(first_status == StatusCode::OK);
+    assert2::assert!(!keyed_first.deduplicated);
+    assert2::assert!(second_status == StatusCode::OK);
+    assert2::assert!(keyed_second.deduplicated);
+    assert2::assert!(keyed_first.offset == keyed_first.offset);
+    assert2::assert!(keyed_second.offset == keyed_first.offset);
 
     token.cancel();
     broker.shutdown().await;
@@ -676,7 +671,7 @@ max_body_bytes = 16
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::PAYLOAD_TOO_LARGE);
+    assert2::assert!(resp.status() == StatusCode::PAYLOAD_TOO_LARGE);
 
     token.cancel();
     broker.shutdown().await;
@@ -701,7 +696,7 @@ async fn unknown_endpoint_404() {
         .await
         .unwrap();
 
-    assert_eq!(resp.status(), StatusCode::NOT_FOUND);
+    assert2::assert!(resp.status() == StatusCode::NOT_FOUND);
 
     token.cancel();
     broker.shutdown().await;
@@ -868,12 +863,8 @@ signature_encoding = "hex"
         )
         .await
         .unwrap();
-    assert_eq!(resp.status(), StatusCode::FORBIDDEN);
-    assert_eq!(
-        count_topic(&bootstrap, topic, "acld-deny-verify").await,
-        0,
-        "denied request must not produce"
-    );
+    assert2::assert!(resp.status() == StatusCode::FORBIDDEN);
+    assert2::assert!(count_topic(&bootstrap, topic, "acld-deny-verify").await == 0);
 
     // Now grant `User:webhook:acl-denied` Allow Write Topic:wh-acl-topic and
     // start the ACL refresh loop. Once the cache converges, the same request
@@ -886,10 +877,7 @@ signature_encoding = "hex"
         )])
         .await
         .unwrap();
-    assert!(
-        outcomes.iter().all(|o| o.error.is_none()),
-        "create_acls failed: {outcomes:?}"
-    );
+    assert2::assert!(outcomes.iter().all(|o| o.error.is_none()));
 
     let shutdown = CancellationToken::new();
     {
@@ -940,16 +928,8 @@ signature_encoding = "hex"
         )
         .await
         .unwrap();
-    assert_eq!(
-        resp2.status(),
-        StatusCode::OK,
-        "after granting ACL the request must succeed"
-    );
-    assert_eq!(
-        count_topic(&bootstrap, topic, "acla-allow-verify").await,
-        1,
-        "after granting ACL exactly one record must land"
-    );
+    assert2::assert!(resp2.status() == StatusCode::OK);
+    assert2::assert!(count_topic(&bootstrap, topic, "acla-allow-verify").await == 1);
 
     shutdown.cancel();
     broker.shutdown().await;
@@ -996,7 +976,7 @@ timestamp_tolerance_secs = 300
         .unwrap(); // must complete, not panic
 
     // Stale timestamp → 401.
-    assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    assert2::assert!(resp.status() == StatusCode::UNAUTHORIZED);
 
     token.cancel();
     broker.shutdown().await;

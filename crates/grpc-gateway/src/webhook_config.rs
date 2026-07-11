@@ -327,35 +327,41 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn sign_hex_round_trips_verify() {
-        let secret = b"outbound-secret";
-        let body = b"{\"topic\":\"events\",\"offset\":42}";
-        let sig = sign_hmac_hex(secret, body);
-        assert!(
-            verify_signature(secret, body, &sig, &SigEncoding::Hex, None),
-            "sign_hmac_hex output must verify via verify_signature"
-        );
-    }
-
-    #[test]
-    fn sign_base64_round_trips_verify() {
-        let secret = b"another-secret";
-        let body = b"hello world";
-        let sig = sign_hmac_base64(secret, body);
-        assert!(
-            verify_signature(secret, body, &sig, &SigEncoding::Base64, None),
-            "sign_hmac_base64 output must verify via verify_signature"
-        );
-    }
-
-    #[test]
-    fn sign_hex_wrong_body_does_not_verify() {
-        let secret = b"sec";
-        let sig = sign_hmac_hex(secret, b"correct body");
-        assert!(
-            !verify_signature(secret, b"wrong body", &sig, &SigEncoding::Hex, None),
-            "signature over different body must not verify"
-        );
+    fn signed_hmac_values_verify_only_for_the_signed_body() {
+        for (_name, secret, signed_body, verified_body, encoding, expected) in [
+            (
+                "hex-round-trip",
+                b"outbound-secret".as_slice(),
+                b"{\"topic\":\"events\",\"offset\":42}".as_slice(),
+                b"{\"topic\":\"events\",\"offset\":42}".as_slice(),
+                SigEncoding::Hex,
+                true,
+            ),
+            (
+                "base64-round-trip",
+                b"another-secret".as_slice(),
+                b"hello world".as_slice(),
+                b"hello world".as_slice(),
+                SigEncoding::Base64,
+                true,
+            ),
+            (
+                "hex-wrong-body",
+                b"sec".as_slice(),
+                b"correct body".as_slice(),
+                b"wrong body".as_slice(),
+                SigEncoding::Hex,
+                false,
+            ),
+        ] {
+            let signature = match &encoding {
+                SigEncoding::Hex => sign_hmac_hex(secret, signed_body),
+                SigEncoding::Base64 => sign_hmac_base64(secret, signed_body),
+            };
+            assert2::assert!(
+                verify_signature(secret, verified_body, &signature, &encoding, None) == expected
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -363,118 +369,90 @@ mod tests {
     // -----------------------------------------------------------------------
 
     #[test]
-    fn verify_hex_correct() {
-        let secret = b"my-secret";
-        let body = b"{\"event\":\"push\"}";
-        let sig = hmac_hex(secret, body);
-        assert!(verify_signature(
-            secret,
-            body,
-            &sig,
-            &SigEncoding::Hex,
-            None
-        ));
-    }
+    fn signature_verification_variants() {
+        let hex = hmac_hex(b"my-secret", b"{\"event\":\"push\"}");
+        let base64 = hmac_b64(b"s3cr3t", b"payload");
+        let prefixed = format!("sha256={}", hmac_hex(b"key", b"data"));
+        let missing_prefix = hmac_hex(b"key", b"data");
 
-    #[test]
-    fn verify_hex_tampered_body_rejected() {
-        let secret = b"my-secret";
-        let body = b"{\"event\":\"push\"}";
-        let sig = hmac_hex(secret, body);
-        // Change a single byte in the body.
-        let bad_body = b"{\"event\":\"pull\"}";
-        assert!(!verify_signature(
-            secret,
-            bad_body,
-            &sig,
-            &SigEncoding::Hex,
-            None
-        ));
-    }
-
-    #[test]
-    fn verify_hex_garbage_sig_rejected() {
-        let secret = b"my-secret";
-        let body = b"hello";
-        assert!(!verify_signature(
-            secret,
-            body,
-            "zzznothex!!",
-            &SigEncoding::Hex,
-            None
-        ));
-    }
-
-    #[test]
-    fn verify_hex_wrong_length_rejected() {
-        let secret = b"my-secret";
-        let body = b"hello";
-        // A valid hex string but only 4 bytes — wrong length.
-        assert!(!verify_signature(
-            secret,
-            body,
-            "deadbeef",
-            &SigEncoding::Hex,
-            None
-        ));
-    }
-
-    #[test]
-    fn verify_base64_correct() {
-        let secret = b"s3cr3t";
-        let body = b"payload";
-        let sig = hmac_b64(secret, body);
-        assert!(verify_signature(
-            secret,
-            body,
-            &sig,
-            &SigEncoding::Base64,
-            None
-        ));
-    }
-
-    #[test]
-    fn verify_base64_tampered_rejected() {
-        let secret = b"s3cr3t";
-        let body = b"payload";
-        let sig = hmac_b64(secret, body);
-        assert!(!verify_signature(
-            secret,
-            b"different",
-            &sig,
-            &SigEncoding::Base64,
-            None
-        ));
-    }
-
-    #[test]
-    fn verify_with_prefix_stripped() {
-        let secret = b"key";
-        let body = b"data";
-        let raw_sig = hmac_hex(secret, body);
-        let with_prefix = format!("sha256={raw_sig}");
-        assert!(verify_signature(
-            secret,
-            body,
-            &with_prefix,
-            &SigEncoding::Hex,
-            Some("sha256=")
-        ));
-    }
-
-    #[test]
-    fn verify_missing_prefix_rejected() {
-        let secret = b"key";
-        let body = b"data";
-        // Provide the sig without the prefix — should fail because strip_prefix fails.
-        let raw_sig = hmac_hex(secret, body);
-        assert!(!verify_signature(
-            secret,
-            body,
-            &raw_sig,
-            &SigEncoding::Hex,
-            Some("sha256=")
-        ));
+        for (_name, secret, body, signature, encoding, prefix, expected) in [
+            (
+                "valid-hex",
+                b"my-secret".as_slice(),
+                b"{\"event\":\"push\"}".as_slice(),
+                hex.as_str(),
+                SigEncoding::Hex,
+                None,
+                true,
+            ),
+            (
+                "tampered-hex-body",
+                b"my-secret".as_slice(),
+                b"{\"event\":\"pull\"}".as_slice(),
+                hex.as_str(),
+                SigEncoding::Hex,
+                None,
+                false,
+            ),
+            (
+                "garbage-hex",
+                b"my-secret".as_slice(),
+                b"hello".as_slice(),
+                "zzznothex!!",
+                SigEncoding::Hex,
+                None,
+                false,
+            ),
+            (
+                "short-hex",
+                b"my-secret".as_slice(),
+                b"hello".as_slice(),
+                "deadbeef",
+                SigEncoding::Hex,
+                None,
+                false,
+            ),
+            (
+                "valid-base64",
+                b"s3cr3t".as_slice(),
+                b"payload".as_slice(),
+                base64.as_str(),
+                SigEncoding::Base64,
+                None,
+                true,
+            ),
+            (
+                "tampered-base64-body",
+                b"s3cr3t".as_slice(),
+                b"different".as_slice(),
+                base64.as_str(),
+                SigEncoding::Base64,
+                None,
+                false,
+            ),
+            (
+                "prefixed-hex",
+                b"key".as_slice(),
+                b"data".as_slice(),
+                prefixed.as_str(),
+                SigEncoding::Hex,
+                Some("sha256="),
+                true,
+            ),
+            (
+                "missing-prefix",
+                b"key".as_slice(),
+                b"data".as_slice(),
+                missing_prefix.as_str(),
+                SigEncoding::Hex,
+                Some("sha256="),
+                false,
+            ),
+        ] {
+            assert2::assert!(
+                verify_signature(secret, body, signature, &encoding, prefix) == expected
+            );
+        }
     }
 
     // -----------------------------------------------------------------------
@@ -497,16 +475,18 @@ key_source = "header:X-Delivery"
         let compiled = file.compile().expect("compile");
         let ep = compiled.get("github").expect("key present");
 
-        assert_eq!(ep.target_topic, "events");
-        // principal defaults to webhook:{name}
-        assert_eq!(ep.principal, "webhook:github");
-        assert_eq!(ep.secret.as_deref(), Some(b"s3cr3t".as_slice()));
-        assert_eq!(ep.signature_header.as_deref(), Some("X-Hub-Signature-256"));
-        assert_eq!(ep.signature_prefix.as_deref(), Some("sha256="));
-        assert_eq!(ep.timestamp_tolerance_secs, 300);
-        assert_eq!(ep.max_body_bytes, 1024 * 1024);
-        assert!(ep.idempotency_source.is_some());
-        assert!(ep.key_source.is_some());
+        assert2::assert!(ep.target_topic.as_str() == "events");
+        assert2::assert!(ep.principal.as_str() == "webhook:github");
+        assert2::assert!(ep.secret.as_deref() == Some(b"s3cr3t".as_slice()));
+        assert2::assert!(ep.signature_header.as_deref() == Some("X-Hub-Signature-256"));
+        assert2::assert!(ep.signature_prefix.as_deref() == Some("sha256="));
+        assert2::assert!(ep.timestamp_header.as_deref() == None);
+        assert2::assert!(ep.timestamp_tolerance_secs == 300);
+        assert2::assert!(ep.idempotency_source.is_some());
+        assert2::assert!(ep.key_source.is_some());
+        assert2::assert!(ep.max_body_bytes == 1024 * 1024);
+        assert2::assert!(ep.schema_subject.as_deref() == None);
+        assert2::assert!(ep.schema_format == SchemaFormat::Json);
     }
 
     #[test]
@@ -519,57 +499,42 @@ principal = "svc:stripe-ingest"
 "#;
         let file: WebhooksFile = toml::from_str(toml).expect("parse");
         let compiled = file.compile().expect("compile");
-        assert_eq!(compiled["stripe"].principal, "svc:stripe-ingest");
+        let ep = &compiled["stripe"];
+        assert2::assert!(ep.target_topic.as_str() == "payments");
+        assert2::assert!(ep.principal.as_str() == "svc:stripe-ingest");
+        assert2::assert!(ep.secret.as_deref() == None);
+        assert2::assert!(ep.signature_header.as_deref() == None);
+        assert2::assert!(ep.signature_prefix.as_deref() == None);
+        assert2::assert!(ep.timestamp_header.as_deref() == None);
+        assert2::assert!(ep.timestamp_tolerance_secs == 300);
+        assert2::assert!(ep.idempotency_source.is_none());
+        assert2::assert!(ep.key_source.is_none());
+        assert2::assert!(ep.max_body_bytes == 1024 * 1024);
+        assert2::assert!(ep.schema_subject.as_deref() == None);
+        assert2::assert!(ep.schema_format == SchemaFormat::Json);
     }
 
     #[test]
-    fn compile_error_secret_without_signature_header() {
-        let toml = r#"
+    fn compile_error_cases() {
+        let secret_without_header = r#"
 [[endpoints]]
 name = "bad"
 target_topic = "t"
 secret = "oops"
 "#;
-        let file: WebhooksFile = toml::from_str(toml).expect("parse");
-        let err = file.compile().expect_err("must error");
-        assert!(
-            err.contains("signature_header"),
-            "error should mention signature_header, got: {err}"
-        );
-    }
-
-    #[test]
-    fn compile_error_signature_header_without_secret() {
-        let toml = r#"
+        let header_without_secret = r#"
 [[endpoints]]
 name = "bad"
 target_topic = "t"
 signature_header = "X-Sig"
 "#;
-        let file: WebhooksFile = toml::from_str(toml).expect("parse");
-        let err = file.compile().expect_err("must error");
-        assert!(err.contains("signature_header"), "{err}");
-    }
-
-    #[test]
-    fn compile_error_invalid_jsonpath() {
-        let toml = r#"
+        let invalid_jsonpath = r#"
 [[endpoints]]
 name = "bad"
 target_topic = "t"
 idempotency_source = "json:@.unterminated["
 "#;
-        let file: WebhooksFile = toml::from_str(toml).expect("parse");
-        let err = file.compile().expect_err("must error");
-        assert!(
-            err.contains("JSONPath"),
-            "error should mention JSONPath, got: {err}"
-        );
-    }
-
-    #[test]
-    fn compile_error_bad_encoding() {
-        let toml = r#"
+        let bad_encoding = r#"
 [[endpoints]]
 name = "bad"
 target_topic = "t"
@@ -577,16 +542,31 @@ secret = "s"
 signature_header = "X-Sig"
 signature_encoding = "md5"
 "#;
-        let file: WebhooksFile = toml::from_str(toml).expect("parse");
-        let err = file.compile().expect_err("must error");
-        assert!(err.contains("signature_encoding"), "{err}");
+        for (_name, input, needle) in [
+            (
+                "secret_without_header",
+                secret_without_header,
+                "signature_header",
+            ),
+            (
+                "header_without_secret",
+                header_without_secret,
+                "signature_header",
+            ),
+            ("invalid_jsonpath", invalid_jsonpath, "JSONPath"),
+            ("bad_encoding", bad_encoding, "signature_encoding"),
+        ] {
+            let file: WebhooksFile = toml::from_str(input).expect("parse");
+            let error = file.compile().expect_err("case must fail");
+            assert2::assert!(error.contains(needle));
+        }
     }
 
     #[test]
     fn compile_empty_file() {
         let file: WebhooksFile = toml::from_str("").expect("parse");
         let compiled = file.compile().expect("compile");
-        assert!(compiled.is_empty());
+        assert2::assert!(compiled.is_empty());
     }
 
     // -----------------------------------------------------------------------
@@ -594,61 +574,54 @@ signature_encoding = "md5"
     // -----------------------------------------------------------------------
 
     #[test]
-    fn extract_header_source() {
+    fn extract_header_source_cases() {
         use axum::http::HeaderMap;
-        let mut headers = HeaderMap::new();
-        headers.insert("x-delivery", "abc-123".parse().unwrap());
-        let src = Source::Header("x-delivery".to_string());
-        assert_eq!(
-            extract_source(&src, &headers, None),
-            Some("abc-123".to_string())
-        );
+
+        for (_name, source_name, header, expected) in [
+            (
+                "present",
+                "x-delivery",
+                Some(("x-delivery", "abc-123")),
+                Some("abc-123"),
+            ),
+            ("missing", "x-missing", None, None),
+        ] {
+            let mut headers = HeaderMap::new();
+            if let Some((header_name, value)) = header {
+                headers.insert(header_name, value.parse().unwrap());
+            }
+            let source = Source::Header(source_name.to_string());
+            assert2::assert!(
+                extract_source(&source, &headers, None) == expected.map(str::to_string)
+            );
+        }
     }
 
     #[test]
-    fn extract_header_missing() {
-        use axum::http::HeaderMap;
-        let headers = HeaderMap::new();
-        let src = Source::Header("x-missing".to_string());
-        assert_eq!(extract_source(&src, &headers, None), None);
-    }
-
-    #[test]
-    fn extract_jsonpath_source() {
+    fn extract_jsonpath_source_cases() {
         use axum::http::HeaderMap;
         use jsonpath_rust::parser::parse_json_path;
 
-        let q = parse_json_path("$.id").expect("compile");
-        let src = Source::JsonPath(q);
-        let json: serde_json::Value = serde_json::json!({"id": "event-42", "type": "push"});
         let headers = HeaderMap::new();
-        assert_eq!(
-            extract_source(&src, &headers, Some(&json)),
-            Some("event-42".to_string())
-        );
-    }
-
-    #[test]
-    fn extract_jsonpath_no_match() {
-        use axum::http::HeaderMap;
-        use jsonpath_rust::parser::parse_json_path;
-
-        let q = parse_json_path("$.missing_field").expect("compile");
-        let src = Source::JsonPath(q);
-        let json: serde_json::Value = serde_json::json!({"id": "event-42"});
-        let headers = HeaderMap::new();
-        assert_eq!(extract_source(&src, &headers, Some(&json)), None);
-    }
-
-    #[test]
-    fn extract_jsonpath_no_body() {
-        use axum::http::HeaderMap;
-        use jsonpath_rust::parser::parse_json_path;
-
-        let q = parse_json_path("$.id").expect("compile");
-        let src = Source::JsonPath(q);
-        let headers = HeaderMap::new();
-        // body_json is None — should return None without panicking.
-        assert_eq!(extract_source(&src, &headers, None), None);
+        for (_name, query, body, expected) in [
+            (
+                "match",
+                "$.id",
+                Some(serde_json::json!({"id": "event-42", "type": "push"})),
+                Some("event-42"),
+            ),
+            (
+                "no_match",
+                "$.missing_field",
+                Some(serde_json::json!({"id": "event-42"})),
+                None,
+            ),
+            ("no_body", "$.id", None, None),
+        ] {
+            let source = Source::JsonPath(parse_json_path(query).expect("compile"));
+            assert2::assert!(
+                extract_source(&source, &headers, body.as_ref()) == expected.map(str::to_string)
+            );
+        }
     }
 }

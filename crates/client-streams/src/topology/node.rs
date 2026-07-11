@@ -291,7 +291,6 @@ mod tests {
     fn add_global_source_records_topic() {
         let mut reg = NodeRegistry::default();
         reg.add_global_source("global");
-        check!(reg.global_source_topics.contains("global"));
-        check!(reg.global_source_topics.len() == 1);
+        check!(reg.global_source_topics == HashSet::from(["global".to_string()]));
     }
 }

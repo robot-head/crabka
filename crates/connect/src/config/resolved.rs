@@ -180,7 +180,7 @@ mod tests {
 
         let err = config.get_string("password").unwrap_err();
 
-        assert!(
+        assert2::assert!(
             matches!(err, ConfigError::WrongType { key, expected: "non-secret string" } if key == "password")
         );
     }

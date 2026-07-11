@@ -632,21 +632,23 @@ mod tests {
 
     #[test]
     fn state_topic_load_warning_only_before_loaded() {
-        assert!(should_warn_state_topic_load(false));
-        assert!(!should_warn_state_topic_load(true));
+        for (_name, loaded, expected) in [("not loaded", false, true), ("loaded", true, false)] {
+            assert2::assert!(should_warn_state_topic_load(loaded) == expected);
+        }
     }
 
     #[test]
     fn recovery_load_wait_continues_only_before_loaded() {
-        assert!(should_continue_recovery_load_wait(false));
-        assert!(!should_continue_recovery_load_wait(true));
+        for (_name, loaded, expected) in [("not loaded", false, true), ("loaded", true, false)] {
+            assert2::assert!(should_continue_recovery_load_wait(loaded) == expected);
+        }
     }
 
     #[test]
     fn recovery_load_timeout_is_strictly_after_deadline() {
         let timeout = Duration::from_secs(5);
-        assert!(!recovery_load_timed_out(Duration::from_secs(5), timeout));
-        assert!(recovery_load_timed_out(
+        assert2::assert!(!recovery_load_timed_out(Duration::from_secs(5), timeout));
+        assert2::assert!(recovery_load_timed_out(
             Duration::from_secs(5) + Duration::from_millis(1),
             timeout
         ));
@@ -654,7 +656,8 @@ mod tests {
 
     #[test]
     fn detector_is_disabled_only_at_zero_interval() {
-        assert!(!detector_enabled(0));
-        assert!(detector_enabled(1));
+        for (_name, interval, expected) in [("disabled", 0, false), ("enabled", 1, true)] {
+            assert2::assert!(detector_enabled(interval) == expected);
+        }
     }
 }

@@ -234,20 +234,11 @@ mod tests {
             .refresh_metadata()
             .await
             .expect("refresh_metadata");
-        assert2::assert!(
-            !md.brokers.is_empty(),
-            "refresh_metadata must return the broker's metadata"
-        );
+        assert2::assert!(!md.brokers.is_empty());
 
         // knows_broker reflects the pool: broker 1 is registered, 999 is not.
-        assert2::assert!(
-            transport.knows_broker(1),
-            "broker 1 must be known after refresh"
-        );
-        assert2::assert!(
-            !transport.knows_broker(999),
-            "an unadvertised broker must be unknown"
-        );
+        assert2::assert!(transport.knows_broker(1));
+        assert2::assert!(!transport.knows_broker(999));
 
         // send_produce returns the broker's real response (a default is empty) and
         // caches a connection to broker 1.
@@ -255,10 +246,7 @@ mod tests {
             .send_produce(Some(1), ProduceRequest::default())
             .await
             .expect("send_produce to broker 1");
-        assert2::assert!(
-            !resp.responses.is_empty(),
-            "send_produce must return the broker's response"
-        );
+        assert2::assert!(!resp.responses.is_empty());
 
         // evict_broker drops the cached connection, so the next send must open a
         // fresh one — observable as another handshake.
@@ -269,11 +257,7 @@ mod tests {
             .await
             .expect("send_produce after evict reconnects");
         let after = handshakes.load(Ordering::SeqCst);
-        assert2::assert!(
-            after > before,
-            "evict_broker must drop the cached connection, forcing a reconnect handshake \
-             (before={before}, after={after})"
-        );
+        assert2::assert!(after > before);
 
         mock.stop();
     }

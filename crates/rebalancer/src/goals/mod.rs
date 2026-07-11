@@ -237,7 +237,6 @@ pub trait Goal: Send + Sync {
 
 #[cfg(test)]
 pub mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -265,7 +264,7 @@ pub mod tests {
 
     #[test]
     fn priority_ordering_hard_before_soft() {
-        assert!(matches!(GoalPriority::Hard, GoalPriority::Hard));
-        assert!(GoalPriority::Hard != GoalPriority::Soft);
+        assert2::assert!(matches!(GoalPriority::Hard, GoalPriority::Hard));
+        assert2::assert!(GoalPriority::Hard != GoalPriority::Soft);
     }
 }

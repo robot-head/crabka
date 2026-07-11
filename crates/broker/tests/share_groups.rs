@@ -11,7 +11,7 @@
 
 use std::sync::Arc;
 
-use assert2::{assert, check};
+use assert2::check;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_protocol::owned::{
@@ -55,10 +55,7 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        resp.topics[0].error_code == 0,
-        "topic create failed: {resp:?}"
-    );
+    assert2::assert!(resp.topics[0].error_code == 0);
 }
 
 fn heartbeat(group: &str, member_id: &str, epoch: i32) -> ShareGroupHeartbeatRequest {
@@ -105,16 +102,14 @@ async fn single_member_join_assignment() {
     req.subscribed_topic_names = Some(vec!["t1".into()]);
     let resp = client.send(req).await.unwrap();
 
-    check!(resp.error_code == 0, "join failed: {:?}", resp.error_code);
-    check!(resp.member_id.is_some(), "broker must mint a member id");
     check!(
-        resp.member_epoch == 1,
-        "first join advances member to epoch 1, got {}",
-        resp.member_epoch
-    );
-    check!(
-        total_assigned(&resp) == 4,
-        "single member must own all 4 partitions"
+        (
+            resp.error_code,
+            resp.member_id.is_some(),
+            resp.member_epoch,
+            total_assigned(&resp)
+        ) == (0, true, 1, 4),
+        "single-member join response mismatch: {resp:?}"
     );
 }
 
@@ -129,36 +124,29 @@ async fn two_members_then_describe() {
     let mut m1 = heartbeat("g1", "", 0);
     m1.subscribed_topic_names = Some(vec!["t2".into()]);
     let r1 = client.send(m1).await.unwrap();
-    assert!(r1.error_code == 0, "m1 join failed: {:?}", r1.error_code);
+    assert2::assert!(r1.error_code == 0);
     let mid1 = r1.member_id.clone().unwrap();
 
     let mut m2 = heartbeat("g1", "", 0);
     m2.subscribed_topic_names = Some(vec!["t2".into()]);
     let r2 = client.send(m2).await.unwrap();
-    assert!(r2.error_code == 0, "m2 join failed: {:?}", r2.error_code);
+    assert2::assert!(r2.error_code == 0);
     let mid2 = r2.member_id.clone().unwrap();
-    assert!(mid1 != mid2, "members must have distinct ids");
+    assert2::assert!(mid1 != mid2);
 
     // m1 re-heartbeats at its returned epoch so it learns the rebalanced
     // assignment after m2 bumped the group epoch.
     let mut m1b = heartbeat("g1", &mid1, r1.member_epoch);
     m1b.subscribed_topic_names = Some(vec!["t2".into()]);
     let r1b = client.send(m1b).await.unwrap();
-    assert!(r1b.error_code == 0, "m1 re-hb failed: {:?}", r1b.error_code);
+    assert2::assert!(r1b.error_code == 0);
 
     let desc = describe(&client, "g1").await;
-    assert!(desc.groups.len() == 1, "expected exactly one group row");
+    assert2::assert!(desc.groups.len() == 1);
     let g = &desc.groups[0];
-    check!(g.error_code == 0, "describe error: {:?}", g.error_code);
     check!(
-        g.members.len() == 2,
-        "describe must show both members, got {}",
-        g.members.len()
-    );
-    check!(
-        g.group_epoch >= 1,
-        "group epoch must have advanced, got {}",
-        g.group_epoch
+        (g.error_code, g.members.len(), g.group_epoch >= 1) == (0, 2, true),
+        "two-member describe response mismatch: {g:?}"
     );
 }
 
@@ -173,30 +161,18 @@ async fn member_leave_epoch_minus_one() {
     let mut join = heartbeat("g1", "", 0);
     join.subscribed_topic_names = Some(vec!["t3".into()]);
     let r = client.send(join).await.unwrap();
-    assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+    assert2::assert!(r.error_code == 0);
     let mid = r.member_id.clone().unwrap();
 
     let leave = heartbeat("g1", &mid, -1);
     let lr = client.send(leave).await.unwrap();
-    assert!(lr.error_code == 0, "leave failed: {:?}", lr.error_code);
+    assert2::assert!(lr.error_code == 0);
 
     let desc = describe(&client, "g1").await;
-    assert!(
-        desc.groups.len() == 1,
-        "group row still present after leave"
-    );
+    assert2::assert!(desc.groups.len() == 1);
     let g = &desc.groups[0];
     // The empty group is retained (the actor stays alive with 0 members).
-    assert!(
-        g.error_code == 0,
-        "retained empty group describe error: {:?}",
-        g.error_code
-    );
-    assert!(
-        g.members.is_empty(),
-        "no members must remain after leave, got {}",
-        g.members.len()
-    );
+    assert2::assert!((g.error_code, g.members.is_empty()) == (0, true));
 }
 
 /// Share-group state persists to `__consumer_offsets`; after a broker restart
@@ -219,7 +195,7 @@ async fn state_survives_restart() {
         let mut join = heartbeat("g1", "", 0);
         join.subscribed_topic_names = Some(vec!["t4".into()]);
         let r = client.send(join).await.unwrap();
-        assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+        assert2::assert!(r.error_code == 0);
         member_id = r.member_id.clone().unwrap();
 
         // flush_pending inside the share actor awaits offsets_log.append before
@@ -236,7 +212,7 @@ async fn state_survives_restart() {
         let client = connect(&bootstrap).await;
 
         let desc = describe(&client, "g1").await;
-        assert!(desc.groups.len() == 1, "group row after restart");
+        assert2::assert!(desc.groups.len() == 1);
         let g = &desc.groups[0];
         check!(
             g.error_code == 0,
@@ -280,7 +256,7 @@ async fn lifecycle_initializes_share_state() {
     let mut join = heartbeat("g5", "", 0);
     join.subscribed_topic_names = Some(vec!["t5".into()]);
     let r = client.send(join).await.unwrap();
-    assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+    assert2::assert!(r.error_code == 0);
     let mid = r.member_id.clone().unwrap();
 
     // The lifecycle hook initializes assigned partitions best-effort on each
@@ -310,20 +286,14 @@ async fn lifecycle_initializes_share_state() {
         }
     })
     .await;
-    assert!(
-        res.is_ok(),
-        "lifecycle did not initialize all 3 partitions within 30s"
-    );
+    assert2::assert!(res.is_ok());
 
     for p in 0..3 {
         let (_se, _le, start_offset, _dcc) = broker
             .share_state_summary_for_test("g5", tid, p)
             .await
             .unwrap();
-        assert!(
-            start_offset == 0,
-            "partition {p} initialized at start_offset 0, got {start_offset}"
-        );
+        assert2::assert!(start_offset == 0);
     }
 }
 
@@ -349,7 +319,7 @@ async fn lifecycle_metadata_survives_restart() {
         let mut join = heartbeat("g6", "", 0);
         join.subscribed_topic_names = Some(vec!["t6".into()]);
         let r = client.send(join).await.unwrap();
-        assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+        assert2::assert!(r.error_code == 0);
         let mid = r.member_id.clone().unwrap();
 
         // Interleave heartbeats with condition check — no fixed count, no
@@ -376,18 +346,14 @@ async fn lifecycle_metadata_survives_restart() {
             }
         })
         .await;
-        assert!(
-            res.is_ok(),
-            "lifecycle did not initialize both partitions within 30s"
-        );
+        assert2::assert!(res.is_ok());
         // Both partitions are initialized before restart.
         for p in 0..2 {
-            assert!(
+            assert2::assert!(
                 broker
                     .share_state_summary_for_test("g6", tid, p)
                     .await
-                    .is_some(),
-                "partition {p} initialized pre-restart"
+                    .is_some()
             );
         }
         broker.shutdown().await;
@@ -403,12 +369,11 @@ async fn lifecycle_metadata_survives_restart() {
         // The recovered ShareCoordinator replays __share_group_state, so the
         // summary is present immediately after restart.
         for p in 0..2 {
-            assert!(
+            assert2::assert!(
                 broker
                     .share_state_summary_for_test("g6", tid, p)
                     .await
-                    .is_some(),
-                "partition {p} share-state recovered after restart"
+                    .is_some()
             );
         }
 
@@ -428,12 +393,11 @@ async fn lifecycle_metadata_survives_restart() {
         // partitions after restart).
         for p in 0..2 {
             broker.wait_for_share_state_summary("g6", tid, p).await;
-            assert!(
+            assert2::assert!(
                 broker
                     .share_state_summary_for_test("g6", tid, p)
                     .await
-                    .is_some(),
-                "partition {p} share-state still present after restart re-join"
+                    .is_some()
             );
         }
     }
@@ -453,7 +417,7 @@ async fn list_groups_includes_share_group() {
     let mut join = heartbeat("g7", "", 0);
     join.subscribed_topic_names = Some(vec!["t7".into()]);
     let r = client.send(join).await.unwrap();
-    assert!(r.error_code == 0, "join failed: {:?}", r.error_code);
+    assert2::assert!(r.error_code == 0);
 
     // types_filter = ["share"] → contains g7 tagged "share".
     let resp = client
@@ -463,7 +427,7 @@ async fn list_groups_includes_share_group() {
         })
         .await
         .expect("ListGroups[share]");
-    assert!(resp.error_code == 0, "list error: {:?}", resp.error_code);
+    assert2::assert!(resp.error_code == 0);
     let share_row = resp.groups.iter().find(|g| g.group_id == "g7");
     let share_row = share_row.unwrap_or_else(|| {
         panic!(
@@ -471,11 +435,7 @@ async fn list_groups_includes_share_group() {
             resp.groups.iter().map(|g| &g.group_id).collect::<Vec<_>>()
         )
     });
-    assert!(
-        share_row.group_type == "share",
-        "expected group_type=share, got {:?}",
-        share_row.group_type
-    );
+    assert2::assert!(share_row.group_type == "share");
 
     // types_filter = ["consumer"] → g7 must NOT appear.
     let resp = client
@@ -485,11 +445,7 @@ async fn list_groups_includes_share_group() {
         })
         .await
         .expect("ListGroups[consumer]");
-    assert!(
-        !resp.groups.iter().any(|g| g.group_id == "g7"),
-        "share group g7 must be excluded under types_filter=[consumer], got {:?}",
-        resp.groups.iter().map(|g| &g.group_id).collect::<Vec<_>>()
-    );
+    assert2::assert!(!resp.groups.iter().any(|g| g.group_id == "g7"));
 
     // No filter → still contains g7 tagged "share".
     let resp = client
@@ -501,9 +457,5 @@ async fn list_groups_includes_share_group() {
         .iter()
         .find(|g| g.group_id == "g7")
         .expect("share group g7 present with no filter");
-    assert!(
-        row.group_type == "share",
-        "unfiltered list must tag g7 as share, got {:?}",
-        row.group_type
-    );
+    assert2::assert!(row.group_type == "share");
 }

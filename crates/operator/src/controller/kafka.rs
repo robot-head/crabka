@@ -466,6 +466,7 @@ pub(crate) fn oauth_introspection_secret_mount(kafka: &Kafka) -> Option<OauthInt
 /// In-pod mount info for the GSSAPI keytab. `key` is the user's source
 /// key; mounted via projected items to a fixed path so the broker reads
 /// `/etc/crabka/gssapi-keytab/keytab` regardless of key name.
+#[derive(Debug, PartialEq, Eq)]
 pub(crate) struct GssapiKeytabMount {
     pub secret_name: String,
     pub key: String,
@@ -1843,7 +1844,6 @@ fn cm_name(kafka: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::crd::{KafkaNodePoolSpec, KafkaNodePoolStatus, NodeRole};
@@ -1870,83 +1870,50 @@ mod tests {
     }
 
     #[test]
-    fn aggregate_status_no_pools_is_no_node_pools() {
-        let r = aggregate_pool_status(std::iter::empty::<&KafkaNodePool>());
-        let (ready, reason, _) = rollup_condition(&r);
-        assert!(!ready);
-        assert!(reason == "NoNodePools");
+    fn aggregate_status_rollup_cases() {
+        for (_name, pools, expected) in [
+            ("no node pools", vec![], (false, "NoNodePools")),
+            (
+                "partially ready pool",
+                vec![pool_with_status("brokers", 3, 1)],
+                (false, "PartiallyReady"),
+            ),
+            (
+                "all pools ready",
+                vec![pool_with_status("brokers", 1, 1)],
+                (true, "Available"),
+            ),
+            (
+                "pool with zero replicas",
+                vec![pool_with_status("brokers", 0, 0)],
+                (false, "PartiallyReady"),
+            ),
+        ] {
+            let r = aggregate_pool_status(pools.iter());
+            let (ready, reason, _) = rollup_condition(&r);
+            let (expected_ready, expected_reason) = expected;
+            assert2::assert!(ready == expected_ready);
+            assert2::assert!(reason == expected_reason);
+        }
     }
 
     #[test]
-    fn aggregate_status_partial_pool_is_partially_ready() {
-        let p = pool_with_status("brokers", 3, 1);
-        let r = aggregate_pool_status([&p]);
-        let (ready, reason, _) = rollup_condition(&r);
-        assert!(!ready);
-        assert!(reason == "PartiallyReady");
-    }
-
-    #[test]
-    fn aggregate_status_all_ready_pools_is_available() {
-        let p = pool_with_status("brokers", 1, 1);
-        let r = aggregate_pool_status([&p]);
-        let (ready, reason, _) = rollup_condition(&r);
-        assert!(ready);
-        assert!(reason == "Available");
-    }
-
-    #[test]
-    fn rolling_condition_when_pool_partial() {
-        let r = ClusterRollup {
-            replicas: ReplicaCount(3),
-            ready_replicas: ReadyReplicaCount(1),
-            pool_count: 1,
-        };
-        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
-        assert!(rolling);
-        assert!(reason == "RollingUpdate");
-    }
-
-    #[test]
-    fn rolling_condition_when_pool_stable() {
-        let r = ClusterRollup {
-            replicas: ReplicaCount(1),
-            ready_replicas: ReadyReplicaCount(1),
-            pool_count: 1,
-        };
-        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
-        assert!(!rolling);
-        assert!(reason == "Stable");
-    }
-
-    // Boundary: with zero pools the cluster is never "rolling", even when the
-    // (defaulted) ready/replica totals disagree. Pins `pool_count > 0` so a
-    // `>=` mutant (which would treat pool_count==0 as rolling) fails here.
-    #[test]
-    fn rolling_condition_zero_pools_is_stable() {
-        let r = ClusterRollup {
-            replicas: ReplicaCount(3),
-            ready_replicas: ReadyReplicaCount(1),
-            pool_count: 0,
-        };
-        let (rolling, reason, _) = rolling_condition_from_rollup(&r);
-        assert!(!rolling);
-        assert!(reason == "Stable");
-    }
-
-    // Boundary: a pool that exists but reports zero replicas (ready==replicas==0)
-    // is PartiallyReady, not Available. Pins `replicas > 0` so a `>=` mutant
-    // (which would call an all-zero cluster "Available") fails here.
-    #[test]
-    fn rollup_condition_zero_replicas_is_partially_ready() {
-        let r = ClusterRollup {
-            replicas: ReplicaCount(0),
-            ready_replicas: ReadyReplicaCount(0),
-            pool_count: 1,
-        };
-        let (ready, reason, _) = rollup_condition(&r);
-        assert!(!ready);
-        assert!(reason == "PartiallyReady");
+    fn rolling_condition_cases() {
+        for (_name, replicas, ready_replicas, pool_count, expected) in [
+            ("partial pool", 3, 1, 1, (true, "RollingUpdate")),
+            ("stable pool", 1, 1, 1, (false, "Stable")),
+            ("zero pools boundary", 3, 1, 0, (false, "Stable")),
+        ] {
+            let r = ClusterRollup {
+                replicas: ReplicaCount(replicas),
+                ready_replicas: ReadyReplicaCount(ready_replicas),
+                pool_count,
+            };
+            let (rolling, reason, _) = rolling_condition_from_rollup(&r);
+            let (expected_rolling, expected_reason) = expected;
+            assert2::assert!(rolling == expected_rolling);
+            assert2::assert!(reason == expected_reason);
+        }
     }
 
     // Pure helper — picks the first OAuth listener as canonical.
@@ -2058,36 +2025,36 @@ mod tests {
     }
 
     #[test]
-    fn canonical_oauth_config_none_when_no_oauth_listener() {
-        let ls = vec![
-            listener_with_auth("plain", None),
-            listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
-        ];
-        assert!(canonical_oauth_config(&ls).is_none());
-    }
-
-    #[test]
-    fn canonical_oauth_config_picks_first_oauth() {
-        let cfg = sample_oauth_cfg(vec![]);
-        let ls = vec![
-            listener_with_auth("plain", None),
-            listener_with_auth("oauth", Some(ListenerAuthentication::OAuth(cfg.clone()))),
-        ];
-        assert!(canonical_oauth_config(&ls) == Some(cfg));
-    }
-
-    #[test]
-    fn canonical_oauth_config_with_empty_trust_certs_is_some_but_empty() {
-        // The reconcile-level no-op check is
-        //   `canonical.tls_trusted_certificates.is_empty()` — guard that the
-        // helper still returns Some so the no-op branch is reached.
-        let cfg = sample_oauth_cfg(vec![]);
-        let ls = vec![listener_with_auth(
-            "oauth",
-            Some(ListenerAuthentication::OAuth(cfg)),
-        )];
-        let got = canonical_oauth_config(&ls).expect("OAuth listener present");
-        assert!(got.tls_trusted_certificates.is_empty());
+    fn canonical_oauth_config_cases() {
+        let oauth = sample_oauth_cfg(vec![]);
+        for (_name, listeners, expected) in [
+            (
+                "no OAuth listener",
+                vec![
+                    listener_with_auth("plain", None),
+                    listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
+                ],
+                None,
+            ),
+            (
+                "first OAuth listener",
+                vec![
+                    listener_with_auth("plain", None),
+                    listener_with_auth("oauth", Some(ListenerAuthentication::OAuth(oauth.clone()))),
+                ],
+                Some(oauth.clone()),
+            ),
+            (
+                "OAuth listener with empty trust certificates",
+                vec![listener_with_auth(
+                    "oauth",
+                    Some(ListenerAuthentication::OAuth(oauth.clone())),
+                )],
+                Some(oauth.clone()),
+            ),
+        ] {
+            assert2::assert!(canonical_oauth_config(&listeners) == expected);
+        }
     }
 
     // Pure helper — derives the introspection client-secret
@@ -2096,38 +2063,32 @@ mod tests {
     // integration tests.
 
     #[test]
-    fn oauth_introspection_secret_mount_returns_none_when_no_oauth_listener() {
-        let kafka = kafka_with_listeners(vec![
+    fn oauth_introspection_secret_mount_absence_cases() {
+        let no_oauth = kafka_with_listeners(vec![
             listener_with_auth("plain", None),
             listener_with_auth("scram", Some(ListenerAuthentication::ScramSha512)),
         ]);
-        assert!(oauth_introspection_secret_mount(&kafka).is_none());
-    }
-
-    #[test]
-    fn oauth_introspection_secret_mount_returns_none_when_access_token_is_jwt_true() {
-        // sample_oauth_cfg defaults to access_token_is_jwt = true (JWT mode).
         let cfg = sample_oauth_cfg(vec![]);
-        let kafka = kafka_with_listeners(vec![listener_with_auth(
+        let jwt_mode = kafka_with_listeners(vec![listener_with_auth(
             "oauth",
             Some(ListenerAuthentication::OAuth(cfg)),
         )]);
-        assert!(oauth_introspection_secret_mount(&kafka).is_none());
-    }
-
-    #[test]
-    fn oauth_introspection_secret_mount_returns_none_when_client_secret_absent_introspection_mode()
-    {
-        // Introspection mode but clientSecret omitted (would fail
-        // validation, but the helper should still handle it gracefully —
-        // the pool reconciler must not panic on an invalid-but-applied CR).
         let mut cfg = sample_oauth_cfg_introspection("oauth-cs", "client-secret");
         cfg.client_secret = None;
-        let kafka = kafka_with_listeners(vec![listener_with_auth(
+        let introspection_without_secret = kafka_with_listeners(vec![listener_with_auth(
             "oauth",
             Some(ListenerAuthentication::OAuth(cfg)),
         )]);
-        assert!(oauth_introspection_secret_mount(&kafka).is_none());
+        for (_name, kafka) in [
+            ("no OAuth listener", no_oauth),
+            ("JWT mode", jwt_mode),
+            (
+                "introspection mode without client secret",
+                introspection_without_secret,
+            ),
+        ] {
+            assert2::assert!(oauth_introspection_secret_mount(&kafka) == None);
+        }
     }
 
     #[test]
@@ -2137,9 +2098,13 @@ mod tests {
             "oauth",
             Some(ListenerAuthentication::OAuth(cfg)),
         )]);
-        let mount = oauth_introspection_secret_mount(&kafka).expect("mount derived");
-        assert!(mount.secret_name == "oauth-cs");
-        assert!(mount.key == "client-secret");
+        assert2::assert!(
+            oauth_introspection_secret_mount(&kafka)
+                == Some(OauthIntrospectionMount {
+                    secret_name: "oauth-cs".to_string(),
+                    key: "client-secret".to_string(),
+                })
+        );
     }
 
     #[test]
@@ -2158,27 +2123,31 @@ mod tests {
             "gss",
             Some(ListenerAuthentication::Gssapi(g)),
         )]);
-        let m = gssapi_keytab_mount(&k).expect("keytab mount present");
-        assert!(m.secret_name == "kt");
-        assert!(m.key == "krb5.keytab");
+        assert2::assert!(
+            gssapi_keytab_mount(&k)
+                == Some(GssapiKeytabMount {
+                    secret_name: "kt".to_string(),
+                    key: "krb5.keytab".to_string(),
+                })
+        );
     }
 
     #[test]
     fn no_keytab_mount_without_gssapi_listener() {
         let k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
-        assert!(gssapi_keytab_mount(&k).is_none());
+        assert2::assert!(gssapi_keytab_mount(&k).is_none());
     }
 
     #[test]
     fn krb5_conf_mount_extracted_from_spec() {
         let mut k = kafka_with_listeners(vec![listener_with_auth("plain", None)]);
-        assert!(krb5_conf_mount(&k).is_none());
+        assert2::assert!(krb5_conf_mount(&k).is_none());
         k.spec.krb5_conf_secret_ref = Some(crate::crd::Krb5ConfSecretRef {
             secret_name: "krb5".into(),
             key: "krb5.conf".into(),
         });
-        let (secret_name, key) = krb5_conf_mount(&k).expect("krb5.conf mount present");
-        assert!(secret_name == "krb5");
-        assert!(key == "krb5.conf");
+        assert2::assert!(
+            krb5_conf_mount(&k) == Some(("krb5".to_string(), "krb5.conf".to_string()))
+        );
     }
 }

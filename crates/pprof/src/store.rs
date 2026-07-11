@@ -78,7 +78,6 @@ pub trait ProfileStore: Send + Sync {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_blockstore::LabelMatcher;
     use datafusion::prelude::SessionContext;
 
@@ -168,7 +167,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(scan.samples_table == "samples");
-        assert!(store.profile_types("t", 0, 1).await.unwrap().is_empty());
+        assert2::assert!(scan.samples_table == "samples");
+        assert2::assert!(store.profile_types("t", 0, 1).await.unwrap().is_empty());
     }
 }

@@ -579,10 +579,13 @@ mod cogroup_caching_tests {
 
         pollster::block_on(g.flush_caches()).unwrap();
         let out = g.take_output();
-        check!(out.len() == 1);
-        check!(out[0].topic == "out");
-        // 3 = in1(+2) then in2(+1) — in2 read in1's buffered accumulator.
-        check!(out[0].value.as_ref().unwrap().as_ref() == 3i64.to_be_bytes());
+        check!(
+            (
+                out.len(),
+                out[0].topic.as_str(),
+                out[0].value.as_ref().map(bytes::Bytes::as_ref),
+            ) == (1, "out", Some(3i64.to_be_bytes().as_slice()))
+        );
     }
 
     /// `with_caching(false)`: the cogroup store stays uncached even with budget.

@@ -174,7 +174,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord, NodeId};
     use crabka_security::ListenerProtocol;
 
@@ -239,7 +238,8 @@ mod tests {
         let bytes = handle(&broker, VERSION, 123, &req, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(&bytes);
+        let mut resp = decode_response(&bytes);
+        resp.brokers.sort_by_key(|broker| broker.broker_id);
 
         let expected = DescribeClusterResponse {
             throttle_time_ms: 0,
@@ -252,7 +252,7 @@ mod tests {
             cluster_authorized_operations: i32::MIN,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -270,39 +270,38 @@ mod tests {
         let bytes = handle(&broker, VERSION, 123, &req, &ctx)
             .await
             .expect("handle");
-        let resp = decode_response(&bytes);
+        let mut resp = decode_response(&bytes);
+        resp.brokers.sort_by_key(|broker| broker.broker_id);
 
-        assert!(
-            (
-                resp.error_code,
-                resp.error_message.clone(),
-                resp.endpoint_type,
-                resp.cluster_id.clone(),
-                resp.cluster_authorized_operations,
-                resp.throttle_time_ms
-            ) == (
-                codes::NONE,
-                None,
-                1,
-                broker.controller.current_image().cluster_id().to_string(),
-                i32::MIN,
-                0
-            )
-        );
-        let broker_row = resp
-            .brokers
-            .iter()
-            .find(|b| b.broker_id == 42)
-            .expect("seeded broker row");
-        let expected_row = DescribeClusterBroker {
-            broker_id: 42,
-            host: "broker-a".into(),
-            port: 29092,
-            rack: Some("rack-a".into()),
-            is_fenced: false,
+        let expected = DescribeClusterResponse {
+            throttle_time_ms: 0,
+            error_code: codes::NONE,
+            error_message: None,
+            endpoint_type: 1,
+            cluster_id: broker.controller.current_image().cluster_id().to_string(),
+            controller_id: 1,
+            brokers: vec![
+                DescribeClusterBroker {
+                    broker_id: 1,
+                    host: "127.0.0.1".into(),
+                    port: 0,
+                    rack: None,
+                    is_fenced: false,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                },
+                DescribeClusterBroker {
+                    broker_id: 42,
+                    host: "broker-a".into(),
+                    port: 29092,
+                    rack: Some("rack-a".into()),
+                    is_fenced: false,
+                    unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
+                },
+            ],
+            cluster_authorized_operations: i32::MIN,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(*broker_row == expected_row);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

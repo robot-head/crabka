@@ -118,7 +118,6 @@ fn is_expired(lease: &Lease) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -139,15 +138,22 @@ mod tests {
     #[test]
     fn held_by_us_matches_identity() {
         let l = lease_with("me", now());
-        assert!(held_by_us(&l, "me"));
-        assert!(!held_by_us(&l, "someone-else"));
+        for (_name, identity, expected) in [
+            ("matching identity", "me", true),
+            ("different identity", "someone-else", false),
+        ] {
+            assert2::assert!(held_by_us(&l, identity) == expected);
+        }
     }
 
     #[test]
     fn expiry_uses_renew_time() {
         let stale = jiff::Timestamp::from_second(now().as_second() - 60).unwrap();
         let fresh = now();
-        assert!(is_expired(&lease_with("x", stale)));
-        assert!(!is_expired(&lease_with("x", fresh)));
+        for (_name, renew_time, expected) in
+            [("stale lease", stale, true), ("fresh lease", fresh, false)]
+        {
+            assert2::assert!(is_expired(&lease_with("x", renew_time)) == expected);
+        }
     }
 }

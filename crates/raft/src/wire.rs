@@ -167,13 +167,12 @@ impl CrabkaMetadataFetchResponse {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     fn assert_unexpected_eof<T: std::fmt::Debug>(result: Result<T, ProtocolError>, want: usize) {
         match result {
-            Err(ProtocolError::UnexpectedEof { needed }) => assert!(needed == want),
+            Err(ProtocolError::UnexpectedEof { needed }) => assert2::assert!(needed == want),
             other => panic!("expected UnexpectedEof {{ needed: {want} }}, got {other:?}"),
         }
     }
@@ -193,7 +192,7 @@ mod tests {
         let mut out = Vec::new();
         req.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
-        assert!(CrabkaSubmitChangeRequest::decode_v0(&mut cur).unwrap() == req);
+        assert2::assert!(CrabkaSubmitChangeRequest::decode_v0(&mut cur).unwrap() == req);
 
         let resp = CrabkaSubmitChangeResponse {
             error_code: 1,
@@ -202,7 +201,7 @@ mod tests {
         let mut out = Vec::new();
         resp.encode_v0(&mut out);
         let mut cur: &[u8] = &out;
-        assert!(CrabkaSubmitChangeResponse::decode_v0(&mut cur).unwrap() == resp);
+        assert2::assert!(CrabkaSubmitChangeResponse::decode_v0(&mut cur).unwrap() == resp);
     }
 
     #[test]
@@ -215,8 +214,8 @@ mod tests {
 
         let mut exact_empty: &[u8] = &[0, 0, 0, 0];
         let decoded = CrabkaSubmitChangeRequest::decode_v0(&mut exact_empty).unwrap();
-        assert!(decoded.records.is_empty());
-        assert!(exact_empty.is_empty());
+        assert2::assert!(decoded.records.is_empty());
+        assert2::assert!(exact_empty.is_empty());
 
         let mut short_payload: &[u8] = &[0, 0, 0, 4, 0xaa];
         assert_unexpected_eof(CrabkaSubmitChangeRequest::decode_v0(&mut short_payload), 3);
@@ -237,7 +236,7 @@ mod tests {
         let mut out = Vec::new();
         req.encode_v0(&mut out);
         let mut cur: &[u8] = &out;
-        assert!(CrabkaMetadataFetchRequest::decode_v0(&mut cur).unwrap() == req);
+        assert2::assert!(CrabkaMetadataFetchRequest::decode_v0(&mut cur).unwrap() == req);
 
         let resp = CrabkaMetadataFetchResponse {
             error_code: 0,
@@ -249,7 +248,7 @@ mod tests {
         let mut out = Vec::new();
         resp.encode_v0(&mut out).unwrap();
         let mut cur: &[u8] = &out;
-        assert!(CrabkaMetadataFetchResponse::decode_v0(&mut cur).unwrap() == resp);
+        assert2::assert!(CrabkaMetadataFetchResponse::decode_v0(&mut cur).unwrap() == resp);
     }
 
     #[test]
@@ -265,14 +264,14 @@ mod tests {
         .encode_v0(&mut exact);
         let mut cur: &[u8] = &exact;
         let decoded = CrabkaMetadataFetchRequest::decode_v0(&mut cur).unwrap();
-        assert!(
+        assert2::assert!(
             decoded
                 == CrabkaMetadataFetchRequest {
                     fetch_offset: 9,
                     max_bytes: 512,
                 }
         );
-        assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty());
     }
 
     #[test]
@@ -290,8 +289,8 @@ mod tests {
         let mut exact = Vec::new();
         resp.encode_v0(&mut exact).unwrap();
         let mut cur: &[u8] = &exact;
-        assert!(CrabkaMetadataFetchResponse::decode_v0(&mut cur).unwrap() == resp);
-        assert!(cur.is_empty());
+        assert2::assert!(CrabkaMetadataFetchResponse::decode_v0(&mut cur).unwrap() == resp);
+        assert2::assert!(cur.is_empty());
 
         let mut short_payload = Vec::new();
         short_payload.extend_from_slice(&0_i16.to_be_bytes());

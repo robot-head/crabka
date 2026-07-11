@@ -17,7 +17,7 @@ pub(crate) fn resolve_sasl_mechanisms_for_listener<'a>(
 
 #[cfg(test)]
 mod per_listener_config_tests {
-    use assert2::assert;
+
     use crabka_security::ListenerProtocol;
 
     use super::*;
@@ -42,7 +42,7 @@ mod per_listener_config_tests {
         let broker_default = vec![SaslMechanism::Plain, SaslMechanism::ScramSha256];
         let spec = test_listener_spec(ListenerProtocol::SaslSsl, Some(per_listener.clone()));
         let resolved = resolve_sasl_mechanisms_for_listener(&spec, &broker_default);
-        assert!(resolved == &per_listener);
+        assert2::assert!(resolved == &per_listener);
     }
 
     #[test]
@@ -50,6 +50,6 @@ mod per_listener_config_tests {
         let broker_default = vec![SaslMechanism::ScramSha512];
         let spec = test_listener_spec(ListenerProtocol::SaslSsl, None);
         let resolved = resolve_sasl_mechanisms_for_listener(&spec, &broker_default);
-        assert!(resolved == &broker_default);
+        assert2::assert!(resolved == &broker_default);
     }
 }

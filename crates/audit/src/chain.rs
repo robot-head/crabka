@@ -130,27 +130,29 @@ mod tests {
         let mut c = ChainState::new();
         check!(c.next_seq() == 0);
         let (s0, p0) = c.extend(b"r0");
-        check!(s0 == 0);
-        check!(p0 == GENESIS_HEAD);
-        check!(c.next_seq() == 1);
-        check!(c.head() == chain_hash(&GENESIS_HEAD, 0, b"r0"));
+        check!(
+            (s0, p0, c.next_seq(), c.head())
+                == (0, GENESIS_HEAD, 1, chain_hash(&GENESIS_HEAD, 0, b"r0"))
+        );
 
         let (s1, p1) = c.extend(b"r1");
-        check!(s1 == 1);
-        check!(p1 == chain_hash(&GENESIS_HEAD, 0, b"r0")); // prev == head after r0
-        check!(c.head() == chain_hash(&p1, 1, b"r1"));
+        check!(
+            (s1, p1, c.head())
+                == (
+                    1,
+                    chain_hash(&GENESIS_HEAD, 0, b"r0"),
+                    chain_hash(&p1, 1, b"r1"),
+                )
+        );
     }
 
     #[test]
     fn resume_sets_next_seq_and_head_and_continues() {
         let head = chain_hash(&GENESIS_HEAD, 4, b"r4");
         let mut c = ChainState::resume(5, head);
-        check!(c.next_seq() == 5);
-        check!(c.head() == head);
+        check!((c.next_seq(), c.head()) == (5, head));
         let (seq, prev) = c.extend(b"r5");
-        check!(seq == 5);
-        check!(prev == head);
-        check!(c.head() == chain_hash(&head, 5, b"r5"));
+        check!((seq, prev, c.head()) == (5, head, chain_hash(&head, 5, b"r5")));
     }
 
     #[test]
@@ -158,8 +160,12 @@ mod tests {
         let h = chain_hash(&GENESIS_HEAD, 7, b"x");
         let s = to_hex(&h);
         check!(s.len() == 64);
-        check!(from_hex32(&s) == Some(h));
-        check!(from_hex32("zz") == None);
-        check!(from_hex32("abc") == None); // odd length
+        for (name, input, expected) in [
+            ("round trip", s.as_str(), Some(h)),
+            ("non-hex input", "zz", None),
+            ("odd-length input", "abc", None),
+        ] {
+            check!(from_hex32(input) == expected, "case {name}");
+        }
     }
 }

@@ -98,7 +98,6 @@ pub fn decompress(data: &[u8], max_output: usize) -> Result<Bytes, CompressionEr
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -109,12 +108,12 @@ mod tests {
     fn roundtrip() {
         let z = compress(HELLO).unwrap();
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.as_ref() == HELLO);
+        assert2::assert!(back.as_ref() == HELLO);
     }
 
     #[test]
     fn decompress_truncated_header() {
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&XERIAL_HEADER[..4], BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -123,7 +122,7 @@ mod tests {
     #[test]
     fn decompress_missing_magic() {
         let bytes = [0u8; 20];
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&bytes, BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -134,7 +133,7 @@ mod tests {
         let mut bytes = XERIAL_HEADER.to_vec();
         bytes.extend_from_slice(&[0, 0, 0, 100]); // claim 100-byte chunk
         bytes.push(0); // only 1 byte present
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&bytes, BIG_CAP),
             Err(CompressionError::InvalidData(_))
         ));
@@ -144,12 +143,12 @@ mod tests {
     fn decompression_bomb_rejected() {
         let bomb = vec![0u8; 64 * 1024 * 1024];
         let z = compress(&bomb).unwrap();
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&z, 1024),
             Err(CompressionError::TooLarge { limit: 1024 })
         ));
         let back = decompress(&z, BIG_CAP).unwrap();
-        assert!(back.len() == bomb.len());
+        assert2::assert!(back.as_ref() == bomb.as_slice());
     }
 
     #[test]
@@ -158,9 +157,9 @@ mod tests {
         // The cumulative per-chunk cap check is `out + chunk > max_output`
         // (not `>=`), so a cap equal to the exact output size must pass.
         let back = decompress(&z, HELLO.len()).unwrap();
-        assert!(back.as_ref() == HELLO);
+        assert2::assert!(back.as_ref() == HELLO);
         // One byte under the exact size is rejected.
-        assert!(matches!(
+        assert2::assert!(matches!(
             decompress(&z, HELLO.len() - 1),
             Err(CompressionError::TooLarge { limit }) if limit == HELLO.len() - 1
         ));
@@ -180,7 +179,7 @@ mod tests {
             rest = &rest[4 + len..];
             chunks += 1;
         }
-        assert!(chunks == 1, "expected one 32 KiB chunk, got {chunks}");
+        assert2::assert!(chunks == 1);
     }
 
     #[test]
@@ -189,9 +188,9 @@ mod tests {
         // decompressing it must succeed and yield empty. Boundary on the
         // `data.len() < header` guard: a length equal to the header is valid.
         let z = compress(b"").unwrap();
-        assert!(z.len() == XERIAL_HEADER.len());
+        assert2::assert!(z.len() == XERIAL_HEADER.len());
         let back = decompress(&z, 1024).unwrap();
-        assert!(back.is_empty());
+        assert2::assert!(back.is_empty());
     }
 
     #[test]
@@ -204,6 +203,6 @@ mod tests {
         let Err(CompressionError::InvalidData(msg)) = decompress(&bytes, 1024) else {
             panic!("expected InvalidData");
         };
-        assert!(msg.contains("body"), "msg={msg}");
+        assert2::assert!(msg.contains("body"));
     }
 }

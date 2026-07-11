@@ -164,57 +164,44 @@ async fn rest_conformance_vs_cp_fixtures() {
 
     // ── 1. Register all three schemas (in order so IDs match fixtures) ────────
 
-    // AVRO: schemaType omitted → default.
     let avro_body = serde_json::json!({ "schema": avro_schema }).to_string();
-    let r = post_register(&app, "av-value", &avro_body).await;
-    assert_eq!(r.status(), StatusCode::OK, "register av-value");
-    let avro_reg_resp = body_json(r).await;
-
-    // PROTOBUF:
     let pb_body =
         serde_json::json!({ "schemaType": "PROTOBUF", "schema": protobuf_schema }).to_string();
-    let r = post_register(&app, "pb-value", &pb_body).await;
-    assert_eq!(r.status(), StatusCode::OK, "register pb-value");
-    let pb_reg_resp = body_json(r).await;
-
-    // JSON:
     let js_body = serde_json::json!({ "schemaType": "JSON", "schema": json_schema }).to_string();
-    let r = post_register(&app, "js-value", &js_body).await;
-    assert_eq!(r.status(), StatusCode::OK, "register js-value");
-    let js_reg_resp = body_json(r).await;
+    for (_name, subject, body, expected) in [
+        (
+            "avro",
+            "av-value",
+            &avro_body,
+            fixture_value("rest_register_avro.json"),
+        ),
+        (
+            "protobuf",
+            "pb-value",
+            &pb_body,
+            fixture_value("rest_register_protobuf.json"),
+        ),
+        (
+            "json",
+            "js-value",
+            &js_body,
+            fixture_value("rest_register_json.json"),
+        ),
+    ] {
+        let response = post_register(&app, subject, body).await;
+        let status = response.status();
+        let actual = body_json(response).await;
+        assert2::assert!(status == StatusCode::OK);
+        assert2::assert!(actual == expected);
+    }
 
     // ── 2. Register response: `{"id":N}` matches fixtures ────────────────────
-
-    let fix_register_avro = fixture_value("rest_register_avro.json");
-    let fix_register_pb = fixture_value("rest_register_protobuf.json");
-    let fix_register_js = fixture_value("rest_register_json.json");
-
-    assert_eq!(
-        avro_reg_resp, fix_register_avro,
-        "POST /subjects/av-value/versions matches fixture"
-    );
-    assert_eq!(
-        pb_reg_resp, fix_register_pb,
-        "POST /subjects/pb-value/versions matches fixture"
-    );
-    assert_eq!(
-        js_reg_resp, fix_register_js,
-        "POST /subjects/js-value/versions matches fixture"
-    );
 
     // ── 3. GET /schemas/ids/1 (AVRO) ─────────────────────────────────────────
     // Fixture: {"schema":"..."} — no schemaType for AVRO.
     let got_avro_by_id = get_json(&app, "/schemas/ids/1").await;
     let fix_avro_by_id = fixture_value("rest_get_by_id_avro.json");
-    assert_eq!(
-        got_avro_by_id, fix_avro_by_id,
-        "GET /schemas/ids/1 structurally matches rest_get_by_id_avro.json"
-    );
-    // Explicit: no schemaType field for AVRO.
-    assert!(
-        got_avro_by_id.get("schemaType").is_none(),
-        "AVRO GET by id must NOT include schemaType"
-    );
+    assert2::assert!(got_avro_by_id == fix_avro_by_id);
 
     // ── 4. GET /schemas/ids/2 (PROTOBUF) ─────────────────────────────────────
     let got_pb_by_id = get_json(&app, "/schemas/ids/2").await;
@@ -222,64 +209,32 @@ async fn rest_conformance_vs_cp_fixtures() {
     // The protobuf schema is normalised by our parser, and by cp-schema-registry.
     // Both sides should produce the same normalised text.  If there is a
     // discrepancy, the comparison below will tell us.
-    assert_eq!(
-        got_pb_by_id["schemaType"], "PROTOBUF",
-        "GET /schemas/ids/2 has schemaType=PROTOBUF"
-    );
-    // Full structural comparison.
-    assert_eq!(
-        got_pb_by_id, fix_pb_by_id,
-        "GET /schemas/ids/2 structurally matches rest_get_by_id_protobuf.json"
-    );
+    assert2::assert!(got_pb_by_id == fix_pb_by_id);
 
     // ── 5. GET /schemas/ids/3 (JSON) ─────────────────────────────────────────
     let got_js_by_id = get_json(&app, "/schemas/ids/3").await;
     let fix_js_by_id = fixture_value("rest_get_by_id_json.json");
-    assert_eq!(
-        got_js_by_id, fix_js_by_id,
-        "GET /schemas/ids/3 structurally matches rest_get_by_id_json.json"
-    );
+    assert2::assert!(got_js_by_id == fix_js_by_id);
 
     // ── 6. GET /subjects/av-value/versions/1 ─────────────────────────────────
     let got_av_ver = get_json(&app, "/subjects/av-value/versions/1").await;
     let fix_av_ver = fixture_value("rest_get_version_avro.json");
-    assert_eq!(
-        got_av_ver, fix_av_ver,
-        "GET /subjects/av-value/versions/1 structurally matches rest_get_version_avro.json"
-    );
-    // Explicit field checks per spec: AVRO has no schemaType.
-    assert!(
-        got_av_ver.get("schemaType").is_none(),
-        "AVRO get_version must NOT include schemaType"
-    );
-    assert_eq!(got_av_ver["subject"], "av-value");
-    assert_eq!(got_av_ver["version"], 1);
-    assert_eq!(got_av_ver["id"], 1);
+    assert2::assert!(got_av_ver == fix_av_ver);
 
     // ── 7. GET /subjects/pb-value/versions/1 ─────────────────────────────────
     let got_pb_ver = get_json(&app, "/subjects/pb-value/versions/1").await;
     let fix_pb_ver = fixture_value("rest_get_version_protobuf.json");
-    assert_eq!(
-        got_pb_ver, fix_pb_ver,
-        "GET /subjects/pb-value/versions/1 structurally matches rest_get_version_protobuf.json"
-    );
-    assert_eq!(got_pb_ver["schemaType"], "PROTOBUF");
+    assert2::assert!(got_pb_ver == fix_pb_ver);
 
     // ── 8. GET /subjects/js-value/versions/1 ─────────────────────────────────
     let got_js_ver = get_json(&app, "/subjects/js-value/versions/1").await;
     let fix_js_ver = fixture_value("rest_get_version_json.json");
-    assert_eq!(
-        got_js_ver, fix_js_ver,
-        "GET /subjects/js-value/versions/1 structurally matches rest_get_version_json.json"
-    );
+    assert2::assert!(got_js_ver == fix_js_ver);
 
     // ── 9. GET /config ────────────────────────────────────────────────────────
     let got_config = get_json(&app, "/config").await;
     let fix_config = fixture_value("rest_get_config.json");
-    assert_eq!(
-        got_config, fix_config,
-        "GET /config matches rest_get_config.json"
-    );
+    assert2::assert!(got_config == fix_config);
 
     // ── 10. GET /subjects — compare as sorted set ─────────────────────────────
     let got_subjects = get_json(&app, "/subjects").await;
@@ -288,10 +243,7 @@ async fn rest_conformance_vs_cp_fixtures() {
     let mut fix_sorted = sorted_string_array(&fix_subjects);
     got_sorted.sort();
     fix_sorted.sort();
-    assert_eq!(
-        got_sorted, fix_sorted,
-        "GET /subjects (as sorted set) matches rest_list_subjects.json"
-    );
+    assert2::assert!(got_sorted == fix_sorted);
 
     // ── 11. GET /schemas/types — compare as sorted set ────────────────────────
     let got_types = get_json(&app, "/schemas/types").await;
@@ -300,10 +252,7 @@ async fn rest_conformance_vs_cp_fixtures() {
     let mut fix_types_sorted = sorted_string_array(&fix_types);
     got_types_sorted.sort();
     fix_types_sorted.sort();
-    assert_eq!(
-        got_types_sorted, fix_types_sorted,
-        "GET /schemas/types (as sorted set) matches rest_schema_types.json"
-    );
+    assert2::assert!(got_types_sorted == fix_types_sorted);
 
     // ── 12. Error: subject not found → 404, error_code 40401 ─────────────────
     let nf_resp = get_response(&app, "/subjects/does-not-exist/versions/1").await;
@@ -311,15 +260,8 @@ async fn rest_conformance_vs_cp_fixtures() {
     let nf_body = body_json(nf_resp).await;
 
     let (fix_status, fix_err_body) = fixture_error_body("rest_err_subject_not_found.json");
-    assert_eq!(
-        nf_status.as_u16(),
-        fix_status,
-        "subject-not-found HTTP status matches fixture"
-    );
-    assert_eq!(
-        nf_body["error_code"], fix_err_body["error_code"],
-        "subject-not-found error_code matches fixture (expected 40401)"
-    );
+    assert2::assert!(nf_status.as_u16() == fix_status);
+    assert2::assert!(&nf_body["error_code"] == &fix_err_body["error_code"]);
 
     // ── 13. Error: invalid schema → 422, error_code 42201 ────────────────────
     let bad_resp = post_register(
@@ -332,15 +274,8 @@ async fn rest_conformance_vs_cp_fixtures() {
     let bad_body = body_json(bad_resp).await;
 
     let (fix_bad_status, fix_bad_body) = fixture_error_body("rest_err_invalid_schema.json");
-    assert_eq!(
-        bad_status.as_u16(),
-        fix_bad_status,
-        "invalid-schema HTTP status matches fixture"
-    );
-    assert_eq!(
-        bad_body["error_code"], fix_bad_body["error_code"],
-        "invalid-schema error_code matches fixture (expected 42201)"
-    );
+    assert2::assert!(bad_status.as_u16() == fix_bad_status);
+    assert2::assert!(&bad_body["error_code"] == &fix_bad_body["error_code"]);
 
     // ── teardown ──────────────────────────────────────────────────────────────
     cancel.cancel();
@@ -360,16 +295,14 @@ async fn message_type_extension_round_trips_through_rest() {
     })
     .to_string();
     let r = post_register(&app, "orders-value", &body).await;
-    assert_eq!(r.status(), StatusCode::OK, "register orders-value");
+    assert2::assert!(r.status() == StatusCode::OK);
 
     let by_id = get_json(&app, "/schemas/ids/1").await;
-    assert_eq!(by_id["messageType"], "demo.Order");
-
     let version = get_json(&app, "/subjects/orders-value/versions/1").await;
-    assert_eq!(version["messageType"], "demo.Order");
-
     let lookup = body_json(post_lookup(&app, "orders-value", &body).await).await;
-    assert_eq!(lookup["messageType"], "demo.Order");
+    assert2::assert!(&by_id["messageType"] == &serde_json::json!("demo.Order"));
+    assert2::assert!(&version["messageType"] == &serde_json::json!("demo.Order"));
+    assert2::assert!(&lookup["messageType"] == &serde_json::json!("demo.Order"));
 
     cancel.cancel();
     broker.shutdown().await;

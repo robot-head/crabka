@@ -61,9 +61,8 @@ mod tests {
         let bytes = s.serialize("t", &sample());
         let reader = IpcReader::new(Cursor::new(bytes.to_vec()));
         let df = reader.finish().unwrap();
-        check!(df.height() == 2);
         let names: Vec<&str> = df.get_column_names().iter().map(|s| s.as_str()).collect();
-        check!(names == ["id", "total"]);
+        check!((df.height(), names) == (2, vec!["id", "total"]));
     }
 
     #[test]

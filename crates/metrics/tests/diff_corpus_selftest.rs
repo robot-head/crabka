@@ -1,7 +1,7 @@
 #[path = "support/diff_corpus.rs"]
 mod diff_corpus;
 
-use assert2::{assert, check};
+use assert2::check;
 use diff_corpus::*;
 use serde_json::json;
 
@@ -42,5 +42,5 @@ fn corpus_is_nonempty_and_covers_key_functions() {
             .iter()
             .any(|case| case.promql.contains("histogram_quantile"))
     );
-    assert!(!seed_dataset().is_empty());
+    assert2::assert!(!seed_dataset().is_empty());
 }

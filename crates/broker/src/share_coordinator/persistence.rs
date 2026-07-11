@@ -195,7 +195,6 @@ fn get_batches(buf: &mut &[u8]) -> Result<Vec<StateBatch>, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -205,29 +204,33 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_key_round_trip() {
-        let key = ShareStateKey {
-            record_type: KEY_SHARE_SNAPSHOT,
-            group_id: "g1".into(),
-            topic_id: Uuid::from_bytes([7; 16]),
-            partition: 3,
-        };
-        let bytes = encode_state_key(&key);
-        assert!(peek_type(&bytes) == KEY_SHARE_SNAPSHOT);
-        assert!(parse_state_key(&bytes).unwrap() == key);
-    }
-
-    #[test]
-    fn update_key_round_trip() {
-        let key = ShareStateKey {
-            record_type: KEY_SHARE_UPDATE,
-            group_id: "another-group".into(),
-            topic_id: Uuid::from_bytes([1; 16]),
-            partition: 0,
-        };
-        let bytes = encode_state_key(&key);
-        assert!(peek_type(&bytes) == KEY_SHARE_UPDATE);
-        assert!(parse_state_key(&bytes).unwrap() == key);
+    fn key_round_trip_scenarios() {
+        for (_case, key, expected_type) in [
+            (
+                "snapshot key",
+                ShareStateKey {
+                    record_type: KEY_SHARE_SNAPSHOT,
+                    group_id: "g1".into(),
+                    topic_id: Uuid::from_bytes([7; 16]),
+                    partition: 3,
+                },
+                KEY_SHARE_SNAPSHOT,
+            ),
+            (
+                "update key",
+                ShareStateKey {
+                    record_type: KEY_SHARE_UPDATE,
+                    group_id: "another-group".into(),
+                    topic_id: Uuid::from_bytes([1; 16]),
+                    partition: 0,
+                },
+                KEY_SHARE_UPDATE,
+            ),
+        ] {
+            let bytes = encode_state_key(&key);
+            assert2::assert!(peek_type(&bytes) == expected_type);
+            assert2::assert!(parse_state_key(&bytes).unwrap() == key);
+        }
     }
 
     #[test]
@@ -237,7 +240,7 @@ mod tests {
         put_string(&mut b, "g");
         b.put_slice(&[0u8; 16]);
         b.put_i32(0);
-        assert!(parse_state_key(&b.freeze()).is_err());
+        assert2::assert!(parse_state_key(&b.freeze()).is_err());
     }
 
     #[test]
@@ -263,7 +266,7 @@ mod tests {
                 },
             ],
         };
-        assert!(ShareSnapshotValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareSnapshotValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -280,7 +283,7 @@ mod tests {
                 delivery_count: 2,
             }],
         };
-        assert!(ShareUpdateValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareUpdateValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -293,7 +296,7 @@ mod tests {
             delivery_complete_count: 0,
             state_batches: vec![],
         };
-        assert!(ShareSnapshotValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareSnapshotValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -313,7 +316,7 @@ mod tests {
             delivery_complete_count: 42,
             state_batches: batches,
         };
-        assert!(ShareUpdateValue::decode(&v.encode()).unwrap() == v);
+        assert2::assert!(ShareUpdateValue::decode(&v.encode()).unwrap() == v);
     }
 
     #[test]
@@ -327,6 +330,6 @@ mod tests {
             state_batches: vec![],
         };
         let decoded = ShareSnapshotValue::decode(&v.encode()).unwrap();
-        assert!(decoded.delivery_complete_count == 1_234_567);
+        assert2::assert!(decoded == v);
     }
 }

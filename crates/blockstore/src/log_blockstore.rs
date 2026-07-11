@@ -1512,7 +1512,7 @@ pub enum BlockStoreError {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use datafusion::prelude::{col, lit};
     use object_store::{local::LocalFileSystem, path::Path as ObjectPath};
 
@@ -1526,10 +1526,9 @@ mod tests {
             ("service".to_string(), "api".to_string()),
         ]);
 
-        check!(label_set == expected);
-        check!(series_fingerprint(&label_set) != 0);
-        check!(series_fingerprint(&label_set) == series_fingerprint(&label_set));
-        check!(
+        assert2::assert!(label_set == expected);
+        assert2::assert!(series_fingerprint(&expected) != 0);
+        assert2::assert!(
             series_fingerprint(&labels([("a", "bc")]))
                 != series_fingerprint(&labels([("ab", "c")]))
         );
@@ -1539,30 +1538,60 @@ mod tests {
     fn label_predicates_match_exact_absent_and_anchored_regex_values() {
         let label_set = labels([("service", "api"), ("env", "prod")]);
         let cases = [
-            ("service", MatchOp::Equal, "api", true),
-            ("service", MatchOp::Equal, "worker", false),
-            ("service", MatchOp::NotEqual, "worker", true),
-            ("cluster", MatchOp::NotEqual, "east", true),
-            ("service", MatchOp::RegexEqual, "api|worker", true),
-            ("service", MatchOp::RegexNotEqual, "api-.+", true),
-            ("cluster", MatchOp::RegexNotEqual, "east", true),
-            ("service", MatchOp::RegexEqual, "p", false),
+            ("exact match", "service", MatchOp::Equal, "api", true),
+            ("exact mismatch", "service", MatchOp::Equal, "worker", false),
+            (
+                "not equal match",
+                "service",
+                MatchOp::NotEqual,
+                "worker",
+                true,
+            ),
+            (
+                "absent not equal",
+                "cluster",
+                MatchOp::NotEqual,
+                "east",
+                true,
+            ),
+            (
+                "anchored regex match",
+                "service",
+                MatchOp::RegexEqual,
+                "api|worker",
+                true,
+            ),
+            (
+                "negative regex match",
+                "service",
+                MatchOp::RegexNotEqual,
+                "api-.+",
+                true,
+            ),
+            (
+                "absent negative regex",
+                "cluster",
+                MatchOp::RegexNotEqual,
+                "east",
+                true,
+            ),
+            (
+                "anchored regex mismatch",
+                "service",
+                MatchOp::RegexEqual,
+                "p",
+                false,
+            ),
         ];
 
-        let actual = cases
-            .into_iter()
-            .map(|(name, op, value, _)| {
+        for (_case, name, op, value, expected) in cases {
+            assert2::assert!(
                 LabelPredicate::new(name, op, value)
                     .unwrap()
                     .matches(&label_set)
-            })
-            .collect::<Vec<_>>();
-        let expected = cases
-            .into_iter()
-            .map(|(_, _, _, expected)| expected)
-            .collect::<Vec<_>>();
-
-        check!(actual == expected);
+                    == expected
+            );
+        }
         check!(LabelPredicate::new("service", MatchOp::RegexEqual, "[").is_err());
     }
 
@@ -1586,21 +1615,25 @@ mod tests {
         ];
         expected_tenant_a_series.sort_by_key(|(fingerprint, _)| *fingerprint);
 
-        check!(api_prod == series_fingerprint(index.labels_for("tenant-a", api_prod).unwrap()));
-        check!(index.labels_for("tenant-b", api_prod).is_none());
-        check!(index.labels_for("tenant-b", other_tenant) == Some(&other_tenant_labels));
-        check!(
+        assert2::assert!(index.labels_for("tenant-a", api_prod).cloned() == Some(api_prod_labels));
+        assert2::assert!(index.labels_for("tenant-b", api_prod).cloned() == None);
+        assert2::assert!(
+            index.labels_for("tenant-b", other_tenant).cloned() == Some(other_tenant_labels)
+        );
+        assert2::assert!(
             index.label_names("tenant-a")
                 == BTreeSet::from(["env".into(), "region".into(), "service".into()])
         );
-        check!(index.label_names("missing").is_empty());
-        check!(
+        assert2::assert!(index.label_names("missing") == BTreeSet::new());
+        assert2::assert!(
             index.label_values("tenant-a", "service")
                 == BTreeSet::from(["api".into(), "worker".into()])
         );
-        check!(index.label_values("tenant-b", "service") == BTreeSet::from(["api".into()]));
-        check!(index.label_values("tenant-a", "missing").is_empty());
-        check!(index.tenant_series("tenant-a") == expected_tenant_a_series);
+        assert2::assert!(
+            index.label_values("tenant-b", "service") == BTreeSet::from(["api".into()])
+        );
+        assert2::assert!(index.label_values("tenant-a", "missing") == BTreeSet::new());
+        assert2::assert!(index.tenant_series("tenant-a") == expected_tenant_a_series);
 
         let exact_api_prod = [
             LabelPredicate::new("service", MatchOp::Equal, "api").unwrap(),
@@ -1618,26 +1651,39 @@ mod tests {
         let missing_exact = [LabelPredicate::new("service", MatchOp::Equal, "admin").unwrap()];
         let match_cases = [
             (
+                "exact api prod",
                 "tenant-a",
                 exact_api_prod.as_slice(),
                 BTreeSet::from([api_prod]),
             ),
             (
+                "exact and residual",
                 "tenant-a",
                 exact_and_residual.as_slice(),
                 BTreeSet::from([api_stage]),
             ),
             (
+                "residual predicates only",
                 "tenant-a",
                 no_exact_predicates.as_slice(),
                 BTreeSet::from([api_stage]),
             ),
-            ("tenant-a", missing_exact.as_slice(), BTreeSet::new()),
-            ("missing", exact_api_prod.as_slice(), BTreeSet::new()),
+            (
+                "missing exact value",
+                "tenant-a",
+                missing_exact.as_slice(),
+                BTreeSet::new(),
+            ),
+            (
+                "missing tenant",
+                "missing",
+                exact_api_prod.as_slice(),
+                BTreeSet::new(),
+            ),
         ];
 
-        for (tenant, predicates, expected) in match_cases {
-            check!(index.match_series(tenant, predicates) == expected);
+        for (_name, tenant, predicates, expected) in match_cases {
+            assert2::assert!(index.match_series(tenant, predicates) == expected);
         }
     }
 
@@ -1649,18 +1695,18 @@ mod tests {
         let prefix = ObjectPath::from("observability/logs");
         let object_key = "tenant=tenant-a/partition=3/offsets=42-47/time=10-20.parquet";
         let overlap_cases = [
-            (TimeRange::new(20, 30).unwrap(), true),
-            (TimeRange::new(0, 9).unwrap(), false),
-            (TimeRange::new(21, 30).unwrap(), false),
+            ("touching boundary", TimeRange::new(20, 30).unwrap(), true),
+            ("strictly before", TimeRange::new(0, 9).unwrap(), false),
+            ("strictly after", TimeRange::new(21, 30).unwrap(), false),
         ];
 
-        for (other, expected) in overlap_cases {
-            check!(first.overlaps(other) == expected);
+        for (_name, other, expected) in overlap_cases {
+            assert2::assert!(first.overlaps(other) == expected);
         }
         check!(TimeRange::new(21, 20).is_err());
-        assert!(key.object_key() == object_key);
-        assert!(block_path(root, &key) == root.join(object_key));
-        assert!(
+        assert2::assert!(key.object_key() == object_key.to_string());
+        assert2::assert!(block_path(root, &key) == root.join(object_key));
+        assert2::assert!(
             log_block_object_path(&prefix, &key).to_string()
                 == format!("observability/logs/{object_key}")
         );
@@ -1686,9 +1732,11 @@ mod tests {
         let descriptor = write_log_block(dir.path(), &key, rows.clone()).unwrap();
         let loaded_rows = read_log_block(dir.path(), &key).unwrap();
 
-        check!(descriptor.key == key);
+        check!(
+            (descriptor.key.clone(), descriptor.fingerprints.clone())
+                == (key.clone(), BTreeSet::from([api, worker]))
+        );
         check!(descriptor.size_bytes > 0);
-        check!(descriptor.fingerprints == BTreeSet::from([api, worker]));
         check!(
             loaded_rows
                 == vec![
@@ -1703,18 +1751,21 @@ mod tests {
                 ]
         );
 
-        for timestamp_ns in [99, 200] {
+        for (name, timestamp_ns) in [("below range", 99), ("above range", 200)] {
             let rows = vec![LogRow::new(
                 api,
                 timestamp_ns,
                 "out of range",
                 StructuredMetadata::new(),
             )];
-            check!(matches!(
-                write_log_block(dir.path(), &key, rows),
-                Err(BlockStoreError::RowOutsideBlockTimeRange { timestamp_ns: actual, .. })
-                    if actual == timestamp_ns
-            ));
+            check!(
+                matches!(
+                    write_log_block(dir.path(), &key, rows),
+                    Err(BlockStoreError::RowOutsideBlockTimeRange { timestamp_ns: actual, .. })
+                        if actual == timestamp_ns
+                ),
+                "case {name}"
+            );
         }
     }
 
@@ -1774,8 +1825,10 @@ mod tests {
             read_log_index_manifest_from_object_store(&store, &prefix)
                 .await
                 .unwrap();
-        check!(loaded_labels == fixture.labels_index);
-        check!(loaded_blocks == fixture.block_index);
+        check!(
+            (loaded_labels, loaded_blocks)
+                == (fixture.labels_index.clone(), fixture.block_index.clone())
+        );
 
         write_tenant_log_index_manifest_to_object_store(
             &store,
@@ -1790,8 +1843,13 @@ mod tests {
             read_tenant_log_index_manifest_from_object_store(&store, &prefix, "tenant-a")
                 .await
                 .unwrap();
-        check!(tenant_labels == expected_tenant_a_label_index());
-        check!(tenant_blocks == block_index_from([fixture.first, fixture.second]));
+        check!(
+            (tenant_labels, tenant_blocks)
+                == (
+                    expected_tenant_a_label_index(),
+                    block_index_from([fixture.first, fixture.second]),
+                )
+        );
     }
 
     #[tokio::test]
@@ -1853,8 +1911,13 @@ mod tests {
         )
         .await
         .unwrap();
-        check!(shard_labels == expected_tenant_a_label_index());
-        check!(shard_blocks == block_index_from([fixture.first, fixture.second]));
+        check!(
+            (shard_labels, shard_blocks)
+                == (
+                    expected_tenant_a_label_index(),
+                    block_index_from([fixture.first, fixture.second]),
+                )
+        );
     }
 
     #[test]
@@ -1875,28 +1938,35 @@ mod tests {
         let metadata_filter = col("structured_metadata").eq(lit("api ok"));
         let literal_filter = lit(true);
         let filter_cases = [
-            (&timestamp_filter, TableProviderFilterPushDown::Inexact),
-            (&fingerprint_filter, TableProviderFilterPushDown::Inexact),
-            (&line_filter, TableProviderFilterPushDown::Inexact),
-            (&metadata_filter, TableProviderFilterPushDown::Unsupported),
-            (&literal_filter, TableProviderFilterPushDown::Unsupported),
+            (
+                "timestamp",
+                &timestamp_filter,
+                TableProviderFilterPushDown::Inexact,
+            ),
+            (
+                "fingerprint",
+                &fingerprint_filter,
+                TableProviderFilterPushDown::Inexact,
+            ),
+            ("line", &line_filter, TableProviderFilterPushDown::Inexact),
+            (
+                "metadata",
+                &metadata_filter,
+                TableProviderFilterPushDown::Unsupported,
+            ),
+            (
+                "literal",
+                &literal_filter,
+                TableProviderFilterPushDown::Unsupported,
+            ),
         ];
 
         check!(provider.planned_blocks() == std::slice::from_ref(&block));
-        assert!(
-            provider
-                .supports_filters_pushdown(
-                    &filter_cases
-                        .iter()
-                        .map(|(filter, _)| *filter)
-                        .collect::<Vec<_>>()
-                )
-                .unwrap()
-                == filter_cases
-                    .iter()
-                    .map(|(_, pushdown)| pushdown.clone())
-                    .collect::<Vec<_>>()
-        );
+        for (_name, filter, expected) in filter_cases {
+            assert2::assert!(
+                provider.supports_filters_pushdown(&[filter]).unwrap() == vec![expected]
+            );
+        }
         check!(
             LogBlockTableProvider::try_new_object_store(
                 Arc::new(LocalFileSystem::new()) as Arc<dyn ObjectStore>,
@@ -1935,36 +2005,42 @@ mod tests {
         let expected_all = vec![replacement_second.clone(), first.clone(), other_tenant];
         let match_cases = [
             (
+                "replacement fingerprint",
                 "tenant-a",
                 TimeRange::new(150, 250).unwrap(),
                 &[1][..],
                 vec![replacement_second.clone()],
             ),
             (
+                "first fingerprint",
                 "tenant-a",
                 TimeRange::new(150, 250).unwrap(),
                 &[2][..],
                 vec![first.clone()],
             ),
             (
+                "all tenant blocks",
                 "tenant-a",
                 TimeRange::new(150, 250).unwrap(),
                 &[][..],
                 vec![replacement_second, first],
             ),
             (
+                "missing tenant",
                 "tenant-c",
                 TimeRange::new(150, 250).unwrap(),
                 &[1][..],
                 vec![],
             ),
             (
+                "outside time range",
                 "tenant-a",
                 TimeRange::new(300, 400).unwrap(),
                 &[][..],
                 vec![],
             ),
             (
+                "missing fingerprint",
                 "tenant-a",
                 TimeRange::new(150, 250).unwrap(),
                 &[99][..],
@@ -1973,8 +2049,11 @@ mod tests {
         ];
 
         check!(index.blocks() == expected_all.as_slice());
-        for (tenant, time_range, fingerprints, expected) in match_cases {
-            check!(index.match_blocks(tenant, time_range, fingerprints) == expected);
+        for (name, tenant, time_range, fingerprints, expected) in match_cases {
+            check!(
+                index.match_blocks(tenant, time_range, fingerprints) == expected,
+                "case {name}"
+            );
         }
     }
 
@@ -1988,8 +2067,10 @@ mod tests {
 
         let full = LogIndexManifest::from_indexes(&fixture.labels_index, &fixture.block_index);
         let (full_labels, full_blocks) = full.into_indexes().unwrap();
-        check!(full_labels == fixture.labels_index);
-        check!(full_blocks == fixture.block_index);
+        check!(
+            (full_labels, full_blocks)
+                == (fixture.labels_index.clone(), fixture.block_index.clone())
+        );
 
         let tenant_manifest = LogIndexManifest::from_indexes_for_tenant(
             "tenant-a",
@@ -1998,8 +2079,7 @@ mod tests {
         );
         let (tenant_labels, tenant_blocks) =
             tenant_manifest.into_indexes_for_tenant("tenant-a").unwrap();
-        check!(tenant_labels == expected_tenant_labels);
-        check!(tenant_blocks == expected_tenant_blocks);
+        check!((tenant_labels, tenant_blocks) == (expected_tenant_labels, expected_tenant_blocks));
 
         let shard_manifest = LogIndexManifest::from_indexes_for_tenant_shard(
             "tenant-a",
@@ -2009,8 +2089,13 @@ mod tests {
         );
         let (shard_labels, shard_blocks) =
             shard_manifest.into_indexes_for_tenant("tenant-a").unwrap();
-        check!(shard_labels == expected_tenant_a_label_index());
-        check!(shard_blocks == block_index_from([fixture.first, fixture.second]));
+        check!(
+            (shard_labels, shard_blocks)
+                == (
+                    expected_tenant_a_label_index(),
+                    block_index_from([fixture.first, fixture.second]),
+                )
+        );
 
         let bad_version = LogIndexManifest {
             format_version: LOG_INDEX_MANIFEST_VERSION + 1,
@@ -2055,18 +2140,22 @@ mod tests {
         ));
         let path_cases = [
             (
+                "global manifest",
                 log_index_manifest_object_path(&prefix),
                 "observability/index/logs/manifest.json",
             ),
             (
+                "tenant shard catalog",
                 log_tenant_index_shard_catalog_object_path(&prefix, "tenant-a"),
                 "observability/tenant=tenant-a/index/logs/shards/manifest.json",
             ),
             (
+                "tenant shard manifest",
                 log_tenant_index_shard_manifest_object_path(&prefix, "tenant-a", first),
                 "observability/tenant=tenant-a/index/logs/shards/time=-10-20/manifest.json",
             ),
             (
+                "tenant shard list offset",
                 log_tenant_index_shard_list_offset_object_path(
                     &prefix,
                     "tenant-a",
@@ -2076,14 +2165,15 @@ mod tests {
             ),
         ];
 
-        for (actual, expected) in path_cases {
-            assert!(actual.to_string() == expected);
+        for (_name, actual, expected) in path_cases {
+            assert2::assert!(actual.to_string() == expected);
         }
         check!(
             log_tenant_index_shard_list_offset_start_ns(TimeRange::new(100, 100).unwrap()) == 99
         );
         let parse_cases = [
             (
+                "valid shard manifest",
                 shard_prefix
                     .clone()
                     .join("time=-10-20")
@@ -2091,6 +2181,7 @@ mod tests {
                 Some(first),
             ),
             (
+                "reversed time range",
                 shard_prefix
                     .clone()
                     .join("time=20-10")
@@ -2098,10 +2189,12 @@ mod tests {
                 None,
             ),
             (
+                "wrong file name",
                 shard_prefix.clone().join("time=10-20").join("data.json"),
                 None,
             ),
             (
+                "extra path component",
                 shard_prefix
                     .clone()
                     .join("time=10-20")
@@ -2109,13 +2202,18 @@ mod tests {
                     .join("extra"),
                 None,
             ),
-            (ObjectPath::from("other/time=10-20/manifest.json"), None),
+            (
+                "wrong prefix",
+                ObjectPath::from("other/time=10-20/manifest.json"),
+                None,
+            ),
         ];
 
-        for (location, expected) in parse_cases {
+        for (name, location, expected) in parse_cases {
             check!(
                 parse_log_tenant_index_shard_range_from_object_path(&shard_prefix, &location)
-                    == expected
+                    == expected,
+                "case {name}"
             );
         }
     }

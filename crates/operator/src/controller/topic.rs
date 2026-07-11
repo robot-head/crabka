@@ -544,7 +544,6 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::crd::{KafkaCondition, KafkaSpec, KafkaStatus, ListenerStatus, ListenerType};
@@ -600,68 +599,72 @@ mod tests {
 
     #[test]
     fn validate_topic_name_accepts_typical() {
-        assert!(validate_kafka_topic_name("demo-topic").is_ok());
-        assert!(validate_kafka_topic_name("My.Topic_1").is_ok());
-    }
-
-    #[test]
-    fn validate_topic_name_rejects_empty() {
-        assert!(validate_kafka_topic_name("").is_err());
-    }
-
-    #[test]
-    fn validate_topic_name_rejects_dot_and_dotdot() {
-        assert!(validate_kafka_topic_name(".").is_err());
-        assert!(validate_kafka_topic_name("..").is_err());
-    }
-
-    #[test]
-    fn validate_topic_name_rejects_too_long() {
-        let n = "a".repeat(250);
-        assert!(validate_kafka_topic_name(&n).is_err());
-    }
-
-    #[test]
-    fn validate_topic_name_rejects_invalid_chars() {
-        for name in ["has space", "has/slash", "has@at"] {
-            assert!(validate_kafka_topic_name(name).is_err(), "case {name:?}");
+        for (_case, name) in [
+            ("hyphenated lowercase", "demo-topic"),
+            ("mixed punctuation", "My.Topic_1"),
+        ] {
+            assert2::assert!(validate_kafka_topic_name(name).is_ok());
         }
     }
 
     #[test]
-    fn diff_configs_set_adds_missing_key() {
-        let current = BTreeMap::new();
-        let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
-        let ops = diff_configs(&current, &desired, "foo");
-        assert!(ops.len() == 1);
-        assert!(matches!(&ops[0], IncrementalAlterOp::Set { key, value, .. }
-            if key == "retention.ms" && value == "60000"));
+    fn validate_topic_name_rejection_cases() {
+        let too_long = "a".repeat(250);
+        for (_name, topic_name) in [
+            ("empty", ""),
+            ("single dot", "."),
+            ("double dot", ".."),
+            ("too long", too_long.as_str()),
+            ("contains space", "has space"),
+            ("contains slash", "has/slash"),
+            ("contains at sign", "has@at"),
+        ] {
+            assert2::assert!(validate_kafka_topic_name(topic_name).is_err());
+        }
     }
 
     #[test]
-    fn diff_configs_set_updates_changed_value() {
-        let current = BTreeMap::from([("retention.ms".to_string(), "30000".to_string())]);
-        let desired = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
-        let ops = diff_configs(&current, &desired, "foo");
-        assert!(ops.len() == 1);
-        assert!(matches!(&ops[0], IncrementalAlterOp::Set { value, .. } if value == "60000"));
-    }
-
-    #[test]
-    fn diff_configs_delete_removes_extra_key() {
-        let current = BTreeMap::from([("cleanup.policy".to_string(), "delete".to_string())]);
-        let desired = BTreeMap::new();
-        let ops = diff_configs(&current, &desired, "foo");
-        assert!(ops.len() == 1);
-        assert!(
-            matches!(&ops[0], IncrementalAlterOp::Delete { key, .. } if key == "cleanup.policy")
-        );
+    fn diff_configs_change_cases() {
+        for (_name, current, desired, expected) in [
+            (
+                "set missing key",
+                BTreeMap::new(),
+                BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]),
+                vec![("set", "foo", "retention.ms", Some("60000"))],
+            ),
+            (
+                "update changed value",
+                BTreeMap::from([("retention.ms".to_string(), "30000".to_string())]),
+                BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]),
+                vec![("set", "foo", "retention.ms", Some("60000"))],
+            ),
+            (
+                "delete extra key",
+                BTreeMap::from([("cleanup.policy".to_string(), "delete".to_string())]),
+                BTreeMap::new(),
+                vec![("delete", "foo", "cleanup.policy", None)],
+            ),
+        ] {
+            let ops = diff_configs(&current, &desired, "foo");
+            let actual: Vec<_> = ops
+                .iter()
+                .map(|op| match op {
+                    IncrementalAlterOp::Set { topic, key, value } => {
+                        ("set", topic.as_str(), key.as_str(), Some(value.as_str()))
+                    }
+                    IncrementalAlterOp::Delete { topic, key } => {
+                        ("delete", topic.as_str(), key.as_str(), None)
+                    }
+                })
+                .collect();
+            assert2::assert!(actual == expected);
+        }
     }
 
     #[test]
     fn diff_configs_noop_when_matching() {
         let m = BTreeMap::from([("retention.ms".to_string(), "60000".to_string())]);
-        assert!(diff_configs(&m, &m, "foo").is_empty());
+        assert2::assert!(diff_configs(&m, &m, "foo").is_empty());
     }
 
     #[test]
@@ -675,16 +678,13 @@ mod tests {
             ("segment.bytes".to_string(), "1048576".to_string()),
         ]);
         let ops = diff_configs(&current, &desired, "foo");
-        assert!(
-            ops.len() == 3,
-            "expected SET(retention.ms), SET(segment.bytes), DELETE(cleanup.policy)"
-        );
+        assert2::assert!(ops.len() == 3);
     }
 
     #[test]
     fn internal_listener_bootstrap_returns_listener_when_ready() {
         let k = kafka_ready("demo", "default", 9092);
-        assert!(
+        assert2::assert!(
             internal_listener_bootstrap(&k).as_deref()
                 == Some("demo-broker-headless.default.svc.cluster.local:9092")
         );
@@ -696,6 +696,6 @@ mod tests {
         if let Some(s) = k.status.as_mut() {
             s.conditions[0].status = "False".into();
         }
-        assert!(internal_listener_bootstrap(&k).is_none());
+        assert2::assert!(internal_listener_bootstrap(&k).is_none());
     }
 }

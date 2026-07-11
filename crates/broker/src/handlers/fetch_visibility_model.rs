@@ -169,14 +169,12 @@ fn assert_monotonic(old: &VisState, new: &VisState) {
             if rc && fol {
                 continue; // read_committed implies !follower
             }
-            assert!(
-                response_hw(fol, new.hw, new.log_end) >= response_hw(fol, old.hw, old.log_end),
-                "response_hw regressed on advance (follower={fol})"
+            assert2::assert!(
+                response_hw(fol, new.hw, new.log_end) >= response_hw(fol, old.hw, old.log_end)
             );
-            assert!(
+            assert2::assert!(
                 response_lso(fol, rc, new.hw, new.lso, new.log_end)
-                    >= response_lso(fol, rc, old.hw, old.lso, old.log_end),
-                "response_lso regressed on advance (follower={fol}, read_committed={rc})"
+                    >= response_lso(fol, rc, old.hw, old.lso, old.log_end)
             );
         }
     }
@@ -195,29 +193,28 @@ fn assert_fetch_contract(
     let win_response_lso = w.response_lso.0;
     let effective_lso = w.effective_lso.0;
     // Valid targets.
-    assert!(limit_offset >= 0 && win_response_hw >= 0 && win_response_lso >= 0);
+    assert2::assert!(limit_offset >= 0 && win_response_hw >= 0 && win_response_lso >= 0);
     // out_of_range / empty correctness.
-    assert_eq!(w.out_of_range, (fetch_offset < s.log_start));
+    assert2::assert!(w.out_of_range == (fetch_offset < s.log_start));
     let upper = if is_follower { s.log_end } else { s.hw };
     if !w.out_of_range {
-        assert_eq!(w.empty, (fetch_offset >= upper));
+        assert2::assert!(w.empty == (fetch_offset >= upper));
     }
     // Response single-source-of-truth contract (OOR and success paths share it).
-    assert_eq!(win_response_hw, response_hw(is_follower, s.hw, s.log_end));
-    assert_eq!(
-        win_response_lso,
-        response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end)
+    assert2::assert!(win_response_hw == response_hw(is_follower, s.hw, s.log_end));
+    assert2::assert!(
+        win_response_lso == response_lso(is_follower, read_committed, s.hw, s.lso, s.log_end)
     );
     if is_follower {
         // Follower bound: serve up to the log-end (>= hw).
-        assert!(limit_offset == s.log_end && limit_offset >= s.hw);
+        assert2::assert!(limit_offset == s.log_end && limit_offset >= s.hw);
     } else {
         // No dirty read: never expose beyond the high-watermark.
-        assert!(limit_offset <= s.hw, "consumer fetch exposed beyond HW");
-        assert!(win_response_lso <= win_response_hw);
+        assert2::assert!(limit_offset <= s.hw);
+        assert2::assert!(win_response_lso <= win_response_hw);
         if read_committed {
-            assert_eq!(effective_lso, s.lso.min(s.hw));
-            assert!(limit_offset <= s.lso.min(s.hw));
+            assert2::assert!(effective_lso == s.lso.min(s.hw));
+            assert2::assert!(limit_offset <= s.lso.min(s.hw));
         }
     }
 }
@@ -236,11 +233,8 @@ fn run(model: VisModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
-    assert!(
-        checker.state_count() < MAX_STATES,
-        "[{label}] state cap hit"
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < MAX_STATES);
     checker.assert_properties();
 }
 

@@ -252,7 +252,7 @@ fn build_leaf_batch(
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -340,10 +340,7 @@ mod tests {
             ("rate", None),
         ];
         for (name, want) in cases {
-            assert!(
-                over_time_family_from_function_name(name) == want,
-                "case {name:?}"
-            );
+            assert2::assert!(over_time_family_from_function_name(name) == want);
         }
     }
 
@@ -357,8 +354,8 @@ mod tests {
             .map(|(i, v)| labeled("a", (i64::try_from(i).unwrap() + 1) * 60_000, *v))
             .collect();
         let got = run(samples, 480_000, 480_000, OverTimeFamily::Quantile, 0.5).await;
-        assert!(got.len() == 1);
-        assert!(approx_eq(got[0].1, 4.5));
+        assert2::assert!(got.len() == 1);
+        assert2::assert!(approx_eq(got[0].1, 4.5));
     }
 
     /// `present_over_time` yields 1.0 when the window has samples.
@@ -366,7 +363,7 @@ mod tests {
     async fn present_over_time_plan_signals_presence() {
         let samples = vec![labeled("a", 60_000, 42.0)];
         let got = run(samples, 120_000, 120_000, OverTimeFamily::Present, 0.0).await;
-        assert!(approx_eq(got[0].1, 1.0));
+        assert2::assert!(approx_eq(got[0].1, 1.0));
     }
 
     /// An empty window emits NULL (not a NaN sentinel), so the assembler drops
@@ -396,7 +393,7 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(value.len() == 1);
-        assert!(value.is_null(0));
+        assert2::assert!(value.len() == 1);
+        assert2::assert!(value.is_null(0));
     }
 }

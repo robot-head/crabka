@@ -39,14 +39,12 @@ impl BrokerCapacities {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn default_is_empty() {
         let c = BrokerCapacities::default();
-        assert!(c.by_broker.is_empty());
-        assert!(c.for_broker(1).is_none());
+        assert2::assert!((c.by_broker.is_empty(), c.for_broker(1)) == (true, None));
     }
 }

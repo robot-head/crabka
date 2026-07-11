@@ -153,8 +153,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
-
     use super::*;
     use crate::test_support::{
         peer, principal, start_broker_with_authorizer_no_audit as start_broker,
@@ -163,16 +161,20 @@ mod tests {
     #[test]
     fn txn_state_str_matches_jvm_names() {
         let cases = [
-            (TxnState::Empty, "Empty"),
-            (TxnState::Ongoing, "Ongoing"),
-            (TxnState::PrepareCommit, "PrepareCommit"),
-            (TxnState::PrepareAbort, "PrepareAbort"),
-            (TxnState::CompleteCommit, "CompleteCommit"),
-            (TxnState::CompleteAbort, "CompleteAbort"),
-            (TxnState::Dead, "Dead"),
+            ("empty", TxnState::Empty, "Empty"),
+            ("ongoing", TxnState::Ongoing, "Ongoing"),
+            ("prepare commit", TxnState::PrepareCommit, "PrepareCommit"),
+            ("prepare abort", TxnState::PrepareAbort, "PrepareAbort"),
+            (
+                "complete commit",
+                TxnState::CompleteCommit,
+                "CompleteCommit",
+            ),
+            ("complete abort", TxnState::CompleteAbort, "CompleteAbort"),
+            ("dead", TxnState::Dead, "Dead"),
         ];
-        for (state, want) in cases {
-            assert!(txn_state_str(state) == want, "{state:?}");
+        for (_case, state, want) in cases {
+            assert2::assert!(txn_state_str(state) == want);
         }
     }
 
@@ -244,10 +246,7 @@ mod tests {
             .iter()
             .map(|s| s.producer_id)
             .collect();
-        assert!(
-            pids == vec![100],
-            "pid filter must keep the matching entry, got {pids:?}"
-        );
+        assert2::assert!(pids == vec![100]);
         broker_handle.shutdown().await;
     }
 
@@ -281,7 +280,7 @@ mod tests {
             transaction_states: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

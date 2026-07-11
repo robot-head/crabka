@@ -143,22 +143,13 @@ fn image_of(entries: &[AclEntry]) -> MetadataImage {
 /// and the gateway `AclCache`) agrees with the oracle, and that the two sources
 /// agree with each other (no broker-vs-gateway drift).
 fn check(super_users: &HashSet<String>, entries: &[AclEntry], req: &AuthorizationRequest<'_>) {
-    use assert2::assert;
     let auth = SimpleAclAuthorizer::new(super_users.clone());
     let image = image_of(entries);
     let cache = AclCache::new(entries.to_vec());
     let want = oracle_decision(super_users, entries, req);
     let got_image = auth.authorize(&image, req);
     let got_cache = auth.authorize(&cache, req);
-    assert!(
-        got_image == want,
-        "image decision {got_image:?} != oracle {want:?} for {req:?} with {} entries",
-        entries.len()
-    );
-    assert!(
-        got_cache == want,
-        "cache decision {got_cache:?} != oracle {want:?} for {req:?}"
-    );
+    assert2::assert!((got_image, got_cache) == (want, want));
 }
 
 // ----- exhaustive enumeration -----
@@ -233,7 +224,7 @@ fn requests<'a>(
 fn acl_precedence_exhaustive() {
     let pool = candidate_pool();
     let k = pool.len();
-    assert_eq!(k, 10, "candidate pool size drives the 2^k enumeration");
+    assert2::assert!(k == 10);
 
     let alice = principal(ALICE);
     let bob = principal("bob");

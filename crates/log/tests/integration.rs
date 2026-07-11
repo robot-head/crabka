@@ -11,7 +11,6 @@ use std::{
     process::{Command, Stdio},
 };
 
-use assert2::assert;
 use crabka_log::{Log, LogConfig};
 use tempfile::tempdir;
 use testcontainers::runners::AsyncRunner;
@@ -28,12 +27,7 @@ fn docker_exec(container_id: &str, args: &[&str]) -> std::process::Output {
         .stdout(Stdio::piped())
         .output()
         .expect("spawn docker exec");
-    assert!(
-        out.status.success(),
-        "docker exec {args:?} failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     out
 }
 
@@ -58,12 +52,7 @@ fn docker_exec_stdin(container_id: &str, args: &[&str], stdin: &[u8]) {
         .expect("write stdin");
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("wait docker exec");
-    assert!(
-        out.status.success(),
-        "docker exec -i {args:?} failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 /// `docker cp <container_id>:<src> <dst>`.
@@ -74,13 +63,7 @@ fn docker_cp(container_id: &str, src: &str, dst: &Path) {
         .arg(dst)
         .output()
         .expect("spawn docker cp");
-    assert!(
-        out.status.success(),
-        "docker cp {src} -> {} failed: stdout={}, stderr={}",
-        dst.display(),
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 #[tokio::test]
@@ -152,24 +135,14 @@ async fn read_jvm_produced_log_dir() {
     let host_tmp = tempdir().expect("tempdir");
     let host_target = host_tmp.path().join(format!("{TOPIC}-0"));
     docker_cp(&container_id, &partition_dir, host_tmp.path());
-    assert!(
-        host_target.exists(),
-        "expected docker cp to produce {}",
-        host_target.display()
-    );
+    assert2::assert!(host_target.exists());
 
     // 5. Open with crabka-log and read everything back.
     let log = Log::open(&host_target, LogConfig::default()).expect("open log");
     let out = log
         .read(log.log_start_offset(), usize::MAX)
         .expect("read log");
-    assert!(
-        !out.batches.is_empty(),
-        "expected at least one batch in JVM-produced log; got 0"
-    );
+    assert2::assert!(!out.batches.is_empty());
     let total_records: usize = out.batches.iter().map(|b| b.records.len()).sum();
-    assert!(
-        total_records >= 3,
-        "expected at least 3 records (produced 3); got {total_records}"
-    );
+    assert2::assert!(total_records >= 3);
 }

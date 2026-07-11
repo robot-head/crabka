@@ -1,5 +1,5 @@
 use arrow::array::{Array, Int64Array, StringArray};
-use assert2::{assert, check};
+use assert2::check;
 use crabka_blockstore::{
     SCOL_ROOT_SPAN_NAME, SCOL_TRACE_ID, SCOL_TRACE_START_NANO, span_block_schema,
 };
@@ -66,7 +66,9 @@ fn evicts_spans_older_than_retention_window() {
     store.ingest(record("tenant-a", span([1; 16], 3, 151)));
 
     let trace = store.trace_by_id("tenant-a", &[1; 16]);
-    assert!(trace.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[2; 8], [3; 8]]);
+    assert2::assert!(
+        trace.iter().map(|span| span.span_id).collect::<Vec<_>>() == vec![[2; 8], [3; 8]]
+    );
 }
 
 #[test]
@@ -76,8 +78,8 @@ fn exposes_recent_spans_as_mem_table_over_span_schema() {
     store.ingest(record("tenant-a", span([2; 16], 1, 20)));
 
     let table = store.mem_table("tenant-a").unwrap();
-    assert!(table.schema() == span_block_schema());
-    assert!(table.schema().index_of(SCOL_TRACE_ID).is_ok());
+    assert2::assert!(table.schema() == span_block_schema());
+    assert2::assert!(table.schema().index_of(SCOL_TRACE_ID).is_ok());
 }
 
 #[tokio::test]
@@ -96,21 +98,27 @@ async fn live_source_exposes_trace_spans_and_tags() {
         .await
         .unwrap()
         .unwrap();
-    check!(trace.root_service_name == "api");
-    check!(trace.root_trace_name == "span-1");
-    check!(trace.spans.len() == 2);
     check!(
-        trace.spans[0].attributes
-            == vec![("http.method".into(), TraceqlAttrValue::Str("GET".into()))]
+        (
+            trace.root_service_name.as_str(),
+            trace.root_trace_name.as_str(),
+            trace.spans.len(),
+            trace.spans[0].attributes.as_slice(),
+        ) == (
+            "api",
+            "span-1",
+            2,
+            [("http.method".into(), TraceqlAttrValue::Str("GET".into()))].as_slice(),
+        )
     );
 
     let names = store.tag_names("tenant-a", None, 0, 100).await.unwrap();
-    assert!(
+    assert2::assert!(
         names
             .iter()
-            .any(|tags| tags.scope == TagScope::Resource && tags.tags == vec!["service.name"])
+            .any(|tags| { tags.scope == TagScope::Resource && tags.tags == vec!["service.name"] })
     );
-    assert!(
+    assert2::assert!(
         names
             .iter()
             .any(|tags| tags.scope == TagScope::Span && tags.tags == vec!["http.method"])
@@ -184,14 +192,14 @@ async fn live_trace_spans_keep_resource_attrs_out_of_span_attrs() {
         .unwrap()
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         trace.spans[0].attributes
             == vec![("http.method".into(), TraceqlAttrValue::Str("GET".into()))]
     );
 }
 
 fn assert_tag_scope_contains(tags: &[ScopedTag], scope: TagScope, expected: &[&str]) {
-    assert!(tags.iter().any(|tags| {
+    assert2::assert!(tags.iter().any(|tags| {
         tags.scope == scope
             && expected
                 .iter()
@@ -200,7 +208,7 @@ fn assert_tag_scope_contains(tags: &[ScopedTag], scope: TagScope, expected: &[&s
 }
 
 fn assert_typed_value(values: &[TypedValue], type_: &str, value: &str) {
-    assert!(
+    assert2::assert!(
         values
             .iter()
             .any(|got| got.type_ == type_ && got.value == value)
@@ -289,8 +297,13 @@ async fn live_source_batches_filter_by_time_range() {
     store.ingest(record("tenant-a", span([1; 16], 2, 200)));
 
     let batches = store.span_batches("tenant-a", 0, 100).await.unwrap();
-    check!(batches.len() == 1);
-    check!(batches[0].num_rows() == 1);
+    check!(
+        batches
+            .iter()
+            .map(arrow::array::RecordBatch::num_rows)
+            .collect::<Vec<_>>()
+            == vec![1]
+    );
     check!(store.block_builder_frontier_ns("tenant-a") == 200);
 }
 
@@ -307,8 +320,13 @@ async fn live_source_window_keeps_trace_level_columns_global() {
 
     // Window [150, 300] includes only the child span.
     let batches = store.span_batches("tenant-a", 150, 300).await.unwrap();
-    assert!(batches.len() == 1);
-    assert!(batches[0].num_rows() == 1);
+    assert2::assert!(
+        batches
+            .iter()
+            .map(arrow::array::RecordBatch::num_rows)
+            .collect::<Vec<_>>()
+            == vec![1]
+    );
 
     let trace_start = batches[0]
         .column_by_name(SCOL_TRACE_START_NANO)
@@ -324,9 +342,9 @@ async fn live_source_window_keeps_trace_level_columns_global() {
         .unwrap();
 
     // Trace-global start is the root span's t=10, NOT the in-window child's t=200.
-    assert!(trace_start.value(0) == 10);
+    assert2::assert!(trace_start.value(0) == 10);
     // Root span name is the actual root ("span-1"), NOT the in-window child.
-    assert!(root_name.value(0) == "span-1");
+    assert2::assert!(root_name.value(0) == "span-1");
 }
 
 #[test]
@@ -337,6 +355,6 @@ fn ingests_encoded_wal_payloads() {
 
     let count = ingest_wal_payloads(&mut store, [&first[..], &second[..]]).unwrap();
 
-    assert!(count == 2);
-    assert!(store.trace_by_id("tenant-a", &[1; 16]).len() == 2);
+    assert2::assert!(count == 2);
+    assert2::assert!(store.trace_by_id("tenant-a", &[1; 16]).len() == 2);
 }

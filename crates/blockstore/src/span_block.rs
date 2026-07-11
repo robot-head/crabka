@@ -501,7 +501,6 @@ mod tests {
         Array, BooleanArray, FixedSizeBinaryArray, Float64Array, Int32Array, Int64Array, ListArray,
         StringArray,
     };
-    use assert2::{assert, check};
 
     use super::*;
     use crate::span_schema::{
@@ -557,8 +556,6 @@ mod tests {
     fn encode_matches_schema_and_columns() {
         let rows = vec![sample_row(1, None, 1), sample_row(2, Some(1), 2)];
         let batch = encode_span_rows(&rows).unwrap();
-        assert!(batch.schema() == span_block_schema());
-        assert!(batch.num_rows() == 2);
 
         let tids = batch
             .column_by_name(SCOL_TRACE_ID)
@@ -566,7 +563,6 @@ mod tests {
             .as_any()
             .downcast_ref::<FixedSizeBinaryArray>()
             .unwrap();
-        assert!(tids.value(0) == [1_u8; 16]);
 
         let kinds = batch
             .column_by_name(SCOL_KIND)
@@ -574,7 +570,6 @@ mod tests {
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        assert!(kinds.value(0) == SpanKind::Client.as_i32());
 
         let lefts = batch
             .column_by_name(SCOL_NESTED_SET_LEFT)
@@ -582,7 +577,11 @@ mod tests {
             .as_any()
             .downcast_ref::<Int32Array>()
             .unwrap();
-        assert!(lefts.value(1) == 2);
+        assert2::assert!(batch.schema() == span_block_schema());
+        assert2::assert!(batch.num_rows() == 2);
+        assert2::assert!(tids.value(0) == [1_u8; 16].as_slice());
+        assert2::assert!(kinds.value(0) == SpanKind::Client.as_i32());
+        assert2::assert!(lefts.value(1) == 2);
     }
 
     fn row_with_attrs(attrs: Vec<SpanAttr>) -> SpanRow {
@@ -611,8 +610,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Float64Array>()
             .unwrap();
-        assert!(!col.is_null(0));
-        assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
+        assert2::assert!(!col.is_null(0));
+        assert2::assert!((col.value(0) - 1.5).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -631,8 +630,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BooleanArray>()
             .unwrap();
-        assert!(!col.is_null(0));
-        assert!(col.value(0));
+        assert2::assert!(!col.is_null(0));
+        assert2::assert!(col.value(0));
     }
 
     #[test]
@@ -663,7 +662,6 @@ mod tests {
             .unwrap();
         let svc_values = svc.values().as_any().downcast_ref::<StringArray>().unwrap();
         let key = usize::try_from(svc.keys().value(0)).unwrap();
-        assert!(svc_values.value(key) == "checkout");
 
         let code = batch
             .column_by_name(&promoted[1].column_name())
@@ -671,7 +669,8 @@ mod tests {
             .as_any()
             .downcast_ref::<Int64Array>()
             .unwrap();
-        assert!(code.value(0) == 42);
+        assert2::assert!(svc_values.value(key) == "checkout");
+        assert2::assert!(code.value(0) == 42);
     }
 
     #[test]
@@ -694,8 +693,6 @@ mod tests {
             .unwrap();
         let row0_keys = keys.value(0);
         let row0_keys = row0_keys.as_any().downcast_ref::<StringArray>().unwrap();
-        assert!(row0_keys.len() == 1);
-        assert!(row0_keys.value(0) == "http.method");
 
         let values = batch
             .column_by_name(crate::span_schema::SCOL_ATTR_VALUE)
@@ -707,8 +704,10 @@ mod tests {
         let row0_values = row0_values.as_any().downcast_ref::<ListArray>().unwrap();
         let first_attr = row0_values.value(0);
         let first_attr = first_attr.as_any().downcast_ref::<StringArray>().unwrap();
-        assert!(first_attr.len() == 2);
-        check!(first_attr.value(0) == "GET");
-        check!(first_attr.value(1) == "POST");
+        assert2::assert!(row0_keys.len() == 1);
+        assert2::assert!(row0_keys.value(0) == "http.method");
+        assert2::assert!(first_attr.len() == 2);
+        assert2::assert!(first_attr.value(0) == "GET");
+        assert2::assert!(first_attr.value(1) == "POST");
     }
 }

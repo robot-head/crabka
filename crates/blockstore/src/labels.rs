@@ -94,7 +94,6 @@ impl FromIterator<(String, String)> for Labels {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
 
     use super::*;
 
@@ -106,7 +105,7 @@ mod tests {
         let mut b = Labels::new();
         b.insert("env", "prod");
         b.insert("app", "api");
-        assert!(a.fingerprint() == b.fingerprint());
+        assert2::assert!(a.fingerprint() == b.fingerprint());
     }
 
     #[test]
@@ -115,46 +114,42 @@ mod tests {
         a.insert("app", "api");
         let mut b = Labels::new();
         b.insert("app", "web");
-        assert!(a.fingerprint() != b.fingerprint());
+        assert2::assert!(a.fingerprint() != b.fingerprint());
     }
 
     #[test]
     fn fingerprint_is_injective_across_delimiter_ambiguity() {
-        // A bare `name=value\n` encoding flattens both of these label sets to the
-        // same byte string `a=b=c\n`, colliding two distinct series. The length
-        // prefix makes the encoding injective, so the fingerprints must differ.
-        let mut a = Labels::new();
-        a.insert("a", "b=c");
-        let mut b = Labels::new();
-        b.insert("a=b", "c");
-        assert!(a.fingerprint() != b.fingerprint());
-
-        // The same ambiguity via an embedded newline (reachable through
-        // user-controlled profile label values).
-        let mut c = Labels::new();
-        c.insert("x", "y");
-        c.insert("z", "");
-        let mut d = Labels::new();
-        d.insert("x", "y\nz=");
-        assert!(c.fingerprint() != d.fingerprint());
+        for (_name, left, right) in [
+            (
+                "embedded equals sign",
+                Labels::from_pairs([("a", "b=c")]),
+                Labels::from_pairs([("a=b", "c")]),
+            ),
+            (
+                "embedded newline",
+                Labels::from_pairs([("x", "y"), ("z", "")]),
+                Labels::from_pairs([("x", "y\nz=")]),
+            ),
+        ] {
+            assert2::assert!(left.fingerprint() != right.fingerprint());
+        }
     }
 
     #[test]
     fn get_and_iter_round_trip() {
         let mut l = Labels::new();
-        assert!(l.is_empty());
+        assert2::assert!(&l == &Labels::new());
         l.insert("app", "api");
-        check!(!l.is_empty());
-        check!(l.get("app") == Some("api"));
-        check!(l.get("missing") == None);
-        check!(l.len() == 1);
+        assert2::assert!(&l == &Labels::from_pairs([("app", "api")]));
+        assert2::assert!(l.get("app") == Some("api"));
+        assert2::assert!(l.get("missing") == None);
         l.insert("env", "prod");
-        assert!(l.len() == 2);
         let pairs = l
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        assert!(pairs == vec![("app", "api"), ("env", "prod")]);
+        assert2::assert!(&l == &Labels::from_pairs([("app", "api"), ("env", "prod")]));
+        assert2::assert!(pairs == vec![("app", "api"), ("env", "prod")]);
     }
 
     #[test]
@@ -170,6 +165,6 @@ mod tests {
             .iter()
             .map(|(name, value)| (name.as_str(), value.as_str()))
             .collect::<Vec<_>>();
-        assert!(pairs == vec![("app", "api"), ("env", "prod")]);
+        assert2::assert!(pairs == vec![("app", "api"), ("env", "prod")]);
     }
 }

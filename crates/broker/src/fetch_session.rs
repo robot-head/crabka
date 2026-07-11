@@ -531,7 +531,7 @@ mod fetch_session_model;
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::owned::fetch_request::{FetchPartition, FetchTopic, ForgottenTopic};
     use qubit_clock::MockTime;
 
@@ -587,7 +587,7 @@ mod tests {
     fn next_epoch_wraps_skipping_sentinels() {
         let cases = [(0, 1), (1, 2), (i32::MAX, 1), (-1, 1)];
         for (epoch, want) in cases {
-            assert!(next_epoch(epoch) == want, "epoch {epoch}");
+            assert2::assert!(next_epoch(epoch) == want);
         }
     }
 
@@ -595,14 +595,14 @@ mod tests {
     fn sessionless_request_is_classified_correctly() {
         let cache = FetchSessionCache::new(10);
         let r = req(0, FINAL_EPOCH, vec![], vec![]);
-        assert!(matches!(cache.classify(&r), SessionDecision::Sessionless));
+        assert2::assert!(matches!(cache.classify(&r), SessionDecision::Sessionless));
     }
 
     #[test]
     fn new_session_request_is_classified_correctly() {
         let cache = FetchSessionCache::new(10);
         let r = req(0, INITIAL_EPOCH, vec![topic("t", &[0])], vec![]);
-        assert!(matches!(cache.classify(&r), SessionDecision::NewSession));
+        assert2::assert!(matches!(cache.classify(&r), SessionDecision::NewSession));
     }
 
     #[test]
@@ -619,23 +619,20 @@ mod tests {
     #[test]
     fn is_empty_tracks_session_lifecycle() {
         let cache = FetchSessionCache::new(10);
-        assert!(cache.is_empty());
+        assert2::assert!(cache.is_empty());
 
         let id = cache.try_allocate(false, "alice".into(), vec![]);
-        assert!(!cache.is_empty());
+        assert2::assert!(!cache.is_empty());
 
         cache.close(id);
-        assert!(cache.is_empty());
+        assert2::assert!(cache.is_empty());
     }
 
     #[test]
     fn session_id_reserved_predicate_matches_wire_sentinels() {
         let cases = [(INVALID_SESSION_ID, true), (FINAL_EPOCH, true), (1, false)];
         for (session_id, want) in cases {
-            assert!(
-                session_id_is_reserved(session_id) == want,
-                "session_id {session_id}"
-            );
+            assert2::assert!(session_id_is_reserved(session_id) == want);
         }
     }
 
@@ -645,7 +642,7 @@ mod tests {
         // Force the next id to be 0 — the loop should skip and start from 1.
         cache.next_id.store(0, Ordering::Relaxed);
         let id = cache.try_allocate(false, "alice".into(), vec![]);
-        assert!(id > 0);
+        assert2::assert!(id > 0);
     }
 
     #[test]
@@ -656,15 +653,15 @@ mod tests {
         cache.next_id.store(first, Ordering::Relaxed);
         let second = cache.try_allocate(false, "bob".into(), vec![]);
 
-        assert!(second == first + 1);
-        assert!(cache.len() == 2);
+        assert2::assert!(second == first + 1);
+        assert2::assert!(cache.len() == 2);
     }
 
     #[test]
     fn allocate_returns_zero_when_max_slots_zero() {
         let cache = FetchSessionCache::new(0);
         let id = cache.try_allocate(false, "alice".into(), vec![]);
-        assert!(id == INVALID_SESSION_ID);
+        assert2::assert!(id == INVALID_SESSION_ID);
     }
 
     #[test]
@@ -673,7 +670,7 @@ mod tests {
         let r = req(12345, 1, vec![], vec![]);
         match cache.classify(&r) {
             SessionDecision::Error { code } => {
-                assert!(code == codes::FETCH_SESSION_ID_NOT_FOUND);
+                assert2::assert!(code == codes::FETCH_SESSION_ID_NOT_FOUND);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -687,7 +684,7 @@ mod tests {
         let r = req(id, 99, vec![], vec![]);
         match cache.classify(&r) {
             SessionDecision::Error { code } => {
-                assert!(code == codes::INVALID_FETCH_SESSION_EPOCH);
+                assert2::assert!(code == codes::INVALID_FETCH_SESSION_EPOCH);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -699,16 +696,16 @@ mod tests {
         let id = cache.try_allocate(false, "alice".into(), vec![]);
         let r = req(id, FINAL_EPOCH, vec![], vec![]);
         match cache.classify(&r) {
-            SessionDecision::Close { session_id } => assert!(session_id == id),
+            SessionDecision::Close { session_id } => assert2::assert!(session_id == id),
             other => panic!("expected Close, got {other:?}"),
         }
         cache.close(id);
-        assert!(cache.len() == 0);
+        assert2::assert!(cache.len() == 0);
         // Subsequent classify with the same id is now NOT_FOUND.
         let r2 = req(id, 1, vec![], vec![]);
         match cache.classify(&r2) {
             SessionDecision::Error { code } => {
-                assert!(code == codes::FETCH_SESSION_ID_NOT_FOUND);
+                assert2::assert!(code == codes::FETCH_SESSION_ID_NOT_FOUND);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -720,7 +717,7 @@ mod tests {
         let r = req(0, 5, vec![], vec![]);
         match cache.classify(&r) {
             SessionDecision::Error { code } => {
-                assert!(code == codes::INVALID_FETCH_SESSION_EPOCH);
+                assert2::assert!(code == codes::INVALID_FETCH_SESSION_EPOCH);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -762,7 +759,7 @@ mod tests {
         let r2 = req(id, 1, vec![], vec![]);
         match cache.classify(&r2) {
             SessionDecision::Error { code } => {
-                assert!(code == codes::INVALID_FETCH_SESSION_EPOCH);
+                assert2::assert!(code == codes::INVALID_FETCH_SESSION_EPOCH);
             }
             other => panic!("expected Error, got {other:?}"),
         }
@@ -838,7 +835,7 @@ mod tests {
                 last_error_code: 0,
             },
         )];
-        assert!(partitions == expected);
+        assert2::assert!(partitions == expected);
     }
 
     #[test]
@@ -904,7 +901,7 @@ mod tests {
                 last_error_code: 0,
             },
         )];
-        assert!(partitions == expected);
+        assert2::assert!(partitions == expected);
     }
 
     #[test]
@@ -949,7 +946,7 @@ mod tests {
             SessionDecision::Incremental { partitions, .. } => {
                 let mut parts: Vec<i32> = partitions.iter().map(|(k, _)| k.partition).collect();
                 parts.sort_unstable();
-                assert!(parts == vec![0, 2]);
+                assert2::assert!(parts == vec![0, 2]);
             }
             other => panic!("expected Incremental, got {other:?}"),
         }
@@ -984,12 +981,12 @@ mod tests {
 
         apply_incremental(&mut partitions, &forgotten, &[]);
 
-        assert!(!partitions.contains_key(&FetchSessionKey {
+        assert2::assert!(!partitions.contains_key(&FetchSessionKey {
             topic_name: "t".into(),
             topic_id: WireUuid::ZERO,
             partition: 0,
         }));
-        assert!(partitions.contains_key(&FetchSessionKey {
+        assert2::assert!(partitions.contains_key(&FetchSessionKey {
             topic_name: "u".into(),
             topic_id: WireUuid::ZERO,
             partition: 0,
@@ -1027,12 +1024,12 @@ mod tests {
 
         apply_incremental(&mut partitions, &forgotten, &[]);
 
-        assert!(!partitions.contains_key(&FetchSessionKey {
+        assert2::assert!(!partitions.contains_key(&FetchSessionKey {
             topic_name: "t".into(),
             topic_id: tid,
             partition: 0,
         }));
-        assert!(partitions.contains_key(&FetchSessionKey {
+        assert2::assert!(partitions.contains_key(&FetchSessionKey {
             topic_name: "u".into(),
             topic_id: other_tid,
             partition: 0,
@@ -1049,20 +1046,20 @@ mod tests {
         let b = cache.try_allocate(false, "b".into(), vec![]);
         mock.advance(TICK);
         let c = cache.try_allocate(false, "c".into(), vec![]);
-        assert!(cache.len() == 2);
-        assert!(cache.evictions_total() == 1);
+        assert2::assert!(cache.len() == 2);
+        assert2::assert!(cache.evictions_total() == 1);
         // `a` (oldest) was evicted; `b` and `c` remain.
         let g = cache.inner.lock().unwrap();
         let mut ids: Vec<i32> = g.sessions.keys().copied().collect();
         ids.sort_unstable();
-        assert!(!ids.contains(&a) && ids == vec![b, c]);
+        assert2::assert!(!ids.contains(&a) && ids == vec![b, c]);
     }
 
     #[test]
     fn non_privileged_cannot_evict_privileged() {
         let cache = FetchSessionCache::new(1);
         let p = cache.try_allocate(true, "follower".into(), vec![]);
-        assert!(p > 0);
+        assert2::assert!(p > 0);
         // Cache full, only session is privileged. Consumer alloc refused.
         let c = cache.try_allocate(false, "consumer".into(), vec![]);
         check!(c == INVALID_SESSION_ID);
@@ -1082,8 +1079,8 @@ mod tests {
         check!(cache.len() == 1);
         check!(cache.evictions_total() == 1);
         let g = cache.inner.lock().unwrap();
-        assert!(!g.sessions.contains_key(&p1));
-        assert!(g.sessions.contains_key(&p2));
+        assert2::assert!(!g.sessions.contains_key(&p1));
+        assert2::assert!(g.sessions.contains_key(&p2));
     }
 
     #[test]
@@ -1110,8 +1107,7 @@ mod tests {
         cache.finalize_incremental(id, &sent);
         let g = cache.inner.lock().unwrap();
         let s = g.sessions.get(&id).unwrap().partitions.get(&key).unwrap();
-        assert!(s.last_high_watermark == 42);
-        assert!(s.last_log_start_offset == 7);
+        assert2::assert!((s.last_high_watermark, s.last_log_start_offset) == (42, 7));
     }
 
     #[test]
@@ -1129,7 +1125,7 @@ mod tests {
         };
         cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
         cache.try_allocate(false, "b".into(), vec![mk(2), mk(3), mk(4)]);
-        assert!(cache.total_partitions_cached() == 5);
+        assert2::assert!(cache.total_partitions_cached() == 5);
     }
 
     #[test]
@@ -1147,8 +1143,8 @@ mod tests {
         };
         // Two partitions on allocate.
         let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
-        assert!(cache.len() == 1);
-        assert!(cache.total_partitions_cached() == 2);
+        assert2::assert!(cache.len() == 1);
+        assert2::assert!(cache.total_partitions_cached() == 2);
 
         // Incremental that forgets partition 1 and adds partitions 2 and 3:
         // net partition count goes 2 -> 3.
@@ -1159,16 +1155,16 @@ mod tests {
             ..Default::default()
         }];
         let r = req(id, 1, vec![topic("t", &[0, 2, 3])], forgotten);
-        assert!(matches!(
+        assert2::assert!(matches!(
             cache.classify(&r),
             SessionDecision::Incremental { .. }
         ));
-        assert!(cache.total_partitions_cached() == 3);
+        assert2::assert!(cache.total_partitions_cached() == 3);
 
         // Close drops the whole session and its partitions.
         cache.close(id);
-        assert!(cache.len() == 0);
-        assert!(cache.total_partitions_cached() == 0);
+        assert2::assert!(cache.len() == 0);
+        assert2::assert!(cache.total_partitions_cached() == 0);
     }
 
     #[test]
@@ -1187,12 +1183,12 @@ mod tests {
         let id = cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
 
         let r = req(id, 1, vec![topic("t", &[0, 1, 2, 3, 4])], vec![]);
-        assert!(matches!(
+        assert2::assert!(matches!(
             cache.classify(&r),
             SessionDecision::Incremental { .. }
         ));
 
-        assert!(cache.total_partitions_cached() == 5);
+        assert2::assert!(cache.total_partitions_cached() == 5);
     }
 
     #[test]
@@ -1217,12 +1213,12 @@ mod tests {
         }];
 
         let r = req(id, 1, vec![], forgotten);
-        assert!(matches!(
+        assert2::assert!(matches!(
             cache.classify(&r),
             SessionDecision::Incremental { .. }
         ));
 
-        assert!(cache.total_partitions_cached() == 2);
+        assert2::assert!(cache.total_partitions_cached() == 2);
     }
 
     #[test]
@@ -1239,12 +1235,12 @@ mod tests {
             )
         };
         cache.try_allocate(false, "a".into(), vec![mk(0), mk(1)]);
-        assert!(cache.total_partitions_cached() == 2);
+        assert2::assert!(cache.total_partitions_cached() == 2);
         // Allocating into the full cache evicts the lone session (2 parts)
         // and inserts a fresh one (1 part).
         cache.try_allocate(false, "b".into(), vec![mk(0)]);
-        assert!(cache.len() == 1);
-        assert!(cache.total_partitions_cached() == 1);
+        assert2::assert!(cache.len() == 1);
+        assert2::assert!(cache.total_partitions_cached() == 1);
     }
 }
 

@@ -57,7 +57,7 @@ pub(crate) fn put_uvarint<B: BufMut>(buf: &mut B, mut v: u32) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use bytes::{Bytes, BytesMut};
     use futures_util::{SinkExt, StreamExt};
     use tokio::{
@@ -88,36 +88,37 @@ mod tests {
         framed.into_inner().shutdown().await.unwrap();
 
         let received = server.await.unwrap();
-        assert!(received.as_ref() == b"hello kafka");
+        assert2::assert!(received.as_ref() == b"hello kafka");
     }
 
     #[test]
     fn put_uvarint_single_byte() {
-        let mut buf = BytesMut::new();
-        put_uvarint(&mut buf, 0);
-        assert!(buf.as_ref() == &[0u8]);
-        buf.clear();
-        put_uvarint(&mut buf, 127);
-        assert!(buf.as_ref() == &[0x7Fu8]);
+        for (_name, value, expected) in [
+            ("zero", 0, &[0u8][..]),
+            ("largest single byte", 127, &[0x7F][..]),
+        ] {
+            let mut buf = BytesMut::new();
+            put_uvarint(&mut buf, value);
+            assert2::assert!(buf.as_ref() == expected);
+        }
     }
 
     #[test]
     fn put_uvarint_multibyte() {
-        // 128 encodes to 0x80 0x01
-        let mut buf = BytesMut::new();
-        put_uvarint(&mut buf, 128);
-        assert!(buf.as_ref() == &[0x80u8, 0x01u8]);
-        buf.clear();
-        put_uvarint(&mut buf, 16_384);
-        assert!(buf.as_ref() == &[0x80u8, 0x80u8, 0x01u8]);
-        buf.clear();
-        put_uvarint(&mut buf, u32::MAX);
-        assert!(buf.as_ref() == &[0xFFu8, 0xFFu8, 0xFFu8, 0xFFu8, 0x0F]);
+        for (_name, value, expected) in [
+            ("two bytes", 128, &[0x80u8, 0x01][..]),
+            ("three bytes", 16_384, &[0x80u8, 0x80, 0x01][..]),
+            ("u32 max", u32::MAX, &[0xFFu8, 0xFF, 0xFF, 0xFF, 0x0F][..]),
+        ] {
+            let mut buf = BytesMut::new();
+            put_uvarint(&mut buf, value);
+            assert2::assert!(buf.as_ref() == expected);
+        }
     }
 
     #[test]
     fn max_frame_bytes_matches_kafka_default() {
-        assert!(MAX_FRAME_BYTES == 100 * 1024 * 1024);
+        assert2::assert!(MAX_FRAME_BYTES == 100 * 1024 * 1024);
     }
 
     #[tokio::test]
@@ -132,6 +133,6 @@ mod tests {
         let mut framed = frame_generic(client);
         framed.send(payload).await.unwrap();
 
-        assert!(server_task.await.unwrap() == 9 * 1024 * 1024);
+        assert2::assert!(server_task.await.unwrap() == 9 * 1024 * 1024);
     }
 }

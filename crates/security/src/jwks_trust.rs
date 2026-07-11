@@ -56,8 +56,6 @@ pub fn build_client_config_from_pem(
 mod tests {
     use std::{fs::File, io::Write};
 
-    use assert2::assert;
-
     use super::*;
 
     fn install_provider() {
@@ -96,17 +94,14 @@ mod tests {
         f.write_all(b"\n").unwrap();
         f.write_all(dev_cert_pem().as_bytes()).unwrap();
         let cfg = build_client_config_from_pem(&path);
-        assert!(cfg.is_ok(), "concatenated chain should load: {cfg:?}");
+        assert2::assert!(cfg.is_ok());
     }
 
     #[test]
     fn build_client_config_from_pem_rejects_missing_file() {
         install_provider();
         let err = build_client_config_from_pem(Path::new("/nonexistent/path.pem")).unwrap_err();
-        assert!(
-            matches!(err, JwksTrustError::Io(_, _)),
-            "expected Io, got {err:?}",
-        );
+        assert2::assert!(matches!(err, JwksTrustError::Io(_, _)));
     }
 
     #[test]
@@ -123,10 +118,10 @@ mod tests {
         // errored on the "comment-only" content). Both are acceptable
         // rejection shapes — both reach the right outcome (no
         // ClientConfig produced).
-        assert!(
-            matches!(err, JwksTrustError::Empty(_) | JwksTrustError::Io(_, _)),
-            "expected Empty or Io, got {err:?}",
-        );
+        assert2::assert!(matches!(
+            err,
+            JwksTrustError::Empty(_) | JwksTrustError::Io(_, _)
+        ));
     }
 
     #[test]
@@ -136,9 +131,6 @@ mod tests {
         let path = dir.path().join("garbage.bin");
         File::create(&path).unwrap().write_all(&[0u8; 64]).unwrap();
         let err = build_client_config_from_pem(&path);
-        assert!(
-            err.is_err(),
-            "arbitrary bytes should not parse as a PEM bundle"
-        );
+        assert2::assert!(err.is_err());
     }
 }

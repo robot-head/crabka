@@ -9,7 +9,6 @@ use std::{
     time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 
-use assert2::{assert, check};
 use axum::{
     body::{Body, to_bytes},
     http::{Request, StatusCode},
@@ -67,10 +66,7 @@ async fn create_topic(bootstrap: &str, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert!(
-        response.topics[0].error_code == 0,
-        "create_topic failed: {response:?}"
-    );
+    assert2::assert!(response.topics[0].error_code == 0);
 }
 
 fn current_unix_second_ns() -> i64 {
@@ -218,8 +214,8 @@ async fn observability_kafka_wal_sink_feeds_live_consumer_hot_tail() {
             .expect("poll live wal");
     }
 
-    assert!(decoded == 1, "expected one live WAL record");
-    assert!(
+    assert2::assert!(decoded == 1);
+    assert2::assert!(
         hot_tail.records()
             == vec![WalLogRecord {
                 position: Some(WalPosition {
@@ -283,7 +279,7 @@ async fn config_built_distributor_writes_loki_push_to_live_wal() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 
     let mut consumer =
         KafkaLogWalConsumer::connect(&bootstrap, "observability-wal-config-distributor", topic)
@@ -292,8 +288,8 @@ async fn config_built_distributor_writes_loki_push_to_live_wal() {
     let hot_tail = BufferedLogHotTail::default();
     let decoded = poll_until_decoded(&mut consumer, &hot_tail).await;
 
-    assert!(decoded == 1, "expected one config-produced WAL record");
-    assert!(
+    assert2::assert!(decoded == 1);
+    assert2::assert!(
         hot_tail.records()
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -341,7 +337,7 @@ async fn config_built_distributor_enforces_broker_user_producer_byte_rate_quota_
         )
         .await
         .expect("set tenant quota");
-    assert!(outcome.is_none(), "quota alter failed: {outcome:?}");
+    assert2::assert!(outcome.is_none());
 
     let config = service_config(Role::Distributor, &bootstrap, topic, &data_root);
     let app = build_service_router(
@@ -379,11 +375,11 @@ async fn config_built_distributor_enforces_broker_user_producer_byte_rate_quota_
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
+    assert2::assert!(response.status() == StatusCode::TOO_MANY_REQUESTS);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(body["errorType"] == "rate_limited");
-    assert!(
+    assert2::assert!(body["errorType"] == "rate_limited");
+    assert2::assert!(
         body["error"]
             .as_str()
             .unwrap()
@@ -398,11 +394,8 @@ async fn config_built_distributor_enforces_broker_user_producer_byte_rate_quota_
     let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(250))
         .await
         .expect("poll live wal");
-    assert!(
-        decoded == 0,
-        "quota rejection must happen before WAL append"
-    );
-    assert!(hot_tail.records().is_empty());
+    assert2::assert!(decoded == 0);
+    assert2::assert!(hot_tail.records().is_empty());
     broker.shutdown().await;
 }
 
@@ -429,10 +422,7 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
         }])
         .await
         .expect("seed acl policy");
-    assert!(
-        outcomes.iter().all(|outcome| outcome.error.is_none()),
-        "seed acl failed: {outcomes:?}"
-    );
+    assert2::assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
 
     let config = service_config(Role::Distributor, &bootstrap, topic, &data_root);
     let app = build_service_router(
@@ -470,11 +460,11 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert2::assert!(response.status() == StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(body["errorType"] == "forbidden");
-    assert!(body["error"].as_str().unwrap().contains("tenant write ACL"));
+    assert2::assert!(body["errorType"] == "forbidden");
+    assert2::assert!(body["error"].as_str().unwrap().contains("tenant write ACL"));
 
     let mut consumer =
         KafkaLogWalConsumer::connect(&bootstrap, "observability-wal-acl-distributor", topic)
@@ -484,8 +474,8 @@ async fn config_built_distributor_enforces_tenant_write_acl_before_wal_append() 
     let decoded = poll_log_hot_tail_once(&mut consumer, &hot_tail, Duration::from_millis(250))
         .await
         .expect("poll live wal");
-    assert!(decoded == 0, "ACL rejection must happen before WAL append");
-    assert!(hot_tail.records().is_empty());
+    assert2::assert!(decoded == 0);
+    assert2::assert!(hot_tail.records().is_empty());
     broker.shutdown().await;
 }
 
@@ -523,10 +513,7 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
         ])
         .await
         .expect("seed tenant write acl");
-    assert!(
-        outcomes.iter().all(|outcome| outcome.error.is_none()),
-        "seed acl failed: {outcomes:?}"
-    );
+    assert2::assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
 
     let config = service_config(Role::Distributor, &bootstrap, topic, &data_root);
     let app = build_service_router(
@@ -564,7 +551,7 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
         .await
         .unwrap();
 
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 
     let mut consumer =
         KafkaLogWalConsumer::connect(&bootstrap, "observability-wal-acl-allow-distributor", topic)
@@ -572,8 +559,8 @@ async fn config_built_distributor_allows_tenant_with_write_acl_to_append_wal() {
             .expect("wal consumer");
     let hot_tail = BufferedLogHotTail::default();
     let decoded = poll_until_decoded(&mut consumer, &hot_tail).await;
-    assert!(decoded == 1, "expected one ACL-authorized WAL record");
-    assert!(
+    assert2::assert!(decoded == 1);
+    assert2::assert!(
         hot_tail.records()
             == vec![WalLogRecord {
                 tenant: "tenant-a".to_string(),
@@ -617,10 +604,7 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
         }])
         .await
         .expect("seed acl policy");
-    assert!(
-        outcomes.iter().all(|outcome| outcome.error.is_none()),
-        "seed acl failed: {outcomes:?}"
-    );
+    assert2::assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
 
     let config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     let app = build_service_router(
@@ -656,11 +640,11 @@ async fn config_built_querier_enforces_tenant_read_acl_before_query() {
         tokio::task::yield_now().await;
     };
 
-    assert!(response.status() == StatusCode::FORBIDDEN);
+    assert2::assert!(response.status() == StatusCode::FORBIDDEN);
     let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
     let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
-    assert!(body["errorType"] == "forbidden");
-    assert!(body["error"].as_str().unwrap().contains("tenant read ACL"));
+    assert2::assert!(body["errorType"] == "forbidden");
+    assert2::assert!(body["error"].as_str().unwrap().contains("tenant read ACL"));
     broker.shutdown().await;
 }
 
@@ -701,7 +685,7 @@ async fn config_built_querier_tails_live_wal_into_query_results() {
     .unwrap();
 
     let body = query_until_api_error(app).await;
-    assert!(
+    assert2::assert!(
         body == json!({
             "status": "success",
             "data": {
@@ -772,7 +756,7 @@ async fn configured_listener_tails_live_wal_over_websocket() {
         .headers_mut()
         .insert("X-Scope-OrgID", "tenant-a".parse().unwrap());
     let (mut socket, response) = connect_async(request).await.unwrap();
-    assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
+    assert2::assert!(response.status() == StatusCode::SWITCHING_PROTOCOLS);
 
     push_api_log(distributor, &timestamp, "api live websocket tail error").await;
 
@@ -783,7 +767,7 @@ async fn configured_listener_tails_live_wal_over_websocket() {
         .unwrap();
     let frame: serde_json::Value = serde_json::from_str(message.to_text().unwrap()).unwrap();
 
-    assert!(
+    assert2::assert!(
         frame
             == json!({
                 "streams": [
@@ -858,7 +842,7 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 
     let mut compactor_config = service_config(Role::Compactor, &bootstrap, topic, &data_root);
     compactor_config.object_store_url = Some(object_store_url.clone());
@@ -871,10 +855,10 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.partition == 0);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 1);
+    assert2::assert!(descriptors.len() == 1);
+    assert2::assert!(descriptors[0].key.partition == 0);
+    assert2::assert!(descriptors[0].key.first_offset == 0);
+    assert2::assert!(descriptors[0].key.last_offset == 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -893,7 +877,7 @@ async fn config_built_distributor_compactor_querier_loop_serves_compacted_logs()
     .unwrap();
 
     let body = query_until_loop_error(querier, &error_timestamp).await;
-    assert!(
+    assert2::assert!(
         body == json!({
             "status": "success",
             "data": {
@@ -986,7 +970,7 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 
     let mut compactor_config = service_config(Role::Compactor, &bootstrap, topic, &data_root);
     compactor_config.object_store_url = Some(object_store_url.clone());
@@ -999,9 +983,9 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 0);
+    assert2::assert!(descriptors.len() == 1);
+    assert2::assert!(descriptors[0].key.first_offset == 0);
+    assert2::assert!(descriptors[0].key.last_offset == 0);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1017,7 +1001,7 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
     .unwrap();
 
     let body = query_until_otlp_loop_error(querier, &timestamp).await;
-    assert!(
+    assert2::assert!(
         body.pointer("/data/result/0/stream")
             == Some(&json!({
                 "deployment_environment": "prod",
@@ -1028,7 +1012,7 @@ async fn otlp_http_log_flows_through_configured_distributor_compactor_and_querie
                 "trace_id": "abc123"
             }))
     );
-    assert!(
+    assert2::assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([[timestamp, "checkout otlp loop error"]]))
     );
@@ -1085,7 +1069,7 @@ async fn configured_loop_isolates_tenants_sharing_one_wal_topic() {
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 2);
+    assert2::assert!(descriptors.len() == 2);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1102,24 +1086,18 @@ async fn configured_loop_isolates_tenants_sharing_one_wal_topic() {
 
     let end = tenant_b_timestamp.parse::<i64>().unwrap() + 10_000_000;
     let tenant_a = query_until_tenant_shared_error(querier.clone(), "tenant-a", end).await;
-    assert!(
+    assert2::assert!(
         tenant_a.pointer("/data/result/0/values")
             == Some(&json!([[tenant_a_timestamp, "tenant a shared wal error"]]))
     );
-    assert!(
-        !tenant_a.to_string().contains("tenant b shared wal error"),
-        "tenant-a query leaked tenant-b row: {tenant_a}"
-    );
+    assert2::assert!(!tenant_a.to_string().contains("tenant b shared wal error"));
 
     let tenant_b = query_until_tenant_shared_error(querier, "tenant-b", end).await;
-    assert!(
+    assert2::assert!(
         tenant_b.pointer("/data/result/0/values")
             == Some(&json!([[tenant_b_timestamp, "tenant b shared wal error"]]))
     );
-    assert!(
-        !tenant_b.to_string().contains("tenant a shared wal error"),
-        "tenant-b query leaked tenant-a row: {tenant_b}"
-    );
+    assert2::assert!(!tenant_b.to_string().contains("tenant a shared wal error"));
     broker.shutdown().await;
 }
 
@@ -1165,9 +1143,9 @@ async fn config_built_querier_merges_compacted_blocks_with_uncompacted_live_tail
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 0);
+    assert2::assert!(descriptors.len() == 1);
+    assert2::assert!(descriptors[0].key.first_offset == 0);
+    assert2::assert!(descriptors[0].key.last_offset == 0);
 
     push_api_log(distributor, &live_timestamp, "api live tail error").await;
 
@@ -1185,7 +1163,7 @@ async fn config_built_querier_merges_compacted_blocks_with_uncompacted_live_tail
     .unwrap();
 
     let body = query_until_hot_cold_errors(querier, &compacted_timestamp, &live_timestamp).await;
-    assert!(
+    assert2::assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([
                 [compacted_timestamp, "api compacted error"],
@@ -1233,9 +1211,9 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     first_compactor.wal_group_id = compactor_group.to_string();
     let first_descriptors =
         run_configured_compactor_for(&first_compactor, Duration::from_millis(750)).await;
-    assert!(first_descriptors.len() == 1);
-    check!(first_descriptors[0].key.first_offset == 0);
-    check!(first_descriptors[0].key.last_offset == 0);
+    assert2::assert!(first_descriptors.len() == 1);
+    assert2::assert!(first_descriptors[0].key.first_offset == 0);
+    assert2::assert!(first_descriptors[0].key.last_offset == 0);
 
     push_api_log(distributor, &second_timestamp, "api second restart error").await;
 
@@ -1245,9 +1223,9 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     restarted_compactor.wal_group_id = compactor_group.to_string();
     let second_descriptors =
         run_configured_compactor_for(&restarted_compactor, Duration::from_millis(750)).await;
-    assert!(second_descriptors.len() == 1);
-    check!(second_descriptors[0].key.first_offset == 1);
-    check!(second_descriptors[0].key.last_offset == 1);
+    assert2::assert!(second_descriptors.len() == 1);
+    assert2::assert!(second_descriptors[0].key.first_offset == 1);
+    assert2::assert!(second_descriptors[0].key.last_offset == 1);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1263,7 +1241,7 @@ async fn config_built_compactor_restart_resumes_from_committed_live_wal_offset()
     .unwrap();
 
     let body = query_until_restart_errors(querier, &first_timestamp, &second_timestamp).await;
-    assert!(
+    assert2::assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([
                 [first_timestamp, "api first restart error"],
@@ -1304,9 +1282,9 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
     )
     .await
     .unwrap();
-    assert!(descriptors.len() == 1);
-    check!(descriptors[0].key.first_offset == 0);
-    check!(descriptors[0].key.last_offset == 0);
+    assert2::assert!(descriptors.len() == 1);
+    assert2::assert!(descriptors[0].key.first_offset == 0);
+    assert2::assert!(descriptors[0].key.last_offset == 0);
 
     let mut querier_config = service_config(Role::Querier, &bootstrap, topic, &data_root);
     querier_config.object_store_url = Some(object_store_url);
@@ -1322,7 +1300,7 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
     .unwrap();
 
     let body = query_until_native_kafka_error(querier).await;
-    assert!(
+    assert2::assert!(
         body.pointer("/data/result/0/stream")
             == Some(&json!({
                 "app": "api",
@@ -1331,7 +1309,7 @@ async fn native_kafka_produced_log_flows_through_configured_compactor_and_querie
                 "trace_id": "abc123"
             }))
     );
-    assert!(
+    assert2::assert!(
         body.pointer("/data/result/0/values")
             == Some(&json!([["20000000", "api native kafka error"]]))
     );
@@ -1441,7 +1419,7 @@ async fn push_tenant_api_log(app: axum::Router, tenant: &str, timestamp_ns: &str
         )
         .await
         .unwrap();
-    assert!(response.status() == StatusCode::NO_CONTENT);
+    assert2::assert!(response.status() == StatusCode::NO_CONTENT);
 }
 
 async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
@@ -1461,7 +1439,7 @@ async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body
@@ -1506,10 +1484,7 @@ async fn query_until_api_error(app: axum::Router) -> serde_json::Value {
         {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed hot WAL row"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -1536,7 +1511,7 @@ async fn query_until_hot_cold_errors(
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1547,10 +1522,7 @@ async fn query_until_hot_cold_errors(
         {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed exact hot/cold merge result: {body}"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -1572,7 +1544,7 @@ async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value 
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1580,10 +1552,7 @@ async fn query_until_native_kafka_error(app: axum::Router) -> serde_json::Value 
         {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed native Kafka produced log: {body}"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -1606,7 +1575,7 @@ async fn query_until_otlp_loop_error(app: axum::Router, timestamp_ns: &str) -> s
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1614,10 +1583,7 @@ async fn query_until_otlp_loop_error(app: axum::Router, timestamp_ns: &str) -> s
         {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed OTLP produced log: {body}"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -1643,16 +1609,13 @@ async fn query_until_tenant_shared_error(
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if !body["data"]["result"].as_array().unwrap().is_empty() {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed shared WAL row for {tenant}: {body}"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -1679,7 +1642,7 @@ async fn query_until_restart_errors(
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body: serde_json::Value = serde_json::from_slice(&body).unwrap();
         if body.pointer("/data/result/0/values")
@@ -1690,10 +1653,7 @@ async fn query_until_restart_errors(
         {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed exact restart result: {body}"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }
@@ -1715,7 +1675,7 @@ async fn query_until_loop_error(app: axum::Router, timestamp: &str) -> serde_jso
             .await
             .unwrap();
 
-        assert!(response.status() == StatusCode::OK);
+        assert2::assert!(response.status() == StatusCode::OK);
         let body = to_bytes(response.into_body(), 64 * 1024).await.unwrap();
         let body = serde_json::from_slice(&body).unwrap();
         if body
@@ -1760,10 +1720,7 @@ async fn query_until_loop_error(app: axum::Router, timestamp: &str) -> serde_jso
         {
             return body;
         }
-        assert!(
-            Instant::now() < deadline,
-            "query never observed compacted loop row"
-        );
+        assert2::assert!(Instant::now() < deadline);
         tokio::task::yield_now().await;
     }
 }

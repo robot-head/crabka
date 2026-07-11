@@ -127,12 +127,7 @@ fn docker_pull(image: &str) {
         .args(["pull", image])
         .output()
         .expect("spawn docker pull");
-    assert!(
-        out.status.success(),
-        "docker pull {image} failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 fn docker_rm_f(name: &str) {
@@ -186,12 +181,7 @@ fn docker_run_kafka() {
         ])
         .output()
         .expect("spawn docker run kafka");
-    assert!(
-        out.status.success(),
-        "docker run kafka failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
     eprintln!(
         "CAPTURE kafka container started id={}",
         String::from_utf8_lossy(&out.stdout).trim()
@@ -214,11 +204,7 @@ fn exec_detached(script: &str) {
         .args(["exec", "-d", CONTAINER, "bash", "-c", script])
         .output()
         .expect("spawn docker exec -d");
-    assert!(
-        out.status.success(),
-        "docker exec -d failed: stderr={}",
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 }
 
 fn docker_logs() -> String {
@@ -319,12 +305,7 @@ async fn capture_real_kafka_describe_groups() {
         "--replication-factor",
         "1",
     ]);
-    assert!(
-        out.status.success(),
-        "create topic failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 
     // Produce a few records so the consumer actually has data + an assignment.
     let out = exec(&[
@@ -334,12 +315,7 @@ async fn capture_real_kafka_describe_groups() {
             "printf 'r1\\nr2\\nr3\\nr4\\n' | kafka-console-producer --bootstrap-server localhost:9092 --topic {TOPIC}"
         ),
     ]);
-    assert!(
-        out.status.success(),
-        "produce failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 
     // ── A classic consumer group `g` with the RangeAssignor. Detached with a
     // generous read timeout so the group stays Stable across the capture. ──
@@ -364,12 +340,7 @@ async fn capture_real_kafka_describe_groups() {
         "--to-earliest",
         "--execute",
     ]);
-    assert!(
-        out.status.success(),
-        "create typeless group failed: stdout={}, stderr={}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
+    assert2::assert!(out.status.success());
 
     // ── Capture from the HOST via crabka_client_core::Client. ──
     let client = Client::builder()
@@ -438,48 +409,19 @@ async fn capture_real_kafka_describe_groups() {
     );
 
     // ── ASSERT the real-Kafka authority semantics (the spec premise). ──
-    assert_eq!(
-        classic.error_code, 0,
-        "classic group describe error: {classic:?}"
-    );
-    assert_eq!(
-        classic.protocol_type, "consumer",
-        "real Kafka: an active classic consumer group reports protocol_type=='consumer'"
-    );
-    assert_eq!(
-        classic.protocol_data, "range",
-        "real Kafka populates the SELECTED protocol name (the RangeAssignor's 'range')"
-    );
-    assert_eq!(
-        classic.group_state, "Stable",
-        "classic group must be Stable"
-    );
-    assert_eq!(classic.members.len(), 1, "exactly one member: {classic:?}");
-    assert!(
-        !m.member_metadata.is_empty(),
-        "real Kafka populates member_metadata (the ConsumerProtocolSubscription); got empty"
-    );
+    assert2::assert!(classic.error_code == 0);
+    assert2::assert!(classic.protocol_type == "consumer");
+    assert2::assert!(classic.protocol_data == "range");
+    assert2::assert!(classic.group_state == "Stable");
+    assert2::assert!(classic.members.len() == 1);
+    assert2::assert!(!m.member_metadata.is_empty());
     // The subscription begins with the ConsumerProtocol version (i16) followed
     // by the subscribed-topics array. cp-kafka 7.4.0 emits version 3.
-    assert_eq!(
-        &m.member_metadata[..2],
-        &[0x00, 0x03],
-        "ConsumerProtocolSubscription header version (i16=3); got {:02x?}",
-        &m.member_metadata[..m.member_metadata.len().min(2)]
-    );
+    assert2::assert!(&m.member_metadata[..2] == &[0x00, 0x03]);
 
     // ── The typeless-group authority: protocol_type == "" (settles the
     // unwrap_or_default() projection in handlers/describe_groups.rs). ──
-    assert_eq!(
-        typeless.error_code, 0,
-        "typeless group describe error: {typeless:?}"
-    );
-    assert_eq!(
-        typeless.protocol_type, "",
-        "real Kafka: an offset-commit-only / typeless group reports protocol_type==\"\""
-    );
-    assert_eq!(
-        typeless.protocol_data, "",
-        "typeless group has no selected protocol"
-    );
+    assert2::assert!(typeless.error_code == 0);
+    assert2::assert!(typeless.protocol_type == "");
+    assert2::assert!(typeless.protocol_data == "");
 }

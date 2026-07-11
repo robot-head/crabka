@@ -241,7 +241,7 @@ impl<C: BrokerConnector> BrokerPool<C> {
 mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -263,10 +263,15 @@ mod tests {
             },
         ])
         .await;
-        assert!(pool.by_addr.contains_key(&1));
-        assert!(pool.by_addr.contains_key(&2));
-        check!(*pool.by_addr.get(&1).unwrap() == "127.0.0.1:9092".parse().unwrap());
-        check!(*pool.by_addr.get(&2).unwrap() == "127.0.0.1:9093".parse().unwrap());
+        check!(
+            (
+                pool.by_addr.get(&1).map(|entry| *entry),
+                pool.by_addr.get(&2).map(|entry| *entry),
+            ) == (
+                Some("127.0.0.1:9092".parse().unwrap()),
+                Some("127.0.0.1:9093".parse().unwrap()),
+            )
+        );
     }
 
     #[tokio::test]
@@ -281,7 +286,7 @@ mod tests {
             rack: None,
         }])
         .await;
-        assert!(pool.knows_broker(7));
+        assert2::assert!(pool.knows_broker(7));
     }
 
     #[tokio::test]
@@ -303,8 +308,9 @@ mod tests {
         ])
         .await;
 
-        assert!(!pool.knows_broker(1));
-        assert!(!pool.knows_broker(2));
+        for (_name, broker_id) in [("zero port", 1), ("negative port", 2)] {
+            assert2::assert!(!pool.knows_broker(broker_id));
+        }
     }
 
     // ── socket-free caching / fallback / eviction via a counting connector ────
@@ -356,16 +362,16 @@ mod tests {
             },
         );
         // Unknown id: no address learned → Disconnected, no dial attempted.
-        assert!(matches!(pool.get(5).await, Err(ClientError::Disconnected)));
-        assert!(dials.load(Ordering::Relaxed) == 0);
+        assert2::assert!(matches!(pool.get(5).await, Err(ClientError::Disconnected)));
+        assert2::assert!(dials.load(Ordering::Relaxed) == 0);
 
         pool.by_addr.insert(5, addr(9092));
         let first = pool.get(5).await.unwrap();
-        assert!(first.addr == addr(9092));
+        assert2::assert!(first.addr == addr(9092));
         // Second get is served from cache: still a single dial.
         let second = pool.get(5).await.unwrap();
-        assert!(Arc::ptr_eq(&first, &second));
-        assert!(dials.load(Ordering::Relaxed) == 1);
+        assert2::assert!(Arc::ptr_eq(&first, &second));
+        assert2::assert!(dials.load(Ordering::Relaxed) == 1);
     }
 
     #[tokio::test]
@@ -382,17 +388,17 @@ mod tests {
         pool.by_addr.insert(2, addr(9093));
         let _ = pool.get(1).await.unwrap();
         let _ = pool.get(2).await.unwrap();
-        assert!(dials.load(Ordering::Relaxed) == 2);
+        assert2::assert!(dials.load(Ordering::Relaxed) == 2);
 
         // Evicting id 1 drops only its cached connection.
         pool.evict(1);
-        assert!(!pool.by_id.contains_key(&1));
-        assert!(pool.by_id.contains_key(&2));
+        assert2::assert!(!pool.by_id.contains_key(&1));
+        assert2::assert!(pool.by_id.contains_key(&2));
 
         // id 1 re-dials; id 2 is still cached.
         let _ = pool.get(1).await.unwrap();
         let _ = pool.get(2).await.unwrap();
-        assert!(dials.load(Ordering::Relaxed) == 3);
+        assert2::assert!(dials.load(Ordering::Relaxed) == 3);
     }
 
     #[tokio::test]
@@ -407,9 +413,9 @@ mod tests {
             },
         );
         let boot = pool.bootstrap_connection().await.unwrap();
-        assert!(boot.addr == addr(2222));
+        assert2::assert!(boot.addr == addr(2222));
         // Two dials: the dead first address, then the live second.
-        assert!(dials.load(Ordering::Relaxed) == 2);
+        assert2::assert!(dials.load(Ordering::Relaxed) == 2);
 
         // Cached under the synthetic bootstrap id; a second call does not redial.
         let again = pool.bootstrap_connection().await.unwrap();
@@ -431,14 +437,14 @@ mod tests {
             },
         );
         let _ = pool.bootstrap_connection().await.unwrap();
-        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+        assert2::assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
         // BOOTSTRAP_ID must be negative; a real broker id is never negative.
-        assert!(BOOTSTRAP_ID < 0);
+        assert2::assert!(BOOTSTRAP_ID < 0);
 
         // Evicting any real id leaves the bootstrap connection intact.
         pool.evict(0);
         pool.evict(1);
-        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
+        assert2::assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
     }
 
     #[tokio::test]
@@ -454,18 +460,26 @@ mod tests {
         pool.by_addr.insert(3, addr(9092));
         let _ = pool.get(3).await.unwrap();
         let _ = pool.bootstrap_connection().await.unwrap();
-        assert!(pool.by_id.contains_key(&BOOTSTRAP_ID));
-        assert!(pool.by_id.contains_key(&3));
+        assert2::assert!(
+            (
+                pool.by_id.contains_key(&BOOTSTRAP_ID),
+                pool.by_id.contains_key(&3)
+            ) == (true, true)
+        );
 
         pool.evict_bootstrap();
         // Only the bootstrap entry is gone; the real broker stays cached.
-        assert!(!pool.by_id.contains_key(&BOOTSTRAP_ID));
-        assert!(pool.by_id.contains_key(&3));
+        assert2::assert!(
+            (
+                pool.by_id.contains_key(&BOOTSTRAP_ID),
+                pool.by_id.contains_key(&3)
+            ) == (false, true)
+        );
 
         // The next bootstrap_connection redials.
         let before = dials.load(Ordering::Relaxed);
         let _ = pool.bootstrap_connection().await.unwrap();
-        assert!(dials.load(Ordering::Relaxed) == before + 1);
+        assert2::assert!(dials.load(Ordering::Relaxed) == before + 1);
     }
 
     #[tokio::test]
@@ -480,14 +494,14 @@ mod tests {
         );
 
         let first = pool.bootstrap_connection().await.unwrap();
-        assert!(first.addr == addr(1111));
-        assert!(dials.load(Ordering::Relaxed) == 1);
+        assert2::assert!(first.addr == addr(1111));
+        assert2::assert!(dials.load(Ordering::Relaxed) == 1);
 
         pool.replace_bootstrap(vec![addr(2222)]);
 
         let second = pool.bootstrap_connection().await.unwrap();
-        assert!(second.addr == addr(2222));
-        assert!(dials.load(Ordering::Relaxed) == 2);
+        assert2::assert!(second.addr == addr(2222));
+        assert2::assert!(dials.load(Ordering::Relaxed) == 2);
     }
 
     #[tokio::test]
@@ -504,10 +518,10 @@ mod tests {
         let held = pool.get(1).await.unwrap();
         let _ = pool.bootstrap_connection().await.unwrap();
         // Two strong refs to broker 1's conn: the pool's and `held`.
-        assert!(Arc::strong_count(&held) == 2);
+        assert2::assert!(Arc::strong_count(&held) == 2);
 
         pool.close_all();
         // The pool dropped its references; only `held` remains.
-        assert!(Arc::strong_count(&held) == 1);
+        assert2::assert!(Arc::strong_count(&held) == 1);
     }
 }

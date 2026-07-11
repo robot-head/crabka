@@ -347,7 +347,6 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, LeaderEpoch, MetadataRecord, PartitionRecord, TopicRecord,
     };
@@ -459,10 +458,7 @@ mod tests {
             {
                 return;
             }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "broker did not become controller leader"
-            );
+            assert2::assert!(std::time::Instant::now() <= deadline);
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
@@ -516,7 +512,7 @@ mod tests {
     fn noop_when_already_at_target() {
         let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 2, 3]), true).unwrap();
-        assert!(res.is_none());
+        assert2::assert!(res.is_none());
     }
 
     #[test]
@@ -537,7 +533,7 @@ mod tests {
             directories: vec![Uuid::nil(); 4],
             partition_epoch: 12,
         };
-        assert!(res == expected);
+        assert2::assert!(res == expected);
     }
 
     #[test]
@@ -549,7 +545,7 @@ mod tests {
             error_message: None,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(ok == expected_ok);
+        assert2::assert!(ok == expected_ok);
 
         let err = err_row(8, UNKNOWN_TOPIC_OR_PARTITION, "missing partition".into());
         let expected_err = ReassignablePartitionResponse {
@@ -558,7 +554,7 @@ mod tests {
             error_message: Some("missing partition".into()),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(err == expected_err);
+        assert2::assert!(err == expected_err);
     }
 
     #[test]
@@ -588,7 +584,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
     }
 
     #[test]
@@ -618,7 +614,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert!(*rows == expected);
+        assert2::assert!(*rows == expected);
     }
 
     #[tokio::test]
@@ -662,7 +658,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -706,7 +702,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -753,12 +749,23 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
 
         let image = broker.controller.current_image();
         let partition = image.partition("orders", 7).expect("partition committed");
-        assert!(partition.adding_replicas == vec![NodeId(2)]);
-        assert!(partition.partition_epoch == 12);
+        let expected_partition = PartitionRecord {
+            topic: "orders".into(),
+            partition: 7,
+            leader: NodeId(1),
+            replicas: vec![NodeId(1), NodeId(2)],
+            isr: vec![NodeId(1)],
+            leader_epoch: LeaderEpoch(3),
+            adding_replicas: vec![NodeId(2)],
+            removing_replicas: vec![],
+            directories: vec![Uuid::nil(); 2],
+            partition_epoch: 12,
+        };
+        assert2::assert!(partition == &expected_partition);
         broker_handle.shutdown().await;
     }
 
@@ -783,14 +790,14 @@ mod tests {
             directories: vec![Uuid::nil(); 4],
             partition_epoch: 1,
         };
-        assert!(res == expected);
+        assert2::assert!(res == expected);
     }
 
     #[test]
     fn rf_change_rejected_when_disabled() {
         let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
         let err = process_one_partition(&img, "foo", 0, Some(&[1, 2]), false).unwrap_err();
-        assert!(err.0 == INVALID_REPLICA_ASSIGNMENT);
+        assert2::assert!(err.0 == INVALID_REPLICA_ASSIGNMENT);
     }
 
     #[test]
@@ -799,7 +806,7 @@ mod tests {
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 2]), true)
             .expect("ok")
             .expect("Some");
-        assert!(res.removing_replicas == vec![NodeId(3)]);
+        assert2::assert!(res.removing_replicas == vec![NodeId(3)]);
     }
 
     #[test]
@@ -807,7 +814,7 @@ mod tests {
         let img = img_with(&[1, 2, 3, 4], &[1, 3, 4], &[4], &[2], 1);
         let res = process_one_partition(&img, "foo", 0, Some(&[1, 3, 4]), false).expect("ok");
 
-        assert!(res.is_none());
+        assert2::assert!(res.is_none());
     }
 
     #[test]
@@ -831,7 +838,7 @@ mod tests {
             directories: vec![Uuid::nil(); 3],
             partition_epoch: 12,
         };
-        assert!(res == expected);
+        assert2::assert!(res == expected);
     }
 
     #[test]
@@ -853,13 +860,13 @@ mod tests {
             directories: vec![Uuid::nil(); 3],
             partition_epoch: 12,
         };
-        assert!(res == expected);
+        assert2::assert!(res == expected);
     }
 
     #[test]
     fn empty_target_rejected() {
         let img = img_with(&[1, 2, 3], &[1, 2, 3], &[], &[], 1);
         let err = process_one_partition(&img, "foo", 0, Some(&[]), true).unwrap_err();
-        assert!(err.0 == INVALID_REPLICA_ASSIGNMENT);
+        assert2::assert!(err.0 == INVALID_REPLICA_ASSIGNMENT);
     }
 }

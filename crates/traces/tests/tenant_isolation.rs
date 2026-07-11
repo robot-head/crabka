@@ -20,7 +20,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use assert2::{assert, check};
+use assert2::check;
 use axum::{
     body::Body,
     http::{Request, StatusCode},
@@ -98,7 +98,7 @@ async fn ingest(tenant: &str, otlp_body: &[u8]) -> TestResult<Vec<SpanRecord>> {
                 .body(Body::from(otlp_body.to_vec()))?,
         )
         .await?;
-    assert!(resp.status() == StatusCode::OK);
+    assert2::assert!(resp.status() == StatusCode::OK);
     let _ = resp.into_body().collect().await?;
     let records = sink
         .records
@@ -496,7 +496,7 @@ async fn tenants_are_fully_isolated_across_all_read_surfaces() -> TestResult {
     )
     .await?;
     check!(root_trace_names(&q_a) == vec!["POST /a".to_string()]);
-    assert!(root_trace_names(&q_b).is_empty());
+    assert2::assert!(root_trace_names(&q_b).is_empty());
 
     server.shutdown();
     Ok(())

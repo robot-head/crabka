@@ -3,7 +3,6 @@
 
 use std::time::Duration;
 
-use assert2::assert;
 use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
 use crabka_raft::{Controller, ControllerConfig};
 use tempfile::TempDir;
@@ -37,7 +36,7 @@ async fn single_voter_create_topic_round_trip() {
     });
     controller.submit_change(vec![topic]).await.expect("submit");
 
-    assert!(controller.current_image().topic("t").is_some());
+    assert2::assert!(controller.current_image().topic("t").is_some());
 
     controller.shutdown().await;
 }
@@ -64,7 +63,7 @@ async fn single_voter_duplicate_topic_rejected() {
     });
     controller.submit_change(vec![topic.clone()]).await.unwrap();
     let err = controller.submit_change(vec![topic]).await.unwrap_err();
-    assert!(matches!(
+    assert2::assert!(matches!(
         err,
         crabka_raft::RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))
     ));

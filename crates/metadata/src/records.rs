@@ -293,7 +293,7 @@ pub enum MetadataRecord {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use serde_wincode::SerdeCompat;
     use wincode::{Deserialize as _, Serialize as _};
 
@@ -310,13 +310,13 @@ mod tests {
             name: "metadata.version".into(),
             level: 1,
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
     fn features_epoch_round_trip() {
         let r = MetadataRecord::V1FeaturesEpoch(FeaturesEpochRecord { epoch: 7 });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -327,7 +327,7 @@ mod tests {
             partitions: 3,
             replication_factor: 1,
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -344,7 +344,7 @@ mod tests {
             directories: vec![Uuid::from_u128(1), Uuid::from_u128(2), Uuid::nil()],
             partition_epoch: 0,
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -355,7 +355,7 @@ mod tests {
             replica: NodeId(3),
             directory: Uuid::from_u128(0xAB),
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -369,7 +369,7 @@ mod tests {
             rack: Some("us-east-1a".into()),
             endpoints: vec![],
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -388,7 +388,7 @@ mod tests {
                 protocol: crabka_security::ListenerProtocol::SaslSsl,
             }],
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -396,7 +396,7 @@ mod tests {
         let r = MetadataRecord::V1DeleteTopic(DeleteTopicRecord {
             name: "doomed".into(),
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -404,7 +404,7 @@ mod tests {
         let r = MetadataRecord::V1UnregisterBroker(UnregisterBrokerRecord {
             node_id: NodeId(42),
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -416,7 +416,7 @@ mod tests {
             topic: "t".into(),
             overrides,
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -429,7 +429,7 @@ mod tests {
             server_key: vec![3u8; 64],
             iterations: 4096,
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -438,7 +438,7 @@ mod tests {
             user: "alice".into(),
             mechanism: crabka_security::SaslMechanism::ScramSha512,
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -453,7 +453,7 @@ mod tests {
             permission_type: crate::PermissionType::Allow,
         };
         let r = MetadataRecord::V1AccessControlEntry(entry);
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -468,7 +468,7 @@ mod tests {
             permission_type: None,
         };
         let r = MetadataRecord::V1DeleteAccessControlEntry(filter);
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -478,7 +478,7 @@ mod tests {
             config_name: "leader.replication.throttled.rate".into(),
             config_value: Some("2048".into()),
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -497,7 +497,7 @@ mod tests {
             config_key: "producer_byte_rate".into(),
             config_value: Some(1024.0),
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -517,7 +517,7 @@ mod tests {
                 name: "bob".into(),
             }],
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -525,7 +525,7 @@ mod tests {
         let r = MetadataRecord::V1DeleteDelegationToken(DeleteDelegationTokenRecord {
             token_id: "tok-abc".into(),
         });
-        assert!(round_trip(&r) == r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
@@ -542,13 +542,13 @@ mod tests {
                 kraft_version: crate::voters::KRaftVersionRange::default(),
             }]),
         });
-        assert!(round_trip(&rec) == rec);
+        assert2::assert!(round_trip(&rec) == rec);
     }
 
     #[test]
     fn kraft_version_record_round_trips() {
         let rec = MetadataRecord::V1KRaftVersion(KRaftVersionRecord { kraft_version: 1 });
-        assert!(round_trip(&rec) == rec);
+        assert2::assert!(round_trip(&rec) == rec);
     }
 
     #[test]
@@ -563,13 +563,13 @@ mod tests {
             name: "sub-a".into(),
             configs: overrides,
         });
-        assert_eq!(round_trip(&r), r);
+        assert2::assert!(round_trip(&r) == r);
     }
 
     #[test]
     fn partition_epoch_serde_default_is_minus_one() {
         // -1 is Kafka's "unknown epoch" sentinel; pin it (mutants flip it to
         // 0/1). This is the `#[serde(default)]` fallback for partition_epoch.
-        assert_eq!(default_partition_epoch(), -1);
+        assert2::assert!(default_partition_epoch() == -1);
     }
 }

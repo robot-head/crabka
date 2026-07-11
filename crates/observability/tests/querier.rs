@@ -6,7 +6,6 @@ use std::{
     time::Duration,
 };
 
-use assert2::assert;
 use async_trait::async_trait;
 use crabka_blockstore::{
     BlockDescriptor, BlockKey, LabelIndex, LogBlockIndex as BlockIndex, LogRow, TimeRange, labels,
@@ -67,7 +66,7 @@ async fn executes_stream_query_over_planned_cold_blocks_as_loki_json() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -122,7 +121,9 @@ async fn literal_line_filter_pushdown_treats_like_wildcards_as_plain_text() {
     let percent_response = execute_stream_query(dir.path(), &percent_plan, &label_index)
         .await
         .unwrap();
-    assert!(percent_response["data"]["result"][0]["values"] == json!([["10", "api cpu 100% ok"]]));
+    assert2::assert!(
+        percent_response["data"]["result"][0]["values"] == json!([["10", "api cpu 100% ok"]])
+    );
 
     let underscore_plan = plan_stream_query(
         "tenant-a",
@@ -135,7 +136,7 @@ async fn literal_line_filter_pushdown_treats_like_wildcards_as_plain_text() {
     let underscore_response = execute_stream_query(dir.path(), &underscore_plan, &label_index)
         .await
         .unwrap();
-    assert!(
+    assert2::assert!(
         underscore_response["data"]["result"][0]["values"] == json!([["12", "api shard a_b ok"]])
     );
 }
@@ -198,7 +199,7 @@ async fn executes_stream_query_merging_cold_blocks_with_hot_wal_tail() {
             .await
             .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -261,7 +262,7 @@ fn stream_plan_scan_sql_pushes_down_time_fingerprints_and_literal_line_filters()
         .map(u64::to_string)
         .collect::<Vec<_>>()
         .join(", ");
-    assert!(
+    assert2::assert!(
         stream_plan_scan_sql(&plan)
             == format!(
                 "select series_fingerprint, timestamp_ns, line, structured_metadata \
@@ -315,7 +316,7 @@ fn metric_plan_scan_sql_uses_eval_range_selector_and_stream_pushdowns() {
         .collect::<Vec<_>>()
         .join(", ");
 
-    assert!(
+    assert2::assert!(
         metric_plan_scan_sql(&plan, &query, TimeRange::new(30, 40).unwrap()).unwrap()
             == format!(
                 "select series_fingerprint, timestamp_ns, line, structured_metadata \
@@ -377,7 +378,7 @@ async fn executes_stream_query_filters_hot_tail_by_partition_offset_frontier() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -444,8 +445,8 @@ async fn hot_tail_buffer_polls_and_decodes_kafka_wal_records() {
         .await
         .unwrap();
 
-    assert!(decoded == 2);
-    assert!(
+    assert2::assert!(decoded == 2);
+    assert2::assert!(
         hot_tail.records()
             == vec![
                 WalLogRecord {
@@ -519,7 +520,7 @@ fn executes_tail_query_over_hot_wal_tail_as_loki_streams_json_frame() {
 
     let response = execute_tail_query(&plan, &hot_tail, 19);
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "streams": [
@@ -578,7 +579,7 @@ fn executes_tail_query_filters_hot_tail_by_partition_offset_frontier() {
 
     let response = execute_tail_query_with_frontier(&plan, &hot_tail, &frontier);
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "streams": [
@@ -639,7 +640,7 @@ async fn executes_stream_query_with_json_field_filter_over_structured_metadata()
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -696,7 +697,7 @@ async fn executes_stream_query_with_field_filter_over_original_labels() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -751,7 +752,7 @@ async fn executes_stream_query_with_extracted_label_collision_suffix() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -819,7 +820,7 @@ async fn executes_stream_query_with_nested_json_field_filter_over_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -889,7 +890,7 @@ async fn executes_stream_query_with_selected_json_field_filter_over_line_body() 
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -946,7 +947,7 @@ async fn executes_stream_query_with_logfmt_field_filter_over_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1013,7 +1014,7 @@ async fn executes_stream_query_with_parameterized_logfmt_field_filter_over_line_
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1078,7 +1079,7 @@ async fn executes_stream_query_with_pattern_parser_over_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1145,7 +1146,7 @@ async fn executes_stream_query_with_regexp_parser_over_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1214,7 +1215,7 @@ async fn executes_stream_query_with_unpack_parser_replacing_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1274,7 +1275,7 @@ async fn executes_stream_query_with_line_format_replacing_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1344,7 +1345,7 @@ async fn executes_stream_query_with_label_format_rewriting_stream_labels() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1416,7 +1417,7 @@ async fn executes_stream_query_with_drop_and_keep_rewriting_stream_labels() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1471,7 +1472,7 @@ async fn executes_stream_query_with_decolorize_rewriting_line_body() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1542,7 +1543,7 @@ async fn executes_stream_query_with_duration_and_bytes_logfmt_field_filters() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1601,7 +1602,7 @@ async fn executes_stream_query_with_or_logfmt_field_filter_chain() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1679,7 +1680,7 @@ async fn executes_count_over_time_query_as_loki_matrix_json() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1721,7 +1722,7 @@ async fn executes_absent_over_time_query_for_empty_plan() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1783,7 +1784,7 @@ async fn count_over_time_honors_json_parser_error_filters() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1877,7 +1878,7 @@ async fn executes_count_over_time_merging_cold_blocks_with_hot_wal_tail() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -1956,7 +1957,7 @@ async fn executes_rate_merging_cold_blocks_with_hot_wal_tail() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2035,7 +2036,7 @@ async fn executes_bytes_rate_merging_cold_blocks_with_hot_wal_tail() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2114,7 +2115,7 @@ async fn executes_bytes_over_time_merging_cold_blocks_with_hot_wal_tail() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2168,7 +2169,7 @@ async fn metric_query_rejects_unfiltered_cold_block_pipeline_errors() {
         .await
         .unwrap_err();
 
-    assert!(error.to_string().contains("JSONParserErr"));
+    assert2::assert!(error.to_string().contains("JSONParserErr"));
 }
 
 #[tokio::test]
@@ -2210,7 +2211,7 @@ async fn metric_query_rejects_unfiltered_hot_tail_pipeline_errors() {
     .await
     .unwrap_err();
 
-    assert!(error.to_string().contains("JSONParserErr"));
+    assert2::assert!(error.to_string().contains("JSONParserErr"));
 }
 
 #[tokio::test]
@@ -2267,7 +2268,7 @@ async fn executes_parser_metric_query_with_loki_pipeline_labels() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2328,7 +2329,7 @@ async fn executes_sum_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2387,7 +2388,7 @@ async fn executes_sum_over_time_decimal_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2446,7 +2447,7 @@ async fn executes_sum_over_time_signed_decimal_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2505,7 +2506,7 @@ async fn executes_sum_over_time_scientific_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2564,7 +2565,7 @@ async fn executes_sum_over_time_unwrap_bytes_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2623,7 +2624,7 @@ async fn executes_sum_over_time_unwrap_duration_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2681,7 +2682,7 @@ async fn executes_rate_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2742,7 +2743,7 @@ async fn executes_rate_counter_unwrap_metric_query_with_reset() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2801,7 +2802,7 @@ async fn executes_avg_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2865,7 +2866,7 @@ async fn executes_metric_query_with_range_offset() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2926,7 +2927,7 @@ async fn executes_avg_over_time_unwrap_metric_query_with_range_grouping() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -2984,7 +2985,7 @@ async fn executes_stdvar_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3044,7 +3045,7 @@ async fn executes_stddev_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3105,7 +3106,7 @@ async fn executes_quantile_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3164,7 +3165,7 @@ async fn executes_min_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3223,7 +3224,7 @@ async fn executes_max_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3282,7 +3283,7 @@ async fn executes_first_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3341,7 +3342,7 @@ async fn executes_last_over_time_unwrap_metric_query() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3405,7 +3406,7 @@ async fn executes_count_over_time_query_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3471,7 +3472,7 @@ async fn executes_present_over_time_query_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3537,7 +3538,7 @@ async fn executes_rate_query_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3603,7 +3604,7 @@ async fn executes_bytes_over_time_query_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3669,7 +3670,7 @@ async fn executes_bytes_rate_query_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3744,7 +3745,7 @@ async fn executes_sum_by_vector_aggregation_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3818,7 +3819,7 @@ async fn executes_avg_without_vector_aggregation_with_stepped_matrix_samples() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -3907,7 +3908,7 @@ async fn executes_count_min_and_max_vector_aggregations() {
         .await
         .unwrap();
 
-        assert!(
+        assert2::assert!(
             response
                 == json!({
                     "status": "success",
@@ -3984,7 +3985,7 @@ async fn executes_count_values_vector_aggregation() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -4085,7 +4086,7 @@ async fn executes_stdvar_and_stddev_vector_aggregations() {
         .await
         .unwrap();
 
-        assert!(
+        assert2::assert!(
             response
                 == json!({
                     "status": "success",
@@ -4170,7 +4171,7 @@ async fn executes_topk_and_bottomk_vector_aggregations() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         topk_response
             == json!({
                 "status": "success",
@@ -4227,7 +4228,7 @@ async fn executes_topk_and_bottomk_vector_aggregations() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         approx_topk_response
             == json!({
                 "status": "success",
@@ -4284,7 +4285,7 @@ async fn executes_topk_and_bottomk_vector_aggregations() {
     .await
     .unwrap();
 
-    assert!(
+    assert2::assert!(
         bottomk_response
             == json!({
                 "status": "success",
@@ -4390,7 +4391,7 @@ async fn executes_sort_and_sort_desc_vector_aggregations() {
             .iter()
             .map(|series| series["metric"]["pod"].as_str().unwrap())
             .collect::<Vec<_>>();
-        assert!(pods == expected_pods);
+        assert2::assert!(pods == expected_pods);
     }
 }
 
@@ -4412,7 +4413,7 @@ async fn empty_stream_plan_returns_empty_loki_streams_result() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -4472,7 +4473,7 @@ async fn executes_stream_query_over_object_store_blocks_as_loki_json() {
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -4534,7 +4535,7 @@ async fn object_store_stream_query_returns_partial_result_with_warning_for_unrea
         .await
         .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",
@@ -4603,7 +4604,7 @@ async fn object_store_metric_query_returns_partial_result_with_warning_for_unrea
             .await
             .unwrap();
 
-    assert!(
+    assert2::assert!(
         response
             == json!({
                 "status": "success",

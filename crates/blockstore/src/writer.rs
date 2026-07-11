@@ -188,7 +188,6 @@ mod tests {
         datatypes::{DataType, Field, Schema},
         record_batch::RecordBatch,
     };
-    use assert2::{assert, check};
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory, path::Path};
 
     use super::*;
@@ -226,7 +225,7 @@ mod tests {
 
         let mut meta = meta;
         meta.fingerprints.sort_unstable();
-        assert!(
+        assert2::assert!(
             meta == BlockMeta {
                 tenant: "tenant-a".to_string(),
                 object_key: "blocks/tenant-a/b1.parquet".to_string(),
@@ -238,7 +237,7 @@ mod tests {
         );
 
         let head = store.head(&Path::from("blocks/tenant-a/b1.parquet")).await;
-        assert!(head.is_ok());
+        assert2::assert!(head.is_ok());
     }
 
     fn span_summary_batch() -> RecordBatch {
@@ -266,10 +265,10 @@ mod tests {
             &SummaryColumns::new("trace_id", "start_unix_nano"),
         )
         .unwrap();
-        check!(min_ts == 100);
-        check!(max_ts == 200);
-        check!(row_count == 2);
-        check!(fps.is_empty());
+        assert2::assert!(min_ts == 100);
+        assert2::assert!(max_ts == 200);
+        assert2::assert!(row_count == 2);
+        assert2::assert!(fps.is_empty());
     }
 
     #[test]
@@ -278,7 +277,7 @@ mod tests {
         let batch = sample_batch(&schema);
         let (_min, _max, _rows, mut fps) = summarize(&[batch], &SummaryColumns::series()).unwrap();
         fps.sort_unstable();
-        assert!(fps == vec![10_u64, 20]);
+        assert2::assert!(fps == vec![10_u64, 20]);
     }
 
     #[tokio::test]
@@ -291,7 +290,7 @@ mod tests {
                 .unwrap();
 
         let err = writer.write_block("t", "k.parquet", schema, &[batch]).await;
-        assert!(err.is_err());
+        assert2::assert!(err.is_err());
     }
 
     #[tokio::test]
@@ -316,7 +315,7 @@ mod tests {
 
         let err = writer.write_block("t", "k.parquet", schema, &[batch]).await;
 
-        assert!(
+        assert2::assert!(
             matches!(err, Err(BlockStoreError::InvalidBlock(message)) if message.contains("schema"))
         );
     }

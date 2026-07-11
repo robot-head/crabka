@@ -404,7 +404,7 @@ impl BlockIndex for ProfileIndex {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -500,8 +500,7 @@ mod tests {
 
     #[test]
     fn snapshot_size_cap_is_256_mib() {
-        assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
-        assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 268_435_456);
+        assert2::assert!(MAX_PROFILE_INDEX_SNAPSHOT_BYTES == 256 * 1024 * 1024);
     }
 
     #[test]
@@ -509,8 +508,8 @@ mod tests {
         let index = seed();
         let mut types = index.profile_types("t");
         types.sort();
-        assert!(types == strings(&[HEAP_TYPE, CPU_TYPE]));
-        assert!(index.profile_types("nope").is_empty());
+        assert2::assert!(types == strings(&[HEAP_TYPE, CPU_TYPE]));
+        assert2::assert!(index.profile_types("nope").is_empty());
     }
 
     #[test]
@@ -518,15 +517,23 @@ mod tests {
         let index = seed();
         let cpu_fps = index.fingerprints_for_profile_type("t", CPU_TYPE);
         let heap_fps = index.fingerprints_for_profile_type("t", HEAP_TYPE);
-        assert!(cpu_fps.len() == 1);
-        assert!(cpu_fps.is_disjoint(&heap_fps));
+        assert2::assert!(
+            cpu_fps
+                == BTreeSet::from([
+                    profile_labels("process_cpu", CPU_TYPE, "checkout").fingerprint()
+                ])
+        );
+        assert2::assert!(
+            heap_fps
+                == BTreeSet::from([profile_labels("memory", HEAP_TYPE, "checkout").fingerprint()])
+        );
     }
 
     #[test]
     fn profile_index_matching_and_block_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, cpu_payments) = seed_with_blocks();
 
-        check!(
+        assert2::assert!(
             index
                 .matching_fingerprints(
                     "t",
@@ -535,7 +542,7 @@ mod tests {
                 .unwrap()
                 == BTreeSet::from([cpu_checkout, heap_checkout])
         );
-        check!(
+        assert2::assert!(
             index
                 .select_fingerprints(
                     "t",
@@ -545,12 +552,11 @@ mod tests {
                 .unwrap()
                 == BTreeSet::from([cpu_checkout])
         );
-        check!(
+        assert2::assert!(
             index.select_fingerprints("t", CPU_TYPE, &[]).unwrap()
                 == BTreeSet::from([cpu_checkout, cpu_payments])
         );
-
-        check!(
+        assert2::assert!(
             index.candidate_blocks_for_series(
                 "t",
                 &BTreeSet::from([cpu_checkout, cpu_payments]),
@@ -558,26 +564,26 @@ mod tests {
                 180,
             ) == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
         );
-        check!(index.block_time_bounds("t", 175, 180) == Some((100, 250)));
-        check!(index.block_time_bounds("t", 450, 500) == None);
-        check!(
+        assert2::assert!(index.block_time_bounds("t", 175, 180) == Some((100, 250)));
+        assert2::assert!(index.block_time_bounds("t", 450, 500) == None);
+        assert2::assert!(
             BlockIndex::candidate_blocks(&index, "t", 175, 180)
                 == strings(&["cpu-checkout.parquet", "cpu-payments.parquet"])
         );
-        check!(BlockIndex::block_count(&index, "t") == 3);
+        assert2::assert!(BlockIndex::block_count(&index, "t") == 3);
     }
 
     #[test]
     fn profile_index_profile_type_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
 
-        check!(index.profile_types_for_time("t", 175, 180) == strings(&[CPU_TYPE]));
-        check!(index.profile_types_for_time("t", 320, 330) == strings(&[HEAP_TYPE]));
-        check!(
+        assert2::assert!(index.profile_types_for_time("t", 175, 180) == strings(&[CPU_TYPE]));
+        assert2::assert!(index.profile_types_for_time("t", 320, 330) == strings(&[HEAP_TYPE]));
+        assert2::assert!(
             index.profile_types_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
                 == strings(&[CPU_TYPE])
         );
-        check!(
+        assert2::assert!(
             index.profile_types_for_fingerprints("t", &BTreeSet::from([heap_checkout]))
                 == strings(&[HEAP_TYPE])
         );
@@ -587,33 +593,34 @@ mod tests {
     fn profile_index_label_helpers_return_pruned_metadata() {
         let (index, cpu_checkout, heap_checkout, _) = seed_with_blocks();
 
-        check!(
+        assert2::assert!(
             index
                 .label_values_for_time("t", "service_name", &[], 175, 180)
                 .unwrap()
                 == strings(&["checkout", "payments"])
         );
-        check!(
+        assert2::assert!(
             index.label_values_for_fingerprints(
                 "t",
                 "service_name",
                 &BTreeSet::from([heap_checkout])
             ) == strings(&["checkout"])
         );
-        check!(
+        assert2::assert!(
             index.label_names_for_time("t", &[], 175, 180).unwrap()
                 == strings(&["__name__", "__profile_type__", "service_name"])
         );
-        check!(
+        assert2::assert!(
             index.label_names_for_fingerprints("t", &BTreeSet::from([cpu_checkout]))
                 == strings(&["__name__", "__profile_type__", "service_name"])
         );
-
-        check!(
+        assert2::assert!(
             index.label_names("t") == strings(&["__name__", "__profile_type__", "service_name"])
         );
-        check!(index.label_values("t", "service_name") == strings(&["checkout", "payments"]));
-        check!(
+        assert2::assert!(
+            index.label_values("t", "service_name") == strings(&["checkout", "payments"])
+        );
+        assert2::assert!(
             index
                 .label_names_for(
                     "t",
@@ -622,7 +629,7 @@ mod tests {
                 .unwrap()
                 == strings(&["__name__", "__profile_type__", "service_name"])
         );
-        check!(
+        assert2::assert!(
             index
                 .label_values_for(
                     "t",
@@ -636,9 +643,11 @@ mod tests {
 
     #[test]
     fn profile_index_series_helpers_return_projected_metadata() {
-        let (index, _, heap_checkout, _) = seed_with_blocks();
+        let (index, cpu_checkout, heap_checkout, cpu_payments) = seed_with_blocks();
 
-        check!(
+        let mut blocks = index.all_blocks();
+        blocks.sort_by(|left, right| left.object_key.cmp(&right.object_key));
+        assert2::assert!(
             index
                 .series_for_time("t", &[], &["service_name".to_string()], 175, 180)
                 .unwrap()
@@ -647,7 +656,7 @@ mod tests {
                     vec![("service_name".to_string(), "payments".to_string())],
                 ]
         );
-        check!(
+        assert2::assert!(
             index.series_for_fingerprints("t", &BTreeSet::from([heap_checkout]), &[])
                 == vec![vec![
                     ("__name__".to_string(), "memory".to_string()),
@@ -655,12 +664,12 @@ mod tests {
                     ("service_name".to_string(), "checkout".to_string()),
                 ]]
         );
-        check!(
+        assert2::assert!(
             index
                 .series(
                     "t",
                     &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")],
-                    &["__name__".to_string()]
+                    &["__name__".to_string()],
                 )
                 .unwrap()
                 == vec![
@@ -668,20 +677,34 @@ mod tests {
                     vec![("__name__".to_string(), "process_cpu".to_string())],
                 ]
         );
-
-        let mut block_keys = index
-            .all_blocks()
-            .into_iter()
-            .map(|block| block.object_key)
-            .collect::<Vec<_>>();
-        block_keys.sort();
-        assert!(
-            block_keys
-                == strings(&[
-                    "cpu-checkout.parquet",
-                    "cpu-payments.parquet",
-                    "heap-checkout.parquet",
-                ])
+        assert2::assert!(
+            blocks
+                == vec![
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "cpu-checkout.parquet".to_string(),
+                        min_ts: 100,
+                        max_ts: 199,
+                        row_count: 10,
+                        fingerprints: vec![cpu_checkout],
+                    },
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "cpu-payments.parquet".to_string(),
+                        min_ts: 150,
+                        max_ts: 250,
+                        row_count: 30,
+                        fingerprints: vec![cpu_payments],
+                    },
+                    BlockMeta {
+                        tenant: "t".to_string(),
+                        object_key: "heap-checkout.parquet".to_string(),
+                        min_ts: 300,
+                        max_ts: 399,
+                        row_count: 20,
+                        fingerprints: vec![heap_checkout],
+                    },
+                ]
         );
     }
 
@@ -694,15 +717,20 @@ mod tests {
                 &[LabelMatcher::new("service_name", MatchOp::Eq, "checkout")],
             )
             .unwrap();
-        assert!(got.len() == 2);
+        assert2::assert!(
+            got == BTreeSet::from([
+                profile_labels("process_cpu", CPU_TYPE, "checkout").fingerprint(),
+                profile_labels("memory", HEAP_TYPE, "checkout").fingerprint(),
+            ])
+        );
     }
 
     #[test]
     fn stacktrace_partition_map_records_block_partitions() {
         let mut index = seed();
         index.add_profile_block("t", "blocks/p1.parquet", vec![0, 1, 2]);
-        assert!(index.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1, 2]);
-        assert!(
+        assert2::assert!(index.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1, 2]);
+        assert2::assert!(
             index
                 .stacktrace_partitions("blocks/absent.parquet")
                 .is_empty()
@@ -747,9 +775,11 @@ mod tests {
             )],
         );
 
-        check!(index.stacktrace_partitions("old.parquet").is_empty());
-        check!(index.stacktrace_partitions("new.parquet") == vec![99]);
-        check!(BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet"]);
+        assert2::assert!(index.stacktrace_partitions("old.parquet").is_empty());
+        assert2::assert!(index.stacktrace_partitions("new.parquet") == vec![99]);
+        assert2::assert!(
+            BlockIndex::candidate_blocks(&index, "t", 0, 10) == vec!["new.parquet".to_string()]
+        );
     }
 
     #[tokio::test]
@@ -763,8 +793,8 @@ mod tests {
         let loaded = ProfileIndex::load(&store, "index/profiles.json")
             .await
             .unwrap();
-        assert!(loaded.profile_types("t").len() == 2);
-        assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+        assert2::assert!(loaded.profile_types("t") == strings(&[HEAP_TYPE, CPU_TYPE]));
+        assert2::assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
     }
 
     #[tokio::test]
@@ -790,8 +820,8 @@ mod tests {
                 .await
                 .is_err()
         );
-        check!(loaded.profile_types("t").len() == 2);
-        check!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
+        assert2::assert!(loaded.profile_types("t") == strings(&[HEAP_TYPE, CPU_TYPE]));
+        assert2::assert!(loaded.stacktrace_partitions("blocks/p1.parquet") == vec![0, 1]);
     }
 
     #[tokio::test]
@@ -817,7 +847,7 @@ mod tests {
             count += 1;
         }
 
-        assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
+        assert2::assert!(count == crate::index_snapshot::DEFAULT_INDEX_SNAPSHOT_RETAIN);
     }
 
     #[tokio::test]
@@ -835,10 +865,10 @@ mod tests {
             .await
             .unwrap()
             .size;
-        assert!(size > 1);
+        assert2::assert!(size > 1);
 
         let got = ProfileIndex::load_with_cap(&store, "index/profiles.json", 1).await;
-        assert!(got.is_err());
+        assert2::assert!(got.is_err());
 
         // A cap at/above the real size still loads.
         let loaded = ProfileIndex::load_with_cap(
@@ -848,6 +878,8 @@ mod tests {
         )
         .await
         .unwrap();
-        assert!(loaded.profile_types("t").len() == 2);
+        let mut profile_types = loaded.profile_types("t");
+        profile_types.sort();
+        assert2::assert!(profile_types == strings(&[HEAP_TYPE, CPU_TYPE]));
     }
 }

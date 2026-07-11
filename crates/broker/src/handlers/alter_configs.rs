@@ -179,7 +179,6 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::assert;
     use crabka_protocol::owned::alter_configs_request::{
         AlterConfigsRequest, AlterConfigsResource, AlterableConfig,
     };
@@ -239,82 +238,64 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn handle_preserves_resource_identity_for_unsupported_type() {
-        let resp = drive_one(
-            Arc::new(crate::authorizer::AllowAllAuthorizer),
-            resource(77, "mystery"),
-        )
-        .await;
+    async fn handler_maps_resource_and_authorization_cases() {
+        type TestCase1<'a> = (
+            &'a str,
+            Arc<dyn Authorizer>,
+            i8,
+            &'a str,
+            i16,
+            Option<&'a str>,
+        );
+        let cases: [TestCase1<'_>; 4] = [
+            (
+                "unsupported resource type",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                77,
+                "mystery",
+                codes::INVALID_RESOURCE_TYPE,
+                Some("resource_type=77 not supported"),
+            ),
+            (
+                "denied topic",
+                Arc::new(DenyAll),
+                RESOURCE_TYPE_TOPIC,
+                "orders",
+                codes::TOPIC_AUTHORIZATION_FAILED,
+                None,
+            ),
+            (
+                "denied broker",
+                Arc::new(DenyAll),
+                RESOURCE_TYPE_BROKER,
+                "1",
+                codes::CLUSTER_AUTHORIZATION_FAILED,
+                None,
+            ),
+            (
+                "authorized broker unsupported",
+                Arc::new(crate::authorizer::AllowAllAuthorizer),
+                RESOURCE_TYPE_BROKER,
+                "1",
+                codes::INVALID_RESOURCE_TYPE,
+                Some("resource_type=4 not supported"),
+            ),
+        ];
 
-        let expected = AlterConfigsResponse {
-            throttle_time_ms: 0,
-            responses: vec![AlterConfigsResourceResponse {
-                error_code: codes::INVALID_RESOURCE_TYPE,
-                error_message: Some("resource_type=77 not supported".to_string()),
-                resource_type: 77,
-                resource_name: "mystery".to_string(),
+        for (_case, authorizer, resource_type, resource_name, error_code, error_message) in cases {
+            let resp = drive_one(authorizer, resource(resource_type, resource_name)).await;
+            let expected = AlterConfigsResponse {
+                throttle_time_ms: 0,
+                responses: vec![AlterConfigsResourceResponse {
+                    error_code,
+                    error_message: error_message.map(str::to_string),
+                    resource_type,
+                    resource_name: resource_name.to_string(),
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
+                }],
                 unknown_tagged_fields: UnknownTaggedFields::default(),
-            }],
-            unknown_tagged_fields: UnknownTaggedFields::default(),
-        };
-        assert!(resp == expected);
-    }
-
-    #[tokio::test]
-    async fn topic_resource_denial_uses_topic_authorization_error() {
-        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_TOPIC, "orders")).await;
-
-        let expected = AlterConfigsResponse {
-            throttle_time_ms: 0,
-            responses: vec![AlterConfigsResourceResponse {
-                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                error_message: None,
-                resource_type: RESOURCE_TYPE_TOPIC,
-                resource_name: "orders".to_string(),
-                unknown_tagged_fields: UnknownTaggedFields::default(),
-            }],
-            unknown_tagged_fields: UnknownTaggedFields::default(),
-        };
-        assert!(resp == expected);
-    }
-
-    #[tokio::test]
-    async fn broker_resource_denial_uses_cluster_authorization_error() {
-        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_BROKER, "1")).await;
-
-        let expected = AlterConfigsResponse {
-            throttle_time_ms: 0,
-            responses: vec![AlterConfigsResourceResponse {
-                error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-                error_message: None,
-                resource_type: RESOURCE_TYPE_BROKER,
-                resource_name: "1".to_string(),
-                unknown_tagged_fields: UnknownTaggedFields::default(),
-            }],
-            unknown_tagged_fields: UnknownTaggedFields::default(),
-        };
-        assert!(resp == expected);
-    }
-
-    #[tokio::test]
-    async fn authorized_broker_resource_is_reported_unsupported() {
-        let resp = drive_one(
-            Arc::new(crate::authorizer::AllowAllAuthorizer),
-            resource(RESOURCE_TYPE_BROKER, "1"),
-        )
-        .await;
-
-        let expected = AlterConfigsResponse {
-            throttle_time_ms: 0,
-            responses: vec![AlterConfigsResourceResponse {
-                error_code: codes::INVALID_RESOURCE_TYPE,
-                error_message: Some("resource_type=4 not supported".to_string()),
-                resource_type: RESOURCE_TYPE_BROKER,
-                resource_name: "1".to_string(),
-                unknown_tagged_fields: UnknownTaggedFields::default(),
-            }],
-            unknown_tagged_fields: UnknownTaggedFields::default(),
-        };
-        assert!(resp == expected);
+            };
+            assert2::assert!(resp == expected);
+        }
     }
 }

@@ -361,10 +361,12 @@ mod tests {
         let mut s = store(1_000_000);
         s.put("k".into(), Some(10), 100).await;
         s.put("k".into(), Some(20), 200).await;
-        assert_eq!(s.get(&"k".into()).await.map(|r| r.value), Some(20));
+        assert2::assert!(s.get(&"k".into()).await.map(|r| r.value) == Some(20));
         let r = s.get_as_of(&"k".into(), 150).await.unwrap();
-        assert_eq!((r.value, r.valid_from, r.valid_to), (10, 100, Some(200)));
-        assert_eq!(s.get_as_of(&"k".into(), 50).await, None);
+        assert2::assert!(r.value == 10);
+        assert2::assert!(r.valid_from == 100);
+        assert2::assert!(r.valid_to == Some(200));
+        assert2::assert!(s.get_as_of(&"k".into(), 50).await == None);
     }
 
     #[tokio::test]
@@ -372,11 +374,8 @@ mod tests {
         let mut s = store(1_000_000);
         s.put("k".into(), Some(20), 200).await;
         s.put("k".into(), Some(10), 100).await;
-        assert_eq!(s.get(&"k".into()).await.map(|r| r.value), Some(20));
-        assert_eq!(
-            s.get_as_of(&"k".into(), 150).await.map(|r| r.value),
-            Some(10)
-        );
+        assert2::assert!(s.get(&"k".into()).await.map(|r| r.value) == Some(20));
+        assert2::assert!(s.get_as_of(&"k".into(), 150).await.map(|r| r.value) == Some(10));
     }
 
     #[tokio::test]
@@ -384,12 +383,9 @@ mod tests {
         let mut s = store(1_000_000);
         s.put("k".into(), Some(10), 100).await;
         let prev = s.delete(&"k".into(), 200).await;
-        assert_eq!(prev.map(|r| r.value), Some(10));
-        assert_eq!(s.get(&"k".into()).await, None);
-        assert_eq!(
-            s.get_as_of(&"k".into(), 150).await.map(|r| r.value),
-            Some(10)
-        );
+        assert2::assert!(prev.map(|r| r.value) == Some(10));
+        assert2::assert!(s.get(&"k".into()).await == None);
+        assert2::assert!(s.get_as_of(&"k".into(), 150).await.map(|r| r.value) == Some(10));
     }
 
     #[tokio::test]
@@ -399,8 +395,8 @@ mod tests {
         s.put("k".into(), Some(20), 200).await;
         s.put("k".into(), Some(5), 40).await;
         let cl = s.take_changelog();
-        assert_eq!(cl.len(), 2);
-        assert_eq!(s.get_as_of(&"k".into(), 40).await, None);
+        assert2::assert!(cl.len() == 2);
+        assert2::assert!(s.get_as_of(&"k".into(), 40).await == None);
     }
 
     #[tokio::test]
@@ -413,7 +409,7 @@ mod tests {
         s.put("k".into(), Some(20), 200).await;
         s.put("k".into(), Some(30), 300).await;
         let q: &dyn IqQueryable = s.as_iq().unwrap();
-        assert_eq!(q.kind(), StoreKind::Versioned);
+        assert2::assert!(q.kind() == StoreKind::Versioned);
 
         // VersionedKeyQuery latest.
         let latest = q
@@ -423,13 +419,13 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *latest.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
-            Some(VersionedRecord {
-                value: 30,
-                valid_from: 300,
-                valid_to: None
-            })
+        assert2::assert!(
+            *latest.downcast::<Option<VersionedRecord<i64>>>().unwrap()
+                == Some(VersionedRecord {
+                    value: 30,
+                    valid_from: 300,
+                    valid_to: None
+                })
         );
 
         // VersionedKeyQuery as_of(250) → the 20@200 version, superseded at 300.
@@ -440,13 +436,13 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *asof.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
-            Some(VersionedRecord {
-                value: 20,
-                valid_from: 200,
-                valid_to: Some(300)
-            })
+        assert2::assert!(
+            *asof.downcast::<Option<VersionedRecord<i64>>>().unwrap()
+                == Some(VersionedRecord {
+                    value: 20,
+                    valid_from: 200,
+                    valid_to: Some(300)
+                })
         );
 
         // as_of(50) predates the oldest version → None.
@@ -457,10 +453,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *miss.downcast::<Option<VersionedRecord<i64>>>().unwrap(),
-            None
-        );
+        assert2::assert!(*miss.downcast::<Option<VersionedRecord<i64>>>().unwrap() == None);
 
         // MultiVersionedKeyQuery all (unbounded), ascending.
         let all = q
@@ -472,25 +465,25 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *all.downcast::<Vec<VersionedRecord<i64>>>().unwrap(),
-            vec![
-                VersionedRecord {
-                    value: 10,
-                    valid_from: 100,
-                    valid_to: Some(200)
-                },
-                VersionedRecord {
-                    value: 20,
-                    valid_from: 200,
-                    valid_to: Some(300)
-                },
-                VersionedRecord {
-                    value: 30,
-                    valid_from: 300,
-                    valid_to: None
-                },
-            ]
+        assert2::assert!(
+            *all.downcast::<Vec<VersionedRecord<i64>>>().unwrap()
+                == vec![
+                    VersionedRecord {
+                        value: 10,
+                        valid_from: 100,
+                        valid_to: Some(200)
+                    },
+                    VersionedRecord {
+                        value: 20,
+                        valid_from: 200,
+                        valid_to: Some(300)
+                    },
+                    VersionedRecord {
+                        value: 30,
+                        valid_from: 300,
+                        valid_to: None
+                    },
+                ]
         );
 
         // MultiVersionedKeyQuery [150,250] → versions overlapping that range
@@ -504,20 +497,20 @@ mod tests {
             })
             .await
             .unwrap();
-        assert_eq!(
-            *win.downcast::<Vec<VersionedRecord<i64>>>().unwrap(),
-            vec![
-                VersionedRecord {
-                    value: 20,
-                    valid_from: 200,
-                    valid_to: Some(300)
-                },
-                VersionedRecord {
-                    value: 10,
-                    valid_from: 100,
-                    valid_to: Some(200)
-                },
-            ]
+        assert2::assert!(
+            *win.downcast::<Vec<VersionedRecord<i64>>>().unwrap()
+                == vec![
+                    VersionedRecord {
+                        value: 20,
+                        valid_from: 200,
+                        valid_to: Some(300)
+                    },
+                    VersionedRecord {
+                        value: 10,
+                        valid_from: 100,
+                        valid_to: Some(200)
+                    },
+                ]
         );
 
         // Wrong key type → KeyTypeMismatch.
@@ -527,7 +520,7 @@ mod tests {
                 as_of: None,
             })
             .await;
-        assert_eq!(bad.err(), Some(Iq2Failure::KeyTypeMismatch));
+        assert2::assert!(bad.err() == Some(Iq2Failure::KeyTypeMismatch));
     }
 
     #[tokio::test]
@@ -542,12 +535,9 @@ mod tests {
         for (k, v, ts) in cl {
             r.apply_changelog_ts(k, v, ts.unwrap()).await;
         }
-        assert!(r.take_changelog().is_empty());
-        assert_eq!(r.get(&"k".into()).await.map(|x| x.value), Some(30));
-        assert_eq!(
-            r.get_as_of(&"k".into(), 120).await.map(|x| x.value),
-            Some(10)
-        );
-        assert_eq!(r.get_as_of(&"k".into(), 160).await, None);
+        assert2::assert!(r.take_changelog().is_empty());
+        assert2::assert!(r.get(&"k".into()).await.map(|x| x.value) == Some(30));
+        assert2::assert!(r.get_as_of(&"k".into(), 120).await.map(|x| x.value) == Some(10));
+        assert2::assert!(r.get_as_of(&"k".into(), 160).await == None);
     }
 }

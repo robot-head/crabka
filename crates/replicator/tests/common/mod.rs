@@ -79,10 +79,7 @@ pub async fn await_count(bootstrap: &str, topic: &str, n: usize, timeout: Durati
         if count(bootstrap, topic).await >= n {
             return;
         }
-        assert!(
-            start.elapsed() <= timeout,
-            "topic `{topic}` did not reach {n} records within {timeout:?}"
-        );
+        assert2::assert!(start.elapsed() <= timeout);
         // real-time wait (not a progress poll): shared helper polling cross-cluster
         // replication via a full consumer-drain (`count`/`read_all`) round-trip; waits on
         // the replicator's copy cadence, not a cheap in-process observable.

@@ -245,7 +245,7 @@ impl SpanSource for MockSpanSource {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
     use crate::{
@@ -334,10 +334,10 @@ mod tests {
         let src = MockSpanSource::default();
         src.push_batch(vec![span(), span()]);
         let batch = src.poll(10).await.unwrap();
-        assert!(batch.len() == 2);
-        assert!(src.poll(10).await.unwrap().is_empty());
+        assert2::assert!(batch.len() == 2);
+        assert2::assert!(src.poll(10).await.unwrap().is_empty());
         src.commit().await.unwrap();
-        assert!(src.commits() == 1);
+        assert2::assert!(src.commits() == 1);
     }
 
     #[test]
@@ -349,26 +349,26 @@ mod tests {
 
         let projected = project_wal_record(record, 123);
 
-        assert_eq!(
-            projected,
-            SpanRecord {
-                tenant: "tenant-a".into(),
-                trace_id: [0xAB; 16],
-                span_id: [0xCD; 8],
-                parent_span_id: [0xEF; 8],
-                name: "GET /checkout".into(),
-                kind: SpanKind::Server,
-                start_ns: 10,
-                duration_ns: 5_000_000,
-                status: StatusCode::Ok,
-                status_message: String::new(),
-                service_name: "checkout".into(),
-                attributes: vec![
-                    ("db.system".into(), "postgresql".into()),
-                    ("http.status_code".into(), "200".into()),
-                ],
-                size_bytes: 123,
-            }
+        assert2::assert!(
+            projected
+                == SpanRecord {
+                    tenant: "tenant-a".into(),
+                    trace_id: [0xAB; 16],
+                    span_id: [0xCD; 8],
+                    parent_span_id: [0xEF; 8],
+                    name: "GET /checkout".into(),
+                    kind: SpanKind::Server,
+                    start_ns: 10,
+                    duration_ns: 5_000_000,
+                    status: StatusCode::Ok,
+                    status_message: String::new(),
+                    service_name: "checkout".into(),
+                    attributes: vec![
+                        ("db.system".into(), "postgresql".into()),
+                        ("http.status_code".into(), "200".into()),
+                    ],
+                    size_bytes: 123,
+                }
         );
     }
 
@@ -404,7 +404,7 @@ mod tests {
 
         let projected = decode_consumer_records(records).unwrap();
 
-        assert_eq!(projected.len(), 1);
+        assert2::assert!(projected.len() == 1);
         check!(projected[0].tenant == "tenant-a");
         check!(projected[0].size_bytes == u64::try_from(bytes.len()).unwrap());
     }

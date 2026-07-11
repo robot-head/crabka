@@ -1,4 +1,3 @@
-use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, Header as ConsumerHeader};
 use crabka_client_core::Client;
@@ -32,7 +31,7 @@ async fn consumer_record_carries_headers() {
         })
         .await
         .unwrap();
-    assert!(ct.topics[0].error_code == 0, "CreateTopics failed: {ct:?}");
+    assert2::assert!(ct.topics[0].error_code == 0);
 
     let producer = Producer::builder()
         .bootstrap(&bootstrap)
@@ -73,7 +72,7 @@ async fn consumer_record_carries_headers() {
             break r;
         }
     };
-    assert!(
+    assert2::assert!(
         recs[0].headers
             == vec![ConsumerHeader {
                 key: "trace".into(),

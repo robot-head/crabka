@@ -438,7 +438,7 @@ fn label_value<'a>(row: &'a SampleRow, name: &str) -> Option<&'a str> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use crabka_blockstore::{LabelMatcher, MatchOp};
     use datafusion::arrow::{
         array::AsArray,
@@ -510,22 +510,24 @@ mod tests {
             .unwrap();
         let out = df.collect().await.unwrap();
         let count = out[0].column(0).as_primitive::<Int64Type>().value(0);
-        assert!(count == 3);
-        assert!(!scan.symbols.resolve(0, 0).is_empty() || !scan.symbols.resolve(0, 1).is_empty());
+        assert2::assert!(count == 3);
+        assert2::assert!(
+            !scan.symbols.resolve(0, 0).is_empty() || !scan.symbols.resolve(0, 1).is_empty()
+        );
     }
 
     #[tokio::test]
     async fn profile_types_and_label_values() {
         let store = store_with_two_samples();
         let pts = store.profile_types("t", 0, 5000).await.unwrap();
-        assert!(pts == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string()]);
+        assert2::assert!(pts == vec!["process_cpu:cpu:nanoseconds:cpu:nanoseconds".to_string()]);
         let vals = store
             .label_values("t", "service_name", &[], 0, 5000)
             .await
             .unwrap();
-        assert!(vals == vec!["checkout".to_string()]);
+        assert2::assert!(vals == vec!["checkout".to_string()]);
         let names = store.label_names("t", &[], 0, 5000).await.unwrap();
-        assert!(names == vec!["service_name".to_string()]);
+        assert2::assert!(names == vec!["service_name".to_string()]);
         let series = store
             .series(
                 "t",
@@ -536,7 +538,9 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(series == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
+        assert2::assert!(
+            series == vec![vec![("service_name".to_string(), "checkout".to_string())]]
+        );
 
         // Empty `label_names` means "return the full label set" (the Pyroscope
         // `/series` convention), mirroring `crabka_blockstore`'s index. It must
@@ -547,7 +551,9 @@ mod tests {
             .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
             .await
             .unwrap();
-        assert!(unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]);
+        assert2::assert!(
+            unprojected == vec![vec![("service_name".to_string(), "checkout".to_string())]]
+        );
     }
 
     #[tokio::test]
@@ -579,8 +585,8 @@ mod tests {
             .unwrap();
         let stats = store.stats("t", 1500, 2500).await.unwrap();
 
-        assert!(values == vec!["inside".to_string()]);
-        assert!(
+        assert2::assert!(values == vec!["inside".to_string()]);
+        assert2::assert!(
             stats
                 == crate::ProfileStats {
                     data_ingested: true,
@@ -626,8 +632,8 @@ mod tests {
         let out = df.collect().await.unwrap();
         let fingerprints = out[0].column(0).as_primitive::<UInt64Type>();
 
-        assert!(fingerprints.len() == 2);
-        assert!(fingerprints.value(0) != fingerprints.value(1));
+        assert2::assert!(fingerprints.len() == 2);
+        assert2::assert!(fingerprints.value(0) != fingerprints.value(1));
     }
 
     #[tokio::test]
@@ -667,8 +673,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(neq == vec!["api".to_string()]);
-        assert!(nre == vec!["api".to_string()]);
+        assert2::assert!(neq == vec!["api".to_string()]);
+        assert2::assert!(nre == vec!["api".to_string()]);
     }
 
     #[tokio::test]
@@ -700,7 +706,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             projected
                 == vec![vec![
                     ("__profile_type__".to_string(), pt.to_string()),
@@ -713,7 +719,7 @@ mod tests {
             .series("t", &[] as &[LabelMatcher], &[], 0, 5000)
             .await
             .unwrap();
-        assert!(
+        assert2::assert!(
             full == vec![vec![
                 ("__name__".to_string(), "process_cpu".to_string()),
                 ("__profile_type__".to_string(), pt.to_string()),

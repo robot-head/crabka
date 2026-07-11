@@ -86,7 +86,7 @@ fn read_or_mint(dir: &Path) -> Uuid {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
+
     use tempfile::tempdir;
 
     use super::*;
@@ -96,9 +96,9 @@ mod tests {
         let tmp = tempdir().unwrap();
         let ids = LogDirIds::resolve(&[tmp.path().to_path_buf()]);
         let first = ids.id_for(tmp.path()).expect("minted");
-        assert!(tmp.path().join("meta.properties.json").exists());
+        assert2::assert!(tmp.path().join("meta.properties.json").exists());
         let ids2 = LogDirIds::resolve(&[tmp.path().to_path_buf()]);
-        assert!(ids2.id_for(tmp.path()) == Some(first));
+        assert2::assert!(ids2.id_for(tmp.path()) == Some(first));
     }
 
     #[test]
@@ -116,12 +116,12 @@ mod tests {
         )
         .unwrap();
         let ids = LogDirIds::resolve(&[tmp.path().to_path_buf()]);
-        assert!(ids.id_for(tmp.path()) == Some(id));
+        assert2::assert!(ids.id_for(tmp.path()) == Some(id));
         let v: serde_json::Value = serde_json::from_slice(
             &std::fs::read(tmp.path().join("meta.properties.json")).unwrap(),
         )
         .unwrap();
-        assert!(v["cluster_id"] == "c-1");
+        assert2::assert!(v["cluster_id"] == "c-1");
     }
 
     #[test]
@@ -129,8 +129,8 @@ mod tests {
         let a = tempdir().unwrap();
         let b = tempdir().unwrap();
         let ids = LogDirIds::resolve(&[a.path().to_path_buf(), b.path().to_path_buf()]);
-        assert!(ids.id_for(a.path()) != ids.id_for(b.path()));
-        assert!(ids.entries().len() == 2);
+        assert2::assert!(ids.id_for(a.path()) != ids.id_for(b.path()));
+        assert2::assert!(ids.entries().len() == 2);
     }
 
     #[test]
@@ -148,6 +148,6 @@ mod tests {
             a.path().to_path_buf(),
         ]);
 
-        assert!(selected == vec![b_id, a_id]);
+        assert2::assert!(selected == vec![b_id, a_id]);
     }
 }

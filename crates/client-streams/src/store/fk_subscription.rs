@@ -164,15 +164,14 @@ mod tests {
         s.put(b"FK1", b"pk1", &wrapper("pk1"), 10).await;
         s.put(b"FK1", b"pk2", &wrapper("pk2"), 11).await;
         s.put(b"FK2", b"pk9", &wrapper("pk9"), 12).await;
-        assert_eq!(
-            s.get(b"FK1", b"pk1").await.unwrap().primary_key,
-            Bytes::from_static(b"pk1")
+        assert2::assert!(
+            s.get(b"FK1", b"pk1").await.unwrap().primary_key == Bytes::from_static(b"pk1")
         );
         let subs = s.range_by_foreign(b"FK1").await;
         let pks: Vec<&[u8]> = subs.iter().map(|(_pk, w)| w.primary_key.as_ref()).collect();
-        assert_eq!(pks, vec![b"pk1".as_ref(), b"pk2".as_ref()]);
-        assert!(s.delete(b"FK1", b"pk1").await.is_some());
-        assert_eq!(s.range_by_foreign(b"FK1").await.len(), 1);
-        assert_eq!(s.take_changelog().len(), 4); // 3 puts + 1 delete (tombstone)
+        assert2::assert!(pks == vec![b"pk1".as_ref(), b"pk2".as_ref()]);
+        assert2::assert!(s.delete(b"FK1", b"pk1").await.is_some());
+        assert2::assert!(s.range_by_foreign(b"FK1").await.len() == 1);
+        assert2::assert!(s.take_changelog().len() == 4); // 3 puts + 1 delete (tombstone)
     }
 }

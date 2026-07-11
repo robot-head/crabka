@@ -265,10 +265,7 @@ where
     {
         use crate::processor::punctuation::PunctuationType;
         let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
-        assert!(
-            interval_ms >= 1,
-            "schedule interval must be positive (>= 1ms)"
-        );
+        assert2::assert!(interval_ms >= 1);
         let base = match ty {
             PunctuationType::StreamTime => self.dispatch.sched_stream_time,
             PunctuationType::WallClockTime => self.dispatch.sched_wall_clock,
@@ -357,10 +354,11 @@ mod tests {
         Upper
             .process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5))
             .await;
-        check!(buffer.len() == 2);
-        let (child, rec) = buffer.pop_front().unwrap();
-        check!(child == 3);
-        check!(*rec.value.downcast::<String>().unwrap() == "HI");
+        let actual = buffer
+            .into_iter()
+            .map(|(child, rec)| (child, *rec.value.downcast::<String>().unwrap()))
+            .collect::<Vec<_>>();
+        check!(actual == vec![(3, "HI".to_string()), (4, "HI".to_string())]);
     }
 
     #[tokio::test]
@@ -400,9 +398,9 @@ mod tests {
             .process(&mut ctx, Record::new(None, "hi".into(), 5))
             .await; // forwards → uppercases
         boxed.close().await; // forwards to Upper's default no-op
-        check!(buffer.len() == 1);
+        let actual_len = buffer.len();
         let (_child, rec) = buffer.pop_front().unwrap();
-        check!(*rec.value.downcast::<String>().unwrap() == "HI");
+        check!((actual_len, *rec.value.downcast::<String>().unwrap()) == (1, "HI".to_string()));
     }
 
     #[tokio::test]

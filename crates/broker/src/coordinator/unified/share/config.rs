@@ -51,31 +51,50 @@ impl Default for ShareGroupConfig {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
 
     use super::*;
     #[test]
     fn defaults_are_kafka_ga() {
         let c = ShareGroupConfig::default();
-        check!(c.enable);
-        check!(c.heartbeat_interval == Duration::from_secs(5));
-        check!(c.session_timeout == Duration::from_secs(45));
-        check!(c.max_size == 200);
-    }
-
-    #[test]
-    fn slice_c_defaults() {
-        let c = ShareGroupConfig::default();
-        check!(c.record_lock_duration == std::time::Duration::from_secs(30));
-        check!(c.max_delivery_attempts == 5);
-        check!(c.max_inflight_records == 200);
-    }
-
-    #[test]
-    fn slice_f_defaults() {
-        let c = ShareGroupConfig::default();
-        assert!(c.isolation_level == ShareIsolationLevel::ReadUncommitted);
-        // The enum's own Default must also be ReadUncommitted.
-        assert!(ShareIsolationLevel::default() == ShareIsolationLevel::ReadUncommitted);
+        assert2::assert!(
+            (
+                (
+                    c.enable,
+                    c.session_timeout,
+                    c.heartbeat_interval,
+                    c.min_session_timeout,
+                    c.max_session_timeout,
+                    c.min_heartbeat_interval,
+                    c.max_heartbeat_interval,
+                ),
+                (
+                    c.max_groups,
+                    c.max_size,
+                    c.record_lock_duration,
+                    c.max_delivery_attempts,
+                    c.max_inflight_records,
+                    c.isolation_level,
+                ),
+            ) == (
+                (
+                    true,
+                    Duration::from_secs(45),
+                    Duration::from_secs(5),
+                    Duration::from_secs(45),
+                    Duration::from_mins(1),
+                    Duration::from_secs(5),
+                    Duration::from_secs(15),
+                ),
+                (
+                    0,
+                    200,
+                    Duration::from_secs(30),
+                    5,
+                    200,
+                    ShareIsolationLevel::ReadUncommitted,
+                ),
+            )
+        );
+        assert2::assert!(ShareIsolationLevel::default() == ShareIsolationLevel::ReadUncommitted);
     }
 }

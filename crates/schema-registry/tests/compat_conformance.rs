@@ -52,11 +52,7 @@ fn assert_matrix_matches_cp(
             ));
         }
     }
-    assert!(
-        mismatches.is_empty(),
-        "engine diverges from cp on:\n{}",
-        mismatches.join("\n")
-    );
+    assert2::assert!(mismatches.is_empty());
 }
 
 #[allow(clippy::unnecessary_wraps)]

@@ -589,7 +589,7 @@ fn scope_name(scope: crabka_traceql::TagScope) -> &'static str {
 
 #[cfg(test)]
 mod tests {
-    use assert2::{assert, check};
+    use assert2::check;
 
     use super::*;
 
@@ -615,13 +615,17 @@ mod tests {
     #[test]
     fn tags_to_traceql_rejects_keys_with_metacharacters() {
         // Benign keys convert to a properly-quoted attribute match.
-        assert!(tags_to_traceql("svc=b") == Some("{ .svc = \"b\" }".to_string()));
-        assert!(tags_to_traceql("span:name=op") == Some("{ span:name = \"op\" }".to_string()));
+        assert2::assert!(tags_to_traceql("svc=b") == Some("{ .svc = \"b\" }".to_string()));
+        assert2::assert!(
+            tags_to_traceql("span:name=op") == Some("{ span:name = \"op\" }".to_string())
+        );
         // A key carrying TraceQL-significant characters injects structure when
         // interpolated unquoted, so it is rejected.
-        assert!(tags_to_traceql("a}=c").is_none());
-        assert!(tags_to_traceql("a\"b=c").is_none());
+        assert2::assert!(tags_to_traceql("a}=c").is_none());
+        assert2::assert!(tags_to_traceql("a\"b=c").is_none());
         // The value side stays safely quoted even with metacharacters.
-        assert!(tags_to_traceql("svc=a\"}||x") == Some("{ .svc = \"a\\\"}||x\" }".to_string()));
+        assert2::assert!(
+            tags_to_traceql("svc=a\"}||x") == Some("{ .svc = \"a\\\"}||x\" }".to_string())
+        );
     }
 }

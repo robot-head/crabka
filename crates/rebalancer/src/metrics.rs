@@ -171,7 +171,6 @@ impl RebalancerMetrics {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::health::new_registry;
@@ -191,9 +190,9 @@ mod tests {
             "crabka_rebalancer_snapshots_total",
             "crabka_rebalancer_proposals_created_total",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
-        assert!(buf.contains("# EOF"), "OpenMetrics terminator missing");
+        assert2::assert!(buf.contains("# EOF"));
     }
 
     #[test]
@@ -205,7 +204,7 @@ mod tests {
         let cloned = m.clone();
         cloned.snapshots_total.inc();
         cloned.snapshots_total.inc();
-        assert!(m.snapshots_total.get() == 2);
+        assert2::assert!(m.snapshots_total.get() == 2);
     }
 
     #[test]
@@ -219,7 +218,7 @@ mod tests {
         m.set_pending_reassignments(4);
 
         // Counter family accumulates per-label.
-        assert!(
+        assert2::assert!(
             m.rebalances
                 .get_or_create(&ResultLabel {
                     result: "ok".into()
@@ -227,7 +226,7 @@ mod tests {
                 .get()
                 == 2
         );
-        assert!(m.pending_reassignments.get() == 4);
+        assert2::assert!(m.pending_reassignments.get() == 4);
 
         let mut buf = String::new();
         prometheus_client::encoding::text::encode(&mut buf, &registry).unwrap();
@@ -237,7 +236,7 @@ mod tests {
             "crabka_rebalancer_rebalance_duration_seconds_count",
             "crabka_rebalancer_pending_reassignments",
         ] {
-            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
+            assert2::assert!(buf.contains(needle));
         }
     }
 }

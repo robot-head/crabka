@@ -417,7 +417,7 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod replica_assignment_tests {
-    use assert2::assert;
+
     use crabka_raft::NodeId;
 
     use super::round_robin_replicas;
@@ -430,12 +430,12 @@ mod replica_assignment_tests {
         let leaders: Vec<_> = out.iter().map(|r| r[0]).collect();
         let mut sorted = leaders.clone();
         sorted.sort_unstable();
-        assert!(sorted == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert2::assert!(sorted == vec![NodeId(1), NodeId(2), NodeId(3)]);
         // Each partition has all three brokers as replicas.
         for replicas in &out {
             let mut s = replicas.clone();
             s.sort_unstable();
-            assert!(s == vec![NodeId(1), NodeId(2), NodeId(3)]);
+            assert2::assert!(s == vec![NodeId(1), NodeId(2), NodeId(3)]);
         }
     }
 
@@ -443,21 +443,21 @@ mod replica_assignment_tests {
     fn offset_per_partition_means_distinct_leaders() {
         let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 3, 1);
-        assert!(out == vec![vec![NodeId(1)], vec![NodeId(2)], vec![NodeId(3)]]);
+        assert2::assert!(out == vec![vec![NodeId(1)], vec![NodeId(2)], vec![NodeId(3)]]);
     }
 
     #[test]
     fn rf_too_high_returns_empty() {
         let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 1, 5);
-        assert!(out.is_empty());
+        assert2::assert!(out.is_empty());
     }
 
     #[test]
     fn rf_one_single_broker_preserves_replica_shape() {
         let bs = vec![NodeId(1)];
         let out = round_robin_replicas(&bs, 2, 1);
-        assert!(out == vec![vec![NodeId(1)], vec![NodeId(1)]]);
+        assert2::assert!(out == vec![vec![NodeId(1)], vec![NodeId(1)]]);
     }
 
     #[test]
@@ -480,19 +480,16 @@ mod replica_assignment_tests {
         }));
         let cases = [
             // Exact (user, client-id) tuple match should throttle on overage.
-            ("app-x", true),
+            ("exact user and client match", "app-x", true),
             // Non-matching client_id should not throttle.
-            ("other", false),
+            ("nonmatching client", "other", false),
         ];
-        for (client_id, want_throttle) in cases {
+        for (_case, client_id, want_throttle) in cases {
             let buckets = crate::quota::QuotaBuckets::new();
             let delay = crate::quota::consume_controller_mutation_quota(
                 &img, &buckets, "alice", client_id, 10,
             );
-            assert!(
-                (delay > std::time::Duration::ZERO) == want_throttle,
-                "client_id {client_id}, delay {delay:?}"
-            );
+            assert2::assert!((delay > std::time::Duration::ZERO) == want_throttle);
         }
     }
 }
@@ -501,7 +498,7 @@ mod replica_assignment_tests {
 mod handler_tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
@@ -613,7 +610,7 @@ mod handler_tests {
             resource_type: "Topic".into(),
             name: "ok".into(),
         }];
-        assert!(resources == expected);
+        assert2::assert!(resources == expected);
     }
 
     #[test]
@@ -624,10 +621,7 @@ mod handler_tests {
         let ctx = test_context(&p, &peer);
 
         audit_created_topics(log.as_ref(), &ctx, Vec::new());
-        assert!(
-            rx.try_recv().is_err(),
-            "empty audit resource list is a no-op"
-        );
+        assert2::assert!(rx.try_recv().is_err());
 
         audit_created_topics(
             log.as_ref(),
@@ -656,7 +650,7 @@ mod handler_tests {
             resource_type: "Topic".into(),
             name: "orders".into(),
         }];
-        assert!(resources == expected_resources);
+        assert2::assert!(resources == expected_resources);
     }
 
     #[test]
@@ -667,19 +661,13 @@ mod handler_tests {
             (&[NodeId(1), NodeId(2)], NodeId(3), false),
         ];
         for (replicas, node_id, want) in materialize_cases {
-            assert!(
-                should_materialize_locally(replicas, node_id) == want,
-                "replicas {replicas:?}, node {node_id}"
-            );
+            assert2::assert!(should_materialize_locally(replicas, node_id) == want);
         }
 
         let leader_cases: [(crabka_raft::NodeId, crabka_raft::NodeId, bool); 2] =
             [(NodeId(1), NodeId(1), true), (NodeId(2), NodeId(1), false)];
         for (leader, node_id, want) in leader_cases {
-            assert!(
-                is_local_leader(leader, node_id) == want,
-                "leader {leader}, node {node_id}"
-            );
+            assert2::assert!(is_local_leader(leader, node_id) == want);
         }
     }
 
@@ -721,8 +709,8 @@ mod handler_tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(
+        assert2::assert!(resp == expected);
+        assert2::assert!(
             broker_handle
                 .controller_image_for_test()
                 .topic("orders")
@@ -770,10 +758,10 @@ mod handler_tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         for name in ["bad-count", "bad-rf"] {
             let image = broker_handle.controller_image_for_test();
-            assert!(image.topic(name).is_none(), "topic {name} not committed");
+            assert2::assert!(image.topic(name).is_none());
         }
         broker_handle.shutdown().await;
     }
@@ -789,8 +777,8 @@ mod handler_tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert!(resp.topics.len() == 1);
-        assert!(resp.topics[0].topic_id != ProtoUuid([0; 16]));
+        assert2::assert!(resp.topics.len() == 1);
+        assert2::assert!(resp.topics[0].topic_id != ProtoUuid([0; 16]));
         let expected = CreateTopicsResponse {
             throttle_time_ms: 0,
             topics: vec![CreatableTopicResult {
@@ -808,13 +796,13 @@ mod handler_tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
 
         let image = broker_handle.controller_image_for_test();
         let topic = image.topic("configured").expect("topic in image");
-        assert!(topic.partitions == 2);
+        assert2::assert!(topic.partitions == 2);
         let configs = image.topic_config("configured").expect("topic configs");
-        assert!(configs.get("retention.ms").map(String::as_str) == Some("60000"));
+        assert2::assert!(configs.get("retention.ms").map(String::as_str) == Some("60000"));
         broker_handle.shutdown().await;
     }
 
@@ -827,11 +815,11 @@ mod handler_tests {
         let peer = peer();
         let req = request(vec![topic("dupe", 1, 1)]);
         let first = drive(&broker, &req, &p, &peer).await;
-        assert!(first.topics[0].error_code == codes::NONE);
+        assert2::assert!(first.topics[0].error_code == codes::NONE);
 
         let second = drive(&broker, &req, &p, &peer).await;
 
-        assert!(second.topics.len() == 1);
+        assert2::assert!(second.topics.len() == 1);
         let expected = CreateTopicsResponse {
             throttle_time_ms: 0,
             topics: vec![CreatableTopicResult {
@@ -849,7 +837,7 @@ mod handler_tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(second == expected);
+        assert2::assert!(second == expected);
         broker_handle.shutdown().await;
     }
 
@@ -867,7 +855,7 @@ mod handler_tests {
         let resp = drive(&broker, &req, &p, &peer).await;
         let elapsed = started.elapsed();
 
-        assert!(resp.topics.len() == 1);
+        assert2::assert!(resp.topics.len() == 1);
         let expected = CreateTopicsResponse {
             throttle_time_ms: 1_000,
             topics: vec![CreatableTopicResult {
@@ -884,11 +872,8 @@ mod handler_tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(
-            elapsed >= Duration::from_millis(900),
-            "handler must wait for the advertised throttle, elapsed={elapsed:?}"
-        );
+        assert2::assert!(resp == expected);
+        assert2::assert!(elapsed >= Duration::from_millis(900));
         broker_handle.shutdown().await;
     }
 }

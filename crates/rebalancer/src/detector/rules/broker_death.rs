@@ -54,8 +54,6 @@ impl Rule for BrokerDeath {
 mod tests {
     use std::time::Duration;
 
-    use assert2::{assert, check};
-
     use super::*;
     use crate::{
         capacity::BrokerCapacities,
@@ -121,7 +119,7 @@ mod tests {
             now_ms: 1_000,
             cfg: &cfg,
         };
-        assert!(BrokerDeath.evaluate(&ctx).is_empty());
+        assert2::assert!(BrokerDeath.evaluate(&ctx).is_empty());
     }
 
     #[test]
@@ -147,9 +145,12 @@ mod tests {
             cfg: &cfg,
         };
         let hits = BrokerDeath.evaluate(&ctx);
-        assert!(hits.len() == 1);
-        check!(hits[0].key == AnomalyKey::Broker(3));
-        check!(hits[0].severity == AnomalySeverity::Critical);
+        assert2::assert!(
+            hits.iter()
+                .map(|hit| (&hit.key, hit.severity))
+                .collect::<Vec<_>>()
+                == vec![(&AnomalyKey::Broker(3), AnomalySeverity::Critical)]
+        );
     }
 
     #[test]
@@ -173,6 +174,6 @@ mod tests {
             now_ms: 120_000,
             cfg: &cfg,
         };
-        assert!(BrokerDeath.evaluate(&ctx).is_empty());
+        assert2::assert!(BrokerDeath.evaluate(&ctx).is_empty());
     }
 }

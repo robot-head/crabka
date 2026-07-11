@@ -21,6 +21,7 @@ default = ["derive"]
 derive = ["dep:crabka-connect-derive"]
 
 [dependencies]
+assert2 = { workspace = true }
 # The schema-registry serdes back the schema-aware converter. Only the
 # format-agnostic `SchemaSerializer`/`SchemaDeserializer` traits are needed
 # here, so no format feature (avro/protobuf/json) is enabled.
@@ -41,5 +42,4 @@ tracing = { workspace = true }
 qubit-clock = { workspace = true, features = ["tokio"] }
 
 [dev-dependencies]
-assert2 = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "macros", "sync", "time", "test-util"] }

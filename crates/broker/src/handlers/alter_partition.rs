@@ -321,7 +321,6 @@ fn encode_resp(version: i16, resp: &AlterPartitionResponse) -> Result<Bytes, Bro
 mod tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
-    use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
@@ -451,10 +450,7 @@ mod tests {
             {
                 return;
             }
-            assert!(
-                std::time::Instant::now() <= deadline,
-                "broker did not become controller leader"
-            );
+            assert2::assert!(std::time::Instant::now() <= deadline);
             tokio::time::sleep(Duration::from_millis(25)).await;
         }
     }
@@ -510,7 +506,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(cluster_action_denied(
+        assert2::assert!(cluster_action_denied(
             &authorizer,
             &image,
             &principal,
@@ -521,7 +517,7 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let resp = AlterPartitionResponse::decode(&mut cur, alter_partition_response::MAX_VERSION)
             .unwrap();
-        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert2::assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
     }
 
     #[test]
@@ -534,7 +530,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert!(!cluster_action_denied(
+        assert2::assert!(!cluster_action_denied(
             &crate::authorizer::AllowAllAuthorizer,
             &image,
             &principal,
@@ -567,7 +563,7 @@ mod tests {
             topics: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -598,7 +594,7 @@ mod tests {
             topics: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -654,11 +650,11 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
+        assert2::assert!(resp == expected);
 
         let image = broker.controller.current_image();
         let committed = image.partition("t", 0).expect("partition committed");
-        assert!(committed.partition_epoch == 1);
+        assert2::assert!(committed.partition_epoch == 1);
         broker_handle.shutdown().await;
     }
 
@@ -668,8 +664,8 @@ mod tests {
         let mut changes = Vec::new();
         let isr = vec![bs(1, 10), bs(2, 20), bs(3, 30)];
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
-        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
-        assert!(changes.len() == 1);
+        assert2::assert!(resp.error_code == codes::NONE);
+        assert2::assert!(changes.len() == 1);
     }
 
     #[test]
@@ -698,13 +694,24 @@ mod tests {
             partition_epoch: 12,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(changes.len() == 1);
-        let MetadataRecord::V1Partition(record) = &changes[0] else {
-            panic!("wrong change variant");
-        };
-        assert!(record.partition == 7);
-        assert!(record.partition_epoch == 12);
+        assert2::assert!(resp == expected);
+        let expected_changes = vec![MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 7,
+            leader: crabka_metadata::NodeId(2),
+            replicas: vec![
+                crabka_metadata::NodeId(2),
+                crabka_metadata::NodeId(4),
+                crabka_metadata::NodeId(6),
+            ],
+            isr: vec![crabka_metadata::NodeId(2), crabka_metadata::NodeId(4)],
+            leader_epoch: crabka_metadata::LeaderEpoch(9),
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 12,
+        })];
+        assert2::assert!(changes == expected_changes);
     }
 
     #[test]
@@ -733,8 +740,8 @@ mod tests {
             partition_epoch: 0,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(changes.is_empty());
+        assert2::assert!(resp == expected);
+        assert2::assert!(changes.is_empty());
     }
 
     #[test]
@@ -752,12 +759,24 @@ mod tests {
             partition_epoch: 1,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert!(resp == expected);
-        assert!(changes.len() == 1);
-        let MetadataRecord::V1Partition(record) = &changes[0] else {
-            panic!("wrong change variant");
-        };
-        assert!(record.isr == vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)]);
+        assert2::assert!(resp == expected);
+        let expected_changes = vec![MetadataRecord::V1Partition(PartitionRecord {
+            topic: "t".into(),
+            partition: 0,
+            leader: crabka_metadata::NodeId(1),
+            replicas: vec![
+                crabka_metadata::NodeId(1),
+                crabka_metadata::NodeId(2),
+                crabka_metadata::NodeId(3),
+            ],
+            isr: vec![crabka_metadata::NodeId(1), crabka_metadata::NodeId(2)],
+            leader_epoch: crabka_metadata::LeaderEpoch(5),
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 1,
+        })];
+        assert2::assert!(changes == expected_changes);
     }
 
     #[test]
@@ -766,12 +785,8 @@ mod tests {
         let mut changes = Vec::new();
         let isr = vec![bs(1, 10), bs(2, 20), bs(3, 29)]; // 29 != image 30
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
-        assert!(
-            resp.error_code == codes::INELIGIBLE_REPLICA,
-            "got {}",
-            resp.error_code
-        );
-        assert!(changes.is_empty());
+        assert2::assert!(resp.error_code == codes::INELIGIBLE_REPLICA);
+        assert2::assert!(changes.is_empty());
     }
 
     #[test]
@@ -780,12 +795,8 @@ mod tests {
         let mut changes = Vec::new();
         let isr = vec![bs(1, 10), bs(2, 20), bs(3, -1)];
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
-        assert!(
-            resp.error_code == codes::INELIGIBLE_REPLICA,
-            "got {}",
-            resp.error_code
-        );
-        assert!(changes.is_empty());
+        assert2::assert!(resp.error_code == codes::INELIGIBLE_REPLICA);
+        assert2::assert!(changes.is_empty());
     }
 
     #[test]
@@ -794,8 +805,8 @@ mod tests {
         let mut changes = Vec::new();
         let isr = vec![bs(1, -1), bs(2, -1), bs(3, -1)]; // -1 = don't check
         let resp = handle_partition(&image, Some("t"), 0, 5, &[], &isr, &mut changes);
-        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
-        assert!(changes.len() == 1);
+        assert2::assert!(resp.error_code == codes::NONE);
+        assert2::assert!(changes.len() == 1);
     }
 
     #[test]
@@ -804,7 +815,7 @@ mod tests {
         let mut changes = Vec::new();
         // v2: new_isr populated, new_isr_with_epochs empty -> no epoch fencing.
         let resp = handle_partition(&image, Some("t"), 0, 5, &[1, 2, 3], &[], &mut changes);
-        assert!(resp.error_code == codes::NONE, "got {}", resp.error_code);
-        assert!(changes.len() == 1);
+        assert2::assert!(resp.error_code == codes::NONE);
+        assert2::assert!(changes.len() == 1);
     }
 }

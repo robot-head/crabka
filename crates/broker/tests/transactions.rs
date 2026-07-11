@@ -11,7 +11,6 @@
 
 use std::time::Duration;
 
-use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle, config::ListenerSpec};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -60,11 +59,7 @@ async fn create_topic(bootstrap: &str, name: &str) {
         })
         .await
         .unwrap();
-    assert!(
-        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
-        "create_topic {name}: error_code={}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
 }
 
 async fn fetch_committed_offset(bootstrap: &str, group_id: &str, topic: &str) -> Option<i64> {
@@ -186,11 +181,7 @@ async fn create_topic_sasl(bootstrap: &str, name: &str, security: ClientSecurity
         })
         .await
         .unwrap();
-    assert!(
-        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
-        "create_topic_sasl {name}: error_code={}",
-        cr.topics[0].error_code
-    );
+    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
 }
 
 /// Build a `ProducerRecord` for the given topic and string value.
@@ -249,7 +240,7 @@ async fn commit_then_read_committed_sees_records() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert!(seen == vec!["a", "b", "c"]);
+    assert2::assert!(seen == vec!["a", "b", "c"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -296,7 +287,7 @@ async fn abort_then_read_committed_skips_records() {
             break;
         }
     }
-    assert!(seen == 0, "read_committed must skip aborted records");
+    assert2::assert!(seen == 0);
     consumer.close().await.unwrap();
 
     // read_uncommitted: sees all 3 records (including aborted ones).
@@ -316,10 +307,7 @@ async fn abort_then_read_committed_skips_records() {
             seen2.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert!(
-        seen2.len() == 3,
-        "read_uncommitted must see aborted records"
-    );
+    assert2::assert!(seen2.len() == 3);
     consumer_uc.close().await.unwrap();
 
     producer.close().await.unwrap();
@@ -389,7 +377,7 @@ async fn interleaved_commit_and_abort() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert!(seen == vec!["a", "b", "c", "d", "e", "f", "g"]);
+    assert2::assert!(seen == vec!["a", "b", "c", "d", "e", "f", "g"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -430,13 +418,10 @@ async fn fenced_producer_cannot_commit() {
         .commit()
         .await
         .expect_err("commit should fail after fencing");
-    assert!(
-        matches!(
-            err.source,
-            crabka_client_producer::ProducerError::FencedProducer
-        ),
-        "expected FencedProducer, got: {err:?}"
-    );
+    assert2::assert!(matches!(
+        err.source,
+        crabka_client_producer::ProducerError::FencedProducer
+    ));
 
     broker.shutdown().await;
 }
@@ -513,7 +498,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                 read += 1;
             }
         }
-        assert!(read == 5, "expected to read 5 input records");
+        assert2::assert!(read == 5);
 
         // Commit the input consumer offset as part of the transaction.
         if let Some(offset_entry) = last_offset {
@@ -522,17 +507,13 @@ async fn send_offsets_to_transaction_atomic_with_records() {
                 .await
                 .unwrap();
         }
-        assert!(
+        assert2::assert!(
             fetch_committed_offset(&bootstrap, "cpp-g", "input")
                 .await
-                .is_none(),
-            "transactional offset must stay invisible before commit"
+                .is_none()
         );
         txn.commit().await.unwrap();
-        assert!(
-            fetch_committed_offset(&bootstrap, "cpp-g", "input").await == Some(5),
-            "transactional offset must become visible after commit"
-        );
+        assert2::assert!(fetch_committed_offset(&bootstrap, "cpp-g", "input").await == Some(5));
         // Wait for the transactional data batches and commit marker to hit the
         // local log before a read_committed verifier polls. `commit()` returns
         // after the coordinator flow completes, but LSO advancement can lag on
@@ -558,7 +539,7 @@ async fn send_offsets_to_transaction_atomic_with_records() {
     while seen < 5 && std::time::Instant::now() < deadline {
         seen += c2.poll(Duration::from_millis(200)).await.unwrap().len();
     }
-    assert!(seen == 5, "expected 5 records on output topic");
+    assert2::assert!(seen == 5);
 
     c2.close().await.unwrap();
     broker.shutdown().await;
@@ -645,7 +626,7 @@ async fn sasl_authenticated_transactional_flow_commits() {
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert!(seen == vec!["a", "b", "c"], "seen={seen:?}");
+    assert2::assert!(seen == vec!["a", "b", "c"]);
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -681,10 +662,7 @@ async fn txn_offset_commit_fences_classic_generation_and_member() {
     // A non-empty member id proves the join completed; the fencing assertions
     // below hold for whatever generation the group settled on (we send
     // `generation_id + 1` for the stale case, which always mismatches).
-    assert!(
-        !meta.member_id.is_empty(),
-        "consumer should have a member id: {meta:?}"
-    );
+    assert2::assert!(!meta.member_id.is_empty());
 
     let client = crabka_client_core::Client::builder()
         .bootstrap(bootstrap.clone())
@@ -716,30 +694,21 @@ async fn txn_offset_commit_fences_classic_generation_and_member() {
         .send(mk(meta.generation_id + 1, &meta.member_id))
         .await
         .unwrap();
-    assert!(
-        stale.topics[0].partitions[0].error_code == 22,
-        "stale generation should be ILLEGAL_GENERATION: {stale:?}"
-    );
+    assert2::assert!(stale.topics[0].partitions[0].error_code == 22);
 
     // Correct generation but unknown member → UNKNOWN_MEMBER_ID (25).
     let unknown = client
         .send(mk(meta.generation_id, "ghost-member"))
         .await
         .unwrap();
-    assert!(
-        unknown.topics[0].partitions[0].error_code == 25,
-        "unknown member should be UNKNOWN_MEMBER_ID: {unknown:?}"
-    );
+    assert2::assert!(unknown.topics[0].partitions[0].error_code == 25);
 
     // Matching metadata → accepted (NONE = 0).
     let ok = client
         .send(mk(meta.generation_id, &meta.member_id))
         .await
         .unwrap();
-    assert!(
-        ok.topics[0].partitions[0].error_code == 0,
-        "valid metadata should commit: {ok:?}"
-    );
+    assert2::assert!(ok.topics[0].partitions[0].error_code == 0);
 
     consumer.close().await.unwrap();
     broker.shutdown().await;
@@ -777,13 +746,10 @@ async fn txn_offset_commit_fences_next_gen_member_epoch() {
     };
     hb.subscribed_topic_names = Some(vec!["ng-in".into()]);
     let hb_resp = client.send(hb).await.unwrap();
-    assert!(hb_resp.error_code == 0, "heartbeat failed: {hb_resp:?}");
+    assert2::assert!(hb_resp.error_code == 0);
     let member_id = hb_resp.member_id.clone().unwrap();
     let epoch = hb_resp.member_epoch;
-    assert!(
-        epoch >= 1,
-        "member should have a positive epoch: {hb_resp:?}"
-    );
+    assert2::assert!(epoch >= 1);
 
     let mk = |epoch_val: i32| TxnOffsetCommitRequest {
         transactional_id: "ng-tid".into(),
@@ -806,24 +772,15 @@ async fn txn_offset_commit_fences_next_gen_member_epoch() {
 
     // Stale epoch (< current) → STALE_MEMBER_EPOCH (113).
     let stale = client.send(mk(epoch - 1)).await.unwrap();
-    assert!(
-        stale.topics[0].partitions[0].error_code == 113,
-        "stale epoch should be STALE_MEMBER_EPOCH: {stale:?}"
-    );
+    assert2::assert!(stale.topics[0].partitions[0].error_code == 113);
 
     // Future epoch (> current) → FENCED_MEMBER_EPOCH (110).
     let fenced = client.send(mk(epoch + 1)).await.unwrap();
-    assert!(
-        fenced.topics[0].partitions[0].error_code == 110,
-        "future epoch should be FENCED_MEMBER_EPOCH: {fenced:?}"
-    );
+    assert2::assert!(fenced.topics[0].partitions[0].error_code == 110);
 
     // Current epoch + known member → accepted (NONE = 0).
     let ok = client.send(mk(epoch)).await.unwrap();
-    assert!(
-        ok.topics[0].partitions[0].error_code == 0,
-        "current epoch should commit: {ok:?}"
-    );
+    assert2::assert!(ok.topics[0].partitions[0].error_code == 0);
 
     broker.shutdown().await;
 }

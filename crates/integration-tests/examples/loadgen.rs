@@ -76,7 +76,7 @@ async fn main() {
         .expect("CreateTopics");
     let ec = resp.topics[0].error_code;
     // 36 = TOPIC_ALREADY_EXISTS
-    assert!(ec == 0 || ec == 36, "create_topic failed: {resp:?}");
+    assert2::assert!(ec == 0 || ec == 36);
 
     let value = Bytes::from(vec![0xABu8; value_bytes]);
     let sent = Arc::new(AtomicU64::new(0));

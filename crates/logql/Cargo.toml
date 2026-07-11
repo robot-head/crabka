@@ -62,6 +62,7 @@ unnested_or_patterns = "allow"
 unreadable_literal = "allow"
 
 [dependencies]
+assert2 = { workspace = true }
 base64 = { workspace = true }
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 chrono-tz = { version = "0.10.4", default-features = false }
@@ -74,4 +75,3 @@ time = { version = "0.3", default-features = false }
 tracing = { workspace = true }
 
 [dev-dependencies]
-assert2 = { workspace = true }

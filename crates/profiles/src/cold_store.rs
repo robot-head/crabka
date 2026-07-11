@@ -526,7 +526,7 @@ fn filter_and_remap_batch(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::{assert, check};
+    use assert2::check;
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
     use object_store::{ObjectStore, memory::InMemory};
@@ -565,8 +565,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(fg.total == 12);
-        assert!(fg.names.iter().any(|name| name == "main"));
+        assert2::assert!(fg.total == 12);
+        assert2::assert!(fg.names.iter().any(|name| name == "main"));
     }
 
     #[tokio::test]
@@ -594,7 +594,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(values == vec!["api".to_string()]);
+        assert2::assert!(values == vec!["api".to_string()]);
     }
 
     #[tokio::test]
@@ -613,7 +613,7 @@ mod tests {
 
         let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
 
-        assert!(
+        assert2::assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -643,7 +643,7 @@ mod tests {
 
         let stats = cold.stats("t", 1_000, 1_000).await.unwrap();
 
-        assert!(
+        assert2::assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -672,8 +672,8 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        assert!(meta_early.min_ts == 1000 && meta_early.max_ts == 1000);
-        assert!(meta_late.min_ts == 5000 && meta_late.max_ts == 5000);
+        assert2::assert!(meta_early.min_ts == 1000 && meta_early.max_ts == 1000);
+        assert2::assert!(meta_late.min_ts == 5000 && meta_late.max_ts == 5000);
         let mut index = ProfileIndex::new();
         for rec in [&early, &late] {
             let labels = Labels::from_pairs(rec.labels.iter().cloned());
@@ -694,7 +694,7 @@ mod tests {
 
         let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
 
-        assert!(
+        assert2::assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -705,7 +705,7 @@ mod tests {
 
         // A tenant with no blocks reports no data without touching the store.
         let empty = stats_for_unknown_tenant(&cold).await;
-        assert!(
+        assert2::assert!(
             empty
                 == ProfileStats {
                     data_ingested: false,
@@ -735,7 +735,7 @@ mod tests {
 
         let types = cold.profile_types("t", 2_000, 3_000).await.unwrap();
 
-        assert!(types.is_empty(), "{types:?}");
+        assert2::assert!(types.is_empty());
     }
 
     #[tokio::test]
@@ -764,7 +764,7 @@ mod tests {
 
         let types = cold.profile_types("t", 1_000, 1_000).await.unwrap();
 
-        assert!(types == vec![PT.to_string()], "{types:?}");
+        assert2::assert!(types == vec![PT.to_string()]);
     }
 
     #[tokio::test]
@@ -786,7 +786,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(values.is_empty(), "{values:?}");
+        assert2::assert!(values.is_empty());
     }
 
     #[tokio::test]
@@ -812,7 +812,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(values == vec!["api".to_string()], "{values:?}");
+        assert2::assert!(values == vec!["api".to_string()]);
     }
 
     #[tokio::test]
@@ -831,7 +831,7 @@ mod tests {
 
         let names = cold.label_names("t", &[], 2_000, 3_000).await.unwrap();
 
-        assert!(names.is_empty(), "{names:?}");
+        assert2::assert!(names.is_empty());
     }
 
     #[tokio::test]
@@ -857,7 +857,7 @@ mod tests {
 
         let names = cold.label_names("t", &[], 1_000, 1_000).await.unwrap();
 
-        assert!(!names.contains(&"pod".to_string()), "{names:?}");
+        assert2::assert!(!names.contains(&"pod".to_string()));
     }
 
     #[tokio::test]
@@ -879,7 +879,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(series.is_empty(), "{series:?}");
+        assert2::assert!(series.is_empty());
     }
 
     #[tokio::test]
@@ -905,10 +905,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert!(
-            series == vec![vec![("service_name".to_string(), "api".to_string())]],
-            "{series:?}"
-        );
+        assert2::assert!(series == vec![vec![("service_name".to_string(), "api".to_string())]]);
     }
 
     #[tokio::test]
@@ -971,8 +968,8 @@ mod tests {
             })
             .unwrap();
 
-        assert!(out[0].function == "/missing/native+0x99");
-        assert!(out[0].file == "/missing/native");
+        assert2::assert!(out[0].function.as_str() == "/missing/native+0x99");
+        assert2::assert!(out[0].file.as_str() == "/missing/native");
     }
 
     #[test]
@@ -1040,7 +1037,7 @@ mod tests {
         let out = filter_and_remap_batch(&batch, &partition_map, &fps, PT, 0, 5_000).unwrap();
 
         // Two surviving rows (the partition-0 and partition-1 keeps).
-        assert!(out.num_rows() == 2);
+        assert2::assert!(out.num_rows() == 2);
         let out_fps = out.column(0).as_primitive::<UInt64Type>();
         let out_partitions = out.column(5).as_primitive::<UInt64Type>();
         check!(out_fps.value(0) == fp_keep);

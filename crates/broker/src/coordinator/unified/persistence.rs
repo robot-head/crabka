@@ -370,7 +370,6 @@ pub(crate) fn put_bytes<B: BufMut>(buf: &mut B, b: &Bytes) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -384,11 +383,7 @@ mod tests {
         };
         let encoded = v.encode_value();
         let decoded = OffsetCommitValue::decode_value(&encoded).unwrap();
-        assert!(decoded == v);
-        assert!(decoded.offset == 42);
-        assert!(decoded.leader_epoch == 0);
-        assert!(decoded.metadata == "meta");
-        assert!(decoded.commit_timestamp_ms == 1_000_000);
+        assert2::assert!(decoded == v);
     }
 
     #[test]
@@ -412,13 +407,13 @@ mod tests {
         };
         let encoded = v.encode_value();
         let decoded = GroupMetadataValue::decode_value(&encoded).unwrap();
-        assert!(decoded == v);
+        assert2::assert!(decoded == v);
     }
 
     #[test]
     fn parse_key_offset_commit_v1() {
         let key = OffsetCommitValue::encode_key("grp", "topic", 7);
-        assert!(
+        assert2::assert!(
             parse_key(&key).unwrap()
                 == Key::OffsetCommit {
                     group_id: "grp".to_string(),
@@ -432,7 +427,7 @@ mod tests {
     fn parse_key_group_metadata_v2() {
         let key = GroupMetadataValue::encode_key("grp");
         match parse_key(&key).unwrap() {
-            Key::GroupMetadata { group_id } => assert!(group_id == "grp"),
+            Key::GroupMetadata { group_id } => assert2::assert!(group_id == "grp"),
             k @ (Key::OffsetCommit { .. } | Key::NextGen(_) | Key::Share(_) | Key::Streams(_)) => {
                 panic!("expected GroupMetadata, got {k:?}")
             }

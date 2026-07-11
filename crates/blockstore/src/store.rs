@@ -232,7 +232,6 @@ mod tests {
         datatypes::{DataType, Field, Schema, SchemaRef},
         record_batch::RecordBatch,
     };
-    use assert2::{assert, check};
     use object_store::{ObjectStore, memory::InMemory};
 
     use super::*;
@@ -295,8 +294,6 @@ mod tests {
             .unwrap();
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 2);
-
         let first = batches[0]
             .column(0)
             .as_any()
@@ -317,7 +314,8 @@ mod tests {
                     .map(|a| a.value(0))
             })
             .expect("line column is utf8");
-        assert!(first == "hello");
+        assert2::assert!(total == 2);
+        assert2::assert!(first == "hello");
     }
 
     #[tokio::test]
@@ -331,28 +329,28 @@ mod tests {
             .index()
             .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "api")])
             .unwrap();
-        assert!(got == std::collections::BTreeSet::from([api.fingerprint()]));
+        assert2::assert!(got == std::collections::BTreeSet::from([api.fingerprint()]));
     }
 
     #[tokio::test]
     async fn cloned_blockstore_shares_index_until_mutated() {
         let (bs, _schema) = seeded_store().await;
         let cloned = bs.clone();
-        assert!(Arc::ptr_eq(&bs.index, &cloned.index));
+        assert2::assert!(Arc::ptr_eq(&bs.index, &cloned.index));
 
         let mut mutated = cloned.clone();
         let mut web = Labels::new();
         web.insert("app", "web");
         mutated.index_mut().add_series("t", web.fingerprint(), &web);
 
-        check!(!Arc::ptr_eq(&bs.index, &mutated.index));
-        check!(
+        assert2::assert!(!Arc::ptr_eq(&bs.index, &mutated.index));
+        assert2::assert!(
             bs.index()
                 .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
                 .unwrap()
-                .is_empty()
+                == std::collections::BTreeSet::new()
         );
-        check!(
+        assert2::assert!(
             mutated
                 .index()
                 .resolve("t", &[LabelMatcher::new("app", MatchOp::Eq, "web")])
@@ -369,11 +367,11 @@ mod tests {
             .await
             .unwrap();
         // Table name is the fixed logical name, not a stub string.
-        assert!(table == "logs");
+        assert2::assert!(table == "logs");
         let df = ctx.sql(&format!("SELECT line FROM {table}")).await.unwrap();
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 2);
+        assert2::assert!(total == 2);
     }
 
     #[tokio::test]
@@ -383,11 +381,11 @@ mod tests {
             .scan_block_row_groups("blocks/b1.parquet", &[0], schema)
             .await
             .unwrap();
-        assert!(table == "logs");
+        assert2::assert!(table == "logs");
         let df = ctx.sql(&format!("SELECT line FROM {table}")).await.unwrap();
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 2);
+        assert2::assert!(total == 2);
     }
 
     #[tokio::test]
@@ -402,6 +400,6 @@ mod tests {
         let df = ctx.sql(&format!("SELECT line FROM {table}")).await.unwrap();
         let batches = df.collect().await.unwrap();
         let total: usize = batches.iter().map(RecordBatch::num_rows).sum();
-        assert!(total == 0);
+        assert2::assert!(total == 0);
     }
 }

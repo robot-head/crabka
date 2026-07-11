@@ -346,8 +346,13 @@ mod tests {
 
         let (_, rec) = buffer.pop_front().expect("expected forwarded record");
         let change = rec.value.downcast::<Change<String>>().unwrap();
-        check!(change.old.is_none());
-        check!(change.new == Some("AB".to_string()));
+        check!(
+            *change
+                == Change {
+                    old: None,
+                    new: Some("AB".to_string())
+                }
+        );
         check!(buffer.is_empty());
     }
 
@@ -388,8 +393,13 @@ mod tests {
 
         let (_, rec) = buffer.pop_front().expect("expected forwarded record");
         let change = rec.value.downcast::<Change<String>>().unwrap();
-        check!(change.old == Some("AB".to_string()));
-        check!(change.new.is_none());
+        check!(
+            *change
+                == Change {
+                    old: Some("AB".to_string()),
+                    new: None
+                }
+        );
         check!(buffer.is_empty());
     }
 
@@ -573,49 +583,57 @@ mod tests {
         )
     }
 
-    fn a() -> String {
-        "A".into()
-    }
-    fn b() -> String {
-        "B".into()
-    }
-
     #[test]
     fn result_inner() {
         let k = JoinKind::inner();
-        // both present → Some
-        check!(result(k, &joiner, Some(&a()), Some(&b())) == Some("AB".into()));
-        // a absent → None
-        check!(result(k, &joiner, None, Some(&b())).is_none());
-        // b absent → None
-        check!(result(k, &joiner, Some(&a()), None).is_none());
-        // both absent → None
-        check!(result(k, &joiner, None::<&String>, None::<&String>).is_none());
+        for (name, left, right, expected) in [
+            ("both present", Some("A"), Some("B"), Some("AB")),
+            ("left absent", None, Some("B"), None),
+            ("right absent", Some("A"), None, None),
+            ("both absent", None, None, None),
+        ] {
+            let left = left.map(str::to_string);
+            let right = right.map(str::to_string);
+            check!(
+                result(k, &joiner, left.as_ref(), right.as_ref()) == expected.map(str::to_string),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn result_left() {
         let k = JoinKind::left();
-        // both present → Some("AB")
-        check!(result(k, &joiner, Some(&a()), Some(&b())) == Some("AB".into()));
-        // a present, b absent → Some("A")
-        check!(result(k, &joiner, Some(&a()), None::<&String>) == Some("A".into()));
-        // a absent, b present → None (a required)
-        check!(result(k, &joiner, None::<&String>, Some(&b())).is_none());
-        // both absent → None
-        check!(result(k, &joiner, None::<&String>, None::<&String>).is_none());
+        for (name, left, right, expected) in [
+            ("both present", Some("A"), Some("B"), Some("AB")),
+            ("right absent", Some("A"), None, Some("A")),
+            ("left absent", None, Some("B"), None),
+            ("both absent", None, None, None),
+        ] {
+            let left = left.map(str::to_string);
+            let right = right.map(str::to_string);
+            check!(
+                result(k, &joiner, left.as_ref(), right.as_ref()) == expected.map(str::to_string),
+                "case {name}"
+            );
+        }
     }
 
     #[test]
     fn result_outer() {
         let k = JoinKind::outer();
-        // both present → Some("AB")
-        check!(result(k, &joiner, Some(&a()), Some(&b())) == Some("AB".into()));
-        // only a → Some("A")
-        check!(result(k, &joiner, Some(&a()), None::<&String>) == Some("A".into()));
-        // only b → Some("B")
-        check!(result(k, &joiner, None::<&String>, Some(&b())) == Some("B".into()));
-        // both absent → None
-        check!(result(k, &joiner, None::<&String>, None::<&String>).is_none());
+        for (name, left, right, expected) in [
+            ("both present", Some("A"), Some("B"), Some("AB")),
+            ("right absent", Some("A"), None, Some("A")),
+            ("left absent", None, Some("B"), Some("B")),
+            ("both absent", None, None, None),
+        ] {
+            let left = left.map(str::to_string);
+            let right = right.map(str::to_string);
+            check!(
+                result(k, &joiner, left.as_ref(), right.as_ref()) == expected.map(str::to_string),
+                "case {name}"
+            );
+        }
     }
 }

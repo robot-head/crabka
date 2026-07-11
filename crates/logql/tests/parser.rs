@@ -162,9 +162,21 @@ fn query_evaluator_ignores_logql_comments_outside_strings() {
     .unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
-    check!(query.matches(&labels, "status=500 msg=\"error # literal\""));
-    check!(!query.matches(&labels, "status=500 msg=\"error\""));
-    check!(!query.matches(&labels, "status=200 msg=\"error # literal\""));
+    for (_name, line, expected) in [
+        (
+            "comment marker inside literal",
+            "status=500 msg=\"error # literal\"",
+            true,
+        ),
+        ("literal without marker", "status=500 msg=\"error\"", false),
+        (
+            "status below filter",
+            "status=200 msg=\"error # literal\"",
+            false,
+        ),
+    ] {
+        assert2::assert!(query.matches(&labels, line) == expected);
+    }
 }
 
 #[test]
@@ -173,12 +185,28 @@ fn decodes_common_escapes_in_quoted_strings() {
         parse_query(r#"{app="api\nprod"} |= "line\tone" | logfmt | msg = "hello\"there""#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api\nprod".to_string())]);
 
-    check!(query.matches(&labels, "line\tone msg=\"hello\\\"there\""));
-    check!(!query.matches(
-        &BTreeMap::from([("app".to_string(), "api\\nprod".to_string())]),
-        "line\tone msg=\"hello\\\"there\""
-    ));
-    check!(!query.matches(&labels, "line\\tone msg=\"hello\\\"there\""));
+    for (_name, candidate_labels, line, expected) in [
+        (
+            "decoded escapes",
+            labels.clone(),
+            "line\tone msg=\"hello\\\"there\"",
+            true,
+        ),
+        (
+            "literal label escape",
+            BTreeMap::from([("app".to_string(), "api\\nprod".to_string())]),
+            "line\tone msg=\"hello\\\"there\"",
+            false,
+        ),
+        (
+            "literal line escape",
+            labels.clone(),
+            "line\\tone msg=\"hello\\\"there\"",
+            false,
+        ),
+    ] {
+        assert2::assert!(query.matches(&candidate_labels, line) == expected);
+    }
 }
 
 #[test]
@@ -189,12 +217,28 @@ fn query_evaluator_applies_matchers_and_pipeline() {
         ("env".to_string(), "prod".to_string()),
     ]);
 
-    check!(query.matches(&labels, "error status=500"));
-    check!(!query.matches(&labels, "debug error status=500"));
-    check!(!query.matches(
-        &BTreeMap::from([("app".to_string(), "worker".to_string())]),
-        "error"
-    ));
+    for (_name, candidate_labels, line, expected) in [
+        (
+            "matching labels and line",
+            labels.clone(),
+            "error status=500",
+            true,
+        ),
+        (
+            "excluded debug line",
+            labels.clone(),
+            "debug error status=500",
+            false,
+        ),
+        (
+            "selector mismatch",
+            BTreeMap::from([("app".to_string(), "worker".to_string())]),
+            "error",
+            false,
+        ),
+    ] {
+        assert2::assert!(query.matches(&candidate_labels, line) == expected);
+    }
 }
 
 #[test]
@@ -426,10 +470,10 @@ fn query_evaluator_selected_json_extracts_paths_and_arrays() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("first_server") == Some(&"10.0.0.1".to_string()));
-    check!(evaluation.fields.get("ua") == Some(&"Agent/1".to_string()));
-    check!(!evaluation.fields.contains_key("request_method"));
-    check!(!evaluation.fields.contains_key("status"));
+    assert2::assert!(evaluation.fields.get("first_server") == Some(&"10.0.0.1".to_string()));
+    assert2::assert!(evaluation.fields.get("ua") == Some(&"Agent/1".to_string()));
+    assert2::assert!(!evaluation.fields.contains_key("request_method"));
+    assert2::assert!(!evaluation.fields.contains_key("status"));
 }
 
 #[test]
@@ -457,18 +501,25 @@ fn query_evaluator_applies_unpack_parser_and_replaced_line_filters() {
     .unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
-    check!(query.matches(
-        &labels,
-        r#"{"container":"myapp","pod":"pod-3223f","_entry":"original log message"}"#
-    ));
-    check!(!query.matches(
-        &labels,
-        r#"{"container":"myapp","pod":"pod-3223f","_entry":"container original log message"}"#
-    ));
-    check!(!query.matches(
-        &labels,
-        r#"{"container":"myapp","pod":"pod-3223f","_entry":"other log message"}"#
-    ));
+    for (_name, line, expected) in [
+        (
+            "matching unpacked entry",
+            r#"{"container":"myapp","pod":"pod-3223f","_entry":"original log message"}"#,
+            true,
+        ),
+        (
+            "excluded container entry",
+            r#"{"container":"myapp","pod":"pod-3223f","_entry":"container original log message"}"#,
+            false,
+        ),
+        (
+            "missing required text",
+            r#"{"container":"myapp","pod":"pod-3223f","_entry":"other log message"}"#,
+            false,
+        ),
+    ] {
+        assert2::assert!(query.matches(&labels, line) == expected);
+    }
 }
 
 #[test]
@@ -920,15 +971,25 @@ fn query_evaluator_line_format_applies_logical_template_helpers() {
     .unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
-    check!(query.matches(
-        &labels,
-        r#"method=GET path=/api/items msg="request timeout""#
-    ));
-    check!(!query.matches(
-        &labels,
-        r#"method=POST path=/api/items msg="request timeout""#
-    ));
-    check!(!query.matches(&labels, r#"method=GET path=/health msg="request timeout""#));
+    for (_name, line, expected) in [
+        (
+            "all helpers true",
+            r#"method=GET path=/api/items msg="request timeout""#,
+            true,
+        ),
+        (
+            "method helper false",
+            r#"method=POST path=/api/items msg="request timeout""#,
+            false,
+        ),
+        (
+            "path helpers false",
+            r#"method=GET path=/health msg="request timeout""#,
+            false,
+        ),
+    ] {
+        assert2::assert!(query.matches(&labels, line) == expected);
+    }
 }
 
 #[test]
@@ -939,9 +1000,13 @@ fn query_evaluator_line_format_applies_ne_template_helper() {
     .unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
-    check!(query.matches(&labels, r#"method=GET status=200"#));
-    check!(!query.matches(&labels, r#"method=POST status=200"#));
-    check!(!query.matches(&labels, r#"method=GET status=500"#));
+    for (_name, line, expected) in [
+        ("both unequal", r#"method=GET status=200"#, true),
+        ("method equal", r#"method=POST status=200"#, false),
+        ("status equal", r#"method=GET status=500"#, false),
+    ] {
+        assert2::assert!(query.matches(&labels, line) == expected);
+    }
 }
 
 #[test]
@@ -1354,9 +1419,9 @@ fn query_evaluator_applies_label_format_to_later_filters_and_labels() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("namespace") == Some(&"prod".to_string()));
-    check!(evaluation.fields.get("summary") == Some(&"GET 500".to_string()));
-    check!(!evaluation.fields.contains_key("env"));
+    assert2::assert!(evaluation.fields.get("namespace") == Some(&"prod".to_string()));
+    assert2::assert!(evaluation.fields.get("summary") == Some(&"GET 500".to_string()));
+    assert2::assert!(!evaluation.fields.contains_key("env"));
 }
 
 #[test]
@@ -1425,10 +1490,10 @@ fn query_evaluator_parameterized_logfmt_extracts_only_requested_fields() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
-    check!(evaluation.fields.get("fwd_ip") == Some(&"124.133.124.161".to_string()));
-    check!(!evaluation.fields.contains_key("method"));
-    check!(!evaluation.fields.contains_key("status"));
+    assert2::assert!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
+    assert2::assert!(evaluation.fields.get("fwd_ip") == Some(&"124.133.124.161".to_string()));
+    assert2::assert!(!evaluation.fields.contains_key("method"));
+    assert2::assert!(!evaluation.fields.contains_key("status"));
 }
 
 #[test]
@@ -1444,8 +1509,14 @@ fn query_evaluator_parameterized_logfmt_keeps_missing_requested_fields_as_empty(
         )
         .unwrap();
 
-    check!(evaluation.fields.get("status") == Some(&String::new()));
-    check!(evaluation.fields.get("message") == Some(&"api typed parser ok".to_string()));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("app".to_string(), "api".to_string()),
+                ("message".to_string(), "api typed parser ok".to_string()),
+                ("status".to_string(), String::new()),
+            ])
+    );
 }
 
 #[test]
@@ -1461,9 +1532,9 @@ fn query_evaluator_numeric_field_filter_keeps_invalid_present_values_as_label_fi
         )
         .unwrap();
 
-    check!(evaluation.fields.get("status") == Some(&String::new()));
-    check!(evaluation.fields.get("__error__") == Some(&"LabelFilterErr".to_string()));
-    check!(
+    assert2::assert!(evaluation.fields.get("status") == Some(&String::new()));
+    assert2::assert!(evaluation.fields.get("__error__") == Some(&"LabelFilterErr".to_string()));
+    assert2::assert!(
         evaluation.fields.get("__error_details__")
             == Some(&r#"strconv.ParseFloat: parsing "": invalid syntax"#.to_string())
     );
@@ -1480,8 +1551,14 @@ fn query_evaluator_logfmt_keep_empty_keeps_standalone_keys() {
         .evaluate_with_fields(&labels, r#"host=grafana.net empty"#, &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
-    check!(evaluation.fields.get("empty") == Some(&String::new()));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("app".to_string(), "api".to_string()),
+                ("empty".to_string(), String::new()),
+                ("host".to_string(), "grafana.net".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1505,8 +1582,13 @@ fn query_evaluator_logfmt_non_strict_skips_malformed_tokens() {
         .evaluate_with_fields(&labels, r#"=broken status=204"#, &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("status") == Some(&"204".to_string()));
-    check!(!evaluation.fields.contains_key("__error__"));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("app".to_string(), "api".to_string()),
+                ("status".to_string(), "204".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1530,8 +1612,13 @@ fn query_evaluator_field_filter_matches_missing_string_label_as_empty() {
         .evaluate_with_fields(&labels, r#"host=grafana.net"#, &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
-    check!(!evaluation.fields.contains_key("empty"));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("app".to_string(), "api".to_string()),
+                ("host".to_string(), "grafana.net".to_string()),
+            ])
+    );
 
     let non_empty_query = parse_query(r#"{app="api"} | logfmt | empty != """#).unwrap();
     check!(
@@ -1551,8 +1638,18 @@ fn query_evaluator_logfmt_strict_marks_malformed_tokens_as_errors() {
         .evaluate_with_fields(&labels, "host=grafana.net =broken", &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
-    check!(evaluation.fields.get("__error__") == Some(&"LogfmtParserErr".to_string()));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("__error__".to_string(), "LogfmtParserErr".to_string()),
+                (
+                    "__error_details__".to_string(),
+                    "invalid logfmt token at byte 17".to_string(),
+                ),
+                ("app".to_string(), "api".to_string()),
+                ("host".to_string(), "grafana.net".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1568,10 +1665,10 @@ fn query_evaluator_logfmt_strict_ignores_standalone_keys_without_keep_empty() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
-    check!(evaluation.fields.get("status") == Some(&"204".to_string()));
-    check!(!evaluation.fields.contains_key("empty"));
-    check!(!evaluation.fields.contains_key("__error__"));
+    assert2::assert!(evaluation.fields.get("host") == Some(&"grafana.net".to_string()));
+    assert2::assert!(evaluation.fields.get("status") == Some(&"204".to_string()));
+    assert2::assert!(!evaluation.fields.contains_key("empty"));
+    assert2::assert!(!evaluation.fields.contains_key("__error__"));
 }
 
 #[test]
@@ -1587,8 +1684,12 @@ fn query_evaluator_logfmt_sanitizes_ansi_prefixed_field_names() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("_31mstatus") == Some(&"503".to_string()));
-    check!(!evaluation.fields.contains_key("\u{1b}[31mstatus"));
+    check!(
+        (
+            evaluation.fields.get("_31mstatus"),
+            evaluation.fields.contains_key("\u{1b}[31mstatus"),
+        ) == (Some(&"503".to_string()), false)
+    );
 }
 
 #[test]
@@ -1604,11 +1705,17 @@ fn query_evaluator_logfmt_sanitizes_field_names_without_losing_valid_characters(
         )
         .unwrap();
 
-    check!(evaluation.fields.get("trace_id") == Some(&"abc".to_string()));
-    check!(evaluation.fields.get("span:id") == Some(&"def".to_string()));
-    check!(evaluation.fields.get("already_ok") == Some(&"ghi".to_string()));
-    check!(evaluation.fields.get("_9lives") == Some(&"cat".to_string()));
-    check!(evaluation.fields.get("a_b") == Some(&"two".to_string()));
+    assert2::assert!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("_9lives".to_string(), "cat".to_string()),
+                ("a_b".to_string(), "two".to_string()),
+                ("already_ok".to_string(), "ghi".to_string()),
+                ("app".to_string(), "api".to_string()),
+                ("span:id".to_string(), "def".to_string()),
+                ("trace_id".to_string(), "abc".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1621,10 +1728,14 @@ fn query_evaluator_logfmt_strict_reports_loki_syntax_error_details() {
         .evaluate_with_fields(&labels, r#"status=500 msg="unterminated"#, &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("__error__") == Some(&"LogfmtParserErr".to_string()));
     check!(
-        evaluation.fields.get("__error_details__")
-            == Some(&"logfmt syntax error at pos 29 : unterminated quoted value".to_string())
+        (
+            evaluation.fields.get("__error__"),
+            evaluation.fields.get("__error_details__"),
+        ) == (
+            Some(&"LogfmtParserErr".to_string()),
+            Some(&"logfmt syntax error at pos 29 : unterminated quoted value".to_string()),
+        )
     );
 }
 
@@ -1637,8 +1748,12 @@ fn query_evaluator_logfmt_non_strict_keep_empty_skips_malformed_quoted_values() 
         .evaluate_with_fields(&labels, r#"status=500 msg="unterminated"#, &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("status") == Some(&"500".to_string()));
-    check!(!evaluation.fields.contains_key("__error__"));
+    check!(
+        (
+            evaluation.fields.get("status"),
+            evaluation.fields.contains_key("__error__"),
+        ) == (Some(&"500".to_string()), false)
+    );
 }
 
 #[test]
@@ -1690,13 +1805,15 @@ fn query_evaluator_applies_drop_and_keep_to_later_filters_and_labels() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("app") == Some(&"api".to_string()));
-    check!(evaluation.fields.get("method") == Some(&"GET".to_string()));
-    check!(evaluation.fields.get("status") == Some(&"500".to_string()));
-    check!(evaluation.fields.get("__error__") == Some(&"ParserErr".to_string()));
-    check!(!evaluation.fields.contains_key("env"));
-    check!(!evaluation.fields.contains_key("level"));
-    check!(!evaluation.fields.contains_key("path"));
+    assert2::assert!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("__error__".to_string(), "ParserErr".to_string()),
+                ("app".to_string(), "api".to_string()),
+                ("method".to_string(), "GET".to_string()),
+                ("status".to_string(), "500".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1708,9 +1825,17 @@ fn query_evaluator_accepts_decimal_unwrap_samples() {
         .evaluate_with_fields(&labels, "cost=1.5", &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("__crabka_unwrap_sample_value__") == Some(&"1.5".to_string()));
-    check!(!evaluation.fields.contains_key("__error__"));
-    check!(!evaluation.fields.contains_key("__error_details__"));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                (
+                    "__crabka_unwrap_sample_value__".to_string(),
+                    "1.5".to_string()
+                ),
+                ("app".to_string(), "api".to_string()),
+                ("cost".to_string(), "1.5".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1718,19 +1843,27 @@ fn query_evaluator_accepts_signed_decimal_unwrap_samples() {
     let query = parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
-    let positive = query
-        .evaluate_with_fields(&labels, "cost=+1.5", &BTreeMap::new())
-        .unwrap();
-    let evaluation = query
-        .evaluate_with_fields(&labels, "cost=-1.5", &BTreeMap::new())
-        .unwrap();
+    for (name, line, expected_cost, expected_sample) in [
+        ("positive sign", "cost=+1.5", "+1.5", "1.5"),
+        ("negative sign", "cost=-1.5", "-1.5", "-1.5"),
+    ] {
+        let evaluation = query
+            .evaluate_with_fields(&labels, line, &BTreeMap::new())
+            .unwrap();
 
-    check!(positive.fields.get("__crabka_unwrap_sample_value__") == Some(&"1.5".to_string()));
-    check!(!positive.fields.contains_key("__error__"));
-    check!(!positive.fields.contains_key("__error_details__"));
-    check!(evaluation.fields.get("__crabka_unwrap_sample_value__") == Some(&"-1.5".to_string()));
-    check!(!evaluation.fields.contains_key("__error__"));
-    check!(!evaluation.fields.contains_key("__error_details__"));
+        check!(
+            evaluation.fields
+                == BTreeMap::from([
+                    (
+                        "__crabka_unwrap_sample_value__".to_string(),
+                        expected_sample.to_string(),
+                    ),
+                    ("app".to_string(), "api".to_string()),
+                    ("cost".to_string(), expected_cost.to_string()),
+                ]),
+            "case {name}"
+        );
+    }
 }
 
 #[test]
@@ -1742,15 +1875,17 @@ fn query_evaluator_rejects_repeated_sample_signs() {
         .evaluate_with_fields(&labels, "cost=++1.5", &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("__error__") == Some(&"SampleExtractionErr".to_string()));
     check!(
-        evaluation.fields.get("__error_details__")
-            == Some(&"unwrap label `cost` cannot be converted".to_string())
-    );
-    check!(
-        !evaluation
-            .fields
-            .contains_key("__crabka_unwrap_sample_value__")
+        evaluation.fields
+            == BTreeMap::from([
+                ("__error__".to_string(), "SampleExtractionErr".to_string()),
+                (
+                    "__error_details__".to_string(),
+                    "unwrap label `cost` cannot be converted".to_string(),
+                ),
+                ("app".to_string(), "api".to_string()),
+                ("cost".to_string(), "++1.5".to_string()),
+            ])
     );
 }
 
@@ -1763,9 +1898,17 @@ fn query_evaluator_accepts_scientific_unwrap_samples() {
         .evaluate_with_fields(&labels, "cost=-2.5e-1", &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("__crabka_unwrap_sample_value__") == Some(&"-0.25".to_string()));
-    check!(!evaluation.fields.contains_key("__error__"));
-    check!(!evaluation.fields.contains_key("__error_details__"));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                (
+                    "__crabka_unwrap_sample_value__".to_string(),
+                    "-0.25".to_string(),
+                ),
+                ("app".to_string(), "api".to_string()),
+                ("cost".to_string(), "-2.5e-1".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1823,11 +1966,16 @@ fn query_evaluator_json_parser_exposes_sanitized_scalar_fields_only() {
         )
         .unwrap();
 
-    check!(evaluation.fields.get("trace_id") == Some(&"abc".to_string()));
-    check!(evaluation.fields.get("span:id") == Some(&"def".to_string()));
-    check!(evaluation.fields.get("already_ok") == Some(&"ghi".to_string()));
-    check!(evaluation.fields.get("_9lives") == Some(&"cat".to_string()));
-    check!(!evaluation.fields.contains_key("servers"));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("_9lives".to_string(), "cat".to_string()),
+                ("already_ok".to_string(), "ghi".to_string()),
+                ("app".to_string(), "api".to_string()),
+                ("span:id".to_string(), "def".to_string()),
+                ("trace_id".to_string(), "abc".to_string()),
+            ])
+    );
 }
 
 #[test]
@@ -1894,8 +2042,14 @@ fn query_evaluator_pattern_parser_captures_after_leading_literals() {
         .evaluate_with_fields(&labels, "prefix method=POST status=500", &BTreeMap::new())
         .unwrap();
 
-    check!(evaluation.fields.get("method") == Some(&"POST".to_string()));
-    check!(evaluation.fields.get("status") == Some(&"500".to_string()));
+    check!(
+        evaluation.fields
+            == BTreeMap::from([
+                ("app".to_string(), "api".to_string()),
+                ("method".to_string(), "POST".to_string()),
+                ("status".to_string(), "500".to_string()),
+            ])
+    );
     check!(!query.matches(&labels, "prefix method=GET status=500"));
 }
 
@@ -2142,10 +2296,30 @@ fn query_evaluator_applies_duration_and_bytes_field_filters() {
         parse_query(r#"{app="api"} | logfmt | duration >= 20ms | bytes_consumed > 20MB"#).unwrap();
     let labels = BTreeMap::from([("app".to_string(), "api".to_string())]);
 
-    check!(query.matches(&labels, "duration=25ms bytes_consumed=21MB"));
-    check!(!query.matches(&labels, "duration=10ms bytes_consumed=21MB"));
-    check!(!query.matches(&labels, "duration=25ms bytes_consumed=19MB"));
-    check!(!query.matches(&labels, "duration=oops bytes_consumed=21MB"));
+    for (_name, line, expected) in [
+        (
+            "both filters match",
+            "duration=25ms bytes_consumed=21MB",
+            true,
+        ),
+        (
+            "duration too short",
+            "duration=10ms bytes_consumed=21MB",
+            false,
+        ),
+        (
+            "bytes too small",
+            "duration=25ms bytes_consumed=19MB",
+            false,
+        ),
+        (
+            "invalid duration",
+            "duration=oops bytes_consumed=21MB",
+            false,
+        ),
+    ] {
+        assert2::assert!(query.matches(&labels, line) == expected);
+    }
 }
 
 #[test]
@@ -2268,12 +2442,12 @@ fn parses_label_replace_metric_query() {
     )
     .unwrap();
 
-    check!(query.destination_label == "service");
-    check!(query.replacement == "$1-api");
-    check!(query.source_label == "app");
-    check!(query.pattern == "(.*)");
-    check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.destination_label.as_str() == "service");
+    assert2::assert!(query.replacement.as_str() == "$1-api");
+    assert2::assert!(query.source_label.as_str() == "app");
+    assert2::assert!(query.pattern.as_str() == "(.*)");
+    assert2::assert!(query.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2283,11 +2457,13 @@ fn parses_label_join_metric_query() {
     )
     .unwrap();
 
-    check!(query.destination_label == "joined");
-    check!(query.separator == "/");
-    check!(query.source_labels == vec!["app", "env", "missing"]);
-    check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.destination_label.as_str() == "joined");
+    assert2::assert!(query.separator.as_str() == "/");
+    assert2::assert!(
+        &query.source_labels == &vec!["app".to_string(), "env".to_string(), "missing".to_string()]
+    );
+    assert2::assert!(query.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2297,11 +2473,11 @@ fn parses_metric_scalar_comparison_query() {
     )
     .unwrap();
 
-    check!(query.op == ComparisonOp::Greater);
-    check!(query.bool_modifier);
-    check!(query.scalar == "1.5e0");
-    check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == ComparisonOp::Greater);
+    assert2::assert!(query.bool_modifier);
+    assert2::assert!(query.scalar.as_str() == "1.5e0");
+    assert2::assert!(query.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2311,12 +2487,12 @@ fn parses_scalar_metric_comparison_query() {
     )
     .unwrap();
 
-    check!(query.op == ComparisonOp::Greater);
-    check!(query.bool_modifier);
-    check!(query.scalar == "2");
-    check!(query.scalar_on_left);
-    check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == ComparisonOp::Greater);
+    assert2::assert!(query.bool_modifier);
+    assert2::assert!(query.scalar.as_str() == "2");
+    assert2::assert!(query.scalar_on_left);
+    assert2::assert!(query.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2326,10 +2502,10 @@ fn parses_metric_scalar_arithmetic_query() {
     )
     .unwrap();
 
-    check!(query.op == crabka_logql::MetricScalarArithmeticOp::Multiply);
-    check!(query.scalar == "2.5");
-    check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == crabka_logql::MetricScalarArithmeticOp::Multiply);
+    assert2::assert!(query.scalar.as_str() == "2.5");
+    assert2::assert!(query.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2339,40 +2515,40 @@ fn parses_scalar_metric_arithmetic_query() {
     )
     .unwrap();
 
-    check!(query.op == crabka_logql::MetricScalarArithmeticOp::Subtract);
-    check!(query.scalar == "2");
-    check!(query.scalar_on_left);
-    check!(query.query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == crabka_logql::MetricScalarArithmeticOp::Subtract);
+    assert2::assert!(query.scalar.as_str() == "2");
+    assert2::assert!(query.scalar_on_left);
+    assert2::assert!(query.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
 fn parses_parenthesized_metric_expression_operands() {
     let metric_scalar =
         parse_metric_scalar_arithmetic_query(r#"(count_over_time({app="api"}[30s])) * 2"#).unwrap();
-    check!(metric_scalar.op == crabka_logql::MetricScalarArithmeticOp::Multiply);
-    check!(metric_scalar.query.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(metric_scalar.op == crabka_logql::MetricScalarArithmeticOp::Multiply);
+    assert2::assert!(metric_scalar.query.aggregation == RangeAggregation::CountOverTime);
 
     let scalar_metric =
         parse_metric_scalar_comparison_query(r#"2 > bool ((count_over_time({app="api"}[30s])))"#)
             .unwrap();
-    check!(scalar_metric.scalar_on_left);
-    check!(scalar_metric.query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(scalar_metric.scalar_on_left);
+    assert2::assert!(scalar_metric.query.range_ns == DurationNanos(30_000_000_000));
 
     let binary = parse_metric_binary_arithmetic_query(
         r#"(count_over_time({app="api"}[30s])) / (count_over_time({app="worker"}[15s]))"#,
     )
     .unwrap();
-    check!(binary.left.range_ns == DurationNanos(30_000_000_000));
-    check!(binary.right.range_ns == DurationNanos(15_000_000_000));
+    assert2::assert!(binary.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(binary.right.range_ns == DurationNanos(15_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"(count_over_time({app="api"}[30s])) or (count_over_time({app="worker"}[15s]))"#,
     )
     .unwrap();
-    check!(set.op == crabka_logql::MetricBinarySetOp::Or);
-    check!(set.left.range_ns == DurationNanos(30_000_000_000));
-    check!(set.right.range_ns == DurationNanos(15_000_000_000));
+    assert2::assert!(set.op == crabka_logql::MetricBinarySetOp::Or);
+    assert2::assert!(set.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(set.right.range_ns == DurationNanos(15_000_000_000));
 
     let label_replace = parse_metric_label_replace_query(
         r#"label_replace((count_over_time({app="api"}[30s])), "service", "$1", "app", "(.*)")"#,
@@ -2419,16 +2595,16 @@ fn parses_metric_function_arguments_with_nested_commas_and_quotes() {
     )
     .unwrap();
 
-    check!(label_replace.query.vector_aggregation.is_some());
-    check!(label_replace.pattern == "api,(.*)");
+    assert2::assert!(label_replace.query.vector_aggregation.is_some());
+    assert2::assert!(label_replace.pattern.as_str() == "api,(.*)");
 
     let label_join = parse_metric_label_join_query(
         r#"label_join(sum by (app) (count_over_time({app="api"}[30s])), "joined", ",", "app", "env")"#,
     )
     .unwrap();
 
-    check!(label_join.query.vector_aggregation.is_some());
-    check!(label_join.separator == ",");
+    assert2::assert!(label_join.query.vector_aggregation.is_some());
+    assert2::assert!(label_join.separator.as_str() == ",");
 
     let label_replace = parse_metric_label_replace_query(
         r#"label_replace(sum by (app, env) (count_over_time({app="api"} |= ")" [30s])), "service", "$1", "app", "(.*)")"#,
@@ -2463,11 +2639,11 @@ fn parses_metric_binary_arithmetic_query() {
     )
     .unwrap();
 
-    check!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
-    check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.left.range_ns == DurationNanos(30_000_000_000));
-    check!(query.right.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
+    assert2::assert!(query.left.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.right.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.right.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2492,16 +2668,16 @@ fn parses_metric_binary_arithmetic_matching_modifier() {
     )
     .unwrap();
 
-    check!(
+    assert2::assert!(
         query.matching
             == Some(crabka_logql::MetricVectorMatching::Ignoring {
                 labels: vec!["app".to_string()],
                 group: None,
             })
     );
-    check!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
-    check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
+    assert2::assert!(query.left.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.right.aggregation == RangeAggregation::CountOverTime);
 }
 
 #[test]
@@ -2510,22 +2686,22 @@ fn parses_metric_binary_arguments_with_nested_operator_characters() {
         r#"count_over_time({app="api"} | line_format `literal > inside` [30s]) > bool count_over_time({app="api"}[30s])"#,
     )
     .unwrap();
-    check!(comparison.op == ComparisonOp::Greater);
-    check!(comparison.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(comparison.op == ComparisonOp::Greater);
+    assert2::assert!(comparison.left.range_ns == DurationNanos(30_000_000_000));
 
     let arithmetic = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"} |= "+" [30s]) + count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
-    check!(arithmetic.right.range_ns == DurationNanos(15_000_000_000));
+    assert2::assert!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
+    assert2::assert!(arithmetic.right.range_ns == DurationNanos(15_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"count_over_time({app="origin"} |= "or" [30s]) or count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    check!(set.op == crabka_logql::MetricBinarySetOp::Or);
-    check!(set.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(set.op == crabka_logql::MetricBinarySetOp::Or);
+    assert2::assert!(set.left.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2534,22 +2710,22 @@ fn parses_metric_binary_arguments_with_quoted_parentheses_and_nested_keywords() 
         r#"count_over_time({app="api"} |= ")" [30s]) > bool count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    check!(comparison.left.range_ns == DurationNanos(30_000_000_000));
-    check!(comparison.right.range_ns == DurationNanos(15_000_000_000));
+    assert2::assert!(comparison.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(comparison.right.range_ns == DurationNanos(15_000_000_000));
 
     let arithmetic = parse_metric_binary_arithmetic_query(
         r#"count_over_time({app="api"} |= ")" [30s] offset -5m) + count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    check!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
-    check!(arithmetic.left.offset_ns == OffsetNanos(-300_000_000_000));
+    assert2::assert!(arithmetic.op == crabka_logql::MetricScalarArithmeticOp::Add);
+    assert2::assert!(arithmetic.left.offset_ns == OffsetNanos(-300_000_000_000));
 
     let set = parse_metric_binary_set_query(
         r#"sum by (or) (count_over_time({app="api"} |= ")" [30s])) and count_over_time({app="worker"}[15s])"#,
     )
     .unwrap();
-    check!(set.op == crabka_logql::MetricBinarySetOp::And);
-    check!(
+    assert2::assert!(set.op == crabka_logql::MetricBinarySetOp::And);
+    assert2::assert!(
         set.left.vector_aggregation
             == Some(VectorAggregation {
                 op: VectorAggregationOp::Sum,
@@ -2565,7 +2741,7 @@ fn parses_metric_binary_arithmetic_group_modifier() {
     )
     .unwrap();
 
-    check!(
+    assert2::assert!(
         query.matching
             == Some(crabka_logql::MetricVectorMatching::On {
                 labels: vec!["env".to_string()],
@@ -2574,9 +2750,9 @@ fn parses_metric_binary_arithmetic_group_modifier() {
                 ])),
             })
     );
-    check!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
-    check!(query.left.vector_aggregation.is_some());
-    check!(query.right.vector_aggregation.is_some());
+    assert2::assert!(query.op == crabka_logql::MetricScalarArithmeticOp::Divide);
+    assert2::assert!(query.left.vector_aggregation.is_some());
+    assert2::assert!(query.right.vector_aggregation.is_some());
 }
 
 #[test]
@@ -2586,12 +2762,12 @@ fn parses_metric_binary_comparison_query() {
     )
     .unwrap();
 
-    check!(query.op == ComparisonOp::Greater);
-    check!(query.bool_modifier);
-    check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.left.range_ns == DurationNanos(30_000_000_000));
-    check!(query.right.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == ComparisonOp::Greater);
+    assert2::assert!(query.bool_modifier);
+    assert2::assert!(query.left.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.right.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.right.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2601,11 +2777,11 @@ fn parses_metric_binary_set_query() {
     )
     .unwrap();
 
-    check!(query.op == crabka_logql::MetricBinarySetOp::And);
-    check!(query.left.aggregation == RangeAggregation::CountOverTime);
-    check!(query.left.range_ns == DurationNanos(30_000_000_000));
-    check!(query.right.aggregation == RangeAggregation::CountOverTime);
-    check!(query.right.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.op == crabka_logql::MetricBinarySetOp::And);
+    assert2::assert!(query.left.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.left.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.right.aggregation == RangeAggregation::CountOverTime);
+    assert2::assert!(query.right.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2642,12 +2818,12 @@ fn parses_rate_counter_unwrap_metric_query() {
     )
     .unwrap();
 
-    check!(query.aggregation == RangeAggregation::RateCounter);
-    check!(
+    assert2::assert!(query.aggregation == RangeAggregation::RateCounter);
+    assert2::assert!(
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap requests | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2671,9 +2847,9 @@ fn parses_bytes_over_time_metric_query() {
 fn parses_bytes_rate_metric_query() {
     let query = parse_metric_query(r#"bytes_rate({app="api"} |= "error" [2m])"#).unwrap();
 
-    check!(format!("{:?}", query.aggregation) == "BytesRate");
-    check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == DurationNanos(120_000_000_000));
+    assert2::assert!(format!("{:?}", query.aggregation) == "BytesRate".to_string());
+    assert2::assert!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
+    assert2::assert!(query.range_ns == DurationNanos(120_000_000_000));
 }
 
 #[test]
@@ -2801,18 +2977,32 @@ fn parses_sum_over_time_unwrap_duration_seconds_metric_query() {
 }
 
 #[test]
-fn parses_avg_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"avg_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::AvgOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
+fn parses_basic_unwrap_metric_queries() {
+    for (_name, input, aggregation) in [
+        (
+            "average",
+            r#"avg_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
+            RangeAggregation::AvgOverTime,
+        ),
+        (
+            "standard variance",
+            r#"stdvar_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
+            RangeAggregation::StdvarOverTime,
+        ),
+        (
+            "standard deviation",
+            r#"stddev_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
+            RangeAggregation::StddevOverTime,
+        ),
+    ] {
+        let query = parse_metric_query(input).unwrap();
+        assert2::assert!(query.aggregation == aggregation);
+        assert2::assert!(
+            query.stream
+                == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
+        );
+        assert2::assert!(query.range_ns == DurationNanos(30_000_000_000));
+    }
 }
 
 #[test]
@@ -2822,43 +3012,13 @@ fn parses_avg_over_time_unwrap_metric_query_with_range_grouping() {
     )
     .unwrap();
 
-    check!(query.aggregation == RangeAggregation::AvgOverTime);
-    check!(
+    assert2::assert!(query.aggregation == RangeAggregation::AvgOverTime);
+    assert2::assert!(
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
-    check!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
-}
-
-#[test]
-fn parses_stdvar_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"stdvar_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::StdvarOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
-}
-
-#[test]
-fn parses_stddev_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"stddev_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::StddevOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
 }
 
 #[test]
@@ -2868,18 +3028,18 @@ fn parses_quantile_over_time_unwrap_metric_query() {
     )
     .unwrap();
 
-    check!(
+    assert2::assert!(
         query.aggregation
             == RangeAggregation::QuantileOverTime(Quantile {
                 numerator: QuantileNumerator(3),
                 denominator: QuantileDenominator(4),
             })
     );
-    check!(
+    assert2::assert!(
         query.stream
             == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
     );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
+    assert2::assert!(query.range_ns == DurationNanos(30_000_000_000));
 }
 
 #[test]
@@ -2889,14 +3049,14 @@ fn parses_fraction_only_quantile_over_time_metric_query() {
     )
     .unwrap();
 
-    check!(
+    assert2::assert!(
         query.aggregation
             == RangeAggregation::QuantileOverTime(Quantile {
                 numerator: QuantileNumerator(3),
                 denominator: QuantileDenominator(4),
             })
     );
-    check!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
+    assert2::assert!(query.range_grouping == Some(VectorGrouping::By(vec!["app".to_string()])));
 }
 
 #[test]
@@ -2907,81 +3067,46 @@ fn rejects_invalid_quantile_scalars() {
 }
 
 #[test]
-fn parses_absent_over_time_metric_query() {
-    let query = parse_metric_query(r#"absent_over_time({app="api",env="prod"} [30s])"#).unwrap();
-
-    check!(query.aggregation == RangeAggregation::AbsentOverTime);
-    check!(query.stream == parse_query(r#"{app="api",env="prod"}"#).unwrap());
-    check!(query.range_ns == DurationNanos(30_000_000_000));
+fn parses_presence_metric_queries() {
+    for (_name, input, expected_aggregation, expected_stream) in [
+        (
+            "absent",
+            r#"absent_over_time({app="api",env="prod"} [30s])"#,
+            RangeAggregation::AbsentOverTime,
+            r#"{app="api",env="prod"}"#,
+        ),
+        (
+            "present",
+            r#"present_over_time({app="api"} |= "error" [30s])"#,
+            RangeAggregation::PresentOverTime,
+            r#"{app="api"} |= "error""#,
+        ),
+    ] {
+        let query = parse_metric_query(input).unwrap();
+        assert2::assert!(query.aggregation == expected_aggregation);
+        assert2::assert!(query.stream == parse_query(expected_stream).unwrap());
+        assert2::assert!(query.range_ns == DurationNanos(30_000_000_000));
+    }
 }
 
 #[test]
-fn parses_present_over_time_metric_query() {
-    let query = parse_metric_query(r#"present_over_time({app="api"} |= "error" [30s])"#).unwrap();
-
-    check!(query.aggregation == RangeAggregation::PresentOverTime);
-    check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == DurationNanos(30_000_000_000));
-}
-
-#[test]
-fn parses_min_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"min_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::MinOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
-}
-
-#[test]
-fn parses_max_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"max_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::MaxOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
-}
-
-#[test]
-fn parses_first_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"first_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::FirstOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
-}
-
-#[test]
-fn parses_last_over_time_unwrap_metric_query() {
-    let query = parse_metric_query(
-        r#"last_over_time({app="api"} | logfmt | unwrap cost | __error__ = "" [30s])"#,
-    )
-    .unwrap();
-
-    check!(query.aggregation == RangeAggregation::LastOverTime);
-    check!(
-        query.stream
-            == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
-    );
-    check!(query.range_ns == DurationNanos(30_000_000_000));
+fn parses_extrema_unwrap_metric_queries() {
+    for (_name, function, aggregation) in [
+        ("minimum", "min_over_time", RangeAggregation::MinOverTime),
+        ("maximum", "max_over_time", RangeAggregation::MaxOverTime),
+        ("first", "first_over_time", RangeAggregation::FirstOverTime),
+        ("last", "last_over_time", RangeAggregation::LastOverTime),
+    ] {
+        let input =
+            format!(r#"{function}({{app="api"}} | logfmt | unwrap cost | __error__ = "" [30s])"#);
+        let query = parse_metric_query(&input).unwrap();
+        assert2::assert!(query.aggregation == aggregation);
+        assert2::assert!(
+            query.stream
+                == parse_query(r#"{app="api"} | logfmt | unwrap cost | __error__ = """#).unwrap()
+        );
+        assert2::assert!(query.range_ns == DurationNanos(30_000_000_000));
+    }
 }
 
 #[test]
@@ -3003,25 +3128,18 @@ fn parses_compound_prometheus_duration_metric_query() {
 }
 
 #[test]
-fn parses_metric_query_with_range_offset() {
-    let query =
-        parse_metric_query(r#"count_over_time({app="api"} |= "error" [10s] offset 5m)"#).unwrap();
-
-    check!(query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == DurationNanos(10_000_000_000));
-    check!(query.offset_ns == OffsetNanos(300_000_000_000));
-}
-
-#[test]
-fn parses_metric_query_with_negative_range_offset() {
-    let query =
-        parse_metric_query(r#"count_over_time({app="api"} |= "error" [10s] offset -5m)"#).unwrap();
-
-    check!(query.aggregation == RangeAggregation::CountOverTime);
-    check!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
-    check!(query.range_ns == DurationNanos(10_000_000_000));
-    check!(query.offset_ns == OffsetNanos(-300_000_000_000));
+fn parses_metric_query_range_offsets() {
+    for (_name, offset, expected_offset) in [
+        ("positive", "5m", OffsetNanos(300_000_000_000)),
+        ("negative", "-5m", OffsetNanos(-300_000_000_000)),
+    ] {
+        let input = format!(r#"count_over_time({{app="api"}} |= "error" [10s] offset {offset})"#);
+        let query = parse_metric_query(&input).unwrap();
+        assert2::assert!(query.aggregation == RangeAggregation::CountOverTime);
+        assert2::assert!(query.stream == parse_query(r#"{app="api"} |= "error""#).unwrap());
+        assert2::assert!(query.range_ns == DurationNanos(10_000_000_000));
+        assert2::assert!(query.offset_ns == expected_offset);
+    }
 }
 
 #[test]

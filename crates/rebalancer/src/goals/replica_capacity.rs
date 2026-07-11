@@ -184,8 +184,6 @@ impl Goal for ReplicaCapacity {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::assert;
-
     use super::*;
     use crate::{
         capacity::{BrokerCapacities, BrokerCapacity},
@@ -267,7 +265,7 @@ mod tests {
         ];
         let s = state_with(parts, vec![1, 2]);
         let mvs = ReplicaCapacity.propose(&s, &ctx_with(caps_with(1, 10)));
-        assert!(mvs.is_empty(), "under-capacity must no-op, got {mvs:?}");
+        assert2::assert!(mvs.is_empty());
     }
 
     #[test]
@@ -276,8 +274,12 @@ mod tests {
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(caps_with(1, 3));
 
-        assert!(ReplicaCapacity.propose(&s, &ctx).is_empty());
-        assert!(ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(
+            (
+                ReplicaCapacity.propose(&s, &ctx).is_empty(),
+                ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx)
+            ) == (true, true)
+        );
     }
 
     #[test]
@@ -285,14 +287,11 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = ReplicaCapacity.propose(&s, &ctx_with(caps_with(1, 3)));
-        assert!(!mvs.is_empty(), "over-capacity must emit movements");
+        assert2::assert!(!mvs.is_empty());
         for m in &mvs {
             let before = m.old_replicas.iter().filter(|x| **x == 1).count();
             let after = m.new_replicas.iter().filter(|x| **x == 1).count();
-            assert!(
-                after < before,
-                "movement must reduce broker-1 replicas: {m:?}"
-            );
+            assert2::assert!(after < before);
         }
     }
 
@@ -308,8 +307,7 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert2::assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]
@@ -324,8 +322,7 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(mvs.len() == 1);
-        assert!(mvs[0].new_replicas == vec![3]);
+        assert2::assert!(mvs.iter().map(|m| &m.new_replicas).collect::<Vec<_>>() == vec![&vec![3]]);
     }
 
     #[test]
@@ -336,7 +333,7 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "t".into(),
                 partition: 1,
@@ -356,7 +353,7 @@ mod tests {
 
         let mvs = ReplicaCapacity.propose(&s, &ctx);
 
-        assert!(
+        assert2::assert!(
             mvs == vec![Movement {
                 topic: "hot".into(),
                 partition: 0,
@@ -373,7 +370,7 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = ReplicaCapacity.propose(&s, &ctx_with(BrokerCapacities::default()));
-        assert!(mvs.is_empty(), "no entries must no-op, got {mvs:?}");
+        assert2::assert!(mvs.is_empty());
     }
 
     #[test]
@@ -391,7 +388,7 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let mvs = ReplicaCapacity.propose(&s, &ctx_with(caps));
-        assert!(mvs.is_empty(), "no max_replicas must no-op, got {mvs:?}");
+        assert2::assert!(mvs.is_empty());
     }
 
     #[test]
@@ -424,7 +421,7 @@ mod tests {
         // donor must be broker 1 each time (tie-broken by id).
         for _ in 0..5 {
             let mvs = ReplicaCapacity.propose(&s, &ctx_with(caps.clone()));
-            assert!(!mvs.is_empty(), "expected at least one movement");
+            assert2::assert!(!mvs.is_empty());
             let first = &mvs[0];
             // The first movement evicts whichever broker find_over_capacity
             // picked first. Determinism = same broker every run.
@@ -434,10 +431,7 @@ mod tests {
                 .find(|r| !first.new_replicas.contains(r))
                 .copied()
                 .expect("a broker was evicted");
-            assert!(
-                evicted == 1,
-                "tie should resolve to broker 1 (lowest id), got broker {evicted}"
-            );
+            assert2::assert!(evicted == 1);
         }
     }
 
@@ -447,7 +441,7 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
         let ctx = ctx_with(caps_with(1, 3));
-        assert!(!ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(!ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 
     #[test]
@@ -455,7 +449,7 @@ mod tests {
         let parts: Vec<_> = (0..5).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2, 3]);
 
-        assert!(ReplicaCapacity.is_satisfied(&s));
+        assert2::assert!(ReplicaCapacity.is_satisfied(&s));
     }
 
     #[test]
@@ -463,6 +457,6 @@ mod tests {
         let parts: Vec<_> = (0..3).map(|i| part("t", i, vec![1, 2], 1)).collect();
         let s = state_with(parts, vec![1, 2]);
         let ctx = ctx_with(caps_with(1, 10));
-        assert!(ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
+        assert2::assert!(ReplicaCapacity.is_satisfied_with_ctx(&s, &ctx));
     }
 }

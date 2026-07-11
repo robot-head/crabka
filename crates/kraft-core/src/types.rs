@@ -88,7 +88,7 @@ mod tests {
     fn quorum_state_starts_unattached_at_epoch_zero() {
         let voters = test_voter_set(&[NodeId(1), NodeId(2), NodeId(3)]);
         let qs = QuorumState::bootstrap(uuid::Uuid::nil(), voters.clone());
-        assert!(
+        assert2::assert!(
             qs == QuorumState {
                 cluster_id: uuid::Uuid::nil(),
                 leader_epoch: 0,
@@ -97,7 +97,7 @@ mod tests {
                 voters,
             }
         );
-        assert!(qs.voters.contains(NodeId(2)));
+        assert2::assert!(qs.voters.contains(NodeId(2)));
     }
 
     pub(crate) fn test_voter_set(ids: &[NodeId]) -> crabka_voters::VoterSet {

@@ -122,7 +122,6 @@ impl Span {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
 
@@ -154,8 +153,8 @@ mod tests {
 
     #[test]
     fn root_detection() {
-        assert!(span(None).is_root());
-        assert!(!span(Some([3; 8])).is_root());
+        assert2::assert!(span(None).is_root());
+        assert2::assert!(!span(Some([3; 8])).is_root());
     }
 
     #[test]
@@ -168,14 +167,14 @@ mod tests {
             SpanKind::Producer,
             SpanKind::Consumer,
         ] {
-            assert!(SpanKind::from_i32(kind.as_i32()) == kind);
+            assert2::assert!(SpanKind::from_i32(kind.as_i32()) == kind);
         }
     }
 
     #[test]
     fn status_round_trips_i32() {
         for status in [StatusCode::Unset, StatusCode::Ok, StatusCode::Error] {
-            assert!(StatusCode::from_i32(status.as_i32()) == status);
+            assert2::assert!(StatusCode::from_i32(status.as_i32()) == status);
         }
     }
 }

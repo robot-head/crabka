@@ -5,7 +5,6 @@
 //! All failures are collected and reported at the end so a single run reveals
 //! every divergence (not just the first).
 
-use assert2::assert;
 mod support;
 use serde_json::json;
 use support::oracle;
@@ -84,12 +83,7 @@ fn every_pair_byte_equal() {
             }
         }
     }
-    assert!(
-        failures.is_empty(),
-        "{} pair(s) failed differential:\n{}",
-        failures.len(),
-        failures.join("\n")
-    );
+    assert2::assert!(failures.is_empty());
 }
 
 fn kind_str(k: Kind) -> &'static str {

@@ -209,8 +209,6 @@ impl NextGenConfig {
 mod tests {
     use std::collections::HashMap;
 
-    use assert2::assert;
-
     use super::*;
     use crate::coordinator::unified::assignor::{Assignment, MemberSubscription, TopicMetadata};
 
@@ -228,10 +226,8 @@ mod tests {
     #[test]
     fn default_registers_uniform_and_range() {
         let cfg = NextGenConfig::default();
-        assert!(cfg.assignors.len() == 2);
         let names: Vec<&str> = cfg.assignors.iter().map(|a| a.name()).collect();
-        assert!(names.contains(&"uniform"));
-        assert!(names.contains(&"range"));
+        assert2::assert!(names == vec!["uniform", "range"]);
     }
 
     #[test]
@@ -239,7 +235,7 @@ mod tests {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("custom")))
             .unwrap();
-        assert!(cfg.find_assignor("custom").is_some());
+        assert2::assert!(cfg.find_assignor("custom").is_some());
     }
 
     #[test]
@@ -249,7 +245,7 @@ mod tests {
             .register_assignor(Arc::new(TestAssignor("uniform")))
             .unwrap_err();
         match err {
-            AssignorRegistrationError::DuplicateName(name) => assert!(name == "uniform"),
+            AssignorRegistrationError::DuplicateName(name) => assert2::assert!(name == "uniform"),
         }
     }
 
@@ -258,22 +254,27 @@ mod tests {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("x"))).unwrap();
         let resolved = cfg.find_assignor("x").expect("registered");
-        assert!(resolved.name() == "x");
+        assert2::assert!(resolved.name() == "x");
     }
 
     #[test]
     fn assignor_enabled_matches_find_assignor() {
         let mut cfg = NextGenConfig::default();
         cfg.register_assignor(Arc::new(TestAssignor("y"))).unwrap();
-        for name in ["uniform", "range", "y", "ghost"] {
-            assert!(cfg.assignor_enabled(name) == cfg.find_assignor(name).is_some());
+        for (_case, name) in [
+            ("built-in uniform", "uniform"),
+            ("built-in range", "range"),
+            ("custom", "y"),
+            ("absent", "ghost"),
+        ] {
+            assert2::assert!(cfg.assignor_enabled(name) == cfg.find_assignor(name).is_some());
         }
     }
 
     #[test]
     fn migration_policy_default_is_bidirectional() {
         // Matches Apache Kafka 4.0 (verified empirically).
-        assert!(
+        assert2::assert!(
             NextGenConfig::default().migration_policy
                 == ConsumerGroupMigrationPolicy::Bidirectional
         );
@@ -282,34 +283,40 @@ mod tests {
     #[test]
     fn migration_policy_from_str_round_trips_all_names() {
         use ConsumerGroupMigrationPolicy as P;
-        for p in [P::Disabled, P::Upgrade, P::Downgrade, P::Bidirectional] {
-            assert!(p.as_str().parse::<P>().unwrap() == p);
+        for (_case, input, expected) in [
+            ("disabled", "disabled", P::Disabled),
+            ("upgrade", "upgrade", P::Upgrade),
+            ("downgrade", "downgrade", P::Downgrade),
+            ("bidirectional", "bidirectional", P::Bidirectional),
+            (
+                "mixed-case bidirectional",
+                "BiDirectional",
+                P::Bidirectional,
+            ),
+            ("uppercase upgrade", "UPGRADE", P::Upgrade),
+        ] {
+            assert2::assert!(input.parse::<P>().unwrap() == expected);
         }
-        // Case-insensitive.
-        assert!("BiDirectional".parse::<P>().unwrap() == P::Bidirectional);
-        assert!("UPGRADE".parse::<P>().unwrap() == P::Upgrade);
     }
 
     #[test]
     fn migration_policy_from_str_rejects_junk() {
-        assert!("sideways".parse::<ConsumerGroupMigrationPolicy>().is_err());
-        assert!("".parse::<ConsumerGroupMigrationPolicy>().is_err());
+        for (_case, input) in [("unknown name", "sideways"), ("empty name", "")] {
+            assert2::assert!(input.parse::<ConsumerGroupMigrationPolicy>().is_err());
+        }
     }
 
     #[test]
     fn migration_policy_direction_truth_table() {
         use ConsumerGroupMigrationPolicy as P;
         let cases = [
-            (P::Disabled, (false, false)),
-            (P::Upgrade, (true, false)),
-            (P::Downgrade, (false, true)),
-            (P::Bidirectional, (true, true)),
+            ("disabled", P::Disabled, (false, false)),
+            ("upgrade", P::Upgrade, (true, false)),
+            ("downgrade", P::Downgrade, (false, true)),
+            ("bidirectional", P::Bidirectional, (true, true)),
         ];
-        for (policy, want) in cases {
-            assert!(
-                (policy.allows_upgrade(), policy.allows_downgrade()) == want,
-                "policy {policy:?}"
-            );
+        for (_case, policy, want) in cases {
+            assert2::assert!((policy.allows_upgrade(), policy.allows_downgrade()) == want);
         }
     }
 
@@ -328,7 +335,7 @@ mod tests {
 
         let rendered = format!("{cfg:?}");
 
-        assert!(rendered.starts_with("NextGenConfig"), "got {rendered}");
+        assert2::assert!(rendered.starts_with("NextGenConfig"));
         for needle in [
             "rebalance_protocols",
             "session_timeout",
@@ -344,20 +351,11 @@ mod tests {
             "migration_policy",
             "Downgrade",
         ] {
-            assert!(
-                rendered.contains(needle),
-                "Debug output missing {needle:?}: {rendered}"
-            );
+            assert2::assert!(rendered.contains(needle));
         }
         // `finish_non_exhaustive` elides the sleeper with a trailing `..`; the
         // elided field's name must not leak into the output.
-        assert!(
-            rendered.contains(".."),
-            "expected non-exhaustive marker: {rendered}"
-        );
-        assert!(
-            !rendered.contains("sleeper"),
-            "sleeper must be elided: {rendered}"
-        );
+        assert2::assert!(rendered.contains(".."));
+        assert2::assert!(!rendered.contains("sleeper"));
     }
 }

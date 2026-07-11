@@ -302,13 +302,10 @@ impl Model for EosModel {
             }
         }
         // HWM never regresses and never passes the log end.
-        assert!(
-            s.hw >= last.hw && s.hw <= s.log.len() as i64,
-            "HWM out of range"
-        );
+        assert2::assert!(s.hw >= last.hw && s.hw <= s.log.len() as i64);
         // LSO is monotonic across every transition (offsets only grow; the
         // oldest-open base only advances). Assert it (cheap regression guard).
-        assert!(lso(&s.log) >= lso(&last.log), "LSO regressed");
+        assert2::assert!(lso(&s.log) >= lso(&last.log));
         Some(s)
     }
 
@@ -396,16 +393,9 @@ fn run(model: EosModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
-    assert!(
-        checker.state_count() < TARGET_STATE_COUNT,
-        "[{label}] truncated"
-    );
-    assert!(
-        checker.unique_state_count() < MAX_UNIQUE_STATES,
-        "[{label}] unique bound exceeded ({})",
-        checker.unique_state_count()
-    );
+    assert2::assert!(checker.max_depth() < MAX_DEPTH);
+    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
+    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
     checker.assert_properties();
 }
 

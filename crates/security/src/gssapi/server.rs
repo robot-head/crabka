@@ -203,7 +203,6 @@ impl GssapiServerExchange {
 
 #[cfg(test)]
 mod tests {
-    use assert2::assert;
 
     use super::*;
     use crate::gssapi::{AcceptStep, GssAcceptor, GssError};
@@ -246,14 +245,14 @@ mod tests {
             ServerStep::Done { .. } => panic!("expected offer"),
         };
         // offer is wrapped (identity here): bitmask 0x01 + 3-byte size
-        assert!(offer[0] == 0x01);
+        assert2::assert!(offer[0] == 0x01);
 
         // Round 3: client choice (auth, size, authzid "alice") -> done.
         let mut choice = vec![0x01u8, 0x00, 0x10, 0x00];
         choice.extend_from_slice(b"alice");
         let r3 = ex.step(&choice).unwrap();
         match r3 {
-            ServerStep::Done { principal } => assert!(principal == "alice@REALM"),
+            ServerStep::Done { principal } => assert2::assert!(principal == "alice@REALM"),
             ServerStep::Challenge(..) => panic!("expected Done"),
         }
     }
@@ -270,7 +269,7 @@ mod tests {
             ServerStep::Done { .. } => panic!("expected challenge"),
         };
         let bad = vec![0x04u8, 0x00, 0x10, 0x00]; // confidentiality
-        assert!(ex.step(&bad).is_err());
+        assert2::assert!(ex.step(&bad).is_err());
     }
 
     #[test]
@@ -278,7 +277,7 @@ mod tests {
         let ex = GssapiServerExchange::new(Box::new(FakeAcceptor { established: false }), 0x1_0000);
         let rendered = format!("{ex:?}");
         for part in ["GssapiServerExchange", "AcceptingContext", "max_recv_size"] {
-            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+            assert2::assert!(rendered.contains(part));
         }
     }
 
@@ -297,7 +296,7 @@ mod tests {
             "OfferingLayer",
             "max_recv_size",
         ] {
-            assert!(rendered.contains(part), "missing {part:?} in {rendered}");
+            assert2::assert!(rendered.contains(part));
         }
 
         // Round 2: layer offer sent -> AwaitingChoice.
@@ -311,9 +310,6 @@ mod tests {
         // on that exact text rather than the bare name, which the *enclosing*
         // `GssapiServerExchange::AwaitingChoice(...)` wrapper would already
         // contain even if the inner impl wrote nothing at all.
-        assert!(
-            rendered.contains("AwaitingChoice { .. }"),
-            "missing \"AwaitingChoice {{ .. }}\" in {rendered}"
-        );
+        assert2::assert!(rendered.contains("AwaitingChoice { .. }"));
     }
 }

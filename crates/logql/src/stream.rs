@@ -630,24 +630,24 @@ mod tests {
 
     #[test]
     fn parse_pattern_parts_omits_empty_literals_around_captures() {
-        assert_eq!(
-            parse_pattern_parts("<method>").unwrap(),
-            vec![PatternPart::Capture("method".to_string())]
+        assert2::assert!(
+            parse_pattern_parts("<method>").unwrap()
+                == vec![PatternPart::Capture("method".to_string())]
         );
-        assert_eq!(
-            parse_pattern_parts("prefix <value>").unwrap(),
-            vec![
-                PatternPart::Literal("prefix ".to_string()),
-                PatternPart::Capture("value".to_string()),
-            ]
+        assert2::assert!(
+            parse_pattern_parts("prefix <value>").unwrap()
+                == vec![
+                    PatternPart::Literal("prefix ".to_string()),
+                    PatternPart::Capture("value".to_string()),
+                ]
         );
-        assert_eq!(
-            parse_pattern_parts("<method> <path>").unwrap(),
-            vec![
-                PatternPart::Capture("method".to_string()),
-                PatternPart::Literal(" ".to_string()),
-                PatternPart::Capture("path".to_string()),
-            ]
+        assert2::assert!(
+            parse_pattern_parts("<method> <path>").unwrap()
+                == vec![
+                    PatternPart::Capture("method".to_string()),
+                    PatternPart::Literal(" ".to_string()),
+                    PatternPart::Capture("path".to_string()),
+                ]
         );
     }
 
@@ -655,12 +655,12 @@ mod tests {
     fn pattern_parser_captures_after_nonzero_prefix() {
         let parser = PatternParser::new("prefix <method> suffix <status>").unwrap();
 
-        assert_eq!(
-            parser.captures("prefix GET suffix 500").unwrap(),
-            vec![
-                ("method".to_string(), "GET".to_string()),
-                ("status".to_string(), "500".to_string()),
-            ]
+        assert2::assert!(
+            parser.captures("prefix GET suffix 500").unwrap()
+                == vec![
+                    ("method".to_string(), "GET".to_string()),
+                    ("status".to_string(), "500".to_string()),
+                ]
         );
     }
 }

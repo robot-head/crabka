@@ -343,8 +343,5 @@ fn race_underflows_without_cas() {
     .timeout(CHECK_TIMEOUT)
     .spawn_bfs()
     .join();
-    assert!(
-        checker.discovery("available_in_range").is_some(),
-        "expected the non-CAS try_consume to violate available_in_range (underflow/over-grant)"
-    );
+    assert2::assert!(checker.discovery("available_in_range").is_some());
 }

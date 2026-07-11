@@ -373,52 +373,50 @@ impl_primitive_cmp!(ApiVersion, i16);
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
-
     use super::{ApiKey, ApiVersion, LeaderEpoch, NodeId, Offset, PartitionIndex, ProducerId};
 
     #[test]
     fn accessors_and_advance_return_the_inner_value() {
-        check!(Offset(9).get() == 9);
-        check!(PartitionIndex(4).get() == 4);
-        check!(NodeId(7).get() == 7);
-        check!(ProducerId(42).get() == 42);
-        check!(LeaderEpoch(3).get() == 3);
-        check!(ApiKey(18).get() == 18);
-        check!(ApiVersion(2).get() == 2);
-        check!(LeaderEpoch(4).next() == LeaderEpoch(5));
+        assert2::assert!(Offset(9).get() == 9);
+        assert2::assert!(PartitionIndex(4).get() == 4);
+        assert2::assert!(NodeId(7).get() == 7);
+        assert2::assert!(ProducerId(42).get() == 42);
+        assert2::assert!(LeaderEpoch(3).get() == 3);
+        assert2::assert!(ApiKey(18).get() == 18);
+        assert2::assert!(ApiVersion(2).get() == 2);
+        assert2::assert!(LeaderEpoch(4).next() == LeaderEpoch(5));
     }
 
     #[test]
     fn compares_against_raw_primitive_in_both_directions() {
-        check!(Offset(5) == 5);
-        check!(5 == Offset(5));
-        check!(Offset(5) != 6);
-        check!(Offset(5) > 3);
-        check!(3 < Offset(5));
-        check!(Offset::ZERO >= 0);
-        check!(NodeId(7) == 7);
-        check!(ApiKey(18) == 18);
+        assert2::assert!(Offset(5) == 5);
+        assert2::assert!(5 == Offset(5));
+        assert2::assert!(Offset(5) != 6);
+        assert2::assert!(Offset(5) > 3);
+        assert2::assert!(3 < Offset(5));
+        assert2::assert!(Offset::ZERO >= 0);
+        assert2::assert!(NodeId(7) == 7);
+        assert2::assert!(ApiKey(18) == 18);
     }
 
     #[test]
     fn newtype_to_newtype_comparison_still_holds() {
-        check!(Offset(1) < Offset(2));
-        check!(Offset(2) == Offset(2));
+        assert2::assert!(Offset(1) < Offset(2));
+        assert2::assert!(Offset(2) == Offset(2));
         let mut xs = [Offset(3), Offset(1), Offset(2)];
         xs.sort();
-        check!(xs == [Offset(1), Offset(2), Offset(3)]);
+        assert2::assert!(xs == [Offset(1), Offset(2), Offset(3)]);
     }
 
     #[test]
     fn sentinels_carry_kafka_meaning() {
-        check!(LeaderEpoch::UNKNOWN == -1);
-        check!(!LeaderEpoch::UNKNOWN.is_known());
-        check!(LeaderEpoch::INITIAL == 0);
-        check!(LeaderEpoch::INITIAL.is_known());
-        check!(ProducerId::NONE == -1);
-        check!(ProducerId::NONE.is_none());
-        check!(!ProducerId(0).is_none());
-        check!(Offset::ZERO == 0);
+        assert2::assert!(LeaderEpoch::UNKNOWN == -1);
+        assert2::assert!(!LeaderEpoch::UNKNOWN.is_known());
+        assert2::assert!(LeaderEpoch::INITIAL == 0);
+        assert2::assert!(LeaderEpoch::INITIAL.is_known());
+        assert2::assert!(ProducerId::NONE == -1);
+        assert2::assert!(ProducerId::NONE.is_none());
+        assert2::assert!(!ProducerId(0).is_none());
+        assert2::assert!(Offset::ZERO == 0);
     }
 }
