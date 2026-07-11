@@ -46,3 +46,8 @@ crabka-pgparser = { version = "0.3.9", path = "../pgparser" }
 [dev-dependencies]
 assert2 = { workspace = true }
 tempfile = { workspace = true }
+bytes = { workspace = true }
+crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
+crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
+crabka-pgcatalog = { version = "0.3.9", path = "../pgcatalog" }
+crabka-pgtypes = { version = "0.3.9", path = "../pgtypes" }

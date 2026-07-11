@@ -926,7 +926,9 @@ jobs:
       - name: Driver capture safety contract
         run: python3 -m unittest tools/tests/test_gres_wire_recorder.py tools/tests/test_capture_gres_driver_goldens.py
       - name: PostgreSQL compatibility matrix anti-rot check
-        run: ./tools/check-pg-compat-matrix.sh --self-test
+        run: |
+          ./tools/check-pg-compat-matrix.sh --self-test
+          ./tools/check-pg-compat-matrix.sh
       - name: Install psql 18 (pgdg)
         run: |
           sudo install -d /usr/share/postgresql-common/pgdg

@@ -8,6 +8,7 @@ Run:
 
 ```bash
 tools/check-pg-compat-matrix.sh --self-test
+tools/check-pg-compat-matrix.sh
 ```
 
 ## Current G-1/G-2 baseline
@@ -18,7 +19,9 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 
 - **Owner:** Chapter Gres SQL-Parity Program.
 - **Update rule:** every wave that changes SQL acceptance or semantics updates this file in the same change.
-- **Anti-rot rule:** `tools/check-pg-compat-matrix.sh` compares accepted parser statement kinds with resolved `Implemented`/`Mapped`/`Error-with-notice` rows so parsed-but-rejected commands do not overclaim execution.
+- **Inventory rule:** [`pg18-command-inventory.json`](pg18-command-inventory.json) pins exactly 190 unique command titles to the PostgreSQL 18 SQL Commands reference. Major language features remain a separate table and never count as commands.
+- **Anti-rot rule:** `tools/check-pg-compat-matrix.sh` checks inventory and matrix in both directions, requires one behavior probe for every resolved or executable non-goal row, rejects orphan probes and disposition/behavior drift, and runs every representative through an in-memory SQL session. Refusals assert exact SQLSTATE plus a stable message fragment.
+- **Bounded-refusal rule:** architectural `Non-goal(...)` rows recognize the representative PostgreSQL 18 syntax recorded in typed parser metadata and fail through the ordinary session path with `0A000`; unrecognized or trailing syntax is never swallowed by a prefix-only matcher.
 - **Allowed dispositions:** `Implemented`, `Wave-assigned(<wave>)`, `Mapped(<semantics>)`, `Error-with-notice(<SQLSTATE>)`, `Non-goal(<reason>)`.
 
 ## PG18 command rows
@@ -29,11 +32,11 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | ALTER AGGREGATE | Wave-assigned(P6) | Stretch routine/object support. |
 | ALTER COLLATION | Wave-assigned(T8) | Collation support lands with the T8 ICU decision. |
 | ALTER CONVERSION | Non-goal(UTF-8-only server) | C-bound conversion objects are excluded by the program design. |
-| ALTER DATABASE | Error-with-notice(0A000) | One logical database per tenant; tenant provisioning owns database lifecycle. |
+| ALTER DATABASE | Error-with-notice(0A000) | Bounded rename syntax reaches a typed `0A000` session refusal; tenant provisioning owns lifecycle. |
 | ALTER DEFAULT PRIVILEGES | Wave-assigned(D8) | Roles and privileges wave. |
 | ALTER DOMAIN | Wave-assigned(T5) | Domain type family. |
 | ALTER EVENT TRIGGER | Wave-assigned(P4) | Stretch trigger surface; stock-shaped refusal until then. |
-| ALTER EXTENSION | Error-with-notice(0A000) | Extension loading is not a goal; shims are explicit. |
+| ALTER EXTENSION | Error-with-notice(0A000) | Bounded update syntax reaches a typed `0A000` session refusal; shims are explicit. |
 | ALTER FOREIGN DATA WRAPPER | Wave-assigned(P5) | FDW lifecycle completeness bucket. |
 | ALTER FOREIGN TABLE | Wave-assigned(P5) | FDW lifecycle completeness bucket. |
 | ALTER FUNCTION | Wave-assigned(P2) | SQL routines. |
@@ -79,14 +82,14 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | CLUSTER | Wave-assigned(P5) | Utility bucket; documented mapping/refusal. |
 | COMMENT | Wave-assigned(D4) | COMMENT across supported object kinds. |
 | COMMIT | Implemented | Transaction commit is parsed and executed in the baseline. |
-| COMMIT PREPARED | Error-with-notice(55000) | Stock default prepared-transactions-disabled behavior. |
+| COMMIT PREPARED | Error-with-notice(55000) | Typed session refusal with exact `55000`; participant lifecycle remains internal. |
 | COPY | Implemented | Q5 starter subset only: `COPY table [(cols...)] FROM STDIN` over pgwire simple query, text format only. Supports tab-delimited rows, `\\N` NULL, common backslash escapes, explicit column lists, defaults, and NOT NULL enforcement. `COPY TO`, file/program sources, binary, CSV, and COPY options beyond `WITH (FORMAT text)` return clear errors. CopyData is buffered and committed as one statement on CopyDone; CopyFail discards buffered rows. |
 | CREATE ACCESS METHOD | Non-goal(C-bound access methods) | C-bound object kind excluded. |
 | CREATE AGGREGATE | Wave-assigned(P6) | Stretch SQL aggregate support. |
 | CREATE CAST | Wave-assigned(P6) | Stretch SQL/PLpgSQL cast support. |
 | CREATE COLLATION | Wave-assigned(T8) | Collation support lands with T8. |
 | CREATE CONVERSION | Non-goal(UTF-8-only server) | C-bound conversion objects are excluded. |
-| CREATE DATABASE | Error-with-notice(0A000) | Tenant provisioning owns database lifecycle. |
+| CREATE DATABASE | Error-with-notice(0A000) | Typed session refusal with exact `0A000`; tenant provisioning owns lifecycle. |
 | CREATE DOMAIN | Wave-assigned(T5) | Domain type family. |
 | CREATE EVENT TRIGGER | Wave-assigned(P4) | Stretch trigger surface. |
 | CREATE EXTENSION | Wave-assigned(P5) | Statement supported only for built-in shim whitelist. |
@@ -137,10 +140,10 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | DROP CAST | Wave-assigned(P6) | Stretch SQL cast support. |
 | DROP COLLATION | Wave-assigned(T8) | Collation support. |
 | DROP CONVERSION | Non-goal(UTF-8-only server) | C-bound conversion objects are excluded. |
-| DROP DATABASE | Error-with-notice(0A000) | Tenant provisioning owns database lifecycle. |
+| DROP DATABASE | Error-with-notice(0A000) | Typed session refusal with exact `0A000`; tenant provisioning owns lifecycle. |
 | DROP DOMAIN | Wave-assigned(T5) | Domain type family. |
 | DROP EVENT TRIGGER | Wave-assigned(P4) | Stretch trigger surface. |
-| DROP EXTENSION | Error-with-notice(0A000) | Extension loading is not a goal. |
+| DROP EXTENSION | Error-with-notice(0A000) | Bounded syntax reaches a typed `0A000` session refusal. |
 | DROP FOREIGN DATA WRAPPER | Implemented | FDW DDL is parsed in the current baseline. |
 | DROP FOREIGN TABLE | Implemented | FDW DDL is parsed in the current baseline. |
 | DROP FUNCTION | Wave-assigned(P2) | SQL routines. |
@@ -188,7 +191,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | MOVE | Wave-assigned(S2) | Cursors. |
 | NOTIFY | Wave-assigned(S4) | Notification bus. |
 | PREPARE | Wave-assigned(S2) | SQL PREPARE lifecycle. |
-| PREPARE TRANSACTION | Error-with-notice(55000) | Stock default prepared-transactions-disabled behavior. |
+| PREPARE TRANSACTION | Error-with-notice(55000) | Typed session refusal with exact `55000`; participant lifecycle remains internal. |
 | REASSIGN OWNED | Wave-assigned(D8) | Roles and privileges. |
 | REFRESH MATERIALIZED VIEW | Wave-assigned(D5) | Materialized view refresh. |
 | REINDEX | Wave-assigned(P5) | Utility bucket. |
@@ -196,7 +199,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | RESET | Implemented | F-1 GUC registry supports `RESET name` and `RESET ALL` for common client settings. |
 | REVOKE | Implemented | Starter subset: `REVOKE ... ON TABLE ... FROM ...` removes recorded table ACL metadata; no data-access enforcement yet. |
 | ROLLBACK | Implemented | Transaction rollback is parsed and executed in the baseline. |
-| ROLLBACK PREPARED | Error-with-notice(55000) | Stock default prepared-transactions-disabled behavior. |
+| ROLLBACK PREPARED | Error-with-notice(55000) | Typed session refusal with exact `55000`; participant recovery remains internal. |
 | ROLLBACK TO SAVEPOINT | Wave-assigned(S1) | Savepoint support. |
 | SAVEPOINT | Wave-assigned(S1) | Savepoint support. |
 | SECURITY LABEL | Non-goal(C-bound security labels) | Explicitly excluded. |

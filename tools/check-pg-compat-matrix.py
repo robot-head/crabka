@@ -23,7 +23,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_MATRIX = ROOT / "docs" / "PG_COMPAT_MATRIX.md"
 DEFAULT_INVENTORY = ROOT / "docs" / "pg18-command-inventory.json"
-PARSER_COMMAND_REPORT_FORMAT_VERSION = 1
+PARSER_COMMAND_REPORT_FORMAT_VERSION = 2
 DEFAULT_PARSER_COMMAND = [
     "cargo",
     "run",
@@ -33,6 +33,10 @@ DEFAULT_PARSER_COMMAND = [
     "crabka-gres-conformance",
     "--bin",
     "crabka-gres-parser-commands",
+]
+DEFAULT_RUNTIME_COMMAND = [
+    "cargo", "test", "--quiet", "--locked", "-p", "crabka-gres-conformance",
+    "--test", "compatibility_behavior",
 ]
 
 VALID_DISPOSITION = re.compile(
@@ -48,7 +52,7 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def accepted_commands() -> set[str]:
+def parser_behavior_report() -> tuple[set[str], list[dict[str, object]]]:
     result = subprocess.run(
         DEFAULT_PARSER_COMMAND,
         cwd=ROOT,
@@ -82,7 +86,26 @@ def accepted_commands() -> set[str]:
         raise ValueError("parser command helper report commands must be sorted and unique")
     if not commands:
         raise ValueError("parser command helper report commands must not be empty")
-    return set(commands)
+    probes = report.get("probes")
+    if not isinstance(probes, list) or not all(isinstance(probe, dict) for probe in probes):
+        raise ValueError("parser command helper report probes must be a JSON object array")
+    return set(commands), probes
+
+
+def validate_runtime_behavior() -> None:
+    result = subprocess.run(
+        DEFAULT_RUNTIME_COMMAND,
+        cwd=ROOT,
+        check=False,
+        capture_output=True,
+        encoding="utf-8",
+    )
+    if result.returncode != 0:
+        detail = result.stderr.strip() or result.stdout.strip()
+        raise ValueError(
+            "session behavior manifest failed"
+            + (f": {detail}" if detail else f" with exit code {result.returncode}")
+        )
 
 
 def matrix_rows(matrix_path: Path) -> dict[str, str]:
@@ -164,6 +187,75 @@ def validate_inventory_rows(rows: dict[str, str], inventory: set[str]) -> list[s
     return errors
 
 
+def validate_behavior_probes(
+    command_rows: dict[str, str], probes: list[dict[str, object]]
+) -> list[str]:
+    errors: list[str] = []
+    probe_by_command: dict[str, dict[str, object]] = {}
+    for probe in probes:
+        command = probe.get("command")
+        if not isinstance(command, str) or not command:
+            errors.append("behavior probe has missing/invalid command")
+            continue
+        if command in probe_by_command:
+            errors.append(f"duplicate behavior probe: {command}")
+            continue
+        probe_by_command[command] = probe
+        for field in ("sql", "parser_shape", "behavior"):
+            if not isinstance(probe.get(field), str) or not probe[field]:
+                errors.append(f"behavior probe {command} has missing/invalid {field}")
+
+    resolved = {
+        command
+        for command, disposition in command_rows.items()
+        if is_resolved_parser_disposition(disposition)
+    }
+    missing = sorted(resolved - probe_by_command.keys())
+    if missing:
+        errors.append("resolved row(s) lack behavior probe: " + ", ".join(missing))
+    extra = sorted(probe_by_command.keys() - command_rows.keys())
+    if extra:
+        errors.append("probe(s) lack matrix row: " + ", ".join(extra))
+
+    for command in sorted(resolved & probe_by_command.keys()):
+        disposition = command_rows[command]
+        probe = probe_by_command[command]
+        behavior = probe.get("behavior")
+        expects_refusal = disposition.startswith(("Error-with-notice(", "Non-goal("))
+        expected_behavior = "refuse" if expects_refusal else "session-execute"
+        if behavior != expected_behavior:
+            errors.append(
+                f"disposition/behavior mismatch for {command}: {disposition} vs {behavior!r}"
+            )
+            continue
+        if expects_refusal:
+            sqlstate = probe.get("sqlstate")
+            message = probe.get("message_fragment")
+            if disposition.startswith("Error-with-notice("):
+                expected_sqlstate = disposition.removeprefix("Error-with-notice(").removesuffix(")")
+            else:
+                expected_sqlstate = "0A000"
+            if sqlstate != expected_sqlstate:
+                errors.append(
+                    f"refusal SQLSTATE mismatch for {command}: expected {expected_sqlstate}, got {sqlstate!r}"
+                )
+            if not isinstance(message, str) or not message:
+                errors.append(f"refusal probe {command} lacks stable message_fragment")
+
+    accepted_wave = sorted(
+        command
+        for command in probe_by_command.keys() & command_rows.keys()
+        if command_rows[command].startswith("Wave-assigned(")
+        and probe_by_command[command].get("behavior") != "refuse"
+    )
+    if accepted_wave:
+        errors.append(
+            "parser-accepted wave-assigned command(s) lack intentional refusal: "
+            + ", ".join(accepted_wave)
+        )
+    return errors
+
+
 def is_resolved_parser_disposition(disposition: str) -> bool:
     return disposition == "Implemented" or disposition.startswith(RESOLVED_PARSER_PREFIXES)
 
@@ -201,6 +293,26 @@ def run_self_test(parser_commands: set[str]) -> None:
     inventory = load_inventory(DEFAULT_INVENTORY)
     if len(inventory) != 190:
         raise AssertionError("self-test expected the pinned inventory to contain exactly 190 commands")
+    with tempfile.TemporaryDirectory() as directory:
+        duplicate_path = Path(directory) / "inventory.json"
+        duplicate_commands = sorted(inventory)
+        duplicate_commands[-1] = duplicate_commands[-2]
+        duplicate_path.write_text(
+            json.dumps({
+                "format_version": 1,
+                "postgresql_major": 18,
+                "source": "https://www.postgresql.org/docs/18/sql-commands.html",
+                "commands": duplicate_commands,
+            }),
+            encoding="utf-8",
+        )
+        try:
+            load_inventory(duplicate_path)
+        except ValueError as error:
+            if "duplicate command" not in str(error):
+                raise AssertionError(f"self-test expected duplicate-inventory failure, got: {error}") from error
+        else:
+            raise AssertionError("self-test expected duplicate-inventory direction to fail")
 
     missing_inventory = set(inventory)
     missing_inventory.remove("ABORT")
@@ -215,6 +327,32 @@ def run_self_test(parser_commands: set[str]) -> None:
     inventory_errors = validate_inventory_rows(extra_rows, inventory)
     if not any("not in authoritative" in error for error in inventory_errors):
         raise AssertionError("self-test expected extra/renamed-row direction to fail")
+
+    execute_probe = {
+        "command": "BEGIN", "sql": "BEGIN", "parser_shape": "Begin",
+        "behavior": "session-execute",
+    }
+    refusal_probe = {
+        "command": "CREATE DATABASE", "sql": "CREATE DATABASE other",
+        "parser_shape": "CompatibilityRefusal", "behavior": "refuse",
+        "sqlstate": "0A000", "message_fragment": "database lifecycle",
+    }
+    behavior_rows = {"BEGIN": "Implemented", "CREATE DATABASE": "Error-with-notice(0A000)"}
+    if validate_behavior_probes(behavior_rows, [execute_probe, refusal_probe]):
+        raise AssertionError("self-test expected a matching bidirectional manifest to pass")
+    directions = [
+        ([execute_probe], "resolved row(s) lack behavior probe"),
+        ([execute_probe, refusal_probe, {**execute_probe, "command": "EXTRA"}], "probe(s) lack matrix row"),
+        ([{**execute_probe, "behavior": "refuse", "sqlstate": "0A000", "message_fragment": "x"}, refusal_probe], "disposition/behavior mismatch"),
+    ]
+    for probes, fragment in directions:
+        if not any(fragment in error for error in validate_behavior_probes(behavior_rows, probes)):
+            raise AssertionError(f"self-test expected failure direction: {fragment}")
+    wave_errors = validate_behavior_probes(
+        {"BEGIN": "Wave-assigned(F-test)"}, [execute_probe]
+    )
+    if not any("lack intentional refusal" in error for error in wave_errors):
+        raise AssertionError("self-test expected parser-accepted wave-assigned direction to fail")
 
     required_commands = {"BEGIN", "END", "ROLLBACK", "START TRANSACTION"}
     missing_commands = sorted(required_commands - parser_commands)
@@ -242,12 +380,14 @@ def run_self_test(parser_commands: set[str]) -> None:
 def main() -> int:
     args = parse_args()
     try:
-        parser_commands = accepted_commands()
+        parser_commands, behavior_probes = parser_behavior_report()
         if args.self_test:
             run_self_test(parser_commands)
         inventory = load_inventory(DEFAULT_INVENTORY)
         errors = validate_inventory_rows(matrix_command_rows(args.matrix), inventory)
         errors.extend(validate(args.matrix, parser_commands))
+        errors.extend(validate_behavior_probes(matrix_command_rows(args.matrix), behavior_probes))
+        validate_runtime_behavior()
     except (OSError, ValueError, AssertionError) as error:
         print(f"pg compat matrix check FAILED: {error}", file=sys.stderr)
         return 1

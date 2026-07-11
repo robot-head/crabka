@@ -56,6 +56,7 @@ Run the anti-rot gate locally before review:
 
 ```bash
 tools/check-pg-compat-matrix.sh --self-test
+tools/check-pg-compat-matrix.sh
 ```
 
 ## Mutation testing
