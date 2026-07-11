@@ -337,6 +337,7 @@ impl TxnRpc {
             | RangeResponse::SqlResultsDone
             | RangeResponse::SqlError { .. }
             | RangeResponse::ScanRange(_)
+            | RangeResponse::ScanCursor(_)
             | RangeResponse::ScanRangeError { .. }
             | RangeResponse::Tso(_)
             | RangeResponse::ResolveTxn(_) => Err(TxnRpcError::UnexpectedResponse),
