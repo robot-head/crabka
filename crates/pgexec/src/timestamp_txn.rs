@@ -992,6 +992,7 @@ pub struct TimestampTxnParticipant {
     primary_kv: std::sync::Arc<dyn crabka_pgkv::Kv>,
     committer: std::sync::Arc<dyn Committer>,
     primary_barrier: Option<std::sync::Arc<dyn crate::read_gate::Linearizer>>,
+    sequence: Option<std::sync::Arc<crate::seq::SequenceManager>>,
     range_id: u32,
 }
 
@@ -1016,6 +1017,7 @@ impl TimestampTxnParticipant {
             primary_kv,
             committer,
             primary_barrier: None,
+            sequence: None,
             range_id,
         }
     }
@@ -1027,6 +1029,15 @@ impl TimestampTxnParticipant {
         barrier: Option<std::sync::Arc<dyn crate::read_gate::Linearizer>>,
     ) -> Self {
         self.primary_barrier = barrier;
+        self
+    }
+
+    #[must_use]
+    pub(crate) fn with_sequence_manager(
+        mut self,
+        sequence: std::sync::Arc<crate::seq::SequenceManager>,
+    ) -> Self {
+        self.sequence = Some(sequence);
         self
     }
 
@@ -1159,8 +1170,19 @@ impl TimestampTxnParticipant {
                 .map_err(map_ts_error)?;
         if decision == TimestampTxnDecision::Aborted {
             ops.extend(delete_global_index_intent_ops(identity.start_ts, writes));
+        } else {
+            ops.extend(scan_terminal_ops(
+                self.kv.as_ref(),
+                writes.iter().map(|write| (write.table_id, write.rowid)),
+            )?);
         }
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        if decision != TimestampTxnDecision::Aborted
+            && let Some(sequence) = &self.sequence
+        {
+            sequence.reseed_from_applied();
+        }
+        Ok(())
     }
 
     /// Idempotently settle durable operations after recovering a terminal range-0
@@ -1209,10 +1231,24 @@ impl TimestampTxnParticipant {
             identity.start_ts,
             decision,
         )?);
+        if decision != TimestampTxnDecision::Aborted {
+            ops.extend(scan_terminal_ops(
+                self.kv.as_ref(),
+                operations
+                    .iter()
+                    .map(|operation| (operation.table_id, operation.rowid)),
+            )?);
+        }
         if ops.is_empty() {
             return Ok(());
         }
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        if decision != TimestampTxnDecision::Aborted
+            && let Some(sequence) = &self.sequence
+        {
+            sequence.reseed_from_applied();
+        }
+        Ok(())
     }
 
     async fn abort_unacknowledged_prewrites(
@@ -1507,6 +1543,38 @@ fn timestamp_intent_identity_key(
     key.extend_from_slice(&write.rowid.to_be_bytes());
     key.extend_from_slice(&start_ts.get().to_be_bytes());
     key
+}
+
+fn scan_terminal_ops(
+    kv: &dyn crabka_pgkv::Kv,
+    rows: impl Iterator<Item = (u32, u64)>,
+) -> Result<Vec<crabka_pgkv::WriteOp>, ExecError> {
+    let mut maxima = std::collections::BTreeMap::<u32, u64>::new();
+    for (table_id, rowid) in rows {
+        maxima
+            .entry(table_id)
+            .and_modify(|maximum| *maximum = (*maximum).max(rowid))
+            .or_insert(rowid);
+    }
+    let mut ops = Vec::new();
+    for (table_id, maximum) in maxima {
+        let next = maximum.checked_add(1).ok_or_else(|| {
+            ExecError::Unsupported("row id exhausted during timestamp resolution".into())
+        })?;
+        let key = crabka_pgkv::key::seq_key(table_id);
+        let current = kv
+            .get(&key)?
+            .and_then(|bytes| <[u8; 8]>::try_from(bytes).ok())
+            .map(u64::from_be_bytes)
+            .unwrap_or(1);
+        if next > current {
+            ops.push(crabka_pgkv::WriteOp::Put {
+                key,
+                value: next.to_be_bytes().to_vec(),
+            });
+        }
+    }
+    Ok(ops)
 }
 
 fn timestamp_prewrite_reservation_key(write: &TimestampWrite) -> Vec<u8> {
@@ -2211,7 +2279,7 @@ mod tests {
             global_xid: 10,
             primary_range: 0,
         };
-        let participant = TimestampTxnParticipant::new(
+        let mut participant = TimestampTxnParticipant::new(
             Arc::clone(&local),
             Arc::clone(&primary),
             Arc::new(crate::commit::LocalCommitter {
@@ -2220,7 +2288,7 @@ mod tests {
             1,
         )
         .with_primary_barrier(Some(Arc::new(PublishingPrimaryBarrier {
-            primary,
+            primary: Arc::clone(&primary),
             descriptor: TimestampTxnDescriptor::begun(start_ts, 10, vec![1]),
         })));
         let write = TimestampWrite {
@@ -2235,6 +2303,51 @@ mod tests {
             .prewrite_with_primary(identity, std::slice::from_ref(&write))
             .await
             .expect("barrier publishes the primary before validation");
+
+        let mut descriptor = TimestampTxnDescriptor::begun(start_ts, 10, vec![1]);
+        descriptor
+            .acknowledge_operations(
+                1,
+                &[TimestampTxnOperation {
+                    range_id: 1,
+                    table_id: 7,
+                    rowid: 9,
+                    delete: false,
+                }],
+            )
+            .expect("prepare participant");
+        let commit_ts = CommitTimestamp::after_start(start_ts, 11).expect("commit timestamp");
+        descriptor
+            .decide(PrimaryTxnDecision::Committed(commit_ts))
+            .expect("commit descriptor");
+        primary
+            .write_batch(&[timestamp_txn_descriptor_op(&descriptor)])
+            .expect("publish commit");
+        participant.primary_barrier = None;
+        participant
+            .resolve_with_primary(
+                identity,
+                TimestampTxnDecision::Committed(commit_ts),
+                std::slice::from_ref(&write),
+            )
+            .await
+            .expect("resolve and advance scan terminal");
+        participant
+            .resolve_with_primary(
+                identity,
+                TimestampTxnDecision::Committed(commit_ts),
+                std::slice::from_ref(&write),
+            )
+            .await
+            .expect("idempotent resolve");
+
+        assert_eq!(
+            local
+                .get(&crabka_pgkv::key::seq_key(7))
+                .expect("scan terminal")
+                .map(|bytes| u64::from_be_bytes(bytes.try_into().expect("u64 terminal"))),
+            Some(10)
+        );
     }
 
     #[tokio::test]
