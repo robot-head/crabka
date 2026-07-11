@@ -3828,7 +3828,6 @@ fn pg_settings_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
     crate::session::guc_settings_runtime()?
         .into_iter()
         .map(|setting| {
-            let boot_val = crate::session::guc_default_value(&setting.name).to_string();
             Ok(vec![
                 text(&setting.name),
                 text(&setting.value),
@@ -3841,8 +3840,8 @@ fn pg_settings_rows() -> Result<Vec<Vec<Datum>>, ExecError> {
                 Datum::Null,
                 Datum::Null,
                 Datum::Null,
-                text(&boot_val),
-                text(&boot_val),
+                text(&setting.boot_val),
+                text(&setting.reset_val),
                 Datum::Bool(false),
             ])
         })
