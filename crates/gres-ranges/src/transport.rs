@@ -61,6 +61,10 @@ pub enum RangeRequest {
     Tso(TsoReq),
     /// Resolve a timestamp transaction through its primary range.
     ResolveTxn(ResolveTxnReq),
+    /// Durably prewrite timestamp intents on an owning participant.
+    TimestampPrewrite(TimestampPrewriteReq),
+    /// Resolve timestamp intents after the primary has chosen a decision.
+    TimestampResolve(TimestampResolveReq),
 }
 
 /// Response sent between range computes.
@@ -98,6 +102,8 @@ pub enum RangeResponse {
     Tso(TsoResp),
     /// Primary-range timestamp transaction resolution response.
     ResolveTxn(ResolveTxnResp),
+    /// Timestamp participant operation completed.
+    TimestampParticipantDone,
     /// Range compute rejected the request.
     Error {
         error: WireErrorKind,
@@ -363,10 +369,48 @@ pub enum WirePredicateOp {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "type", content = "value")]
 pub enum WireDatum {
+    Null,
     Bool(bool),
     Int4(i32),
     Int8(i64),
     Text(String),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireTimestampIdentity {
+    pub start_ts: u64,
+    pub global_xid: u64,
+    pub primary_range: u32,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireTimestampWrite {
+    pub table_id: u32,
+    pub rowid: u64,
+    pub row: Vec<WireDatum>,
+    pub delete: bool,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimestampPrewriteReq {
+    pub range_id: RangeId,
+    pub identity: WireTimestampIdentity,
+    pub writes: Vec<WireTimestampWrite>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WireTimestampDecision {
+    Aborted,
+    Committed { commit_ts: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimestampResolveReq {
+    pub range_id: RangeId,
+    pub identity: WireTimestampIdentity,
+    pub decision: WireTimestampDecision,
+    pub writes: Vec<WireTimestampWrite>,
 }
 
 /// Serializable projection pushdown for range-scan RPCs.
@@ -1306,7 +1350,9 @@ mod tests {
                 | RangeRequest::Session { .. }
                 | RangeRequest::SessionClose { .. }
                 | RangeRequest::GlobalDecision { .. }
-                | RangeRequest::GlobalBegin { .. } => RangeResponse::Error {
+                | RangeRequest::GlobalBegin { .. }
+                | RangeRequest::TimestampPrewrite(_)
+                | RangeRequest::TimestampResolve(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".into(),
                 },

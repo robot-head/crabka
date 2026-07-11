@@ -344,7 +344,8 @@ impl TxnRpc {
             | RangeResponse::ScanCursor(_)
             | RangeResponse::ScanRangeError { .. }
             | RangeResponse::Tso(_)
-            | RangeResponse::ResolveTxn(_) => Err(TxnRpcError::UnexpectedResponse),
+            | RangeResponse::ResolveTxn(_)
+            | RangeResponse::TimestampParticipantDone => Err(TxnRpcError::UnexpectedResponse),
         }
     }
 }
