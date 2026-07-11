@@ -4,11 +4,12 @@ Date: 2026-07-11
 
 ## Status
 
-COMPLETE. The typed registry/transaction stack, parser surface, DISCARD core,
-capture-backed exact-driver/PgDog goldens, executable direct-Gres replay,
-compatibility anti-rot, mandatory live PgDog E2E, and dated M0 publication are
-implemented and verified. M0 covers F-0/F-1 only and does not claim later SQL
-waves or full PostgreSQL parity.
+INCOMPLETE pending independent clean re-review. The typed registry/transaction
+stack, parser surface, DISCARD core, hardened capture-backed exact-driver/PgDog
+goldens, executable direct-Gres replay, compatibility anti-rot, mandatory live
+PgDog E2E, and dated M0 evidence are implemented and green. M0 is not marked
+complete until review confirms the remediation below; it covers F-0/F-1 only
+and does not claim later SQL waves or full PostgreSQL parity.
 
 ## PostgreSQL 18 oracle
 
@@ -182,7 +183,7 @@ replay, bounded Gres gate, and mandatory CI wiring.
 ### RED/GREEN and capture evidence
 
 - RED: the validator test failed because the fixture/module did not exist, then
-  because the placeholder schema was version 0. GREEN: schema version 1,
+  because the placeholder schema was version 0. GREEN: schema version 2,
   complete provenance, exact dependency pins, strict startup-key allowlist,
   explicit empty arrays, and forbidden identity/secret scanning all pass.
 - RED: the first real PgDog backend trace presented an SSLRequest before the
@@ -206,8 +207,9 @@ replay, bounded Gres gate, and mandatory CI wiring.
 - RED: the structural gate reported the missing `Captured driver startup
   replay` CI step. GREEN: the mandatory Gres job runs the bounded replay script.
 - `CRABKA_GRES_SKIP_BUILD=1 timeout 30s
-  ./scripts/gres-driver-goldens-gate.sh`: PASS; three captured startup packets
-  and every captured backend SET batch were accepted directly by Gres.
+  ./scripts/gres-driver-goldens-gate.sh`: PASS; three direct and three PgDog
+  backend startup packets plus every captured backend SET batch were accepted
+  directly by Gres.
 
 ### Final static and live exit evidence
 
@@ -225,3 +227,59 @@ replay, bounded Gres gate, and mandatory CI wiring.
   `docs/superpowers/evidence/2026-07-11-gres-m0.md`. PgDog SET/SHOW/RESET
   limitations remain checked, precisely bounded deviations in
   `crates/gres-conformance/pooler-baseline.md`.
+
+## Independent-review remediation (2026-07-11)
+
+Status: **INCOMPLETE pending clean re-review**. Commit `1ed678a4` addresses all
+findings from the first review.
+
+### RED/GREEN
+
+- RED: arbitrary text beginning with SET was retained, SET ROLE/unknown GUCs
+  were not rejected, and startup duplicates overwrote earlier values. GREEN:
+  the recorder parses only the three actually observed GUC/value assignments,
+  deterministically re-renders them, rejects private values, SET ROLE, unknown
+  GUCs, mixed statements, comments, semicolon tricks, malformed/duplicate/
+  unexpected startup fields, and never serializes arbitrary query text.
+- RED: the Rust validator allowed evidence deletion and mutation so long as the
+  broad shape remained valid. GREEN: it independently requires the exact three
+  drivers in order, exact direct and PgDog-backend startup maps, exact ordered
+  SQLx SET list and explicit empty lists, unique JSON startup keys, exact safe
+  SQL grammar/values, and exact dependency/image provenance. Deletion,
+  reordering, private values, and digest mutation all fail focused tests.
+- RED: recorder accept/session time and recapture subprocesses were not all
+  absolutely bounded. GREEN: the recorder has one non-renewing absolute
+  deadline; every subprocess, image pull, Docker action, and driver has a
+  timeout; failure cleanup kills and reaps recorder and containers.
+- RED: new tooling paths did not trigger the Gres CI job. GREEN: every capture,
+  recorder, test, gate, and structural-test path is asserted in the Gres filter,
+  and CI runs the Python safety contract.
+
+### Authoritative capture and provenance
+
+- PgDog is run by exact digest reference
+  `ghcr.io/pgdogdev/pgdog@sha256:5d21fa668d091ae6ce30e5cb1536c7bcaba1f96b0d492227b1a46852d1f3ab2c`.
+  Inspected OCI labels verify full revision
+  `c99282e9001f66194b03b108ba2a66ad7a27a75d`, source
+  `https://github.com/pgdogdev/pgdog`, and version `v0.1.6`.
+- PostgreSQL is run by exact digest reference
+  `postgres@sha256:22c89fe0d0f507606260237fd55e51f6137f58b2d5bcf6152242b96d9fe8f9a4`;
+  its inspected image id is pinned and its absent OCI labels are recorded.
+- The psycopg wheel SHA-256 is parsed from the one exact pinned requirements
+  line and compared to the fixture; it is not embedded as a validator suffix.
+- PgDog backend startup parameters are stored per driver and replayed. The gate
+  now proves three direct plus three backend startups and all captured SETs.
+- Digest-addressed recapture reproduced the fixture byte-for-byte:
+  `25251f3ed66931c0f2f4c6fb0e073515b27171abcc97c7f99ca26275b7b69211`.
+
+### Reverification after remediation
+
+- 10 Python payload/timeout/anti-rot tests: PASS.
+- 4 Rust schema/provenance/exact-evidence tests: PASS.
+- Matrix self-test/normal, relevant all-target test/check/clippy with
+  `-D warnings`, nightly fmt, F-0 structural filter/CI contract, six-startup
+  replay, and diff check: PASS.
+- Full provisioned PgDog 0.1.6 E2E: PASS; lifecycle 3/3, base 666/688,
+  extended 6/6, exact Rust/Python drivers, and F-1 two-client GUC gate green.
+- ACL was explicitly skipped and is not claimed; the prior reviewed exact-topic
+  code-29 evidence remains unchanged.
