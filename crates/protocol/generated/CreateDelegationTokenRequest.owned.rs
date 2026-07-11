@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i64, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -28,21 +29,24 @@ pub struct CreateDelegationTokenRequest {
 impl Encode for CreateDelegationTokenRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_type.as_deref());
+                let () = put_compact_nullable_string(buf, self.owner_principal_type.as_deref());
             } else {
-                put_nullable_string(buf, self.owner_principal_type.as_deref());
+                let () = put_nullable_string(buf, self.owner_principal_type.as_deref());
             }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.owner_principal_name.as_deref());
+                let () = put_compact_nullable_string(buf, self.owner_principal_name.as_deref());
             } else {
-                put_nullable_string(buf, self.owner_principal_name.as_deref());
+                let () = put_nullable_string(buf, self.owner_principal_name.as_deref());
             }
         }
         if version >= 0 {
@@ -81,8 +85,12 @@ impl Encode for CreateDelegationTokenRequest {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.renewers).len(), flex);
-                let body: usize = (self.renewers).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.renewers).len(), flex);
+                let body: usize = (self.renewers)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -99,15 +107,26 @@ impl Encode for CreateDelegationTokenRequest {
 impl Decode<'_> for CreateDelegationTokenRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 3 {
-            out.owner_principal_type = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.owner_principal_type = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 3 {
-            out.owner_principal_name = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.owner_principal_name = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.renewers = {
@@ -158,10 +177,18 @@ impl Encode for CreatableRenewers {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.principal_type) } else { put_string(buf, &self.principal_type) }
+            if flex {
+                let () = put_compact_string(buf, &self.principal_type);
+            } else {
+                let () = put_string(buf, &self.principal_type);
+            }
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.principal_name) } else { put_string(buf, &self.principal_name) }
+            if flex {
+                let () = put_compact_string(buf, &self.principal_name);
+            } else {
+                let () = put_string(buf, &self.principal_name);
+            }
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -173,10 +200,18 @@ impl Encode for CreatableRenewers {
         let flex = version >= 2;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.principal_type) } else { string_len(&self.principal_type) };
+            n += if flex {
+                compact_string_len(&self.principal_type)
+            } else {
+                string_len(&self.principal_type)
+            };
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.principal_name) } else { string_len(&self.principal_name) };
+            n += if flex {
+                compact_string_len(&self.principal_name)
+            } else {
+                string_len(&self.principal_name)
+            };
         }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -190,10 +225,18 @@ impl Decode<'_> for CreatableRenewers {
         let flex = version >= 2;
         let mut out = Self::default();
         if version >= 0 {
-            out.principal_type = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.principal_type = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
-            out.principal_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.principal_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;

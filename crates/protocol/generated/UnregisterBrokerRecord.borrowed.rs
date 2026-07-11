@@ -11,14 +11,16 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct UnregisterBrokerRecord {
     pub broker_id: i32,
     pub broker_epoch: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl UnregisterBrokerRecord {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
     pub fn to_owned(&self) -> crate::owned::unregister_broker_record::UnregisterBrokerRecord {
         crate::owned::unregister_broker_record::UnregisterBrokerRecord {
@@ -31,7 +33,9 @@ impl UnregisterBrokerRecord {
 impl Encode for UnregisterBrokerRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("UnregisterBrokerRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "UnregisterBrokerRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -65,7 +69,9 @@ impl Encode for UnregisterBrokerRecord {
 impl<'de> DecodeBorrow<'de> for UnregisterBrokerRecord {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("UnregisterBrokerRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "UnregisterBrokerRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

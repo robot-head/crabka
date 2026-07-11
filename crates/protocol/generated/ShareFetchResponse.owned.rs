@@ -2,10 +2,15 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::primitives::string_bytes::{get_bytes_owned, get_compact_bytes_owned, get_compact_nullable_bytes_owned, get_nullable_bytes_owned, put_bytes, put_compact_bytes, put_compact_nullable_bytes, put_nullable_bytes};
+use crate::primitives::string_bytes::{
+    get_bytes_owned, get_compact_bytes_owned, get_compact_nullable_bytes_owned,
+    get_nullable_bytes_owned, put_bytes, put_compact_bytes, put_compact_nullable_bytes,
+    put_nullable_bytes,
+};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::{Buf, BufMut};
@@ -31,7 +36,10 @@ pub struct ShareFetchResponse {
 impl Encode for ShareFetchResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -42,9 +50,9 @@ impl Encode for ShareFetchResponse {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 1 {
@@ -93,15 +101,25 @@ impl Encode for ShareFetchResponse {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.responses).len(), flex);
-                let body: usize = (self.responses).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.responses).len(), flex);
+                let body: usize = (self.responses)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.node_endpoints).len(), flex);
-                let body: usize = (self.node_endpoints).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.node_endpoints).len(),
+                    flex,
+                );
+                let body: usize = (self.node_endpoints)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -115,7 +133,10 @@ impl Encode for ShareFetchResponse {
 impl Decode<'_> for ShareFetchResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -126,7 +147,11 @@ impl Decode<'_> for ShareFetchResponse {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 1 {
             out.acquisition_lock_timeout_ms = get_i32(buf)?;
@@ -217,8 +242,12 @@ impl Encode for ShareFetchableTopicResponse {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -292,9 +321,9 @@ impl PartitionData {
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
     }
@@ -306,52 +335,88 @@ impl PartitionData {
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref());
+                let () =
+                    put_compact_nullable_string(buf, self.acknowledge_error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.acknowledge_error_message.as_deref());
+                let () = put_nullable_string(buf, self.acknowledge_error_message.as_deref());
             }
         }
     }
-    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn encode_field_5<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             self.current_leader.encode(buf, version)?;
         }
         Ok(())
     }
-    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn encode_field_6<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             if version <= 0 {
                 match &self.records {
                     None => {
                         if flex {
-                            put_compact_nullable_bytes(buf, None);
+                            let () = put_compact_nullable_bytes(buf, None);
                         } else {
-                            put_nullable_bytes(buf, None);
+                            let () = put_nullable_bytes(buf, None);
                         }
                     }
                     Some(__rb) => {
                         let mut __rb_buf = bytes::BytesMut::new();
-                        <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?;
-                        if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) }
+                        <crate::records::RecordsPayload as crate::Encode>::encode(
+                            __rb,
+                            &mut __rb_buf,
+                            version,
+                        )?;
+                        if flex {
+                            let () = put_compact_bytes(buf, &__rb_buf);
+                        } else {
+                            let () = put_bytes(buf, &__rb_buf);
+                        }
                     }
                 }
             } else {
                 match &self.records {
                     None => {
                         let __rb_buf = bytes::BytesMut::new();
-                        if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) }
+                        if flex {
+                            let () = put_compact_bytes(buf, &__rb_buf);
+                        } else {
+                            let () = put_bytes(buf, &__rb_buf);
+                        }
                     }
                     Some(__rb) => {
                         let mut __rb_buf = bytes::BytesMut::new();
-                        <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?;
-                        if flex { put_compact_bytes(buf, &__rb_buf) } else { put_bytes(buf, &__rb_buf) }
+                        <crate::records::RecordsPayload as crate::Encode>::encode(
+                            __rb,
+                            &mut __rb_buf,
+                            version,
+                        )?;
+                        if flex {
+                            let () = put_compact_bytes(buf, &__rb_buf);
+                        } else {
+                            let () = put_bytes(buf, &__rb_buf);
+                        }
                     }
                 }
             }
         }
         Ok(())
     }
-    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn encode_field_7<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.acquired_records).len(), flex);
@@ -368,58 +433,112 @@ impl PartitionData {
             tagged.write(buf, &self.unknown_tagged_fields);
         }
     }
-    fn decode_field_0<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.partition_index = get_i32(buf)?;
         }
         Ok(())
     }
-    fn decode_field_1<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.error_code = get_i16(buf)?;
         }
         Ok(())
     }
-    fn decode_field_2<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_3<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.acknowledge_error_code = get_i16(buf)?;
         }
         Ok(())
     }
-    fn decode_field_4<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.acknowledge_error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.acknowledge_error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_5<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.current_leader = LeaderIdAndEpoch::decode(buf, version)?;
         }
         Ok(())
     }
-    fn decode_field_6<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.records = if version <= 0 {
                 {
-                    let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? };
+                    let __rb_opt = if flex {
+                        get_compact_nullable_bytes_owned(buf)?
+                    } else {
+                        get_nullable_bytes_owned(buf)?
+                    };
                     match __rb_opt {
                         None => None,
                         Some(__rb_bytes) => {
                             let mut __rb_cur: &[u8] = &__rb_bytes;
-                            Some(crate::records::RecordsPayload::decode_lenient(&mut __rb_cur, version)?)
+                            Some(crate::records::RecordsPayload::decode_lenient(
+                                &mut __rb_cur,
+                                version,
+                            )?)
                         }
                     }
                 }
             } else {
                 Some({
-                    let __rb_bytes = if flex { get_compact_bytes_owned(buf)? } else { get_bytes_owned(buf)? };
+                    let __rb_bytes = if flex {
+                        get_compact_bytes_owned(buf)?
+                    } else {
+                        get_bytes_owned(buf)?
+                    };
                     let mut __rb_cur: &[u8] = &__rb_bytes;
                     crate::records::RecordsPayload::decode_lenient(&mut __rb_cur, version)?
                 })
@@ -427,7 +546,12 @@ impl PartitionData {
         }
         Ok(())
     }
-    fn decode_field_7<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.acquired_records = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
@@ -440,7 +564,12 @@ impl PartitionData {
         }
         Ok(())
     }
-    fn decode_tagged_fields<B: Buf>(out: &mut Self, buf: &mut B, _version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
@@ -501,8 +630,15 @@ impl Encode for PartitionData {
                         }
                     }
                     Some(__rb) => {
-                        let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version);
-                        if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len }
+                        let __rb_len =
+                            <crate::records::RecordsPayload as crate::Encode>::encoded_len(
+                                __rb, version,
+                            );
+                        if flex {
+                            crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len)
+                        } else {
+                            4 + __rb_len
+                        }
                     }
                 }
             } else {
@@ -515,16 +651,29 @@ impl Encode for PartitionData {
                         }
                     }
                     Some(__rb) => {
-                        let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version);
-                        if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len }
+                        let __rb_len =
+                            <crate::records::RecordsPayload as crate::Encode>::encoded_len(
+                                __rb, version,
+                            );
+                        if flex {
+                            crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len)
+                        } else {
+                            4 + __rb_len
+                        }
                     }
                 }
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.acquired_records).len(), flex);
-                let body: usize = (self.acquired_records).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.acquired_records).len(),
+                    flex,
+                );
+                let body: usize = (self.acquired_records)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -742,16 +891,20 @@ impl Encode for NodeEndpoint {
             put_i32(buf, self.node_id);
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) }
+            if flex {
+                let () = put_compact_string(buf, &self.host);
+            } else {
+                let () = put_string(buf, &self.host);
+            }
         }
         if version >= 0 {
             put_i32(buf, self.port);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref());
+                let () = put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if flex {
@@ -767,13 +920,21 @@ impl Encode for NodeEndpoint {
             n += 4;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
         }
         if version >= 0 {
             n += 4;
         }
         if version >= 0 {
-            n += if flex { compact_nullable_string_len(self.rack.as_deref()) } else { nullable_string_len(self.rack.as_deref()) };
+            n += if flex {
+                compact_nullable_string_len(self.rack.as_deref())
+            } else {
+                nullable_string_len(self.rack.as_deref())
+            };
         }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -790,13 +951,21 @@ impl Decode<'_> for NodeEndpoint {
             out.node_id = get_i32(buf)?;
         }
         if version >= 0 {
-            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.port = get_i32(buf)?;
         }
         if version >= 0 {
-            out.rack = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.rack = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -834,9 +1003,15 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
     if version >= 1 {
-        obj.insert("acquisitionLockTimeoutMs".to_string(), ::serde_json::json!(0));
+        obj.insert(
+            "acquisitionLockTimeoutMs".to_string(),
+            ::serde_json::json!(0),
+        );
     }
     obj.insert("responses".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("nodeEndpoints".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert(
+        "nodeEndpoints".to_string(),
+        ::serde_json::Value::Array(vec![]),
+    );
     ::serde_json::Value::Object(obj)
 }

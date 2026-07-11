@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -28,23 +29,34 @@ pub struct HeartbeatRequest {
 impl Encode for HeartbeatRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.group_id);
+            } else {
+                let () = put_string(buf, &self.group_id);
+            }
         }
         if version >= 0 {
             put_i32(buf, self.generation_id);
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.member_id);
+            } else {
+                let () = put_string(buf, &self.member_id);
+            }
         }
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.group_instance_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.group_instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.group_instance_id.as_deref());
+                let () = put_nullable_string(buf, self.group_instance_id.as_deref());
             }
         }
         if flex {
@@ -57,13 +69,21 @@ impl Encode for HeartbeatRequest {
         let flex = is_flexible(version);
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) };
+            n += if flex {
+                compact_string_len(&self.group_id)
+            } else {
+                string_len(&self.group_id)
+            };
         }
         if version >= 0 {
             n += 4;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) };
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
         }
         if version >= 3 {
             n += if flex {
@@ -82,21 +102,36 @@ impl Encode for HeartbeatRequest {
 impl Decode<'_> for HeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.generation_id = get_i32(buf)?;
         }
         if version >= 0 {
-            out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 3 {
-            out.group_instance_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.group_instance_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -130,9 +165,15 @@ impl HeartbeatRequest {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "groupId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("generationId".to_string(), ::serde_json::json!(0));
-    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "memberId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     if version >= 3 {
         obj.insert("groupInstanceId".to_string(), ::serde_json::Value::Null);
     }

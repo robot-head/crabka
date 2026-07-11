@@ -11,14 +11,16 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct SnapshotHeaderRecord {
     pub version: i16,
     pub last_contained_log_timestamp: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl SnapshotHeaderRecord {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
     pub fn to_owned(&self) -> crate::owned::snapshot_header_record::SnapshotHeaderRecord {
         crate::owned::snapshot_header_record::SnapshotHeaderRecord {
@@ -31,7 +33,9 @@ impl SnapshotHeaderRecord {
 impl Encode for SnapshotHeaderRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("SnapshotHeaderRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "SnapshotHeaderRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -65,7 +69,9 @@ impl Encode for SnapshotHeaderRecord {
 impl<'de> DecodeBorrow<'de> for SnapshotHeaderRecord {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("SnapshotHeaderRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "SnapshotHeaderRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

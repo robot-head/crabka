@@ -3,7 +3,6 @@ use std::{cmp::Ordering, collections::BTreeMap, fmt::Write as _};
 use base64::{Engine as _, prelude::BASE64_STANDARD};
 use chrono::{FixedOffset, LocalResult, NaiveDate, NaiveDateTime, NaiveTime, TimeZone, Utc};
 use chrono_tz::Tz;
-use num_traits::ToPrimitive;
 use regex::{NoExpand, Regex};
 use time::OffsetDateTime;
 
@@ -2084,9 +2083,7 @@ fn format_template_bytes(value: &str) -> String {
         return String::new();
     };
     if bytes.fract() == 0.0 {
-        bytes
-            .to_u64()
-            .map_or_else(String::new, |bytes| bytes.to_string())
+        format!("{bytes:.0}")
     } else {
         bytes.to_string()
     }

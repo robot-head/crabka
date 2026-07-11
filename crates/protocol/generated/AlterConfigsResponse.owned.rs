@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -26,7 +27,10 @@ pub struct AlterConfigsResponse {
 impl Encode for AlterConfigsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -54,8 +58,12 @@ impl Encode for AlterConfigsResponse {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.responses).len(), flex);
-                let body: usize = (self.responses).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.responses).len(), flex);
+                let body: usize = (self.responses)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -69,7 +77,10 @@ impl Encode for AlterConfigsResponse {
 impl Decode<'_> for AlterConfigsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -122,16 +133,20 @@ impl Encode for AlterConfigsResourceResponse {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
             put_i8(buf, self.resource_type);
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.resource_name) } else { put_string(buf, &self.resource_name) }
+            if flex {
+                let () = put_compact_string(buf, &self.resource_name);
+            } else {
+                let () = put_string(buf, &self.resource_name);
+            }
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -156,7 +171,11 @@ impl Encode for AlterConfigsResourceResponse {
             n += 1;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.resource_name) } else { string_len(&self.resource_name) };
+            n += if flex {
+                compact_string_len(&self.resource_name)
+            } else {
+                string_len(&self.resource_name)
+            };
         }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -173,13 +192,21 @@ impl Decode<'_> for AlterConfigsResourceResponse {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.resource_type = get_i8(buf)?;
         }
         if version >= 0 {
-            out.resource_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.resource_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;

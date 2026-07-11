@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -31,7 +32,10 @@ pub struct FindCoordinatorResponse {
 impl Encode for FindCoordinatorResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 1 {
@@ -42,16 +46,20 @@ impl Encode for FindCoordinatorResponse {
         }
         if (1..=3).contains(&version) {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if (0..=3).contains(&version) {
             put_i32(buf, self.node_id);
         }
         if (0..=3).contains(&version) {
-            if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) }
+            if flex {
+                let () = put_compact_string(buf, &self.host);
+            } else {
+                let () = put_string(buf, &self.host);
+            }
         }
         if (0..=3).contains(&version) {
             put_i32(buf, self.port);
@@ -90,15 +98,23 @@ impl Encode for FindCoordinatorResponse {
             n += 4;
         }
         if (0..=3).contains(&version) {
-            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
         }
         if (0..=3).contains(&version) {
             n += 4;
         }
         if version >= 4 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.coordinators).len(), flex);
-                let body: usize = (self.coordinators).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.coordinators).len(), flex);
+                let body: usize = (self.coordinators)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -112,7 +128,10 @@ impl Encode for FindCoordinatorResponse {
 impl Decode<'_> for FindCoordinatorResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -123,13 +142,21 @@ impl Decode<'_> for FindCoordinatorResponse {
             out.error_code = get_i16(buf)?;
         }
         if (1..=3).contains(&version) {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if (0..=3).contains(&version) {
             out.node_id = get_i32(buf)?;
         }
         if (0..=3).contains(&version) {
-            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if (0..=3).contains(&version) {
             out.port = get_i32(buf)?;
@@ -193,13 +220,21 @@ impl Encode for Coordinator {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 3;
         if version >= 4 {
-            if flex { put_compact_string(buf, &self.key) } else { put_string(buf, &self.key) }
+            if flex {
+                let () = put_compact_string(buf, &self.key);
+            } else {
+                let () = put_string(buf, &self.key);
+            }
         }
         if version >= 4 {
             put_i32(buf, self.node_id);
         }
         if version >= 4 {
-            if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) }
+            if flex {
+                let () = put_compact_string(buf, &self.host);
+            } else {
+                let () = put_string(buf, &self.host);
+            }
         }
         if version >= 4 {
             put_i32(buf, self.port);
@@ -209,9 +244,9 @@ impl Encode for Coordinator {
         }
         if version >= 4 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -224,13 +259,21 @@ impl Encode for Coordinator {
         let flex = version >= 3;
         let mut n: usize = 0;
         if version >= 4 {
-            n += if flex { compact_string_len(&self.key) } else { string_len(&self.key) };
+            n += if flex {
+                compact_string_len(&self.key)
+            } else {
+                string_len(&self.key)
+            };
         }
         if version >= 4 {
             n += 4;
         }
         if version >= 4 {
-            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
         }
         if version >= 4 {
             n += 4;
@@ -257,13 +300,21 @@ impl Decode<'_> for Coordinator {
         let flex = version >= 3;
         let mut out = Self::default();
         if version >= 4 {
-            out.key = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.key = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 4 {
             out.node_id = get_i32(buf)?;
         }
         if version >= 4 {
-            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 4 {
             out.port = get_i32(buf)?;
@@ -272,7 +323,11 @@ impl Decode<'_> for Coordinator {
             out.error_code = get_i16(buf)?;
         }
         if version >= 4 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -325,13 +380,19 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
         obj.insert("nodeId".to_string(), ::serde_json::json!(0));
     }
     if version <= 3 {
-        obj.insert("host".to_string(), ::serde_json::Value::String(String::new()));
+        obj.insert(
+            "host".to_string(),
+            ::serde_json::Value::String(String::new()),
+        );
     }
     if version <= 3 {
         obj.insert("port".to_string(), ::serde_json::json!(0));
     }
     if version >= 4 {
-        obj.insert("coordinators".to_string(), ::serde_json::Value::Array(vec![]));
+        obj.insert(
+            "coordinators".to_string(),
+            ::serde_json::Value::Array(vec![]),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

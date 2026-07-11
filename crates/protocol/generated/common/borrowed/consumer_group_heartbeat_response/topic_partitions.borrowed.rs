@@ -3,16 +3,21 @@ use crate::primitives::fixed::{get_i32, put_i32};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartitions {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
-    pub fn to_owned(&self) -> crate::owned::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions
+    {
         crate::owned::common::consumer_group_heartbeat_response::topic_partitions::TopicPartitions {
             topic_id: (self.topic_id),
             partitions: (self.partitions).clone(),
@@ -48,7 +53,8 @@ impl Encode for TopicPartitions {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
                 let body: usize = (self.partitions).iter().map(|_| 4).sum();
                 prefix + body
             };

@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i32, get_u16, put_i32, put_u16};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -27,14 +28,17 @@ pub struct EndQuorumEpochRequest {
 impl Encode for EndQuorumEpochRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref());
+                let () = put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 0 {
@@ -71,15 +75,22 @@ impl Encode for EndQuorumEpochRequest {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if version >= 1 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.leader_endpoints).len(), flex);
-                let body: usize = (self.leader_endpoints).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.leader_endpoints).len(),
+                    flex,
+                );
+                let body: usize = (self.leader_endpoints)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -93,12 +104,19 @@ impl Encode for EndQuorumEpochRequest {
 impl Decode<'_> for EndQuorumEpochRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.cluster_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.cluster_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.topics = {
@@ -153,7 +171,11 @@ impl Encode for TopicData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.topic_name) } else { put_string(buf, &self.topic_name) }
+            if flex {
+                let () = put_compact_string(buf, &self.topic_name);
+            } else {
+                let () = put_string(buf, &self.topic_name);
+            }
         }
         if version >= 0 {
             {
@@ -173,12 +195,20 @@ impl Encode for TopicData {
         let flex = version >= 1;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.topic_name) } else { string_len(&self.topic_name) };
+            n += if flex {
+                compact_string_len(&self.topic_name)
+            } else {
+                string_len(&self.topic_name)
+            };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -194,7 +224,11 @@ impl Decode<'_> for TopicData {
         let flex = version >= 1;
         let mut out = Self::default();
         if version >= 0 {
-            out.topic_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.topic_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.partitions = {
@@ -249,7 +283,11 @@ impl Encode for PartitionData {
         }
         if version == 0 {
             {
-                crate::primitives::array::put_array_len(buf, (self.preferred_successors).len(), flex);
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.preferred_successors).len(),
+                    flex,
+                );
                 for it in &self.preferred_successors {
                     put_i32(buf, *it);
                 }
@@ -257,7 +295,11 @@ impl Encode for PartitionData {
         }
         if version >= 1 {
             {
-                crate::primitives::array::put_array_len(buf, (self.preferred_candidates).len(), flex);
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.preferred_candidates).len(),
+                    flex,
+                );
                 for it in &self.preferred_candidates {
                     it.encode(buf, version)?;
                 }
@@ -283,15 +325,24 @@ impl Encode for PartitionData {
         }
         if version == 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.preferred_successors).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.preferred_successors).len(),
+                    flex,
+                );
                 let body: usize = (self.preferred_successors).iter().map(|_| 4).sum();
                 prefix + body
             };
         }
         if version >= 1 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.preferred_candidates).len(), flex);
-                let body: usize = (self.preferred_candidates).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.preferred_candidates).len(),
+                    flex,
+                );
+                let body: usize = (self.preferred_candidates)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -442,10 +493,18 @@ impl Encode for LeaderEndpoint {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 1 {
-            if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) }
+            if flex {
+                let () = put_compact_string(buf, &self.name);
+            } else {
+                let () = put_string(buf, &self.name);
+            }
         }
         if version >= 1 {
-            if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) }
+            if flex {
+                let () = put_compact_string(buf, &self.host);
+            } else {
+                let () = put_string(buf, &self.host);
+            }
         }
         if version >= 1 {
             put_u16(buf, self.port);
@@ -460,10 +519,18 @@ impl Encode for LeaderEndpoint {
         let flex = version >= 1;
         let mut n: usize = 0;
         if version >= 1 {
-            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
+            n += if flex {
+                compact_string_len(&self.name)
+            } else {
+                string_len(&self.name)
+            };
         }
         if version >= 1 {
-            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
         }
         if version >= 1 {
             n += 2;
@@ -480,10 +547,18 @@ impl Decode<'_> for LeaderEndpoint {
         let flex = version >= 1;
         let mut out = Self::default();
         if version >= 1 {
-            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 1 {
-            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 1 {
             out.port = get_u16(buf)?;
@@ -520,7 +595,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     if version >= 1 {
-        obj.insert("leaderEndpoints".to_string(), ::serde_json::Value::Array(vec![]));
+        obj.insert(
+            "leaderEndpoints".to_string(),
+            ::serde_json::Value::Array(vec![]),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

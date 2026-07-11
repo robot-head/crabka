@@ -3670,7 +3670,9 @@ pub const CASES: &[Case] = &[
 fn encode_default_0(name: &str, version: i16) -> Option<Vec<u8>> {
     Some(match name {
         "AddOffsetsToTxnRequest" => {
-            let msg = crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::default();
+            let msg =
+                crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3694,13 +3696,15 @@ fn encode_default_0(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "AddRaftVoterRequest" => {
-            let msg = crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::default();
+            let msg =
+                crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "AddRaftVoterResponse" => {
-            let msg = crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::default();
+            let msg =
+                crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3741,7 +3745,8 @@ fn encode_default_1(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "AlterConfigsResponse" => {
-            let msg = crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::default();
+            let msg =
+                crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3759,13 +3764,15 @@ fn encode_default_1(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "AlterPartitionRequest" => {
-            let msg = crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::default();
+            let msg =
+                crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "AlterPartitionResponse" => {
-            let msg = crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::default();
+            let msg =
+                crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3853,13 +3860,16 @@ fn encode_default_3(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "BrokerHeartbeatRequest" => {
-            let msg = crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::default();
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "BrokerHeartbeatResponse" => {
-            let msg = crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::default();
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3947,7 +3957,9 @@ fn encode_default_5(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "CreatePartitionsRequest" => {
-            let msg = crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::default();
+            let msg =
+                crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3965,7 +3977,8 @@ fn encode_default_5(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "CreateTopicsResponse" => {
-            let msg = crabka_protocol::owned::create_topics_response::CreateTopicsResponse::default();
+            let msg =
+                crabka_protocol::owned::create_topics_response::CreateTopicsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -3994,19 +4007,22 @@ fn encode_default_6(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "DeleteGroupsResponse" => {
-            let msg = crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::default();
+            let msg =
+                crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DeleteRecordsRequest" => {
-            let msg = crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::default();
+            let msg =
+                crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DeleteRecordsResponse" => {
-            let msg = crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::default();
+            let msg =
+                crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4047,7 +4063,8 @@ fn encode_default_7(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "DeleteTopicsResponse" => {
-            let msg = crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::default();
+            let msg =
+                crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4059,7 +4076,8 @@ fn encode_default_7(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "DescribeAclsResponse" => {
-            let msg = crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4077,13 +4095,16 @@ fn encode_default_7(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "DescribeClusterRequest" => {
-            let msg = crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeClusterResponse" => {
-            let msg = crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4094,13 +4115,16 @@ fn encode_default_7(name: &str, version: i16) -> Option<Vec<u8>> {
 fn encode_default_8(name: &str, version: i16) -> Option<Vec<u8>> {
     Some(match name {
         "DescribeConfigsRequest" => {
-            let msg = crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeConfigsResponse" => {
-            let msg = crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4118,19 +4142,23 @@ fn encode_default_8(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "DescribeGroupsRequest" => {
-            let msg = crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeGroupsResponse" => {
-            let msg = crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeLogDirsRequest" => {
-            let msg = crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4159,13 +4187,15 @@ fn encode_default_9(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "DescribeQuorumRequest" => {
-            let msg = crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::default();
+            let msg =
+                crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "DescribeQuorumResponse" => {
-            let msg = crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::default();
+            let msg =
+                crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4230,19 +4260,23 @@ fn encode_default_10(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "ElectLeadersResponse" => {
-            let msg = crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::default();
+            let msg =
+                crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "EndQuorumEpochRequest" => {
-            let msg = crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::default();
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "EndQuorumEpochResponse" => {
-            let msg = crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::default();
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4306,25 +4340,30 @@ fn encode_default_11(name: &str, version: i16) -> Option<Vec<u8>> {
 fn encode_default_12(name: &str, version: i16) -> Option<Vec<u8>> {
     Some(match name {
         "FetchSnapshotRequest" => {
-            let msg = crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::default();
+            let msg =
+                crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "FetchSnapshotResponse" => {
-            let msg = crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::default();
+            let msg =
+                crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "FindCoordinatorRequest" => {
-            let msg = crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::default();
+            let msg =
+                crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "FindCoordinatorResponse" => {
-            let msg = crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::default();
+            let msg =
+                crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4371,13 +4410,16 @@ fn encode_default_13(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "InitProducerIdRequest" => {
-            let msg = crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::default();
+            let msg =
+                crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "InitProducerIdResponse" => {
-            let msg = crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::default();
+            let msg =
+                crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4477,7 +4519,9 @@ fn encode_default_15(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "ListTransactionsRequest" => {
-            let msg = crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::default();
+            let msg =
+                crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4507,7 +4551,8 @@ fn encode_default_15(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "OffsetCommitResponse" => {
-            let msg = crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::default();
+            let msg =
+                crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4524,7 +4569,8 @@ fn encode_default_16(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "OffsetDeleteResponse" => {
-            let msg = crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::default();
+            let msg =
+                crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4571,13 +4617,15 @@ fn encode_default_16(name: &str, version: i16) -> Option<Vec<u8>> {
 fn encode_default_17(name: &str, version: i16) -> Option<Vec<u8>> {
     Some(match name {
         "PushTelemetryRequest" => {
-            let msg = crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::default();
+            let msg =
+                crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "PushTelemetryResponse" => {
-            let msg = crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::default();
+            let msg =
+                crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4607,7 +4655,9 @@ fn encode_default_17(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "RemoveRaftVoterRequest" => {
-            let msg = crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::default();
+            let msg =
+                crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4648,7 +4698,9 @@ fn encode_default_18(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "SaslAuthenticateRequest" => {
-            let msg = crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::default();
+            let msg =
+                crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4660,13 +4712,15 @@ fn encode_default_18(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "SaslHandshakeRequest" => {
-            let msg = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::default();
+            let msg =
+                crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "SaslHandshakeResponse" => {
-            let msg = crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::default();
+            let msg =
+                crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4677,7 +4731,9 @@ fn encode_default_18(name: &str, version: i16) -> Option<Vec<u8>> {
 fn encode_default_19(name: &str, version: i16) -> Option<Vec<u8>> {
     Some(match name {
         "ShareAcknowledgeRequest" => {
-            let msg = crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::default();
+            let msg =
+                crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4766,7 +4822,9 @@ fn encode_default_20(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "TxnOffsetCommitRequest" => {
-            let msg = crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::default();
+            let msg =
+                crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4783,7 +4841,9 @@ fn encode_default_20(name: &str, version: i16) -> Option<Vec<u8>> {
 fn encode_default_21(name: &str, version: i16) -> Option<Vec<u8>> {
     Some(match name {
         "UnregisterBrokerRequest" => {
-            let msg = crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::default();
+            let msg =
+                crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4795,19 +4855,23 @@ fn encode_default_21(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "UpdateFeaturesRequest" => {
-            let msg = crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::default();
+            let msg =
+                crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "UpdateFeaturesResponse" => {
-            let msg = crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::default();
+            let msg =
+                crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::default();
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
         }
         "UpdateRaftVoterRequest" => {
-            let msg = crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::default();
+            let msg =
+                crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4848,7 +4912,9 @@ fn encode_default_22(name: &str, version: i16) -> Option<Vec<u8>> {
             buf.to_vec()
         }
         "WriteTxnMarkersRequest" => {
-            let msg = crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::default();
+            let msg =
+                crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::default(
+                );
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
             buf.to_vec()
@@ -4862,9 +4928,10 @@ fn encode_default_22(name: &str, version: i16) -> Option<Vec<u8>> {
         _ => return None,
     })
 }
-#[must_use]
 /// # Panics
-/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
+///
+/// Panics when `name` does not identify a generated protocol message.
+#[must_use]
 pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
     let mut result = None;
     result = result.or_else(|| encode_default_0(name, version));
@@ -4894,202 +4961,497 @@ pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
 }
 fn default_json_for_0(name: &str, version: i16) -> Option<::serde_json::Value> {
     Some(match name {
-        "AddOffsetsToTxnRequest" => crabka_protocol::owned::add_offsets_to_txn_request::default_json(version),
-        "AddOffsetsToTxnResponse" => crabka_protocol::owned::add_offsets_to_txn_response::default_json(version),
-        "AddPartitionsToTxnRequest" => crabka_protocol::owned::add_partitions_to_txn_request::default_json(version),
-        "AddPartitionsToTxnResponse" => crabka_protocol::owned::add_partitions_to_txn_response::default_json(version),
-        "AddRaftVoterRequest" => crabka_protocol::owned::add_raft_voter_request::default_json(version),
-        "AddRaftVoterResponse" => crabka_protocol::owned::add_raft_voter_response::default_json(version),
-        "AllocateProducerIdsRequest" => crabka_protocol::owned::allocate_producer_ids_request::default_json(version),
-        "AllocateProducerIdsResponse" => crabka_protocol::owned::allocate_producer_ids_response::default_json(version),
-        "AlterClientQuotasRequest" => crabka_protocol::owned::alter_client_quotas_request::default_json(version),
-        "AlterClientQuotasResponse" => crabka_protocol::owned::alter_client_quotas_response::default_json(version),
-        "AlterConfigsRequest" => crabka_protocol::owned::alter_configs_request::default_json(version),
-        "AlterConfigsResponse" => crabka_protocol::owned::alter_configs_response::default_json(version),
-        "AlterPartitionReassignmentsRequest" => crabka_protocol::owned::alter_partition_reassignments_request::default_json(version),
-        "AlterPartitionReassignmentsResponse" => crabka_protocol::owned::alter_partition_reassignments_response::default_json(version),
-        "AlterPartitionRequest" => crabka_protocol::owned::alter_partition_request::default_json(version),
-        "AlterPartitionResponse" => crabka_protocol::owned::alter_partition_response::default_json(version),
-        "AlterReplicaLogDirsRequest" => crabka_protocol::owned::alter_replica_log_dirs_request::default_json(version),
-        "AlterReplicaLogDirsResponse" => crabka_protocol::owned::alter_replica_log_dirs_response::default_json(version),
-        "AlterShareGroupOffsetsRequest" => crabka_protocol::owned::alter_share_group_offsets_request::default_json(version),
-        "AlterShareGroupOffsetsResponse" => crabka_protocol::owned::alter_share_group_offsets_response::default_json(version),
-        "AlterUserScramCredentialsRequest" => crabka_protocol::owned::alter_user_scram_credentials_request::default_json(version),
-        "AlterUserScramCredentialsResponse" => crabka_protocol::owned::alter_user_scram_credentials_response::default_json(version),
+        "AddOffsetsToTxnRequest" => {
+            crabka_protocol::owned::add_offsets_to_txn_request::default_json(version)
+        }
+        "AddOffsetsToTxnResponse" => {
+            crabka_protocol::owned::add_offsets_to_txn_response::default_json(version)
+        }
+        "AddPartitionsToTxnRequest" => {
+            crabka_protocol::owned::add_partitions_to_txn_request::default_json(version)
+        }
+        "AddPartitionsToTxnResponse" => {
+            crabka_protocol::owned::add_partitions_to_txn_response::default_json(version)
+        }
+        "AddRaftVoterRequest" => {
+            crabka_protocol::owned::add_raft_voter_request::default_json(version)
+        }
+        "AddRaftVoterResponse" => {
+            crabka_protocol::owned::add_raft_voter_response::default_json(version)
+        }
+        "AllocateProducerIdsRequest" => {
+            crabka_protocol::owned::allocate_producer_ids_request::default_json(version)
+        }
+        "AllocateProducerIdsResponse" => {
+            crabka_protocol::owned::allocate_producer_ids_response::default_json(version)
+        }
+        "AlterClientQuotasRequest" => {
+            crabka_protocol::owned::alter_client_quotas_request::default_json(version)
+        }
+        "AlterClientQuotasResponse" => {
+            crabka_protocol::owned::alter_client_quotas_response::default_json(version)
+        }
+        "AlterConfigsRequest" => {
+            crabka_protocol::owned::alter_configs_request::default_json(version)
+        }
+        "AlterConfigsResponse" => {
+            crabka_protocol::owned::alter_configs_response::default_json(version)
+        }
+        "AlterPartitionReassignmentsRequest" => {
+            crabka_protocol::owned::alter_partition_reassignments_request::default_json(version)
+        }
+        "AlterPartitionReassignmentsResponse" => {
+            crabka_protocol::owned::alter_partition_reassignments_response::default_json(version)
+        }
+        "AlterPartitionRequest" => {
+            crabka_protocol::owned::alter_partition_request::default_json(version)
+        }
+        "AlterPartitionResponse" => {
+            crabka_protocol::owned::alter_partition_response::default_json(version)
+        }
+        "AlterReplicaLogDirsRequest" => {
+            crabka_protocol::owned::alter_replica_log_dirs_request::default_json(version)
+        }
+        "AlterReplicaLogDirsResponse" => {
+            crabka_protocol::owned::alter_replica_log_dirs_response::default_json(version)
+        }
+        "AlterShareGroupOffsetsRequest" => {
+            crabka_protocol::owned::alter_share_group_offsets_request::default_json(version)
+        }
+        "AlterShareGroupOffsetsResponse" => {
+            crabka_protocol::owned::alter_share_group_offsets_response::default_json(version)
+        }
+        "AlterUserScramCredentialsRequest" => {
+            crabka_protocol::owned::alter_user_scram_credentials_request::default_json(version)
+        }
+        "AlterUserScramCredentialsResponse" => {
+            crabka_protocol::owned::alter_user_scram_credentials_response::default_json(version)
+        }
         "ApiVersionsRequest" => crabka_protocol::owned::api_versions_request::default_json(version),
-        "ApiVersionsResponse" => crabka_protocol::owned::api_versions_response::default_json(version),
-        "AssignReplicasToDirsRequest" => crabka_protocol::owned::assign_replicas_to_dirs_request::default_json(version),
-        "AssignReplicasToDirsResponse" => crabka_protocol::owned::assign_replicas_to_dirs_response::default_json(version),
-        "BeginQuorumEpochRequest" => crabka_protocol::owned::begin_quorum_epoch_request::default_json(version),
-        "BeginQuorumEpochResponse" => crabka_protocol::owned::begin_quorum_epoch_response::default_json(version),
-        "BrokerHeartbeatRequest" => crabka_protocol::owned::broker_heartbeat_request::default_json(version),
-        "BrokerHeartbeatResponse" => crabka_protocol::owned::broker_heartbeat_response::default_json(version),
-        "BrokerRegistrationRequest" => crabka_protocol::owned::broker_registration_request::default_json(version),
-        "BrokerRegistrationResponse" => crabka_protocol::owned::broker_registration_response::default_json(version),
-        "ConsumerGroupDescribeRequest" => crabka_protocol::owned::consumer_group_describe_request::default_json(version),
-        "ConsumerGroupDescribeResponse" => crabka_protocol::owned::consumer_group_describe_response::default_json(version),
-        "ConsumerGroupHeartbeatRequest" => crabka_protocol::owned::consumer_group_heartbeat_request::default_json(version),
-        "ConsumerGroupHeartbeatResponse" => crabka_protocol::owned::consumer_group_heartbeat_response::default_json(version),
-        "ControllerRegistrationRequest" => crabka_protocol::owned::controller_registration_request::default_json(version),
-        "ControllerRegistrationResponse" => crabka_protocol::owned::controller_registration_response::default_json(version),
+        "ApiVersionsResponse" => {
+            crabka_protocol::owned::api_versions_response::default_json(version)
+        }
+        "AssignReplicasToDirsRequest" => {
+            crabka_protocol::owned::assign_replicas_to_dirs_request::default_json(version)
+        }
+        "AssignReplicasToDirsResponse" => {
+            crabka_protocol::owned::assign_replicas_to_dirs_response::default_json(version)
+        }
+        "BeginQuorumEpochRequest" => {
+            crabka_protocol::owned::begin_quorum_epoch_request::default_json(version)
+        }
+        "BeginQuorumEpochResponse" => {
+            crabka_protocol::owned::begin_quorum_epoch_response::default_json(version)
+        }
+        "BrokerHeartbeatRequest" => {
+            crabka_protocol::owned::broker_heartbeat_request::default_json(version)
+        }
+        "BrokerHeartbeatResponse" => {
+            crabka_protocol::owned::broker_heartbeat_response::default_json(version)
+        }
+        "BrokerRegistrationRequest" => {
+            crabka_protocol::owned::broker_registration_request::default_json(version)
+        }
+        "BrokerRegistrationResponse" => {
+            crabka_protocol::owned::broker_registration_response::default_json(version)
+        }
+        "ConsumerGroupDescribeRequest" => {
+            crabka_protocol::owned::consumer_group_describe_request::default_json(version)
+        }
+        "ConsumerGroupDescribeResponse" => {
+            crabka_protocol::owned::consumer_group_describe_response::default_json(version)
+        }
+        "ConsumerGroupHeartbeatRequest" => {
+            crabka_protocol::owned::consumer_group_heartbeat_request::default_json(version)
+        }
+        "ConsumerGroupHeartbeatResponse" => {
+            crabka_protocol::owned::consumer_group_heartbeat_response::default_json(version)
+        }
+        "ControllerRegistrationRequest" => {
+            crabka_protocol::owned::controller_registration_request::default_json(version)
+        }
+        "ControllerRegistrationResponse" => {
+            crabka_protocol::owned::controller_registration_response::default_json(version)
+        }
         "CreateAclsRequest" => crabka_protocol::owned::create_acls_request::default_json(version),
         "CreateAclsResponse" => crabka_protocol::owned::create_acls_response::default_json(version),
-        "CreateDelegationTokenRequest" => crabka_protocol::owned::create_delegation_token_request::default_json(version),
-        "CreateDelegationTokenResponse" => crabka_protocol::owned::create_delegation_token_response::default_json(version),
-        "CreatePartitionsRequest" => crabka_protocol::owned::create_partitions_request::default_json(version),
-        "CreatePartitionsResponse" => crabka_protocol::owned::create_partitions_response::default_json(version),
-        "CreateTopicsRequest" => crabka_protocol::owned::create_topics_request::default_json(version),
-        "CreateTopicsResponse" => crabka_protocol::owned::create_topics_response::default_json(version),
+        "CreateDelegationTokenRequest" => {
+            crabka_protocol::owned::create_delegation_token_request::default_json(version)
+        }
+        "CreateDelegationTokenResponse" => {
+            crabka_protocol::owned::create_delegation_token_response::default_json(version)
+        }
+        "CreatePartitionsRequest" => {
+            crabka_protocol::owned::create_partitions_request::default_json(version)
+        }
+        "CreatePartitionsResponse" => {
+            crabka_protocol::owned::create_partitions_response::default_json(version)
+        }
+        "CreateTopicsRequest" => {
+            crabka_protocol::owned::create_topics_request::default_json(version)
+        }
+        "CreateTopicsResponse" => {
+            crabka_protocol::owned::create_topics_response::default_json(version)
+        }
         "DeleteAclsRequest" => crabka_protocol::owned::delete_acls_request::default_json(version),
         "DeleteAclsResponse" => crabka_protocol::owned::delete_acls_response::default_json(version),
-        "DeleteGroupsRequest" => crabka_protocol::owned::delete_groups_request::default_json(version),
-        "DeleteGroupsResponse" => crabka_protocol::owned::delete_groups_response::default_json(version),
-        "DeleteRecordsRequest" => crabka_protocol::owned::delete_records_request::default_json(version),
-        "DeleteRecordsResponse" => crabka_protocol::owned::delete_records_response::default_json(version),
-        "DeleteShareGroupOffsetsRequest" => crabka_protocol::owned::delete_share_group_offsets_request::default_json(version),
-        "DeleteShareGroupOffsetsResponse" => crabka_protocol::owned::delete_share_group_offsets_response::default_json(version),
-        "DeleteShareGroupStateRequest" => crabka_protocol::owned::delete_share_group_state_request::default_json(version),
-        "DeleteShareGroupStateResponse" => crabka_protocol::owned::delete_share_group_state_response::default_json(version),
-        "DeleteTopicsRequest" => crabka_protocol::owned::delete_topics_request::default_json(version),
-        "DeleteTopicsResponse" => crabka_protocol::owned::delete_topics_response::default_json(version),
-        "DescribeAclsRequest" => crabka_protocol::owned::describe_acls_request::default_json(version),
-        "DescribeAclsResponse" => crabka_protocol::owned::describe_acls_response::default_json(version),
+        "DeleteGroupsRequest" => {
+            crabka_protocol::owned::delete_groups_request::default_json(version)
+        }
+        "DeleteGroupsResponse" => {
+            crabka_protocol::owned::delete_groups_response::default_json(version)
+        }
+        "DeleteRecordsRequest" => {
+            crabka_protocol::owned::delete_records_request::default_json(version)
+        }
+        "DeleteRecordsResponse" => {
+            crabka_protocol::owned::delete_records_response::default_json(version)
+        }
+        "DeleteShareGroupOffsetsRequest" => {
+            crabka_protocol::owned::delete_share_group_offsets_request::default_json(version)
+        }
+        "DeleteShareGroupOffsetsResponse" => {
+            crabka_protocol::owned::delete_share_group_offsets_response::default_json(version)
+        }
+        "DeleteShareGroupStateRequest" => {
+            crabka_protocol::owned::delete_share_group_state_request::default_json(version)
+        }
+        "DeleteShareGroupStateResponse" => {
+            crabka_protocol::owned::delete_share_group_state_response::default_json(version)
+        }
+        "DeleteTopicsRequest" => {
+            crabka_protocol::owned::delete_topics_request::default_json(version)
+        }
+        "DeleteTopicsResponse" => {
+            crabka_protocol::owned::delete_topics_response::default_json(version)
+        }
+        "DescribeAclsRequest" => {
+            crabka_protocol::owned::describe_acls_request::default_json(version)
+        }
+        "DescribeAclsResponse" => {
+            crabka_protocol::owned::describe_acls_response::default_json(version)
+        }
         _ => return None,
     })
 }
 fn default_json_for_1(name: &str, version: i16) -> Option<::serde_json::Value> {
     Some(match name {
-        "DescribeClientQuotasRequest" => crabka_protocol::owned::describe_client_quotas_request::default_json(version),
-        "DescribeClientQuotasResponse" => crabka_protocol::owned::describe_client_quotas_response::default_json(version),
-        "DescribeClusterRequest" => crabka_protocol::owned::describe_cluster_request::default_json(version),
-        "DescribeClusterResponse" => crabka_protocol::owned::describe_cluster_response::default_json(version),
-        "DescribeConfigsRequest" => crabka_protocol::owned::describe_configs_request::default_json(version),
-        "DescribeConfigsResponse" => crabka_protocol::owned::describe_configs_response::default_json(version),
-        "DescribeDelegationTokenRequest" => crabka_protocol::owned::describe_delegation_token_request::default_json(version),
-        "DescribeDelegationTokenResponse" => crabka_protocol::owned::describe_delegation_token_response::default_json(version),
-        "DescribeGroupsRequest" => crabka_protocol::owned::describe_groups_request::default_json(version),
-        "DescribeGroupsResponse" => crabka_protocol::owned::describe_groups_response::default_json(version),
-        "DescribeLogDirsRequest" => crabka_protocol::owned::describe_log_dirs_request::default_json(version),
-        "DescribeLogDirsResponse" => crabka_protocol::owned::describe_log_dirs_response::default_json(version),
-        "DescribeProducersRequest" => crabka_protocol::owned::describe_producers_request::default_json(version),
-        "DescribeProducersResponse" => crabka_protocol::owned::describe_producers_response::default_json(version),
-        "DescribeQuorumRequest" => crabka_protocol::owned::describe_quorum_request::default_json(version),
-        "DescribeQuorumResponse" => crabka_protocol::owned::describe_quorum_response::default_json(version),
-        "DescribeShareGroupOffsetsRequest" => crabka_protocol::owned::describe_share_group_offsets_request::default_json(version),
-        "DescribeShareGroupOffsetsResponse" => crabka_protocol::owned::describe_share_group_offsets_response::default_json(version),
-        "DescribeTopicPartitionsRequest" => crabka_protocol::owned::describe_topic_partitions_request::default_json(version),
-        "DescribeTopicPartitionsResponse" => crabka_protocol::owned::describe_topic_partitions_response::default_json(version),
-        "DescribeTransactionsRequest" => crabka_protocol::owned::describe_transactions_request::default_json(version),
-        "DescribeTransactionsResponse" => crabka_protocol::owned::describe_transactions_response::default_json(version),
-        "DescribeUserScramCredentialsRequest" => crabka_protocol::owned::describe_user_scram_credentials_request::default_json(version),
-        "DescribeUserScramCredentialsResponse" => crabka_protocol::owned::describe_user_scram_credentials_response::default_json(version),
-        "ElectLeadersRequest" => crabka_protocol::owned::elect_leaders_request::default_json(version),
-        "ElectLeadersResponse" => crabka_protocol::owned::elect_leaders_response::default_json(version),
-        "EndQuorumEpochRequest" => crabka_protocol::owned::end_quorum_epoch_request::default_json(version),
-        "EndQuorumEpochResponse" => crabka_protocol::owned::end_quorum_epoch_response::default_json(version),
+        "DescribeClientQuotasRequest" => {
+            crabka_protocol::owned::describe_client_quotas_request::default_json(version)
+        }
+        "DescribeClientQuotasResponse" => {
+            crabka_protocol::owned::describe_client_quotas_response::default_json(version)
+        }
+        "DescribeClusterRequest" => {
+            crabka_protocol::owned::describe_cluster_request::default_json(version)
+        }
+        "DescribeClusterResponse" => {
+            crabka_protocol::owned::describe_cluster_response::default_json(version)
+        }
+        "DescribeConfigsRequest" => {
+            crabka_protocol::owned::describe_configs_request::default_json(version)
+        }
+        "DescribeConfigsResponse" => {
+            crabka_protocol::owned::describe_configs_response::default_json(version)
+        }
+        "DescribeDelegationTokenRequest" => {
+            crabka_protocol::owned::describe_delegation_token_request::default_json(version)
+        }
+        "DescribeDelegationTokenResponse" => {
+            crabka_protocol::owned::describe_delegation_token_response::default_json(version)
+        }
+        "DescribeGroupsRequest" => {
+            crabka_protocol::owned::describe_groups_request::default_json(version)
+        }
+        "DescribeGroupsResponse" => {
+            crabka_protocol::owned::describe_groups_response::default_json(version)
+        }
+        "DescribeLogDirsRequest" => {
+            crabka_protocol::owned::describe_log_dirs_request::default_json(version)
+        }
+        "DescribeLogDirsResponse" => {
+            crabka_protocol::owned::describe_log_dirs_response::default_json(version)
+        }
+        "DescribeProducersRequest" => {
+            crabka_protocol::owned::describe_producers_request::default_json(version)
+        }
+        "DescribeProducersResponse" => {
+            crabka_protocol::owned::describe_producers_response::default_json(version)
+        }
+        "DescribeQuorumRequest" => {
+            crabka_protocol::owned::describe_quorum_request::default_json(version)
+        }
+        "DescribeQuorumResponse" => {
+            crabka_protocol::owned::describe_quorum_response::default_json(version)
+        }
+        "DescribeShareGroupOffsetsRequest" => {
+            crabka_protocol::owned::describe_share_group_offsets_request::default_json(version)
+        }
+        "DescribeShareGroupOffsetsResponse" => {
+            crabka_protocol::owned::describe_share_group_offsets_response::default_json(version)
+        }
+        "DescribeTopicPartitionsRequest" => {
+            crabka_protocol::owned::describe_topic_partitions_request::default_json(version)
+        }
+        "DescribeTopicPartitionsResponse" => {
+            crabka_protocol::owned::describe_topic_partitions_response::default_json(version)
+        }
+        "DescribeTransactionsRequest" => {
+            crabka_protocol::owned::describe_transactions_request::default_json(version)
+        }
+        "DescribeTransactionsResponse" => {
+            crabka_protocol::owned::describe_transactions_response::default_json(version)
+        }
+        "DescribeUserScramCredentialsRequest" => {
+            crabka_protocol::owned::describe_user_scram_credentials_request::default_json(version)
+        }
+        "DescribeUserScramCredentialsResponse" => {
+            crabka_protocol::owned::describe_user_scram_credentials_response::default_json(version)
+        }
+        "ElectLeadersRequest" => {
+            crabka_protocol::owned::elect_leaders_request::default_json(version)
+        }
+        "ElectLeadersResponse" => {
+            crabka_protocol::owned::elect_leaders_response::default_json(version)
+        }
+        "EndQuorumEpochRequest" => {
+            crabka_protocol::owned::end_quorum_epoch_request::default_json(version)
+        }
+        "EndQuorumEpochResponse" => {
+            crabka_protocol::owned::end_quorum_epoch_response::default_json(version)
+        }
         "EndTxnRequest" => crabka_protocol::owned::end_txn_request::default_json(version),
         "EndTxnResponse" => crabka_protocol::owned::end_txn_response::default_json(version),
         "EnvelopeRequest" => crabka_protocol::owned::envelope_request::default_json(version),
         "EnvelopeResponse" => crabka_protocol::owned::envelope_response::default_json(version),
-        "ExpireDelegationTokenRequest" => crabka_protocol::owned::expire_delegation_token_request::default_json(version),
-        "ExpireDelegationTokenResponse" => crabka_protocol::owned::expire_delegation_token_response::default_json(version),
+        "ExpireDelegationTokenRequest" => {
+            crabka_protocol::owned::expire_delegation_token_request::default_json(version)
+        }
+        "ExpireDelegationTokenResponse" => {
+            crabka_protocol::owned::expire_delegation_token_response::default_json(version)
+        }
         "FetchRequest" => crabka_protocol::owned::fetch_request::default_json(version),
         "FetchResponse" => crabka_protocol::owned::fetch_response::default_json(version),
-        "FetchSnapshotRequest" => crabka_protocol::owned::fetch_snapshot_request::default_json(version),
-        "FetchSnapshotResponse" => crabka_protocol::owned::fetch_snapshot_response::default_json(version),
-        "FindCoordinatorRequest" => crabka_protocol::owned::find_coordinator_request::default_json(version),
-        "FindCoordinatorResponse" => crabka_protocol::owned::find_coordinator_response::default_json(version),
-        "GetTelemetrySubscriptionsRequest" => crabka_protocol::owned::get_telemetry_subscriptions_request::default_json(version),
-        "GetTelemetrySubscriptionsResponse" => crabka_protocol::owned::get_telemetry_subscriptions_response::default_json(version),
+        "FetchSnapshotRequest" => {
+            crabka_protocol::owned::fetch_snapshot_request::default_json(version)
+        }
+        "FetchSnapshotResponse" => {
+            crabka_protocol::owned::fetch_snapshot_response::default_json(version)
+        }
+        "FindCoordinatorRequest" => {
+            crabka_protocol::owned::find_coordinator_request::default_json(version)
+        }
+        "FindCoordinatorResponse" => {
+            crabka_protocol::owned::find_coordinator_response::default_json(version)
+        }
+        "GetTelemetrySubscriptionsRequest" => {
+            crabka_protocol::owned::get_telemetry_subscriptions_request::default_json(version)
+        }
+        "GetTelemetrySubscriptionsResponse" => {
+            crabka_protocol::owned::get_telemetry_subscriptions_response::default_json(version)
+        }
         "HeartbeatRequest" => crabka_protocol::owned::heartbeat_request::default_json(version),
         "HeartbeatResponse" => crabka_protocol::owned::heartbeat_response::default_json(version),
-        "IncrementalAlterConfigsRequest" => crabka_protocol::owned::incremental_alter_configs_request::default_json(version),
-        "IncrementalAlterConfigsResponse" => crabka_protocol::owned::incremental_alter_configs_response::default_json(version),
-        "InitProducerIdRequest" => crabka_protocol::owned::init_producer_id_request::default_json(version),
-        "InitProducerIdResponse" => crabka_protocol::owned::init_producer_id_response::default_json(version),
-        "InitializeShareGroupStateRequest" => crabka_protocol::owned::initialize_share_group_state_request::default_json(version),
-        "InitializeShareGroupStateResponse" => crabka_protocol::owned::initialize_share_group_state_response::default_json(version),
+        "IncrementalAlterConfigsRequest" => {
+            crabka_protocol::owned::incremental_alter_configs_request::default_json(version)
+        }
+        "IncrementalAlterConfigsResponse" => {
+            crabka_protocol::owned::incremental_alter_configs_response::default_json(version)
+        }
+        "InitProducerIdRequest" => {
+            crabka_protocol::owned::init_producer_id_request::default_json(version)
+        }
+        "InitProducerIdResponse" => {
+            crabka_protocol::owned::init_producer_id_response::default_json(version)
+        }
+        "InitializeShareGroupStateRequest" => {
+            crabka_protocol::owned::initialize_share_group_state_request::default_json(version)
+        }
+        "InitializeShareGroupStateResponse" => {
+            crabka_protocol::owned::initialize_share_group_state_response::default_json(version)
+        }
         "JoinGroupRequest" => crabka_protocol::owned::join_group_request::default_json(version),
         "JoinGroupResponse" => crabka_protocol::owned::join_group_response::default_json(version),
         "LeaveGroupRequest" => crabka_protocol::owned::leave_group_request::default_json(version),
         "LeaveGroupResponse" => crabka_protocol::owned::leave_group_response::default_json(version),
-        "ListConfigResourcesRequest" => crabka_protocol::owned::list_config_resources_request::default_json(version),
-        "ListConfigResourcesResponse" => crabka_protocol::owned::list_config_resources_response::default_json(version),
+        "ListConfigResourcesRequest" => {
+            crabka_protocol::owned::list_config_resources_request::default_json(version)
+        }
+        "ListConfigResourcesResponse" => {
+            crabka_protocol::owned::list_config_resources_response::default_json(version)
+        }
         "ListGroupsRequest" => crabka_protocol::owned::list_groups_request::default_json(version),
         "ListGroupsResponse" => crabka_protocol::owned::list_groups_response::default_json(version),
         "ListOffsetsRequest" => crabka_protocol::owned::list_offsets_request::default_json(version),
-        "ListOffsetsResponse" => crabka_protocol::owned::list_offsets_response::default_json(version),
+        "ListOffsetsResponse" => {
+            crabka_protocol::owned::list_offsets_response::default_json(version)
+        }
         _ => return None,
     })
 }
 fn default_json_for_2(name: &str, version: i16) -> Option<::serde_json::Value> {
     Some(match name {
-        "ListPartitionReassignmentsRequest" => crabka_protocol::owned::list_partition_reassignments_request::default_json(version),
-        "ListPartitionReassignmentsResponse" => crabka_protocol::owned::list_partition_reassignments_response::default_json(version),
-        "ListTransactionsRequest" => crabka_protocol::owned::list_transactions_request::default_json(version),
-        "ListTransactionsResponse" => crabka_protocol::owned::list_transactions_response::default_json(version),
+        "ListPartitionReassignmentsRequest" => {
+            crabka_protocol::owned::list_partition_reassignments_request::default_json(version)
+        }
+        "ListPartitionReassignmentsResponse" => {
+            crabka_protocol::owned::list_partition_reassignments_response::default_json(version)
+        }
+        "ListTransactionsRequest" => {
+            crabka_protocol::owned::list_transactions_request::default_json(version)
+        }
+        "ListTransactionsResponse" => {
+            crabka_protocol::owned::list_transactions_response::default_json(version)
+        }
         "MetadataRequest" => crabka_protocol::owned::metadata_request::default_json(version),
         "MetadataResponse" => crabka_protocol::owned::metadata_response::default_json(version),
-        "OffsetCommitRequest" => crabka_protocol::owned::offset_commit_request::default_json(version),
-        "OffsetCommitResponse" => crabka_protocol::owned::offset_commit_response::default_json(version),
-        "OffsetDeleteRequest" => crabka_protocol::owned::offset_delete_request::default_json(version),
-        "OffsetDeleteResponse" => crabka_protocol::owned::offset_delete_response::default_json(version),
+        "OffsetCommitRequest" => {
+            crabka_protocol::owned::offset_commit_request::default_json(version)
+        }
+        "OffsetCommitResponse" => {
+            crabka_protocol::owned::offset_commit_response::default_json(version)
+        }
+        "OffsetDeleteRequest" => {
+            crabka_protocol::owned::offset_delete_request::default_json(version)
+        }
+        "OffsetDeleteResponse" => {
+            crabka_protocol::owned::offset_delete_response::default_json(version)
+        }
         "OffsetFetchRequest" => crabka_protocol::owned::offset_fetch_request::default_json(version),
-        "OffsetFetchResponse" => crabka_protocol::owned::offset_fetch_response::default_json(version),
-        "OffsetForLeaderEpochRequest" => crabka_protocol::owned::offset_for_leader_epoch_request::default_json(version),
-        "OffsetForLeaderEpochResponse" => crabka_protocol::owned::offset_for_leader_epoch_response::default_json(version),
+        "OffsetFetchResponse" => {
+            crabka_protocol::owned::offset_fetch_response::default_json(version)
+        }
+        "OffsetForLeaderEpochRequest" => {
+            crabka_protocol::owned::offset_for_leader_epoch_request::default_json(version)
+        }
+        "OffsetForLeaderEpochResponse" => {
+            crabka_protocol::owned::offset_for_leader_epoch_response::default_json(version)
+        }
         "ProduceRequest" => crabka_protocol::owned::produce_request::default_json(version),
         "ProduceResponse" => crabka_protocol::owned::produce_response::default_json(version),
-        "PushTelemetryRequest" => crabka_protocol::owned::push_telemetry_request::default_json(version),
-        "PushTelemetryResponse" => crabka_protocol::owned::push_telemetry_response::default_json(version),
-        "ReadShareGroupStateRequest" => crabka_protocol::owned::read_share_group_state_request::default_json(version),
-        "ReadShareGroupStateResponse" => crabka_protocol::owned::read_share_group_state_response::default_json(version),
-        "ReadShareGroupStateSummaryRequest" => crabka_protocol::owned::read_share_group_state_summary_request::default_json(version),
-        "ReadShareGroupStateSummaryResponse" => crabka_protocol::owned::read_share_group_state_summary_response::default_json(version),
-        "RemoveRaftVoterRequest" => crabka_protocol::owned::remove_raft_voter_request::default_json(version),
-        "RemoveRaftVoterResponse" => crabka_protocol::owned::remove_raft_voter_response::default_json(version),
-        "RenewDelegationTokenRequest" => crabka_protocol::owned::renew_delegation_token_request::default_json(version),
-        "RenewDelegationTokenResponse" => crabka_protocol::owned::renew_delegation_token_response::default_json(version),
+        "PushTelemetryRequest" => {
+            crabka_protocol::owned::push_telemetry_request::default_json(version)
+        }
+        "PushTelemetryResponse" => {
+            crabka_protocol::owned::push_telemetry_response::default_json(version)
+        }
+        "ReadShareGroupStateRequest" => {
+            crabka_protocol::owned::read_share_group_state_request::default_json(version)
+        }
+        "ReadShareGroupStateResponse" => {
+            crabka_protocol::owned::read_share_group_state_response::default_json(version)
+        }
+        "ReadShareGroupStateSummaryRequest" => {
+            crabka_protocol::owned::read_share_group_state_summary_request::default_json(version)
+        }
+        "ReadShareGroupStateSummaryResponse" => {
+            crabka_protocol::owned::read_share_group_state_summary_response::default_json(version)
+        }
+        "RemoveRaftVoterRequest" => {
+            crabka_protocol::owned::remove_raft_voter_request::default_json(version)
+        }
+        "RemoveRaftVoterResponse" => {
+            crabka_protocol::owned::remove_raft_voter_response::default_json(version)
+        }
+        "RenewDelegationTokenRequest" => {
+            crabka_protocol::owned::renew_delegation_token_request::default_json(version)
+        }
+        "RenewDelegationTokenResponse" => {
+            crabka_protocol::owned::renew_delegation_token_response::default_json(version)
+        }
         "RequestHeader" => crabka_protocol::owned::request_header::default_json(version),
         "ResponseHeader" => crabka_protocol::owned::response_header::default_json(version),
-        "SaslAuthenticateRequest" => crabka_protocol::owned::sasl_authenticate_request::default_json(version),
-        "SaslAuthenticateResponse" => crabka_protocol::owned::sasl_authenticate_response::default_json(version),
-        "SaslHandshakeRequest" => crabka_protocol::owned::sasl_handshake_request::default_json(version),
-        "SaslHandshakeResponse" => crabka_protocol::owned::sasl_handshake_response::default_json(version),
-        "ShareAcknowledgeRequest" => crabka_protocol::owned::share_acknowledge_request::default_json(version),
-        "ShareAcknowledgeResponse" => crabka_protocol::owned::share_acknowledge_response::default_json(version),
+        "SaslAuthenticateRequest" => {
+            crabka_protocol::owned::sasl_authenticate_request::default_json(version)
+        }
+        "SaslAuthenticateResponse" => {
+            crabka_protocol::owned::sasl_authenticate_response::default_json(version)
+        }
+        "SaslHandshakeRequest" => {
+            crabka_protocol::owned::sasl_handshake_request::default_json(version)
+        }
+        "SaslHandshakeResponse" => {
+            crabka_protocol::owned::sasl_handshake_response::default_json(version)
+        }
+        "ShareAcknowledgeRequest" => {
+            crabka_protocol::owned::share_acknowledge_request::default_json(version)
+        }
+        "ShareAcknowledgeResponse" => {
+            crabka_protocol::owned::share_acknowledge_response::default_json(version)
+        }
         "ShareFetchRequest" => crabka_protocol::owned::share_fetch_request::default_json(version),
         "ShareFetchResponse" => crabka_protocol::owned::share_fetch_response::default_json(version),
-        "ShareGroupDescribeRequest" => crabka_protocol::owned::share_group_describe_request::default_json(version),
-        "ShareGroupDescribeResponse" => crabka_protocol::owned::share_group_describe_response::default_json(version),
-        "ShareGroupHeartbeatRequest" => crabka_protocol::owned::share_group_heartbeat_request::default_json(version),
-        "ShareGroupHeartbeatResponse" => crabka_protocol::owned::share_group_heartbeat_response::default_json(version),
-        "StreamsGroupDescribeRequest" => crabka_protocol::owned::streams_group_describe_request::default_json(version),
-        "StreamsGroupDescribeResponse" => crabka_protocol::owned::streams_group_describe_response::default_json(version),
-        "StreamsGroupHeartbeatRequest" => crabka_protocol::owned::streams_group_heartbeat_request::default_json(version),
-        "StreamsGroupHeartbeatResponse" => crabka_protocol::owned::streams_group_heartbeat_response::default_json(version),
+        "ShareGroupDescribeRequest" => {
+            crabka_protocol::owned::share_group_describe_request::default_json(version)
+        }
+        "ShareGroupDescribeResponse" => {
+            crabka_protocol::owned::share_group_describe_response::default_json(version)
+        }
+        "ShareGroupHeartbeatRequest" => {
+            crabka_protocol::owned::share_group_heartbeat_request::default_json(version)
+        }
+        "ShareGroupHeartbeatResponse" => {
+            crabka_protocol::owned::share_group_heartbeat_response::default_json(version)
+        }
+        "StreamsGroupDescribeRequest" => {
+            crabka_protocol::owned::streams_group_describe_request::default_json(version)
+        }
+        "StreamsGroupDescribeResponse" => {
+            crabka_protocol::owned::streams_group_describe_response::default_json(version)
+        }
+        "StreamsGroupHeartbeatRequest" => {
+            crabka_protocol::owned::streams_group_heartbeat_request::default_json(version)
+        }
+        "StreamsGroupHeartbeatResponse" => {
+            crabka_protocol::owned::streams_group_heartbeat_response::default_json(version)
+        }
         "SyncGroupRequest" => crabka_protocol::owned::sync_group_request::default_json(version),
         "SyncGroupResponse" => crabka_protocol::owned::sync_group_response::default_json(version),
-        "TxnOffsetCommitRequest" => crabka_protocol::owned::txn_offset_commit_request::default_json(version),
-        "TxnOffsetCommitResponse" => crabka_protocol::owned::txn_offset_commit_response::default_json(version),
-        "UnregisterBrokerRequest" => crabka_protocol::owned::unregister_broker_request::default_json(version),
-        "UnregisterBrokerResponse" => crabka_protocol::owned::unregister_broker_response::default_json(version),
-        "UpdateFeaturesRequest" => crabka_protocol::owned::update_features_request::default_json(version),
-        "UpdateFeaturesResponse" => crabka_protocol::owned::update_features_response::default_json(version),
-        "UpdateRaftVoterRequest" => crabka_protocol::owned::update_raft_voter_request::default_json(version),
-        "UpdateRaftVoterResponse" => crabka_protocol::owned::update_raft_voter_response::default_json(version),
+        "TxnOffsetCommitRequest" => {
+            crabka_protocol::owned::txn_offset_commit_request::default_json(version)
+        }
+        "TxnOffsetCommitResponse" => {
+            crabka_protocol::owned::txn_offset_commit_response::default_json(version)
+        }
+        "UnregisterBrokerRequest" => {
+            crabka_protocol::owned::unregister_broker_request::default_json(version)
+        }
+        "UnregisterBrokerResponse" => {
+            crabka_protocol::owned::unregister_broker_response::default_json(version)
+        }
+        "UpdateFeaturesRequest" => {
+            crabka_protocol::owned::update_features_request::default_json(version)
+        }
+        "UpdateFeaturesResponse" => {
+            crabka_protocol::owned::update_features_response::default_json(version)
+        }
+        "UpdateRaftVoterRequest" => {
+            crabka_protocol::owned::update_raft_voter_request::default_json(version)
+        }
+        "UpdateRaftVoterResponse" => {
+            crabka_protocol::owned::update_raft_voter_response::default_json(version)
+        }
         "VoteRequest" => crabka_protocol::owned::vote_request::default_json(version),
         "VoteResponse" => crabka_protocol::owned::vote_response::default_json(version),
-        "WriteShareGroupStateRequest" => crabka_protocol::owned::write_share_group_state_request::default_json(version),
-        "WriteShareGroupStateResponse" => crabka_protocol::owned::write_share_group_state_response::default_json(version),
-        "WriteTxnMarkersRequest" => crabka_protocol::owned::write_txn_markers_request::default_json(version),
-        "WriteTxnMarkersResponse" => crabka_protocol::owned::write_txn_markers_response::default_json(version),
+        "WriteShareGroupStateRequest" => {
+            crabka_protocol::owned::write_share_group_state_request::default_json(version)
+        }
+        "WriteShareGroupStateResponse" => {
+            crabka_protocol::owned::write_share_group_state_response::default_json(version)
+        }
+        "WriteTxnMarkersRequest" => {
+            crabka_protocol::owned::write_txn_markers_request::default_json(version)
+        }
+        "WriteTxnMarkersResponse" => {
+            crabka_protocol::owned::write_txn_markers_response::default_json(version)
+        }
         _ => return None,
     })
 }
-#[must_use]
 /// # Panics
-/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
+///
+/// Panics when `name` does not identify a generated protocol message.
+#[must_use]
 pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
     let mut result = None;
     result = result.or_else(|| default_json_for_0(name, version));
@@ -5102,7 +5464,11 @@ fn roundtrip_0(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "AddOffsetsToTxnRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::add_offsets_to_txn_request::AddOffsetsToTxnRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5134,7 +5500,10 @@ fn roundtrip_0(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "AddRaftVoterRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::add_raft_voter_request::AddRaftVoterRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5142,7 +5511,11 @@ fn roundtrip_0(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "AddRaftVoterResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::add_raft_voter_response::AddRaftVoterResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5188,7 +5561,10 @@ fn roundtrip_1(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "AlterConfigsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_configs_request::AlterConfigsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_configs_request::AlterConfigsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5196,7 +5572,10 @@ fn roundtrip_1(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "AlterConfigsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::alter_configs_response::AlterConfigsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5226,7 +5605,11 @@ fn roundtrip_2(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "AlterPartitionRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::alter_partition_request::AlterPartitionRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5234,7 +5617,11 @@ fn roundtrip_2(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "AlterPartitionResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::alter_partition_response::AlterPartitionResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5296,7 +5683,10 @@ fn roundtrip_3(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ApiVersionsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::api_versions_request::ApiVersionsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::api_versions_request::ApiVersionsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5304,7 +5694,10 @@ fn roundtrip_3(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ApiVersionsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::api_versions_response::ApiVersionsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::api_versions_response::ApiVersionsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5350,7 +5743,11 @@ fn roundtrip_4(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "BrokerHeartbeatRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_request::BrokerHeartbeatRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5358,7 +5755,11 @@ fn roundtrip_4(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "BrokerHeartbeatResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::broker_heartbeat_response::BrokerHeartbeatResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5442,7 +5843,10 @@ fn roundtrip_6(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "CreateAclsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_acls_request::CreateAclsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_acls_request::CreateAclsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5450,7 +5854,10 @@ fn roundtrip_6(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "CreateAclsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_acls_response::CreateAclsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_acls_response::CreateAclsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5480,7 +5887,11 @@ fn roundtrip_7(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "CreatePartitionsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::create_partitions_request::CreatePartitionsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5496,7 +5907,10 @@ fn roundtrip_7(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "CreateTopicsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_topics_request::CreateTopicsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_topics_request::CreateTopicsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5504,7 +5918,10 @@ fn roundtrip_7(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "CreateTopicsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::create_topics_response::CreateTopicsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::create_topics_response::CreateTopicsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5512,7 +5929,10 @@ fn roundtrip_7(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteAclsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_acls_request::DeleteAclsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_acls_request::DeleteAclsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5520,7 +5940,10 @@ fn roundtrip_7(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteAclsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_acls_response::DeleteAclsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_acls_response::DeleteAclsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5534,7 +5957,10 @@ fn roundtrip_8(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "DeleteGroupsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_groups_request::DeleteGroupsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5542,7 +5968,10 @@ fn roundtrip_8(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteGroupsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_groups_response::DeleteGroupsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5550,7 +5979,10 @@ fn roundtrip_8(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteRecordsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_records_request::DeleteRecordsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5558,7 +5990,11 @@ fn roundtrip_8(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteRecordsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::delete_records_response::DeleteRecordsResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5604,7 +6040,10 @@ fn roundtrip_9(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteTopicsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_topics_request::DeleteTopicsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5612,7 +6051,10 @@ fn roundtrip_9(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DeleteTopicsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::delete_topics_response::DeleteTopicsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5620,7 +6062,10 @@ fn roundtrip_9(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeAclsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_acls_request::DescribeAclsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_acls_request::DescribeAclsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5628,7 +6073,10 @@ fn roundtrip_9(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeAclsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::describe_acls_response::DescribeAclsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5658,7 +6106,11 @@ fn roundtrip_10(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeClusterRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_cluster_request::DescribeClusterRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5666,7 +6118,11 @@ fn roundtrip_10(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeClusterResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_cluster_response::DescribeClusterResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5674,7 +6130,11 @@ fn roundtrip_10(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeConfigsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_configs_request::DescribeConfigsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5682,7 +6142,11 @@ fn roundtrip_10(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeConfigsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_configs_response::DescribeConfigsResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5712,7 +6176,11 @@ fn roundtrip_11(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeGroupsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_groups_request::DescribeGroupsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5720,7 +6188,11 @@ fn roundtrip_11(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeGroupsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_groups_response::DescribeGroupsResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5728,7 +6200,11 @@ fn roundtrip_11(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeLogDirsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_log_dirs_request::DescribeLogDirsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5766,7 +6242,11 @@ fn roundtrip_12(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeQuorumRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_quorum_request::DescribeQuorumRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5774,7 +6254,11 @@ fn roundtrip_12(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "DescribeQuorumResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::describe_quorum_response::DescribeQuorumResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5858,7 +6342,10 @@ fn roundtrip_14(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "ElectLeadersRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::elect_leaders_request::ElectLeadersRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5866,7 +6353,10 @@ fn roundtrip_14(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ElectLeadersResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::elect_leaders_response::ElectLeadersResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5874,7 +6364,11 @@ fn roundtrip_14(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "EndQuorumEpochRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_request::EndQuorumEpochRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5882,7 +6376,11 @@ fn roundtrip_14(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "EndQuorumEpochResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::end_quorum_epoch_response::EndQuorumEpochResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5890,7 +6388,9 @@ fn roundtrip_14(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "EndTxnRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::end_txn_request::EndTxnRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::end_txn_request::EndTxnRequest::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5898,7 +6398,9 @@ fn roundtrip_14(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "EndTxnResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::end_txn_response::EndTxnResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::end_txn_response::EndTxnResponse::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5912,7 +6414,10 @@ fn roundtrip_15(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "EnvelopeRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::envelope_request::EnvelopeRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::envelope_request::EnvelopeRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5920,7 +6425,10 @@ fn roundtrip_15(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "EnvelopeResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::envelope_response::EnvelopeResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::envelope_response::EnvelopeResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5944,7 +6452,9 @@ fn roundtrip_15(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "FetchRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::fetch_request::FetchRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::fetch_request::FetchRequest::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5952,7 +6462,9 @@ fn roundtrip_15(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "FetchResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::fetch_response::FetchResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::fetch_response::FetchResponse::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5966,7 +6478,10 @@ fn roundtrip_16(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "FetchSnapshotRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::fetch_snapshot_request::FetchSnapshotRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5974,7 +6489,11 @@ fn roundtrip_16(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "FetchSnapshotResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::fetch_snapshot_response::FetchSnapshotResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5982,7 +6501,11 @@ fn roundtrip_16(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "FindCoordinatorRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::find_coordinator_request::FindCoordinatorRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -5990,7 +6513,11 @@ fn roundtrip_16(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "FindCoordinatorResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::find_coordinator_response::FindCoordinatorResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6020,7 +6547,10 @@ fn roundtrip_17(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "HeartbeatRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::heartbeat_request::HeartbeatRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::heartbeat_request::HeartbeatRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6028,7 +6558,10 @@ fn roundtrip_17(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "HeartbeatResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::heartbeat_response::HeartbeatResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::heartbeat_response::HeartbeatResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6052,7 +6585,11 @@ fn roundtrip_17(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "InitProducerIdRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::init_producer_id_request::InitProducerIdRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6060,7 +6597,11 @@ fn roundtrip_17(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "InitProducerIdResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::init_producer_id_response::InitProducerIdResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6090,7 +6631,10 @@ fn roundtrip_18(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "JoinGroupRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::join_group_request::JoinGroupRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::join_group_request::JoinGroupRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6098,7 +6642,10 @@ fn roundtrip_18(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "JoinGroupResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::join_group_response::JoinGroupResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::join_group_response::JoinGroupResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6106,7 +6653,10 @@ fn roundtrip_18(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "LeaveGroupRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::leave_group_request::LeaveGroupRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::leave_group_request::LeaveGroupRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6114,7 +6664,10 @@ fn roundtrip_18(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "LeaveGroupResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::leave_group_response::LeaveGroupResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::leave_group_response::LeaveGroupResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6144,7 +6697,10 @@ fn roundtrip_19(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ListGroupsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_groups_request::ListGroupsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_groups_request::ListGroupsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6152,7 +6708,10 @@ fn roundtrip_19(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ListGroupsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_groups_response::ListGroupsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_groups_response::ListGroupsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6160,7 +6719,10 @@ fn roundtrip_19(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ListOffsetsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_offsets_request::ListOffsetsRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_offsets_request::ListOffsetsRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6168,7 +6730,10 @@ fn roundtrip_19(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ListOffsetsResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_offsets_response::ListOffsetsResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::list_offsets_response::ListOffsetsResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6198,7 +6763,11 @@ fn roundtrip_20(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ListTransactionsRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::list_transactions_request::ListTransactionsRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6214,7 +6783,10 @@ fn roundtrip_20(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "MetadataRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::metadata_request::MetadataRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::metadata_request::MetadataRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6222,7 +6794,10 @@ fn roundtrip_20(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "MetadataResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::metadata_response::MetadataResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::metadata_response::MetadataResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6236,7 +6811,10 @@ fn roundtrip_21(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "OffsetCommitRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_commit_request::OffsetCommitRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_commit_request::OffsetCommitRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6244,7 +6822,10 @@ fn roundtrip_21(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "OffsetCommitResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_commit_response::OffsetCommitResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6252,7 +6833,10 @@ fn roundtrip_21(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "OffsetDeleteRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_delete_request::OffsetDeleteRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_delete_request::OffsetDeleteRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6260,7 +6844,10 @@ fn roundtrip_21(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "OffsetDeleteResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_delete_response::OffsetDeleteResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6268,7 +6855,10 @@ fn roundtrip_21(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "OffsetFetchRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_fetch_request::OffsetFetchRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6276,7 +6866,10 @@ fn roundtrip_21(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "OffsetFetchResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::offset_fetch_response::OffsetFetchResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::offset_fetch_response::OffsetFetchResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6306,7 +6899,9 @@ fn roundtrip_22(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ProduceRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::produce_request::ProduceRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::produce_request::ProduceRequest::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6314,7 +6909,10 @@ fn roundtrip_22(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ProduceResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::produce_response::ProduceResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::produce_response::ProduceResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6322,7 +6920,10 @@ fn roundtrip_22(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "PushTelemetryRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::push_telemetry_request::PushTelemetryRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6330,7 +6931,11 @@ fn roundtrip_22(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "PushTelemetryResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::push_telemetry_response::PushTelemetryResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6376,7 +6981,11 @@ fn roundtrip_23(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "RemoveRaftVoterRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::remove_raft_voter_request::RemoveRaftVoterRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6414,7 +7023,9 @@ fn roundtrip_24(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "RequestHeader" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::request_header::RequestHeader::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::request_header::RequestHeader::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6422,7 +7033,9 @@ fn roundtrip_24(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ResponseHeader" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::response_header::ResponseHeader::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::response_header::ResponseHeader::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6430,7 +7043,11 @@ fn roundtrip_24(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "SaslAuthenticateRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::sasl_authenticate_request::SaslAuthenticateRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6452,7 +7069,10 @@ fn roundtrip_25(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "SaslHandshakeRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::sasl_handshake_request::SaslHandshakeRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6460,7 +7080,11 @@ fn roundtrip_25(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "SaslHandshakeResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::sasl_handshake_response::SaslHandshakeResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6468,7 +7092,11 @@ fn roundtrip_25(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ShareAcknowledgeRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::share_acknowledge_request::ShareAcknowledgeRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6484,7 +7112,10 @@ fn roundtrip_25(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ShareFetchRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_fetch_request::ShareFetchRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_fetch_request::ShareFetchRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6492,7 +7123,10 @@ fn roundtrip_25(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "ShareFetchResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::share_fetch_response::ShareFetchResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::share_fetch_response::ShareFetchResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6576,7 +7210,10 @@ fn roundtrip_27(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "SyncGroupRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::sync_group_request::SyncGroupRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::sync_group_request::SyncGroupRequest::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6584,7 +7221,10 @@ fn roundtrip_27(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "SyncGroupResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::sync_group_response::SyncGroupResponse::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::sync_group_response::SyncGroupResponse::decode(
+                &mut cur, version,
+            )
+            .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6592,7 +7232,11 @@ fn roundtrip_27(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "TxnOffsetCommitRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::txn_offset_commit_request::TxnOffsetCommitRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6614,7 +7258,11 @@ fn roundtrip_28(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "UnregisterBrokerRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::unregister_broker_request::UnregisterBrokerRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6630,7 +7278,11 @@ fn roundtrip_28(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "UpdateFeaturesRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::update_features_request::UpdateFeaturesRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6638,7 +7290,11 @@ fn roundtrip_28(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "UpdateFeaturesResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::update_features_response::UpdateFeaturesResponse::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6646,7 +7302,11 @@ fn roundtrip_28(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "UpdateRaftVoterRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::update_raft_voter_request::UpdateRaftVoterRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6668,7 +7328,8 @@ fn roundtrip_29(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
     Some(match name {
         "VoteRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::vote_request::VoteRequest::decode(&mut cur, version).unwrap();
+            let msg = crabka_protocol::owned::vote_request::VoteRequest::decode(&mut cur, version)
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6676,7 +7337,9 @@ fn roundtrip_29(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "VoteResponse" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::vote_response::VoteResponse::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::vote_response::VoteResponse::decode(&mut cur, version)
+                    .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6700,7 +7363,11 @@ fn roundtrip_29(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
         }
         "WriteTxnMarkersRequest" => {
             let mut cur = bytes;
-            let msg = crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::decode(&mut cur, version).unwrap();
+            let msg =
+                crabka_protocol::owned::write_txn_markers_request::WriteTxnMarkersRequest::decode(
+                    &mut cur, version,
+                )
+                .unwrap();
             assert!(cur.is_empty());
             let mut buf = BytesMut::new();
             msg.encode(&mut buf, version).unwrap();
@@ -6719,7 +7386,8 @@ fn roundtrip_29(name: &str, version: i16, bytes: &[u8]) -> Option<Vec<u8>> {
 }
 #[must_use]
 /// # Panics
-/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
+///
+/// Panics when `name` does not identify a generated protocol message.
 pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
     let mut result = None;
     result = result.or_else(|| roundtrip_0(name, version, bytes));
@@ -6947,7 +7615,11 @@ pub fn request_header_version(name: &str, version: i16) -> i16 {
         return 0;
     }
     let minimum = header_flex_min(REQUEST_FLEX_MIN, name, "request");
-    if minimum == i16::MIN || version >= minimum { 2 } else { 1 }
+    if minimum == i16::MIN || version >= minimum {
+        2
+    } else {
+        1
+    }
 }
 #[must_use]
 pub fn response_header_version(name: &str, version: i16) -> i16 {
@@ -6961,7 +7633,8 @@ pub fn response_header_version(name: &str, version: i16) -> i16 {
 /// returning the remaining message bytes.
 #[must_use]
 /// # Panics
-/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
+///
+/// Panics when the frame header is malformed or `name` is unknown.
 pub fn strip_frame_header(name: &str, version: i16, is_request: bool, frame: &[u8]) -> Vec<u8> {
     use crabka_protocol::Decode;
     let mut cur = frame;

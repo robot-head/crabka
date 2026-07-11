@@ -6,12 +6,11 @@ use std::{
     path::{Path, PathBuf},
 };
 
-use crate::numeric::{nonnegative_f64_to_u64, to_f64};
-
 use anyhow::{Context, Result};
 
 use crate::{
     ids::TimeOffsetMs,
+    numeric::{nonnegative_f64_to_u64, to_f64},
     scenario::{RunOutput, Stack},
 };
 

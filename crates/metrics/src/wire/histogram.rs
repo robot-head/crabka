@@ -1,8 +1,9 @@
 //! Decode `remote_write` histogram samples into absolute native histograms.
 
+use num_traits::ToPrimitive;
+
 use super::{WireError, pb};
 use crate::{BucketSpan, NativeHistogram, ResetHint};
-use num_traits::ToPrimitive;
 
 /// # Errors
 /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.

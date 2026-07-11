@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_bool, get_i16, get_i32, put_bool, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 13;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -38,17 +38,14 @@ impl Default for MetadataResponse {
             topics: Vec::new(),
             cluster_authorized_operations: -2_147_483_648i32,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl Encode for MetadataResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 3 {
@@ -64,9 +61,9 @@ impl Encode for MetadataResponse {
         }
         if version >= 2 {
             if flex {
-                put_compact_nullable_string(buf, self.cluster_id.as_deref())
+                let () = put_compact_nullable_string(buf, self.cluster_id.as_deref());
             } else {
-                put_nullable_string(buf, self.cluster_id.as_deref())
+                let () = put_nullable_string(buf, self.cluster_id.as_deref());
             }
         }
         if version >= 1 {
@@ -80,7 +77,7 @@ impl Encode for MetadataResponse {
                 }
             }
         }
-        if version >= 8 && version <= 10 {
+        if (8..=10).contains(&version) {
             put_i32(buf, self.cluster_authorized_operations)
         }
         if version >= 13 {
@@ -100,12 +97,8 @@ impl Encode for MetadataResponse {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.brokers).len(), flex);
-                let body: usize = (self.brokers)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.brokers).len(), flex);
+                let body: usize = (self.brokers).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -121,13 +114,12 @@ impl Encode for MetadataResponse {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
-        if version >= 8 && version <= 10 {
+        if (8..=10).contains(&version) {
             n += 4;
         }
         if version >= 13 {
@@ -143,10 +135,7 @@ impl Encode for MetadataResponse {
 impl<'de> Decode<'de> for MetadataResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -164,11 +153,7 @@ impl<'de> Decode<'de> for MetadataResponse {
             };
         }
         if version >= 2 {
-            out.cluster_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.cluster_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 1 {
             out.controller_id = get_i32(buf)?;
@@ -183,7 +168,7 @@ impl<'de> Decode<'de> for MetadataResponse {
                 v
             };
         }
-        if version >= 8 && version <= 10 {
+        if (8..=10).contains(&version) {
             out.cluster_authorized_operations = get_i32(buf)?;
         }
         if version >= 13 {
@@ -215,7 +200,7 @@ impl MetadataResponse {
         if version >= 0 {
             m.topics = vec![MetadataResponseTopic::populated(version)];
         }
-        if version >= 8 && version <= 10 {
+        if (8..=10).contains(&version) {
             m.cluster_authorized_operations = 1i32;
         }
         if version >= 13 {
@@ -240,9 +225,9 @@ impl Encode for MetadataResponseBroker {
         }
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.host)
+                let () = put_compact_string(buf, &self.host);
             } else {
-                put_string(buf, &self.host)
+                let () = put_string(buf, &self.host);
             }
         }
         if version >= 0 {
@@ -250,9 +235,9 @@ impl Encode for MetadataResponseBroker {
         }
         if version >= 1 {
             if flex {
-                put_compact_nullable_string(buf, self.rack.as_deref())
+                let () = put_compact_nullable_string(buf, self.rack.as_deref());
             } else {
-                put_nullable_string(buf, self.rack.as_deref())
+                let () = put_nullable_string(buf, self.rack.as_deref());
             }
         }
         if flex {
@@ -268,21 +253,13 @@ impl Encode for MetadataResponseBroker {
             n += 4;
         }
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.host)
-            } else {
-                string_len(&self.host)
-            };
+            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
         }
         if version >= 0 {
             n += 4;
         }
         if version >= 1 {
-            n += if flex {
-                compact_nullable_string_len(self.rack.as_deref())
-            } else {
-                nullable_string_len(self.rack.as_deref())
-            };
+            n += if flex { compact_nullable_string_len(self.rack.as_deref()) } else { nullable_string_len(self.rack.as_deref()) };
         }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -299,21 +276,13 @@ impl<'de> Decode<'de> for MetadataResponseBroker {
             out.node_id = get_i32(buf)?;
         }
         if version >= 0 {
-            out.host = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.port = get_i32(buf)?;
         }
         if version >= 1 {
-            out.rack = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.rack = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -356,11 +325,11 @@ impl Default for MetadataResponseTopic {
         Self {
             error_code: 0i16,
             name: None,
-            topic_id: Default::default(),
+            topic_id: crate::primitives::uuid::Uuid::default(),
             is_internal: false,
             partitions: Vec::new(),
             topic_authorized_operations: -2_147_483_648i32,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -373,15 +342,15 @@ impl Encode for MetadataResponseTopic {
         if version >= 0 {
             if version >= 12 {
                 if flex {
-                    put_compact_nullable_string(buf, self.name.as_deref())
+                    let () = put_compact_nullable_string(buf, self.name.as_deref());
                 } else {
-                    put_nullable_string(buf, self.name.as_deref())
+                    let () = put_nullable_string(buf, self.name.as_deref());
                 }
             } else {
                 if flex {
-                    put_compact_string(buf, (self.name).as_deref().unwrap_or(""))
+                    let () = put_compact_string(buf, (self.name).as_deref().unwrap_or(""));
                 } else {
-                    put_string(buf, (self.name).as_deref().unwrap_or(""))
+                    let () = put_string(buf, (self.name).as_deref().unwrap_or(""));
                 }
             }
         }
@@ -416,11 +385,7 @@ impl Encode for MetadataResponseTopic {
         }
         if version >= 0 {
             n += if version >= 12 {
-                if flex {
-                    compact_nullable_string_len(self.name.as_deref())
-                } else {
-                    nullable_string_len(self.name.as_deref())
-                }
+                if flex { compact_nullable_string_len(self.name.as_deref()) } else { nullable_string_len(self.name.as_deref()) }
             } else {
                 if flex {
                     compact_string_len((self.name).as_deref().unwrap_or(""))
@@ -437,12 +402,8 @@ impl Encode for MetadataResponseTopic {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -465,17 +426,9 @@ impl<'de> Decode<'de> for MetadataResponseTopic {
         }
         if version >= 0 {
             out.name = if version >= 12 {
-                if flex {
-                    get_compact_nullable_string_owned(buf)?
-                } else {
-                    get_nullable_string_owned(buf)?
-                }
+                if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }
             } else {
-                Some(if flex {
-                    get_compact_string_owned(buf)?
-                } else {
-                    get_string_owned(buf)?
-                })
+                Some(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? })
             };
         }
         if version >= 10 {
@@ -550,7 +503,7 @@ impl Default for MetadataResponsePartition {
             replica_nodes: Vec::new(),
             isr_nodes: Vec::new(),
             offline_replicas: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -616,28 +569,21 @@ impl Encode for MetadataResponsePartition {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.replica_nodes).len(),
-                    flex,
-                );
+                let prefix = crate::primitives::array::array_len_prefix_len((self.replica_nodes).len(), flex);
                 let body: usize = (self.replica_nodes).iter().map(|_| 4).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.isr_nodes).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.isr_nodes).len(), flex);
                 let body: usize = (self.isr_nodes).iter().map(|_| 4).sum();
                 prefix + body
             };
         }
         if version >= 5 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.offline_replicas).len(),
-                    flex,
-                );
+                let prefix = crate::primitives::array::array_len_prefix_len((self.offline_replicas).len(), flex);
                 let body: usize = (self.offline_replicas).iter().map(|_| 4).sum();
                 prefix + body
             };
@@ -748,10 +694,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     }
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     if version >= 8 && version <= 10 {
-        obj.insert(
-            "clusterAuthorizedOperations".to_string(),
-            ::serde_json::json!(-2147483648),
-        );
+        obj.insert("clusterAuthorizedOperations".to_string(), ::serde_json::json!(-2_147_483_648));
     }
     if version >= 13 {
         obj.insert("errorCode".to_string(), ::serde_json::json!(0));

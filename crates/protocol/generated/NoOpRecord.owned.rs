@@ -18,7 +18,9 @@ pub struct NoOpRecord {
 impl Encode for NoOpRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("NoOpRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "NoOpRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if flex {
@@ -40,7 +42,9 @@ impl Encode for NoOpRecord {
 impl Decode<'_> for NoOpRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("NoOpRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "NoOpRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

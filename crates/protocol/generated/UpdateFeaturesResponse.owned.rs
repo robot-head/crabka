@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -28,7 +29,10 @@ pub struct UpdateFeaturesResponse {
 impl Encode for UpdateFeaturesResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -39,9 +43,9 @@ impl Encode for UpdateFeaturesResponse {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if (0..=1).contains(&version) {
@@ -76,8 +80,12 @@ impl Encode for UpdateFeaturesResponse {
         }
         if (0..=1).contains(&version) {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
-                let body: usize = (self.results).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.results).len(), flex);
+                let body: usize = (self.results)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -91,7 +99,10 @@ impl Encode for UpdateFeaturesResponse {
 impl Decode<'_> for UpdateFeaturesResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -102,7 +113,11 @@ impl Decode<'_> for UpdateFeaturesResponse {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if (0..=1).contains(&version) {
             out.results = {
@@ -151,16 +166,20 @@ impl Encode for UpdatableFeatureResult {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.feature) } else { put_string(buf, &self.feature) }
+            if flex {
+                let () = put_compact_string(buf, &self.feature);
+            } else {
+                let () = put_string(buf, &self.feature);
+            }
         }
         if version >= 0 {
             put_i16(buf, self.error_code);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -173,7 +192,11 @@ impl Encode for UpdatableFeatureResult {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.feature) } else { string_len(&self.feature) };
+            n += if flex {
+                compact_string_len(&self.feature)
+            } else {
+                string_len(&self.feature)
+            };
         }
         if version >= 0 {
             n += 2;
@@ -197,13 +220,21 @@ impl Decode<'_> for UpdatableFeatureResult {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.feature = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.feature = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;

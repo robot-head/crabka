@@ -23,7 +23,9 @@ pub struct LeaderChangeMessage {
 impl Encode for LeaderChangeMessage {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("LeaderChangeMessage version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "LeaderChangeMessage version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -65,15 +67,22 @@ impl Encode for LeaderChangeMessage {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.voters).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.voters).len(), flex);
                 let body: usize = (self.voters).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.granting_voters).len(), flex);
-                let body: usize = (self.granting_voters).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.granting_voters).len(),
+                    flex,
+                );
+                let body: usize = (self.granting_voters)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -87,7 +96,9 @@ impl Encode for LeaderChangeMessage {
 impl Decode<'_> for LeaderChangeMessage {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("LeaderChangeMessage version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "LeaderChangeMessage version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -102,7 +113,9 @@ impl Decode<'_> for LeaderChangeMessage {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::leader_change_message::voter::Voter::decode(buf, version)?);
+                    v.push(super::common::leader_change_message::voter::Voter::decode(
+                        buf, version,
+                    )?);
                 }
                 v
             };
@@ -112,7 +125,9 @@ impl Decode<'_> for LeaderChangeMessage {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::leader_change_message::voter::Voter::decode(buf, version)?);
+                    v.push(super::common::leader_change_message::voter::Voter::decode(
+                        buf, version,
+                    )?);
                 }
                 v
             };
@@ -138,7 +153,8 @@ impl LeaderChangeMessage {
             m.voters = vec![super::common::leader_change_message::voter::Voter::populated(version)];
         }
         if version >= 0 {
-            m.granting_voters = vec![super::common::leader_change_message::voter::Voter::populated(version)];
+            m.granting_voters =
+                vec![super::common::leader_change_message::voter::Voter::populated(version)];
         }
         m
     }
@@ -152,6 +168,9 @@ pub fn default_json(_version: i16) -> ::serde_json::Value {
     obj.insert("version".to_string(), ::serde_json::json!(0));
     obj.insert("leaderId".to_string(), ::serde_json::json!(0));
     obj.insert("voters".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert("grantingVoters".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert(
+        "grantingVoters".to_string(),
+        ::serde_json::Value::Array(vec![]),
+    );
     ::serde_json::Value::Object(obj)
 }

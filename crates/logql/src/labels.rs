@@ -1,5 +1,6 @@
 use std::collections::BTreeSet;
 
+use num_traits::ToPrimitive;
 use regex::Regex;
 
 use crate::{
@@ -8,7 +9,6 @@ use crate::{
     template::{LineFormat, template_parse_error},
     util::{format_decimal_ratio, parse_bytes_literal, parse_prometheus_duration_literal},
 };
-use num_traits::ToPrimitive;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct LabelFormat {

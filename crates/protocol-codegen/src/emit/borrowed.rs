@@ -835,16 +835,16 @@ pub(crate) fn encode_call_option_as_non_nullable(schema_type: &str, expr: &str) 
     }
     match schema_type {
         "string" => format!(
-            "if flex {{ put_compact_string(buf, ({expr}).unwrap_or(\"\")) }} \
-             else {{ put_string(buf, ({expr}).unwrap_or(\"\")) }}"
+            "if flex {{ let () = put_compact_string(buf, ({expr}).unwrap_or(\"\")); }} \
+             else {{ let () = put_string(buf, ({expr}).unwrap_or(\"\")); }}"
         ),
         "uuid" => format!("crate::primitives::uuid::put_uuid(buf, ({expr}).unwrap_or_default())"),
         // `records` can't go through `unwrap_or_default()` (that would move out of
         // `&self`), so match by reference and encode an empty payload for None.
         "records" => format!(
             "match &{expr} {{ \
-                None => {{ let __rb_buf = bytes::BytesMut::new(); if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} }}, \
-                Some(__rb) => {{ let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} }} \
+                None => {{ let __rb_buf = bytes::BytesMut::new(); if flex {{ let () = put_compact_bytes(buf, &__rb_buf); }} else {{ let () = put_bytes(buf, &__rb_buf); }} }}, \
+                Some(__rb) => {{ let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex {{ let () = put_compact_bytes(buf, &__rb_buf); }} else {{ let () = put_bytes(buf, &__rb_buf); }} }} \
             }}"
         ),
         _ => encode_call(schema_type, &format!("({expr}).unwrap_or_default()"), false),
@@ -945,16 +945,16 @@ pub(crate) fn owned_encoded_len_expr(schema_type: &str, expr: &str, nullable: bo
 pub(crate) fn owned_encode_call(schema_type: &str, expr: &str, nullable: bool) -> String {
     match (schema_type, nullable) {
         ("string", false) => format!(
-            "if flex {{ put_compact_string(buf, &{expr}) }} else {{ put_string(buf, &{expr}) }}"
+            "if flex {{ let () = put_compact_string(buf, &{expr}); }} else {{ let () = put_string(buf, &{expr}); }}"
         ),
         ("string", true) => format!(
-            "if flex {{ put_compact_nullable_string(buf, {expr}.as_deref()) }} else {{ put_nullable_string(buf, {expr}.as_deref()) }}"
+            "if flex {{ let () = put_compact_nullable_string(buf, {expr}.as_deref()); }} else {{ let () = put_nullable_string(buf, {expr}.as_deref()); }}"
         ),
         ("bytes", false) => format!(
-            "if flex {{ put_compact_bytes(buf, &{expr}) }} else {{ put_bytes(buf, &{expr}) }}"
+            "if flex {{ let () = put_compact_bytes(buf, &{expr}); }} else {{ let () = put_bytes(buf, &{expr}); }}"
         ),
         ("bytes", true) => format!(
-            "if flex {{ put_compact_nullable_bytes(buf, {expr}.as_deref()) }} else {{ put_nullable_bytes(buf, {expr}.as_deref()) }}"
+            "if flex {{ let () = put_compact_nullable_bytes(buf, {expr}.as_deref()); }} else {{ let () = put_nullable_bytes(buf, {expr}.as_deref()); }}"
         ),
         // For non-string/bytes types, fall back to the borrowed encode call.
         _ => encode_call(schema_type, expr, nullable),
@@ -1078,31 +1078,31 @@ pub(crate) fn encode_call(schema_type: &str, expr: &str, nullable: bool) -> Stri
         ("float64", _) => format!("put_f64(buf, {expr})"),
         ("uuid", _) => format!("crate::primitives::uuid::put_uuid(buf, {expr})"),
         ("string", false) => format!(
-            "if flex {{ put_compact_string(buf, {expr}) }} else {{ put_string(buf, {expr}) }}"
+            "if flex {{ let () = put_compact_string(buf, {expr}); }} else {{ let () = put_string(buf, {expr}); }}"
         ),
         ("string", true) => format!(
-            "if flex {{ put_compact_nullable_string(buf, {expr}) }} else {{ put_nullable_string(buf, {expr}) }}"
+            "if flex {{ let () = put_compact_nullable_string(buf, {expr}); }} else {{ let () = put_nullable_string(buf, {expr}); }}"
         ),
         ("bytes", false) => format!(
-            "if flex {{ put_compact_bytes(buf, {expr}) }} else {{ put_bytes(buf, {expr}) }}"
+            "if flex {{ let () = put_compact_bytes(buf, {expr}); }} else {{ let () = put_bytes(buf, {expr}); }}"
         ),
         ("bytes", true) => format!(
-            "if flex {{ put_compact_nullable_bytes(buf, {expr}) }} else {{ put_nullable_bytes(buf, {expr}) }}"
+            "if flex {{ let () = put_compact_nullable_bytes(buf, {expr}); }} else {{ let () = put_nullable_bytes(buf, {expr}); }}"
         ),
         ("records", false) => format!(
             "{{ \
                 let mut __rb_buf = bytes::BytesMut::new(); \
                 <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(&{expr}, &mut __rb_buf, version)?; \
-                if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
+                if flex {{ let () = put_compact_bytes(buf, &__rb_buf); }} else {{ let () = put_bytes(buf, &__rb_buf); }} \
             }}"
         ),
         ("records", true) => format!(
             "match &{expr} {{ \
-                None => if flex {{ put_compact_nullable_bytes(buf, None) }} else {{ put_nullable_bytes(buf, None) }}, \
+                None => if flex {{ let () = put_compact_nullable_bytes(buf, None); }} else {{ let () = put_nullable_bytes(buf, None); }}, \
                 Some(__rb) => {{ \
                     let mut __rb_buf = bytes::BytesMut::new(); \
                     <crate::records::RecordsPayloadBorrowed as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; \
-                    if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} \
+                    if flex {{ let () = put_compact_bytes(buf, &__rb_buf); }} else {{ let () = put_bytes(buf, &__rb_buf); }} \
                 }} \
             }}"
         ),

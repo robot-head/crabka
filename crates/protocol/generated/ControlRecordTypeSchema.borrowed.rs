@@ -10,13 +10,15 @@ pub const FLEXIBLE_MIN: i16 = 32767;
 pub fn is_flexible(version: i16) -> bool {
     version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct ControlRecordTypeSchema {
     pub type_: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl ControlRecordTypeSchema {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
     pub fn to_owned(&self) -> crate::owned::control_record_type_schema::ControlRecordTypeSchema {
         crate::owned::control_record_type_schema::ControlRecordTypeSchema {
@@ -28,7 +30,9 @@ impl ControlRecordTypeSchema {
 impl Encode for ControlRecordTypeSchema {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("ControlRecordTypeSchema version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "ControlRecordTypeSchema version out of range",
+            ));
         }
         if version >= 0 {
             put_i16(buf, self.type_);
@@ -46,7 +50,9 @@ impl Encode for ControlRecordTypeSchema {
 impl<'de> DecodeBorrow<'de> for ControlRecordTypeSchema {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("ControlRecordTypeSchema version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "ControlRecordTypeSchema version out of range",
+            ));
         }
         let mut out = Self::default();
         if version >= 0 {

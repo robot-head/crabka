@@ -39,7 +39,10 @@ impl Default for InitProducerIdResponse {
 impl Encode for InitProducerIdResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -97,7 +100,10 @@ impl Encode for InitProducerIdResponse {
 impl Decode<'_> for InitProducerIdResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -165,7 +171,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
         obj.insert("ongoingTxnProducerId".to_string(), ::serde_json::json!(-1));
     }
     if version >= 6 {
-        obj.insert("ongoingTxnProducerEpoch".to_string(), ::serde_json::json!(-1));
+        obj.insert(
+            "ongoingTxnProducerEpoch".to_string(),
+            ::serde_json::json!(-1),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

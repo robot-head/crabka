@@ -2,7 +2,8 @@
 
 use crate::primitives::fixed::{get_bool, get_i8, put_bool, put_i8};
 use crate::primitives::string_bytes::{
-    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string, string_len,
+    compact_string_len, get_compact_string_owned, get_string_owned, put_compact_string, put_string,
+    string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -26,7 +27,10 @@ pub struct DescribeConfigsRequest {
 impl Encode for DescribeConfigsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -54,8 +58,12 @@ impl Encode for DescribeConfigsRequest {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.resources).len(), flex);
-                let body: usize = (self.resources).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.resources).len(), flex);
+                let body: usize = (self.resources)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -75,7 +83,10 @@ impl Encode for DescribeConfigsRequest {
 impl Decode<'_> for DescribeConfigsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -132,7 +143,11 @@ impl Encode for DescribeConfigsResource {
             put_i8(buf, self.resource_type);
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.resource_name) } else { put_string(buf, &self.resource_name) }
+            if flex {
+                let () = put_compact_string(buf, &self.resource_name);
+            } else {
+                let () = put_string(buf, &self.resource_name);
+            }
         }
         if version >= 0 {
             {
@@ -141,9 +156,9 @@ impl Encode for DescribeConfigsResource {
                 if let Some(v) = &self.configuration_keys {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, it);
+                            let () = put_compact_string(buf, it);
                         } else {
-                            put_string(buf, it);
+                            let () = put_string(buf, it);
                         }
                     }
                 }
@@ -162,13 +177,30 @@ impl Encode for DescribeConfigsResource {
             n += 1;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.resource_name) } else { string_len(&self.resource_name) };
+            n += if flex {
+                compact_string_len(&self.resource_name)
+            } else {
+                string_len(&self.resource_name)
+            };
         }
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.configuration_keys).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
-                let body: usize = opt.map_or(0, |v| v.iter().map(|it| if flex { compact_string_len(it) } else { string_len(it) }).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize = opt.map_or(0, |v| {
+                    v.iter()
+                        .map(|it| {
+                            if flex {
+                                compact_string_len(it)
+                            } else {
+                                string_len(it)
+                            }
+                        })
+                        .sum()
+                });
                 prefix + body
             };
         }
@@ -187,7 +219,11 @@ impl Decode<'_> for DescribeConfigsResource {
             out.resource_type = get_i8(buf)?;
         }
         if version >= 0 {
-            out.resource_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.resource_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.configuration_keys = {
@@ -197,7 +233,11 @@ impl Decode<'_> for DescribeConfigsResource {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? });
+                            v.push(if flex {
+                                get_compact_string_owned(buf)?
+                            } else {
+                                get_string_owned(buf)?
+                            });
                         }
                         Some(v)
                     }
@@ -235,10 +275,16 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("resources".to_string(), ::serde_json::Value::Array(vec![]));
     if version >= 1 {
-        obj.insert("includeSynonyms".to_string(), ::serde_json::Value::Bool(false));
+        obj.insert(
+            "includeSynonyms".to_string(),
+            ::serde_json::Value::Bool(false),
+        );
     }
     if version >= 3 {
-        obj.insert("includeDocumentation".to_string(), ::serde_json::Value::Bool(false));
+        obj.insert(
+            "includeDocumentation".to_string(),
+            ::serde_json::Value::Bool(false),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

@@ -30,8 +30,13 @@ impl Default for BrokerRegistrationResponse {
     }
 }
 impl BrokerRegistrationResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
-    pub fn to_owned(&self) -> crate::owned::broker_registration_response::BrokerRegistrationResponse {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::broker_registration_response::BrokerRegistrationResponse {
         crate::owned::broker_registration_response::BrokerRegistrationResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
@@ -43,7 +48,10 @@ impl BrokerRegistrationResponse {
 impl Encode for BrokerRegistrationResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -83,7 +91,10 @@ impl Encode for BrokerRegistrationResponse {
 impl<'de> DecodeBorrow<'de> for BrokerRegistrationResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

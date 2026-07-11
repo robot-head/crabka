@@ -2,14 +2,10 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
-use crate::primitives::string_bytes::{
-    get_compact_nullable_bytes_owned, get_nullable_bytes_owned, put_bytes, put_compact_bytes,
-    put_compact_nullable_bytes, put_nullable_bytes,
-};
+use crate::primitives::string_bytes::{get_compact_nullable_bytes_owned, get_nullable_bytes_owned, put_bytes, put_compact_bytes, put_compact_nullable_bytes, put_nullable_bytes};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::{Buf, BufMut};
@@ -18,7 +14,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 9;
 pub const FLEXIBLE_MIN: i16 = 9;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -32,17 +29,14 @@ pub struct ProduceRequest {
 impl Encode for ProduceRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 3 {
             if flex {
-                put_compact_nullable_string(buf, self.transactional_id.as_deref())
+                let () = put_compact_nullable_string(buf, self.transactional_id.as_deref());
             } else {
-                put_nullable_string(buf, self.transactional_id.as_deref())
+                let () = put_nullable_string(buf, self.transactional_id.as_deref());
             }
         }
         if version >= 0 {
@@ -83,12 +77,8 @@ impl Encode for ProduceRequest {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topic_data).len(), flex);
-                let body: usize = (self.topic_data)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_data).len(), flex);
+                let body: usize = (self.topic_data).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -102,19 +92,12 @@ impl Encode for ProduceRequest {
 impl<'de> Decode<'de> for ProduceRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 3 {
-            out.transactional_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.transactional_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 0 {
             out.acks = get_i16(buf)?;
@@ -169,9 +152,9 @@ impl Encode for TopicProduceData {
         let flex = version >= 9;
         if version >= 0 {
             if flex {
-                put_compact_string(buf, &self.name)
+                let () = put_compact_string(buf, &self.name);
             } else {
-                put_string(buf, &self.name)
+                let () = put_string(buf, &self.name);
             }
         }
         if version >= 0 {
@@ -192,22 +175,12 @@ impl Encode for TopicProduceData {
         let flex = version >= 9;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.name)
-            } else {
-                string_len(&self.name)
-            };
+            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.partition_data).len(),
-                    flex,
-                );
-                let body: usize = (self.partition_data)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partition_data).len(), flex);
+                let body: usize = (self.partition_data).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -223,11 +196,7 @@ impl<'de> Decode<'de> for TopicProduceData {
         let flex = version >= 9;
         let mut out = Self::default();
         if version >= 0 {
-            out.name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.partition_data = {
@@ -275,22 +244,18 @@ impl Encode for PartitionProduceData {
             match &self.records {
                 None => {
                     if flex {
-                        put_compact_nullable_bytes(buf, None)
+                        let () = put_compact_nullable_bytes(buf, None);
                     } else {
-                        put_nullable_bytes(buf, None)
+                        let () = put_nullable_bytes(buf, None);
                     }
                 }
                 Some(__rb) => {
                     let mut __rb_buf = bytes::BytesMut::new();
-                    <crate::records::RecordsPayload as crate::Encode>::encode(
-                        __rb,
-                        &mut __rb_buf,
-                        version,
-                    )?;
+                    <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?;
                     if flex {
-                        put_compact_bytes(buf, &__rb_buf)
+                        let () = put_compact_bytes(buf, &__rb_buf);
                     } else {
-                        put_bytes(buf, &__rb_buf)
+                        let () = put_bytes(buf, &__rb_buf);
                     }
                 }
             }
@@ -317,14 +282,8 @@ impl Encode for PartitionProduceData {
                     }
                 }
                 Some(__rb) => {
-                    let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(
-                        __rb, version,
-                    );
-                    if flex {
-                        crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len)
-                    } else {
-                        4 + __rb_len
-                    }
+                    let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version);
+                    if flex { crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) } else { 4 + __rb_len }
                 }
             };
         }
@@ -344,19 +303,12 @@ impl<'de> Decode<'de> for PartitionProduceData {
         }
         if version >= 0 {
             out.records = {
-                let __rb_opt = if flex {
-                    get_compact_nullable_bytes_owned(buf)?
-                } else {
-                    get_nullable_bytes_owned(buf)?
-                };
+                let __rb_opt = if flex { get_compact_nullable_bytes_owned(buf)? } else { get_nullable_bytes_owned(buf)? };
                 match __rb_opt {
                     None => None,
                     Some(__rb_bytes) => {
                         let mut __rb_cur: &[u8] = &__rb_bytes;
-                        Some(<crate::records::RecordsPayload as crate::Decode>::decode(
-                            &mut __rb_cur,
-                            version,
-                        )?)
+                        Some(<crate::records::RecordsPayload as crate::Decode>::decode(&mut __rb_cur, version)?)
                     }
                 }
             };

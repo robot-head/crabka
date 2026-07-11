@@ -30,6 +30,9 @@ impl Default for DescribeClusterRequest {
     }
 }
 impl DescribeClusterRequest {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
     pub fn to_owned(&self) -> crate::owned::describe_cluster_request::DescribeClusterRequest {
         crate::owned::describe_cluster_request::DescribeClusterRequest {
@@ -43,7 +46,10 @@ impl DescribeClusterRequest {
 impl Encode for DescribeClusterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -83,7 +89,10 @@ impl Encode for DescribeClusterRequest {
 impl<'de> DecodeBorrow<'de> for DescribeClusterRequest {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

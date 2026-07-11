@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -27,7 +28,10 @@ pub struct DeleteTopicsRequest {
 impl Encode for DeleteTopicsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 6 {
@@ -43,9 +47,9 @@ impl Encode for DeleteTopicsRequest {
                 crate::primitives::array::put_array_len(buf, (self.topic_names).len(), flex);
                 for it in &self.topic_names {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -64,15 +68,26 @@ impl Encode for DeleteTopicsRequest {
         let mut n: usize = 0;
         if version >= 6 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if (0..=5).contains(&version) {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_names).len(), flex);
-                let body: usize = (self.topic_names).iter().map(|it| if flex { compact_string_len(it) } else { string_len(it) }).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topic_names).len(), flex);
+                let body: usize = (self.topic_names)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
                 prefix + body
             };
         }
@@ -89,7 +104,10 @@ impl Encode for DeleteTopicsRequest {
 impl Decode<'_> for DeleteTopicsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -108,7 +126,11 @@ impl Decode<'_> for DeleteTopicsRequest {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? });
+                    v.push(if flex {
+                        get_compact_string_owned(buf)?
+                    } else {
+                        get_string_owned(buf)?
+                    });
                 }
                 v
             };
@@ -150,9 +172,9 @@ impl Encode for DeleteTopicState {
         let flex = version >= 4;
         if version >= 6 {
             if flex {
-                put_compact_nullable_string(buf, self.name.as_deref());
+                let () = put_compact_nullable_string(buf, self.name.as_deref());
             } else {
-                put_nullable_string(buf, self.name.as_deref());
+                let () = put_nullable_string(buf, self.name.as_deref());
             }
         }
         if version >= 6 {
@@ -168,7 +190,11 @@ impl Encode for DeleteTopicState {
         let flex = version >= 4;
         let mut n: usize = 0;
         if version >= 6 {
-            n += if flex { compact_nullable_string_len(self.name.as_deref()) } else { nullable_string_len(self.name.as_deref()) };
+            n += if flex {
+                compact_nullable_string_len(self.name.as_deref())
+            } else {
+                nullable_string_len(self.name.as_deref())
+            };
         }
         if version >= 6 {
             n += 16;
@@ -185,7 +211,11 @@ impl Decode<'_> for DeleteTopicState {
         let flex = version >= 4;
         let mut out = Self::default();
         if version >= 6 {
-            out.name = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.name = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 6 {
             out.topic_id = crate::primitives::uuid::get_uuid(buf)?;

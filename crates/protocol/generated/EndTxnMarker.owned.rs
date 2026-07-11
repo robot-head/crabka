@@ -19,7 +19,9 @@ pub struct EndTxnMarker {
 impl Encode for EndTxnMarker {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("EndTxnMarker version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "EndTxnMarker version out of range",
+            ));
         }
         if version >= 0 {
             put_i32(buf, self.coordinator_epoch);
@@ -37,7 +39,9 @@ impl Encode for EndTxnMarker {
 impl Decode<'_> for EndTxnMarker {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("EndTxnMarker version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "EndTxnMarker version out of range",
+            ));
         }
         let mut out = Self::default();
         if version >= 0 {

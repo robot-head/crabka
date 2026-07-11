@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -26,7 +27,10 @@ pub struct ConsumerGroupDescribeResponse {
 impl Encode for ConsumerGroupDescribeResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -54,7 +58,8 @@ impl Encode for ConsumerGroupDescribeResponse {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
                 let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -69,7 +74,10 @@ impl Encode for ConsumerGroupDescribeResponse {
 impl Decode<'_> for ConsumerGroupDescribeResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -144,20 +152,28 @@ impl DescribedGroup {
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.group_id);
+            } else {
+                let () = put_string(buf, &self.group_id);
+            }
         }
     }
     fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.group_state) } else { put_string(buf, &self.group_state) }
+            if flex {
+                let () = put_compact_string(buf, &self.group_state);
+            } else {
+                let () = put_string(buf, &self.group_state);
+            }
         }
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
@@ -172,10 +188,19 @@ impl DescribedGroup {
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.assignor_name) } else { put_string(buf, &self.assignor_name) }
+            if flex {
+                let () = put_compact_string(buf, &self.assignor_name);
+            } else {
+                let () = put_string(buf, &self.assignor_name);
+            }
         }
     }
-    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn encode_field_7<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 crate::primitives::array::put_array_len(buf, (self.members).len(), flex);
@@ -197,49 +222,105 @@ impl DescribedGroup {
             tagged.write(buf, &self.unknown_tagged_fields);
         }
     }
-    fn decode_field_0<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.error_code = get_i16(buf)?;
         }
         Ok(())
     }
-    fn decode_field_1<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_2<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_3<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.group_state = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.group_state = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_4<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.group_epoch = get_i32(buf)?;
         }
         Ok(())
     }
-    fn decode_field_5<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.assignment_epoch = get_i32(buf)?;
         }
         Ok(())
     }
-    fn decode_field_6<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.assignor_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.assignor_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_7<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.members = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
@@ -252,13 +333,23 @@ impl DescribedGroup {
         }
         Ok(())
     }
-    fn decode_field_8<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_8<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.authorized_operations = get_i32(buf)?;
         }
         Ok(())
     }
-    fn decode_tagged_fields<B: Buf>(out: &mut Self, buf: &mut B, _version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
@@ -294,10 +385,18 @@ impl Encode for DescribedGroup {
             };
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) };
+            n += if flex {
+                compact_string_len(&self.group_id)
+            } else {
+                string_len(&self.group_id)
+            };
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.group_state) } else { string_len(&self.group_state) };
+            n += if flex {
+                compact_string_len(&self.group_state)
+            } else {
+                string_len(&self.group_state)
+            };
         }
         if version >= 0 {
             n += 4;
@@ -306,12 +405,20 @@ impl Encode for DescribedGroup {
             n += 4;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.assignor_name) } else { string_len(&self.assignor_name) };
+            n += if flex {
+                compact_string_len(&self.assignor_name)
+            } else {
+                string_len(&self.assignor_name)
+            };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
-                let body: usize = (self.members).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
+                let body: usize = (self.members)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -403,8 +510,10 @@ impl Default for Member {
             client_host: String::new(),
             subscribed_topic_names: Vec::new(),
             subscribed_topic_regex: None,
-            assignment: super::common::consumer_group_describe_response::assignment::Assignment::default(),
-            target_assignment: super::common::consumer_group_describe_response::assignment::Assignment::default(),
+            assignment:
+                super::common::consumer_group_describe_response::assignment::Assignment::default(),
+            target_assignment:
+                super::common::consumer_group_describe_response::assignment::Assignment::default(),
             member_type: -1i8,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         }
@@ -413,24 +522,28 @@ impl Default for Member {
 impl Member {
     fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.member_id);
+            } else {
+                let () = put_string(buf, &self.member_id);
+            }
         }
     }
     fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.instance_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.instance_id.as_deref());
             } else {
-                put_nullable_string(buf, self.instance_id.as_deref());
+                let () = put_nullable_string(buf, self.instance_id.as_deref());
             }
         }
     }
     fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
     }
@@ -441,23 +554,35 @@ impl Member {
     }
     fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.client_id) } else { put_string(buf, &self.client_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.client_id);
+            } else {
+                let () = put_string(buf, &self.client_id);
+            }
         }
     }
     fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.client_host) } else { put_string(buf, &self.client_host) }
+            if flex {
+                let () = put_compact_string(buf, &self.client_host);
+            } else {
+                let () = put_string(buf, &self.client_host);
+            }
         }
     }
     fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             {
-                crate::primitives::array::put_array_len(buf, (self.subscribed_topic_names).len(), flex);
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.subscribed_topic_names).len(),
+                    flex,
+                );
                 for it in &self.subscribed_topic_names {
                     if flex {
-                        put_compact_string(buf, it);
+                        let () = put_compact_string(buf, it);
                     } else {
-                        put_string(buf, it);
+                        let () = put_string(buf, it);
                     }
                 }
             }
@@ -466,19 +591,29 @@ impl Member {
     fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.subscribed_topic_regex.as_deref());
+                let () = put_compact_nullable_string(buf, self.subscribed_topic_regex.as_deref());
             } else {
-                put_nullable_string(buf, self.subscribed_topic_regex.as_deref());
+                let () = put_nullable_string(buf, self.subscribed_topic_regex.as_deref());
             }
         }
     }
-    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn encode_field_8<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             self.assignment.encode(buf, version)?;
         }
         Ok(())
     }
-    fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn encode_field_9<B: BufMut>(
+        &self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             self.target_assignment.encode(buf, version)?;
         }
@@ -495,80 +630,174 @@ impl Member {
             tagged.write(buf, &self.unknown_tagged_fields);
         }
     }
-    fn decode_field_0<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_0<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_1<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_1<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.instance_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.instance_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_2<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_2<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.rack_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.rack_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_3<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_3<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.member_epoch = get_i32(buf)?;
         }
         Ok(())
     }
-    fn decode_field_4<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_4<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.client_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.client_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_5<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_5<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.client_host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.client_host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_6<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_6<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
             out.subscribed_topic_names = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? });
+                    v.push(if flex {
+                        get_compact_string_owned(buf)?
+                    } else {
+                        get_string_owned(buf)?
+                    });
                 }
                 v
             };
         }
         Ok(())
     }
-    fn decode_field_7<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_7<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.subscribed_topic_regex = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.subscribed_topic_regex = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         Ok(())
     }
-    fn decode_field_8<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_8<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.assignment = super::common::consumer_group_describe_response::assignment::Assignment::decode(buf, version)?;
+            out.assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         Ok(())
     }
-    fn decode_field_9<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_9<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 0 {
-            out.target_assignment = super::common::consumer_group_describe_response::assignment::Assignment::decode(buf, version)?;
+            out.target_assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::decode(
+                    buf, version,
+                )?;
         }
         Ok(())
     }
-    fn decode_field_10<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+    fn decode_field_10<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        version: i16,
+        _flex: bool,
+    ) -> Result<(), ProtocolError> {
         if version >= 1 {
             out.member_type = get_i8(buf)?;
         }
         Ok(())
     }
-    fn decode_tagged_fields<B: Buf>(out: &mut Self, buf: &mut B, _version: i16, flex: bool) -> Result<(), ProtocolError> {
+    fn decode_tagged_fields<B: Buf>(
+        out: &mut Self,
+        buf: &mut B,
+        _version: i16,
+        flex: bool,
+    ) -> Result<(), ProtocolError> {
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
         }
@@ -596,7 +825,11 @@ impl Encode for Member {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) };
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
         }
         if version >= 0 {
             n += if flex {
@@ -606,21 +839,45 @@ impl Encode for Member {
             };
         }
         if version >= 0 {
-            n += if flex { compact_nullable_string_len(self.rack_id.as_deref()) } else { nullable_string_len(self.rack_id.as_deref()) };
+            n += if flex {
+                compact_nullable_string_len(self.rack_id.as_deref())
+            } else {
+                nullable_string_len(self.rack_id.as_deref())
+            };
         }
         if version >= 0 {
             n += 4;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.client_id) } else { string_len(&self.client_id) };
+            n += if flex {
+                compact_string_len(&self.client_id)
+            } else {
+                string_len(&self.client_id)
+            };
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.client_host) } else { string_len(&self.client_host) };
+            n += if flex {
+                compact_string_len(&self.client_host)
+            } else {
+                string_len(&self.client_host)
+            };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.subscribed_topic_names).len(), flex);
-                let body: usize = (self.subscribed_topic_names).iter().map(|it| if flex { compact_string_len(it) } else { string_len(it) }).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.subscribed_topic_names).len(),
+                    flex,
+                );
+                let body: usize = (self.subscribed_topic_names)
+                    .iter()
+                    .map(|it| {
+                        if flex {
+                            compact_string_len(it)
+                        } else {
+                            string_len(it)
+                        }
+                    })
+                    .sum();
                 prefix + body
             };
         }
@@ -696,10 +953,16 @@ impl Member {
             m.subscribed_topic_regex = Some("x".to_string());
         }
         if version >= 0 {
-            m.assignment = super::common::consumer_group_describe_response::assignment::Assignment::populated(version);
+            m.assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 0 {
-            m.target_assignment = super::common::consumer_group_describe_response::assignment::Assignment::populated(version);
+            m.target_assignment =
+                super::common::consumer_group_describe_response::assignment::Assignment::populated(
+                    version,
+                );
         }
         if version >= 1 {
             m.member_type = 1i8;

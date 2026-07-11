@@ -107,7 +107,7 @@ topology
     .map_values(|e: &OrderEvent| OrderProto {
         order_id: e.order_id.clone(),
         user: e.user.clone(),
-        amount_cents: (e.amount * 100.0).round() as i64,
+        amount_cents: amount_cents(e.amount),
         currency: e.currency.to_uppercase(),
         ts_ms: e.ts_ms,
     })
@@ -399,10 +399,10 @@ for v in drain(&bootstrap, "orders.summary", "verify", 2).await {
     by_user.insert(s.user.clone(), s);
 }
 let alice = by_user.get("alice").expect("alice summary");
-assert2::assert!(alice.total_cents == 850);
-assert2::assert!(alice.order_count == 2);
+assert_eq!(alice.total_cents, 850, "alice total_cents");
+assert_eq!(alice.order_count, 2, "alice order_count");
 let bob = by_user.get("bob").expect("bob summary");
-assert2::assert!(bob.total_cents == 900);
-assert2::assert!(bob.order_count == 1);
+assert_eq!(bob.total_cents, 900, "bob total_cents");
+assert_eq!(bob.order_count, 1, "bob order_count");
 ```
 <!-- /snippet -->

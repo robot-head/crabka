@@ -47,22 +47,36 @@ impl Encode for Assignment {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.active_tasks).len(), flex);
-                let body: usize = (self.active_tasks).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.active_tasks).len(), flex);
+                let body: usize = (self.active_tasks)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.standby_tasks).len(), flex);
-                let body: usize = (self.standby_tasks).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.standby_tasks).len(),
+                    flex,
+                );
+                let body: usize = (self.standby_tasks)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.warmup_tasks).len(), flex);
-                let body: usize = (self.warmup_tasks).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.warmup_tasks).len(), flex);
+                let body: usize = (self.warmup_tasks)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }

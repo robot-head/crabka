@@ -157,6 +157,9 @@ fn build_encode_default(specs: &[MessageSpec]) -> TokenStream {
 
     quote! {
         #(#helpers)*
+        /// # Panics
+        ///
+        /// Panics when `name` does not identify a generated protocol message.
         #[must_use]
         pub fn encode_default(name: &str, version: i16) -> Vec<u8> {
             let mut result = None;
@@ -207,6 +210,9 @@ fn build_default_json_for(specs: &[MessageSpec]) -> TokenStream {
 
     quote! {
         #(#helpers)*
+        /// # Panics
+        ///
+        /// Panics when `name` does not identify a generated protocol message.
         #[must_use]
         pub fn default_json_for(name: &str, version: i16) -> ::serde_json::Value {
             let mut result = None;
@@ -267,6 +273,9 @@ fn build_roundtrip(specs: &[MessageSpec]) -> TokenStream {
     quote! {
         #(#helpers)*
         #[must_use]
+        /// # Panics
+        ///
+        /// Panics when `name` does not identify a generated protocol message.
         pub fn roundtrip(name: &str, version: i16, bytes: &[u8]) -> Vec<u8> {
             let mut result = None;
             #(#calls)*
@@ -347,6 +356,9 @@ fn build_strip_frame_header() -> TokenStream {
         #[doc = " Decode and discard the request/response header from a full frame body,"]
         #[doc = " returning the remaining message bytes."]
         #[must_use]
+        /// # Panics
+        ///
+        /// Panics when the frame header is malformed or `name` is unknown.
         pub fn strip_frame_header(name: &str, version: i16, is_request: bool, frame: &[u8]) -> Vec<u8> {
             use crabka_protocol::Decode;
             let mut cur = frame;

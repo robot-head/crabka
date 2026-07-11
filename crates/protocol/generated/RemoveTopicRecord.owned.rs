@@ -19,7 +19,9 @@ pub struct RemoveTopicRecord {
 impl Encode for RemoveTopicRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("RemoveTopicRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "RemoveTopicRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -47,7 +49,9 @@ impl Encode for RemoveTopicRecord {
 impl Decode<'_> for RemoveTopicRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("RemoveTopicRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "RemoveTopicRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -77,6 +81,9 @@ impl RemoveTopicRecord {
 #[allow(unused_comparisons)]
 pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("topicId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
+    obj.insert(
+        "topicId".to_string(),
+        ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()),
+    );
     ::serde_json::Value::Object(obj)
 }

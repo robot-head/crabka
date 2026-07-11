@@ -25,8 +25,13 @@ impl Default for ReplicaState {
     }
 }
 impl ReplicaState {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
-    pub fn to_owned(&self) -> crate::owned::common::describe_quorum_response::replica_state::ReplicaState {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::common::describe_quorum_response::replica_state::ReplicaState {
         crate::owned::common::describe_quorum_response::replica_state::ReplicaState {
             replica_id: (self.replica_id),
             replica_directory_id: (self.replica_directory_id),

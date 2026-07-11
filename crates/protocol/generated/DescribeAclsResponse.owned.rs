@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i8, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -28,7 +29,10 @@ pub struct DescribeAclsResponse {
 impl Encode for DescribeAclsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -39,9 +43,9 @@ impl Encode for DescribeAclsResponse {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if version >= 0 {
@@ -76,8 +80,12 @@ impl Encode for DescribeAclsResponse {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.resources).len(), flex);
-                let body: usize = (self.resources).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.resources).len(), flex);
+                let body: usize = (self.resources)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -91,7 +99,10 @@ impl Encode for DescribeAclsResponse {
 impl Decode<'_> for DescribeAclsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -102,7 +113,11 @@ impl Decode<'_> for DescribeAclsResponse {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.resources = {
@@ -166,7 +181,11 @@ impl Encode for DescribeAclsResource {
             put_i8(buf, self.resource_type);
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.resource_name) } else { put_string(buf, &self.resource_name) }
+            if flex {
+                let () = put_compact_string(buf, &self.resource_name);
+            } else {
+                let () = put_string(buf, &self.resource_name);
+            }
         }
         if version >= 1 {
             put_i8(buf, self.pattern_type);
@@ -192,14 +211,19 @@ impl Encode for DescribeAclsResource {
             n += 1;
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.resource_name) } else { string_len(&self.resource_name) };
+            n += if flex {
+                compact_string_len(&self.resource_name)
+            } else {
+                string_len(&self.resource_name)
+            };
         }
         if version >= 1 {
             n += 1;
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.acls).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.acls).len(), flex);
                 let body: usize = (self.acls).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -219,7 +243,11 @@ impl Decode<'_> for DescribeAclsResource {
             out.resource_type = get_i8(buf)?;
         }
         if version >= 0 {
-            out.resource_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.resource_name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 1 {
             out.pattern_type = get_i8(buf)?;
@@ -272,10 +300,18 @@ impl Encode for AclDescription {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 2;
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.principal) } else { put_string(buf, &self.principal) }
+            if flex {
+                let () = put_compact_string(buf, &self.principal);
+            } else {
+                let () = put_string(buf, &self.principal);
+            }
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) }
+            if flex {
+                let () = put_compact_string(buf, &self.host);
+            } else {
+                let () = put_string(buf, &self.host);
+            }
         }
         if version >= 0 {
             put_i8(buf, self.operation);
@@ -293,10 +329,18 @@ impl Encode for AclDescription {
         let flex = version >= 2;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.principal) } else { string_len(&self.principal) };
+            n += if flex {
+                compact_string_len(&self.principal)
+            } else {
+                string_len(&self.principal)
+            };
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
+            n += if flex {
+                compact_string_len(&self.host)
+            } else {
+                string_len(&self.host)
+            };
         }
         if version >= 0 {
             n += 1;
@@ -316,10 +360,18 @@ impl Decode<'_> for AclDescription {
         let flex = version >= 2;
         let mut out = Self::default();
         if version >= 0 {
-            out.principal = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.principal = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
-            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.host = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.operation = get_i8(buf)?;

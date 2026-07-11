@@ -1,5 +1,6 @@
-use num_traits::ToPrimitive;
 use std::collections::BTreeSet;
+
+use num_traits::ToPrimitive;
 
 use super::labels::labels_key;
 use crate::{PromqlError, error::Result, result::QueryResult};

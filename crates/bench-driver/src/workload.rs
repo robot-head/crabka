@@ -14,8 +14,6 @@ use std::{
     time::Duration,
 };
 
-use crate::numeric::{nonnegative_i64_to_u64, saturating_u128_to_u64, to_f64};
-
 use anyhow::{Context, Result};
 use chrono::Utc;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
@@ -30,6 +28,7 @@ use tracing::{info, warn};
 use crate::{
     hist,
     ids::{DurationSeconds, MessageCount, TimeOffsetMs, WallclockMs},
+    numeric::{nonnegative_i64_to_u64, saturating_u128_to_u64, to_f64},
     payload,
     prom::PromClient,
     rate::Pacer,

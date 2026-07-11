@@ -318,6 +318,9 @@ fn struct_block(
         }
 
         #impl_a #ty_a {
+            /// # Panics
+            ///
+            /// Panics if a records field contains an invalid encoded record batch.
             pub fn to_owned(&self) -> #owned_target {
                 #owned_target {
                     #to_owned_assigns

@@ -12,8 +12,7 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct AllocateProducerIdsResponse {
     pub throttle_time_ms: i32,
     pub error_code: i16,
@@ -22,8 +21,13 @@ pub struct AllocateProducerIdsResponse {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl AllocateProducerIdsResponse {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
-    pub fn to_owned(&self) -> crate::owned::allocate_producer_ids_response::AllocateProducerIdsResponse {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::allocate_producer_ids_response::AllocateProducerIdsResponse {
         crate::owned::allocate_producer_ids_response::AllocateProducerIdsResponse {
             throttle_time_ms: (self.throttle_time_ms),
             error_code: (self.error_code),
@@ -36,7 +40,10 @@ impl AllocateProducerIdsResponse {
 impl Encode for AllocateProducerIdsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -82,7 +89,10 @@ impl Encode for AllocateProducerIdsResponse {
 impl<'de> DecodeBorrow<'de> for AllocateProducerIdsResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

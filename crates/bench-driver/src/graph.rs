@@ -17,8 +17,6 @@ use std::{
     fmt::{Arguments, Write},
 };
 
-use crate::numeric::to_f64;
-
 use plotly::{
     Bar, Layout, Plot, Scatter,
     common::{ErrorData, ErrorType, Line, Mode, Title},
@@ -29,6 +27,7 @@ use crate::{
     aggregate::{
         CellAgg, ScalarMetric, TsSeries, aggregate_cells, averaged_timeseries, scalar_metrics,
     },
+    numeric::to_f64,
     scenario::{RunOutput, Stack},
 };
 

@@ -20,7 +20,9 @@ pub struct ResponseHeader {
 impl Encode for ResponseHeader {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("ResponseHeader version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "ResponseHeader version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -48,7 +50,9 @@ impl Encode for ResponseHeader {
 impl Decode<'_> for ResponseHeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("ResponseHeader version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "ResponseHeader version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

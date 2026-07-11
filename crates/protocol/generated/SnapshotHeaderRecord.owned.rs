@@ -21,7 +21,9 @@ pub struct SnapshotHeaderRecord {
 impl Encode for SnapshotHeaderRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("SnapshotHeaderRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "SnapshotHeaderRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -55,7 +57,9 @@ impl Encode for SnapshotHeaderRecord {
 impl Decode<'_> for SnapshotHeaderRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("SnapshotHeaderRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "SnapshotHeaderRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -92,6 +96,9 @@ impl SnapshotHeaderRecord {
 pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("version".to_string(), ::serde_json::json!(0));
-    obj.insert("lastContainedLogTimestamp".to_string(), ::serde_json::json!(0));
+    obj.insert(
+        "lastContainedLogTimestamp".to_string(),
+        ::serde_json::json!(0),
+    );
     ::serde_json::Value::Object(obj)
 }

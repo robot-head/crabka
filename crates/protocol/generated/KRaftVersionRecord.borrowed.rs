@@ -11,14 +11,16 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct KRaftVersionRecord {
     pub version: i16,
     pub k_raft_version: i16,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl KRaftVersionRecord {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
     pub fn to_owned(&self) -> crate::owned::k_raft_version_record::KRaftVersionRecord {
         crate::owned::k_raft_version_record::KRaftVersionRecord {
@@ -31,7 +33,9 @@ impl KRaftVersionRecord {
 impl Encode for KRaftVersionRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("KRaftVersionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "KRaftVersionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -65,7 +69,9 @@ impl Encode for KRaftVersionRecord {
 impl<'de> DecodeBorrow<'de> for KRaftVersionRecord {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("KRaftVersionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "KRaftVersionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

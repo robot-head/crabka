@@ -2,8 +2,8 @@
 
 use crate::primitives::fixed::{get_i8, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned, nullable_string_len, put_compact_nullable_string,
-    put_nullable_string,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -25,7 +25,10 @@ pub struct DeleteAclsRequest {
 impl Encode for DeleteAclsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -47,8 +50,12 @@ impl Encode for DeleteAclsRequest {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.filters).len(), flex);
-                let body: usize = (self.filters).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.filters).len(), flex);
+                let body: usize = (self.filters)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -62,7 +69,10 @@ impl Encode for DeleteAclsRequest {
 impl Decode<'_> for DeleteAclsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -126,9 +136,9 @@ impl Encode for DeleteAclsFilter {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.resource_name_filter.as_deref());
+                let () = put_compact_nullable_string(buf, self.resource_name_filter.as_deref());
             } else {
-                put_nullable_string(buf, self.resource_name_filter.as_deref());
+                let () = put_nullable_string(buf, self.resource_name_filter.as_deref());
             }
         }
         if version >= 1 {
@@ -136,16 +146,16 @@ impl Encode for DeleteAclsFilter {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.principal_filter.as_deref());
+                let () = put_compact_nullable_string(buf, self.principal_filter.as_deref());
             } else {
-                put_nullable_string(buf, self.principal_filter.as_deref());
+                let () = put_nullable_string(buf, self.principal_filter.as_deref());
             }
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.host_filter.as_deref());
+                let () = put_compact_nullable_string(buf, self.host_filter.as_deref());
             } else {
-                put_nullable_string(buf, self.host_filter.as_deref());
+                let () = put_nullable_string(buf, self.host_filter.as_deref());
             }
         }
         if version >= 0 {
@@ -211,16 +221,28 @@ impl Decode<'_> for DeleteAclsFilter {
             out.resource_type_filter = get_i8(buf)?;
         }
         if version >= 0 {
-            out.resource_name_filter = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.resource_name_filter = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 1 {
             out.pattern_type_filter = get_i8(buf)?;
         }
         if version >= 0 {
-            out.principal_filter = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.principal_filter = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
-            out.host_filter = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.host_filter = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.operation = get_i8(buf)?;

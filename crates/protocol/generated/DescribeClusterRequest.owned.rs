@@ -33,7 +33,10 @@ impl Default for DescribeClusterRequest {
 impl Encode for DescribeClusterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -73,7 +76,10 @@ impl Encode for DescribeClusterRequest {
 impl Decode<'_> for DescribeClusterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -115,12 +121,18 @@ impl DescribeClusterRequest {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("includeClusterAuthorizedOperations".to_string(), ::serde_json::Value::Bool(false));
+    obj.insert(
+        "includeClusterAuthorizedOperations".to_string(),
+        ::serde_json::Value::Bool(false),
+    );
     if version >= 1 {
         obj.insert("endpointType".to_string(), ::serde_json::json!(1));
     }
     if version >= 2 {
-        obj.insert("includeFencedBrokers".to_string(), ::serde_json::Value::Bool(false));
+        obj.insert(
+            "includeFencedBrokers".to_string(),
+            ::serde_json::Value::Bool(false),
+        );
     }
     ::serde_json::Value::Object(obj)
 }

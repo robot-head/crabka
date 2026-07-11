@@ -2,8 +2,9 @@
 
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -29,23 +30,34 @@ pub struct ShareGroupHeartbeatRequest {
 impl Encode for ShareGroupHeartbeatRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.group_id);
+            } else {
+                let () = put_string(buf, &self.group_id);
+            }
         }
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) }
+            if flex {
+                let () = put_compact_string(buf, &self.member_id);
+            } else {
+                let () = put_string(buf, &self.member_id);
+            }
         }
         if version >= 0 {
             put_i32(buf, self.member_epoch);
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_compact_nullable_string(buf, self.rack_id.as_deref());
             } else {
-                put_nullable_string(buf, self.rack_id.as_deref());
+                let () = put_nullable_string(buf, self.rack_id.as_deref());
             }
         }
         if version >= 0 {
@@ -55,9 +67,9 @@ impl Encode for ShareGroupHeartbeatRequest {
                 if let Some(v) = &self.subscribed_topic_names {
                     for it in v {
                         if flex {
-                            put_compact_string(buf, it);
+                            let () = put_compact_string(buf, it);
                         } else {
-                            put_string(buf, it);
+                            let () = put_string(buf, it);
                         }
                     }
                 }
@@ -73,22 +85,47 @@ impl Encode for ShareGroupHeartbeatRequest {
         let flex = is_flexible(version);
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) };
+            n += if flex {
+                compact_string_len(&self.group_id)
+            } else {
+                string_len(&self.group_id)
+            };
         }
         if version >= 0 {
-            n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) };
+            n += if flex {
+                compact_string_len(&self.member_id)
+            } else {
+                string_len(&self.member_id)
+            };
         }
         if version >= 0 {
             n += 4;
         }
         if version >= 0 {
-            n += if flex { compact_nullable_string_len(self.rack_id.as_deref()) } else { nullable_string_len(self.rack_id.as_deref()) };
+            n += if flex {
+                compact_nullable_string_len(self.rack_id.as_deref())
+            } else {
+                nullable_string_len(self.rack_id.as_deref())
+            };
         }
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.subscribed_topic_names).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
-                let body: usize = opt.map_or(0, |v| v.iter().map(|it| if flex { compact_string_len(it) } else { string_len(it) }).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
+                    opt.map(std::vec::Vec::len),
+                    flex,
+                );
+                let body: usize = opt.map_or(0, |v| {
+                    v.iter()
+                        .map(|it| {
+                            if flex {
+                                compact_string_len(it)
+                            } else {
+                                string_len(it)
+                            }
+                        })
+                        .sum()
+                });
                 prefix + body
             };
         }
@@ -102,21 +139,36 @@ impl Encode for ShareGroupHeartbeatRequest {
 impl Decode<'_> for ShareGroupHeartbeatRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.group_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
-            out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.member_id = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.member_epoch = get_i32(buf)?;
         }
         if version >= 0 {
-            out.rack_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.rack_id = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.subscribed_topic_names = {
@@ -126,7 +178,11 @@ impl Decode<'_> for ShareGroupHeartbeatRequest {
                     Some(n) => {
                         let mut v = Vec::with_capacity(n);
                         for _ in 0..n {
-                            v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? });
+                            v.push(if flex {
+                                get_compact_string_owned(buf)?
+                            } else {
+                                get_string_owned(buf)?
+                            });
                         }
                         Some(v)
                     }
@@ -168,11 +224,20 @@ impl ShareGroupHeartbeatRequest {
 #[allow(unused_comparisons)]
 pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert("groupId".to_string(), ::serde_json::Value::String(String::new()));
-    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
+    obj.insert(
+        "groupId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
+    obj.insert(
+        "memberId".to_string(),
+        ::serde_json::Value::String(String::new()),
+    );
     obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
     obj.insert("rackId".to_string(), ::serde_json::Value::Null);
-    obj.insert("subscribedTopicNames".to_string(), ::serde_json::Value::Null);
+    obj.insert(
+        "subscribedTopicNames".to_string(),
+        ::serde_json::Value::Null,
+    );
     ::serde_json::Value::Object(obj)
 }
 impl crate::ProtocolRequest for ShareGroupHeartbeatRequest {

@@ -9,10 +9,9 @@
 
 use std::collections::BTreeMap;
 
-use crate::numeric::to_f64;
-
 use crate::{
     ids::TimeOffsetMs,
+    numeric::to_f64,
     scenario::{BrokerSample, RunOutput, Sample, Stack},
 };
 

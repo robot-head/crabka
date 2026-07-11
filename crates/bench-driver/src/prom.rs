@@ -4,13 +4,12 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
-use crate::numeric::{nonnegative_f64_to_u64, to_f64};
-
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
 use crate::{
     ids::{DurationSeconds, MessageCount, TimeOffsetMs},
+    numeric::{nonnegative_f64_to_u64, to_f64},
     scenario::{BrokerSample, Resource, Stack},
 };
 

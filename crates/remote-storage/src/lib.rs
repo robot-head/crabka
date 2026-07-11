@@ -43,9 +43,8 @@
 //! use bytes::Bytes;
 //! use crabka_ids::LeaderEpoch;
 //! use crabka_remote_storage::{
-//!     IndexType, LocalTieredStorage, LogSegmentData, RemoteLogSegmentId,
-//!     RemoteLogSegmentDetails, RemoteLogSegmentMetadata, RemoteLogSegmentState,
-//!     RemoteStorageManager, TopicIdPartition,
+//!     IndexType, LocalTieredStorage, LogSegmentData, RemoteLogSegmentDetails, RemoteLogSegmentId,
+//!     RemoteLogSegmentMetadata, RemoteLogSegmentState, RemoteStorageManager, TopicIdPartition,
 //! };
 //! use uuid::Uuid;
 //!

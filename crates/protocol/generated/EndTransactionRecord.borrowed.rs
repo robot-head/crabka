@@ -10,12 +10,14 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndTransactionRecord {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EndTransactionRecord {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_transaction_record::EndTransactionRecord {
         crate::owned::end_transaction_record::EndTransactionRecord {
@@ -26,7 +28,9 @@ impl EndTransactionRecord {
 impl Encode for EndTransactionRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("EndTransactionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "EndTransactionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if flex {
@@ -48,7 +52,9 @@ impl Encode for EndTransactionRecord {
 impl<'de> DecodeBorrow<'de> for EndTransactionRecord {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("EndTransactionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "EndTransactionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

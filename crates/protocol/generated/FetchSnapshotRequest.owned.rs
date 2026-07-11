@@ -2,10 +2,13 @@
 
 use crate::primitives::fixed::{get_i32, get_i64, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
-    put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
+    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
+    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len};
+use crate::tagged_fields::{
+    WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
+};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::{Buf, BufMut};
 pub const API_KEY: i16 = 59;
@@ -39,7 +42,10 @@ impl Default for FetchSnapshotRequest {
 impl Encode for FetchSnapshotRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -67,9 +73,9 @@ impl Encode for FetchSnapshotRequest {
                     },
                     |b| {
                         if flex {
-                            put_compact_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_compact_nullable_string(b, self.cluster_id.as_deref());
                         } else {
-                            put_nullable_string(b, self.cluster_id.as_deref());
+                            let () = put_nullable_string(b, self.cluster_id.as_deref());
                         }
                         Ok(())
                     },
@@ -91,7 +97,8 @@ impl Encode for FetchSnapshotRequest {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -116,7 +123,10 @@ impl Encode for FetchSnapshotRequest {
 impl Decode<'_> for FetchSnapshotRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -142,7 +152,11 @@ impl Decode<'_> for FetchSnapshotRequest {
                 0 => {
                     tag_cluster_id = Some({
                         let b: &mut &[u8] = payload;
-                        if flex { get_compact_nullable_string_owned(b)? } else { get_nullable_string_owned(b)? }
+                        if flex {
+                            get_compact_nullable_string_owned(b)?
+                        } else {
+                            get_nullable_string_owned(b)?
+                        }
                     });
                     Ok(true)
                 }
@@ -185,7 +199,11 @@ impl Encode for TopicSnapshot {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) }
+            if flex {
+                let () = put_compact_string(buf, &self.name);
+            } else {
+                let () = put_string(buf, &self.name);
+            }
         }
         if version >= 0 {
             {
@@ -205,12 +223,20 @@ impl Encode for TopicSnapshot {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
+            n += if flex {
+                compact_string_len(&self.name)
+            } else {
+                string_len(&self.name)
+            };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix =
+                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -226,7 +252,11 @@ impl Decode<'_> for TopicSnapshot {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+            out.name = if flex {
+                get_compact_string_owned(buf)?
+            } else {
+                get_string_owned(buf)?
+            };
         }
         if version >= 0 {
             out.partitions = {

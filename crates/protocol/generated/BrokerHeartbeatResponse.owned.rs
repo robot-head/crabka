@@ -37,7 +37,10 @@ impl Default for BrokerHeartbeatResponse {
 impl Encode for BrokerHeartbeatResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -89,7 +92,10 @@ impl Encode for BrokerHeartbeatResponse {
 impl Decode<'_> for BrokerHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -147,6 +153,9 @@ pub fn default_json(_version: i16) -> ::serde_json::Value {
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("isCaughtUp".to_string(), ::serde_json::Value::Bool(false));
     obj.insert("isFenced".to_string(), ::serde_json::Value::Bool(true));
-    obj.insert("shouldShutDown".to_string(), ::serde_json::Value::Bool(false));
+    obj.insert(
+        "shouldShutDown".to_string(),
+        ::serde_json::Value::Bool(false),
+    );
     ::serde_json::Value::Object(obj)
 }

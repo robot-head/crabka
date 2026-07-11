@@ -2,8 +2,8 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned, nullable_string_len, put_compact_nullable_string,
-    put_nullable_string,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
+    nullable_string_len, put_compact_nullable_string, put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -26,7 +26,10 @@ pub struct GetReplicaLogInfoResponse {
 impl Encode for GetReplicaLogInfoResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -34,7 +37,11 @@ impl Encode for GetReplicaLogInfoResponse {
         }
         if version >= 0 {
             {
-                crate::primitives::array::put_array_len(buf, (self.topic_partition_log_info_list).len(), flex);
+                crate::primitives::array::put_array_len(
+                    buf,
+                    (self.topic_partition_log_info_list).len(),
+                    flex,
+                );
                 for it in &self.topic_partition_log_info_list {
                     it.encode(buf, version)?;
                 }
@@ -54,8 +61,14 @@ impl Encode for GetReplicaLogInfoResponse {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_partition_log_info_list).len(), flex);
-                let body: usize = (self.topic_partition_log_info_list).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.topic_partition_log_info_list).len(),
+                    flex,
+                );
+                let body: usize = (self.topic_partition_log_info_list)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -69,7 +82,10 @@ impl Encode for GetReplicaLogInfoResponse {
 impl Decode<'_> for GetReplicaLogInfoResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -140,8 +156,14 @@ impl Encode for TopicPartitionLogInfo {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len((self.partition_log_info).len(), flex);
-                let body: usize = (self.partition_log_info).iter().map(|it| it.encoded_len(version)).sum();
+                let prefix = crate::primitives::array::array_len_prefix_len(
+                    (self.partition_log_info).len(),
+                    flex,
+                );
+                let body: usize = (self.partition_log_info)
+                    .iter()
+                    .map(|it| it.encoded_len(version))
+                    .sum();
                 prefix + body
             };
         }
@@ -219,9 +241,9 @@ impl Encode for PartitionLogInfo {
         }
         if version >= 0 {
             if flex {
-                put_compact_nullable_string(buf, self.error_message.as_deref());
+                let () = put_compact_nullable_string(buf, self.error_message.as_deref());
             } else {
-                put_nullable_string(buf, self.error_message.as_deref());
+                let () = put_nullable_string(buf, self.error_message.as_deref());
             }
         }
         if flex {
@@ -282,7 +304,11 @@ impl Decode<'_> for PartitionLogInfo {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+            out.error_message = if flex {
+                get_compact_nullable_string_owned(buf)?
+            } else {
+                get_nullable_string_owned(buf)?
+            };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -323,6 +349,9 @@ impl PartitionLogInfo {
 pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("brokerEpoch".to_string(), ::serde_json::json!(0));
-    obj.insert("topicPartitionLogInfoList".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert(
+        "topicPartitionLogInfoList".to_string(),
+        ::serde_json::Value::Array(vec![]),
+    );
     ::serde_json::Value::Object(obj)
 }

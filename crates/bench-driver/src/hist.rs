@@ -4,9 +4,7 @@
 
 use hdrhistogram::Histogram;
 
-use crate::numeric::to_f64;
-
-use crate::scenario::LatencyPercentiles;
+use crate::{numeric::to_f64, scenario::LatencyPercentiles};
 
 /// One per-task latency histogram. Recommended way to construct, since
 /// the bounds matter for accuracy.

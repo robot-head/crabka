@@ -11,15 +11,19 @@ pub const FLEXIBLE_MIN: i16 = 0;
 pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq)]
-#[derive(Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct GetTelemetrySubscriptionsRequest {
     pub client_instance_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl GetTelemetrySubscriptionsRequest {
+    /// # Panics
+    ///
+    /// Panics if a records field contains an invalid encoded record batch.
     #[must_use]
-    pub fn to_owned(&self) -> crate::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest {
+    pub fn to_owned(
+        &self,
+    ) -> crate::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest {
         crate::owned::get_telemetry_subscriptions_request::GetTelemetrySubscriptionsRequest {
             client_instance_id: (self.client_instance_id),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
@@ -29,7 +33,10 @@ impl GetTelemetrySubscriptionsRequest {
 impl Encode for GetTelemetrySubscriptionsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -57,7 +64,10 @@ impl Encode for GetTelemetrySubscriptionsRequest {
 impl<'de> DecodeBorrow<'de> for GetTelemetrySubscriptionsRequest {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+            return Err(ProtocolError::UnsupportedVersion {
+                api_key: API_KEY,
+                version,
+            });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

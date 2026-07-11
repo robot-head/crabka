@@ -18,7 +18,9 @@ pub struct EndTransactionRecord {
 impl Encode for EndTransactionRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("EndTransactionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "EndTransactionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if flex {
@@ -40,7 +42,9 @@ impl Encode for EndTransactionRecord {
 impl Decode<'_> for EndTransactionRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("EndTransactionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "EndTransactionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

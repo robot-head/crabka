@@ -21,7 +21,9 @@ pub struct KRaftVersionRecord {
 impl Encode for KRaftVersionRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("KRaftVersionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "KRaftVersionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -55,7 +57,9 @@ impl Encode for KRaftVersionRecord {
 impl Decode<'_> for KRaftVersionRecord {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch("KRaftVersionRecord version out of range"));
+            return Err(ProtocolError::SchemaMismatch(
+                "KRaftVersionRecord version out of range",
+            ));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
