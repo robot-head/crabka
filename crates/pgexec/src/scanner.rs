@@ -251,7 +251,11 @@ impl RangeCursor for MaterializedRangeCursor {
             ));
         }
         let take = max_rows.min(self.rows.len());
-        let rows = self.rows.drain(..take).collect::<Vec<_>>().into_boxed_slice();
+        let rows = self
+            .rows
+            .drain(..take)
+            .collect::<Vec<_>>()
+            .into_boxed_slice();
         Ok(ScanPage {
             rows,
             is_last: self.rows.is_empty(),
@@ -309,6 +313,7 @@ pub struct LocalRangeScanner;
 struct LocalRangeCursor<'a> {
     request: ScanRequest<'a>,
     next_rowid: u64,
+    end_rowid: u64,
     done: bool,
 }
 
@@ -326,7 +331,7 @@ impl RangeCursor for LocalRangeCursor<'_> {
                 is_last: true,
             });
         }
-        let requested_end = self.request.interval.end.unwrap_or(u64::MAX);
+        let requested_end = self.end_rowid;
         let width = u64::try_from(max_rows).unwrap_or(u64::MAX);
         let page_end = self.next_rowid.saturating_add(width).min(requested_end);
         let interval = RowInterval {
@@ -422,10 +427,15 @@ impl RangeScanner for LocalRangeScanner {
             return Ok(Box::new(MaterializedRangeCursor::new(self.scan(request)?)));
         }
         let next_rowid = request.interval.start.unwrap_or(0);
+        let end_rowid = request
+            .interval
+            .end
+            .unwrap_or(crate::exec::read_seq_kv(request.local, request.table.id)?);
         Ok(Box::new(LocalRangeCursor {
             request,
             next_rowid,
-            done: false,
+            end_rowid,
+            done: next_rowid >= end_rowid,
         }))
     }
 }
