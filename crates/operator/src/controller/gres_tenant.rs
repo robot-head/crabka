@@ -247,6 +247,27 @@ async fn reconcile_inner(
             let filters: Vec<_> = deletions.iter().map(entry_to_exact_filter).collect();
             admin.delete_acls(&filters).await?;
         }
+
+        // Publish stable Service DNS before writing those names into the range
+        // registry. Deployments may still be progressing, but clients never
+        // observe a registry endpoint whose Kubernetes object is absent.
+        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
+        if tenant_ranges.len() > 1 {
+            apply_object(
+                &svc_api,
+                &front_door_service_name(&name),
+                &render_service(&obj)?,
+            )
+            .await?;
+        }
+        for range in &tenant_ranges {
+            apply_object(
+                &svc_api,
+                &range_service_name(&name, range.range_id),
+                &render_range_service(&obj, range.range_id)?,
+            )
+            .await?;
+        }
         let record_version = match current_record.as_ref() {
             None => 1,
             Some(record) => record.record_version.checked_add(1).ok_or_else(|| {
@@ -283,7 +304,7 @@ async fn reconcile_inner(
         };
         if parking_progress == ParkingProgress::DeletionPending {
             drop(admin);
-            reconcile_compute_deployments(
+            let _ready = reconcile_compute_deployments(
                 &ctx,
                 &ns,
                 &obj,
@@ -322,10 +343,8 @@ async fn reconcile_inner(
             record = current.clone();
         }
 
-        let svc_api: Api<Service> = Api::namespaced(ctx.client.clone(), &ns);
         let policy_api: Api<NetworkPolicy> = Api::namespaced(ctx.client.clone(), &ns);
-        apply_object(&svc_api, &service_name(&name), &render_service(&obj)?).await?;
-        reconcile_compute_deployments(
+        let deployments_ready = reconcile_compute_deployments(
             &ctx,
             &ns,
             &obj,
@@ -344,16 +363,26 @@ async fn reconcile_inner(
         )
         .await?;
 
+        let (status, reason, message, endpoint_ready) = if deployments_ready {
+            ("True", "Ready", "tenant in sync", true)
+        } else {
+            (
+                "False",
+                "ComputeProgressing",
+                "waiting for all range compute Deployments to become available",
+                false,
+            )
+        };
         patch_status(
             &tenant_api,
             &name,
             &obj,
-            "True",
-            "Ready",
-            "tenant in sync",
+            status,
+            reason,
+            message,
             Some(record.record_version),
             record.state,
-            true,
+            endpoint_ready,
         )
         .await?;
         Ok(Action::requeue(LIFECYCLE_REQUEUE))
@@ -398,7 +427,7 @@ async fn reconcile_compute_deployments(
     config_topic: &str,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
-) -> Result<(), ReconcileError> {
+) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let image = ctx
         .config
@@ -406,6 +435,7 @@ async fn reconcile_compute_deployments(
         .clone()
         .unwrap_or_else(|| DEFAULT_IMAGE.to_string());
     let tenant_name = obj.name_any();
+    let mut all_ready = true;
     for range in ranges {
         let deployment = render_deployment(
             obj,
@@ -425,8 +455,25 @@ async fn reconcile_compute_deployments(
             &deployment,
         )
         .await?;
+        let observed = dep_api
+            .get(&deployment_name(&tenant_name, range.range_id))
+            .await?;
+        all_ready &= deployment_is_ready(&observed);
     }
-    Ok(())
+    Ok(all_ready)
+}
+
+fn deployment_is_ready(deployment: &Deployment) -> bool {
+    let desired = deployment
+        .spec
+        .as_ref()
+        .and_then(|spec| spec.replicas)
+        .unwrap_or(1);
+    let generation = deployment.metadata.generation.unwrap_or_default();
+    deployment.status.as_ref().is_some_and(|status| {
+        status.observed_generation.unwrap_or_default() >= generation
+            && status.available_replicas.unwrap_or_default() >= desired
+    })
 }
 
 async fn park_suspended_tenant_wal(
@@ -906,8 +953,11 @@ fn wal_topic_for_generation(tenant: &TenantName, range_id: u32, generation: u64)
     }
 }
 
-fn service_name(name: &str) -> String {
-    format!("{name}-gres")
+fn front_door_service_name(name: &str) -> String {
+    format!("{name}-gres-pg")
+}
+fn range_service_name(name: &str, range_id: u32) -> String {
+    deployment_name(name, range_id)
 }
 fn deployment_name(name: &str, range_id: u32) -> String {
     if range_id == 0 {
@@ -991,7 +1041,7 @@ fn range_layout_for_ranges(
             end_key: range.end_key.map(boundary_from_range_key),
             endpoint: format!(
                 "{}.{}.svc.cluster.local:{COMPUTE_PORT}",
-                deployment_name(&obj.name_any(), range.range_id),
+                range_service_name(&obj.name_any(), range.range_id),
                 obj.namespace().unwrap_or_else(|| "default".into())
             ),
             wal_generation: 0,
@@ -1011,8 +1061,16 @@ fn meta_labels(obj: &GresTenant) -> BTreeMap<String, String> {
 fn render_service(obj: &GresTenant) -> Result<Service, ReconcileError> {
     let name = obj.name_any();
     Ok(serde_json::from_value(json!({
-        "metadata": { "name": service_name(&name), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
+        "metadata": { "name": front_door_service_name(&name), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
         "spec": { "type": "ClusterIP", "selector": selector_labels(obj), "ports": [{ "name": "postgres", "port": COMPUTE_PORT, "targetPort": COMPUTE_PORT, "protocol": "TCP" }] }
+    }))?)
+}
+
+fn render_range_service(obj: &GresTenant, range_id: u32) -> Result<Service, ReconcileError> {
+    let name = obj.name_any();
+    Ok(serde_json::from_value(json!({
+        "metadata": { "name": range_service_name(&name, range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
+        "spec": { "type": "ClusterIP", "selector": range_labels(obj, range_id), "ports": [{ "name": "range", "port": COMPUTE_PORT, "targetPort": COMPUTE_PORT, "protocol": "TCP" }] }
     }))?)
 }
 
@@ -1526,6 +1584,58 @@ mod tests {
             .expect("args");
         assert!(args.windows(2).any(|pair| pair == ["--host-ranges", "r1"]));
         assert!(!args.windows(2).any(|pair| pair == ["--host-ranges", "r0"]));
+    }
+
+    #[test]
+    fn range_service_has_stable_registry_name_and_selects_only_its_range() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+
+        let service = render_range_service(&obj, 1).expect("render r1 service");
+
+        assert_eq!(service.metadata.name.as_deref(), Some("tenant-a-gres-r1"));
+        let spec = service.spec.expect("service spec");
+        assert_eq!(
+            spec.selector
+                .expect("selector")
+                .get("crabka.io/gres-range")
+                .map(String::as_str),
+            Some("r1")
+        );
+        assert_eq!(spec.ports.expect("ports")[0].name.as_deref(), Some("range"));
+    }
+
+    #[test]
+    fn deployment_readiness_requires_observed_generation_and_available_replicas() {
+        let mut deployment = Deployment::default();
+        deployment.metadata.generation = Some(4);
+        deployment.spec = Some(serde_json::from_value(json!({
+            "selector": { "matchLabels": { "app": "gres" } },
+            "template": { "metadata": { "labels": { "app": "gres" } }, "spec": { "containers": [{ "name": "gres", "image": "gres" }] } },
+            "replicas": 1
+        })).expect("deployment spec"));
+        deployment.status = Some(
+            serde_json::from_value(json!({
+                "observedGeneration": 3,
+                "availableReplicas": 1
+            }))
+            .expect("deployment status"),
+        );
+        assert!(!deployment_is_ready(&deployment));
+
+        deployment
+            .status
+            .as_mut()
+            .expect("status")
+            .observed_generation = Some(4);
+        assert!(deployment_is_ready(&deployment));
+        deployment
+            .status
+            .as_mut()
+            .expect("status")
+            .available_replicas = Some(0);
+        assert!(!deployment_is_ready(&deployment));
     }
 
     #[test]
