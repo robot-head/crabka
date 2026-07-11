@@ -276,7 +276,7 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
     record.ranges = vec![RangeLayoutEntry {
         range_id: 0,
         end_key: None,
-        endpoint: "tenant-a-gres.ns.svc.cluster.local:5432".into(),
+        endpoint: "tenant-a-gres.ns.svc.cluster.local:7432".into(),
         wal_generation: generation,
     }];
     record
@@ -404,9 +404,9 @@ async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all
     let records = control.upserts.lock().await;
     assert!(records.len() == 1);
     assert!(records[0].ranges.len() == 3);
-    assert!(records[0].ranges[0].endpoint == "tenant-a-gres.ns.svc.cluster.local:5432");
-    assert!(records[0].ranges[1].endpoint == "tenant-a-gres-r1.ns.svc.cluster.local:5432");
-    assert!(records[0].ranges[2].endpoint == "tenant-a-gres-r2.ns.svc.cluster.local:5432");
+    assert!(records[0].ranges[0].endpoint == "tenant-a-gres.ns.svc.cluster.local:7432");
+    assert!(records[0].ranges[1].endpoint == "tenant-a-gres-r1.ns.svc.cluster.local:7432");
+    assert!(records[0].ranges[2].endpoint == "tenant-a-gres-r2.ns.svc.cluster.local:7432");
     drop(records);
 
     let observed = state.take_observed();
