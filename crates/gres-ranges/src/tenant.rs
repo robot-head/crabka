@@ -2098,16 +2098,6 @@ impl GatewaySession {
                 .remote_sessions
                 .get_mut(&range_id)
                 .expect("remote session inserted");
-            session
-                .record_global_decision(
-                    global_xid,
-                    if commit {
-                        crabka_pgmvcc::clog::XidStatus::Committed
-                    } else {
-                        crabka_pgmvcc::clog::XidStatus::Aborted
-                    },
-                )
-                .await?;
             session.release_global(global_xid, commit).await
         }
     }

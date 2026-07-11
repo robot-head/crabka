@@ -93,8 +93,18 @@ impl ProcessHarness {
         connect(self.node(range).sql_port, &self.tenant).await
     }
 
+    pub async fn try_sql(&self, range: u32) -> Option<tokio_postgres::Client> {
+        try_connect(self.node(range).sql_port, &self.tenant).await
+    }
+
     pub fn pid(&self, range: u32) -> u32 {
         self.node(range).child.id().expect("child pid")
+    }
+
+    pub fn log(&self, range: u32) -> String {
+        let path = &self.node(range).log_path;
+        std::fs::read_to_string(path)
+            .unwrap_or_else(|error| format!("<read {} failed: {error}>", path.display()))
     }
 
     pub async fn create_table_on_all(&mut self, sql: &str) {
