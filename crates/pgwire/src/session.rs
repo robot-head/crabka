@@ -1,14 +1,16 @@
 //! Post-startup connection state machine, generic over the byte stream so the
 //! same code runs plaintext and TLS sessions.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 use bytes::{Bytes, BytesMut};
 use tokio::io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    engine::{BoundParam, Cell, CopyInResponse, Engine, FieldDescription, QueryResult, Session},
+    engine::{
+        BoundParam, CloseTarget, CopyInResponse, Engine, ExecuteOutcome, QueryResult, Session,
+    },
     error::{PgError, Severity, sqlstate},
     messages::{
         backend,
@@ -66,43 +68,8 @@ pub fn default_server_params() -> Vec<(String, String)> {
 
 // ── Extended-query state ────────────────────────────────────────────────────
 
-#[derive(Debug, Clone)]
-struct Prepared {
-    sql: String,
-    /// One type OID per positional parameter. `0` means the client left the
-    /// type unspecified, matching `PostgreSQL`'s `ParameterDescription` encoding.
-    param_types: Vec<u32>,
-    fields: Vec<FieldDescription>,
-}
-
-#[derive(Debug, Clone)]
-struct Portal {
-    sql: String,
-    fields: Vec<FieldDescription>,
-    /// One resolved format code (0 = text / 1 = binary) per column.
-    formats: Vec<i16>,
-    params: Vec<BoundParam>,
-    execution: PortalExecution,
-}
-
-#[derive(Debug, Clone)]
-enum PortalExecution {
-    NotStarted,
-    Rows {
-        rows: Vec<Vec<Option<Cell>>>,
-        tag: String,
-        position: usize,
-    },
-    Command {
-        tag: String,
-    },
-    Empty,
-}
-
 #[derive(Debug, Default)]
 struct ExtendedState {
-    statements: HashMap<String, Prepared>,
-    portals: HashMap<String, Portal>,
     /// True after an error in the extended phase: skip messages until Sync.
     failed: bool,
 }
@@ -111,24 +78,6 @@ struct ExtendedState {
 struct CopyInState {
     sql: String,
     chunks: Vec<Bytes>,
-}
-
-fn resolve_formats(requested: &[i16], ncols: usize) -> Result<Vec<i16>, PgError> {
-    let validate = |code: i16| -> Result<i16, PgError> {
-        if code == 0 || code == 1 {
-            Ok(code)
-        } else {
-            Err(PgError::protocol(format!("invalid format code {code}")))
-        }
-    };
-    match requested.len() {
-        0 => Ok(vec![0; ncols]),
-        1 => Ok(vec![validate(requested[0])?; ncols]),
-        n if n == ncols => requested.iter().map(|&c| validate(c)).collect(),
-        n => Err(PgError::protocol(format!(
-            "bind message has {n} result formats but query has {ncols} columns"
-        ))),
-    }
 }
 
 fn resolve_param_formats(requested: &[i16], nparams: usize) -> Result<Vec<i16>, PgError> {
@@ -149,16 +98,6 @@ fn resolve_param_formats(requested: &[i16], nparams: usize) -> Result<Vec<i16>, 
             "bind message has {n} parameter formats but {nparams} parameters"
         ))),
     }
-}
-
-fn prepared_param_types(sql: &str, client_param_types: Vec<u32>) -> Result<Vec<u32>, PgError> {
-    let placeholder_count = count_positional_parameters(sql)?;
-    let expected_count = placeholder_count.max(client_param_types.len());
-    let mut param_types = vec![0; expected_count];
-    for (index, type_oid) in client_param_types.into_iter().enumerate() {
-        param_types[index] = type_oid;
-    }
-    Ok(param_types)
 }
 
 fn count_positional_parameters(sql: &str) -> Result<usize, PgError> {
@@ -267,35 +206,20 @@ fn fail_extended(ext: &mut ExtendedState, out: &mut BytesMut, e: &PgError) {
 }
 
 async fn handle_parse<Sess: Session>(
-    ext: &mut ExtendedState,
     session: &mut Sess,
     name: String,
     sql: String,
     param_types: Vec<u32>,
     out: &mut BytesMut,
 ) -> Result<(), PgError> {
-    if !name.is_empty() && ext.statements.contains_key(&name) {
-        return Err(PgError::error(
-            sqlstate::DUPLICATE_PREPARED_STATEMENT,
-            format!("prepared statement \"{name}\" already exists"),
-        ));
-    }
-    let param_types = prepared_param_types(&sql, param_types)?;
-    let (fields, param_types) = session.describe_prepared(&sql, &param_types).await?;
-    ext.statements.insert(
-        name,
-        Prepared {
-            sql,
-            param_types,
-            fields,
-        },
-    );
+    count_positional_parameters(&sql)?;
+    session.parse(&name, &sql, &param_types).await?;
     backend::parse_complete(out);
     Ok(())
 }
 
-fn handle_bind(
-    ext: &mut ExtendedState,
+async fn handle_bind<Sess: Session>(
+    session: &mut Sess,
     portal: String,
     statement: &str,
     param_formats: &[i16],
@@ -303,96 +227,46 @@ fn handle_bind(
     result_formats: &[i16],
     out: &mut BytesMut,
 ) -> Result<(), PgError> {
-    let prepared = ext.statements.get(statement).ok_or_else(|| {
-        PgError::error(
-            sqlstate::INVALID_SQL_STATEMENT_NAME,
-            format!("prepared statement \"{statement}\" does not exist"),
-        )
-    })?;
-    if !portal.is_empty() && ext.portals.contains_key(&portal) {
-        return Err(PgError::error(
-            sqlstate::DUPLICATE_CURSOR,
-            format!("cursor \"{portal}\" already exists"),
-        ));
-    }
-    if params.len() != prepared.param_types.len() {
-        return Err(PgError::protocol(format!(
-            "bind message supplies {} parameters, but prepared statement requires {}",
-            params.len(),
-            prepared.param_types.len()
-        )));
-    }
     let param_formats = resolve_param_formats(param_formats, params.len())?;
     let params = params
         .into_iter()
         .zip(param_formats)
-        .enumerate()
-        .map(|(index, (value, format))| BoundParam {
-            type_oid: match prepared.param_types[index] {
-                0 => None,
-                type_oid => Some(type_oid),
-            },
+        .map(|(value, format)| BoundParam {
+            type_oid: None,
             format,
             value,
         })
-        .collect();
-    let formats = resolve_formats(result_formats, prepared.fields.len())?;
-    ext.portals.insert(
-        portal,
-        Portal {
-            sql: prepared.sql.clone(),
-            fields: prepared.fields.clone(),
-            formats,
-            params,
-            execution: PortalExecution::NotStarted,
-        },
-    );
+        .collect::<Vec<_>>();
+    session
+        .bind(&portal, statement, &params, result_formats)
+        .await?;
     backend::bind_complete(out);
     Ok(())
 }
 
-fn handle_describe(
-    ext: &ExtendedState,
+async fn handle_describe<Sess: Session>(
+    session: &mut Sess,
     kind: u8,
     name: &str,
     out: &mut BytesMut,
 ) -> Result<(), PgError> {
     match kind {
         b'S' => {
-            let prepared = ext.statements.get(name).ok_or_else(|| {
-                PgError::error(
-                    sqlstate::INVALID_SQL_STATEMENT_NAME,
-                    format!("prepared statement \"{name}\" does not exist"),
-                )
-            })?;
-            backend::parameter_description(out, &prepared.param_types);
-            if prepared.fields.is_empty() {
+            let description = session.describe_statement(name).await?;
+            backend::parameter_description(out, &description.parameter_types);
+            if description.fields.is_empty() {
                 backend::no_data(out);
             } else {
-                backend::row_description(out, &prepared.fields);
+                backend::row_description(out, &description.fields);
             }
         }
         b'P' => {
-            let portal = ext.portals.get(name).ok_or_else(|| {
-                PgError::error(
-                    sqlstate::INVALID_CURSOR_NAME,
-                    format!("portal \"{name}\" does not exist"),
-                )
-            })?;
-            if portal.fields.is_empty() {
+            let description = session.describe_portal(name).await?;
+            if description.fields.is_empty() {
                 backend::no_data(out);
             } else {
                 // Describe(portal) reports the formats the portal will use.
-                let fields: Vec<FieldDescription> = portal
-                    .fields
-                    .iter()
-                    .zip(&portal.formats)
-                    .map(|(f, &format)| FieldDescription {
-                        format,
-                        ..f.clone()
-                    })
-                    .collect();
-                backend::row_description(out, &fields);
+                backend::row_description(out, &description.fields);
             }
         }
         other => {
@@ -406,7 +280,6 @@ fn handle_describe(
 }
 
 async fn handle_execute<Sess: Session>(
-    ext: &mut ExtendedState,
     session: &mut Sess,
     portal_name: &str,
     max_rows: i32,
@@ -419,108 +292,44 @@ async fn handle_execute<Sess: Session>(
         )));
     }
 
-    let needs_execution = {
-        let portal = ext.portals.get_mut(portal_name).ok_or_else(|| {
-            PgError::error(
-                sqlstate::INVALID_CURSOR_NAME,
-                format!("portal \"{portal_name}\" does not exist"),
-            )
-        })?;
-        matches!(portal.execution, PortalExecution::NotStarted)
+    let outcome = tokio::select! {
+        // biased + cancellation-first: a cancel that arrived before execution
+        // (the pending flag from the extended-batch window) must win even
+        // against an engine future that is ready on its first poll.
+        biased;
+        () = token.cancelled() => return Err(PgError::error(
+            sqlstate::QUERY_CANCELED,
+            "canceling statement due to user request",
+        )),
+        r = session.execute(portal_name, max_rows.cast_unsigned()) => r?,
     };
-
-    if needs_execution {
-        let (sql, params) = {
-            let portal = ext.portals.get(portal_name).ok_or_else(|| {
-                PgError::error(
-                    sqlstate::INVALID_CURSOR_NAME,
-                    format!("portal \"{portal_name}\" does not exist"),
-                )
-            })?;
-            (portal.sql.clone(), portal.params.clone())
-        };
-
-        let results = tokio::select! {
-            // biased + cancellation-first: a cancel that arrived before execution
-            // (the pending flag from the extended-batch window) must win even
-            // against an engine future that is ready on its first poll.
-            biased;
-            () = token.cancelled() => return Err(PgError::error(
-                sqlstate::QUERY_CANCELED,
-                "canceling statement due to user request",
-            )),
-            r = session.extended_query(&sql, &params) => r?,
-        };
-        let execution = match results.into_iter().next() {
-            Some(QueryResult::Rows { rows, tag, .. }) => PortalExecution::Rows {
-                rows,
-                tag,
-                position: 0,
-            },
-            Some(QueryResult::Command { tag }) => PortalExecution::Command { tag },
-            Some(QueryResult::Empty) | None => PortalExecution::Empty,
-        };
-        let portal = ext.portals.get_mut(portal_name).ok_or_else(|| {
-            PgError::error(
-                sqlstate::INVALID_CURSOR_NAME,
-                format!("portal \"{portal_name}\" does not exist"),
-            )
-        })?;
-        portal.execution = execution;
-    }
-
-    let portal = ext.portals.get_mut(portal_name).ok_or_else(|| {
-        PgError::error(
-            sqlstate::INVALID_CURSOR_NAME,
-            format!("portal \"{portal_name}\" does not exist"),
-        )
-    })?;
-    match &mut portal.execution {
-        PortalExecution::Rows {
-            rows,
-            tag,
-            position,
-        } => {
-            let remaining = rows.len().saturating_sub(*position);
-            let requested = usize::try_from(max_rows).expect("non-negative max rows fits usize");
-            let rows_to_send = if requested == 0 {
-                remaining
-            } else {
-                requested.min(remaining)
-            };
-            let end = *position + rows_to_send;
-            for row in &rows[*position..end] {
-                write_formatted_row(out, row, &portal.formats);
-            }
-            *position = end;
-            if *position < rows.len() {
-                backend::portal_suspended(out);
-            } else {
-                backend::command_complete(out, tag);
-            }
-        }
-        PortalExecution::Command { tag } => backend::command_complete(out, tag),
-        PortalExecution::Empty => backend::empty_query_response(out),
-        PortalExecution::NotStarted => unreachable!("portal was executed above"),
-    }
-    Ok(())
+    encode_execute_outcome(out, outcome)
 }
 
-fn write_formatted_row(out: &mut BytesMut, row: &[Option<Cell>], formats: &[i16]) {
-    let values: Vec<Option<Bytes>> = row
-        .iter()
-        .zip(formats)
-        .map(|(cell, &format)| {
-            cell.as_ref().map(|c| {
-                if format == 1 {
-                    c.binary.clone()
-                } else {
-                    c.text.clone()
-                }
-            })
-        })
-        .collect();
-    backend::data_row(out, &values);
+fn encode_execute_outcome(out: &mut BytesMut, outcome: ExecuteOutcome) -> Result<(), PgError> {
+    match outcome {
+        ExecuteOutcome::Rows { rows, completion } => {
+            for row in &rows {
+                backend::data_row(out, row);
+            }
+            if let Some(tag) = completion {
+                backend::command_complete(out, &tag);
+            } else {
+                backend::portal_suspended(out);
+            }
+        }
+        ExecuteOutcome::CommandComplete { tag } => backend::command_complete(out, &tag),
+        ExecuteOutcome::EmptyQuery => backend::empty_query_response(out),
+        ExecuteOutcome::CopyIn { .. }
+        | ExecuteOutcome::CopyOut { .. }
+        | ExecuteOutcome::Notification { .. } => {
+            return Err(PgError::error(
+                sqlstate::FEATURE_NOT_SUPPORTED,
+                "execute outcome is reserved for a future protocol extension",
+            ));
+        }
+    }
+    Ok(())
 }
 
 fn write_copy_in_response(out: &mut BytesMut, response: &CopyInResponse) {
@@ -828,8 +637,10 @@ where
                 out.clear();
             }
             FrontendMessage::Sync => {
+                if let Err(e) = session.sync().await {
+                    backend::error_response(&mut out, &e);
+                }
                 ext.failed = false;
-                ext.portals.clear(); // implicit transaction ends at Sync
                 backend::ready_for_query(&mut out, session.tx_status());
                 stream.write_all(&out).await?;
                 out.clear();
@@ -844,9 +655,7 @@ where
                 if ext.failed {
                     continue;
                 }
-                if let Err(e) =
-                    handle_parse(&mut ext, &mut session, name, sql, param_types, &mut out).await
-                {
+                if let Err(e) = handle_parse(&mut session, name, sql, param_types, &mut out).await {
                     fail_extended(&mut ext, &mut out, &e);
                 }
                 stream.write_all(&out).await?;
@@ -863,14 +672,16 @@ where
                     continue;
                 }
                 if let Err(e) = handle_bind(
-                    &mut ext,
+                    &mut session,
                     portal,
                     &statement,
                     &param_formats,
                     params,
                     &result_formats,
                     &mut out,
-                ) {
+                )
+                .await
+                {
                     fail_extended(&mut ext, &mut out, &e);
                 }
                 stream.write_all(&out).await?;
@@ -880,7 +691,7 @@ where
                 if ext.failed {
                     continue;
                 }
-                if let Err(e) = handle_describe(&ext, kind, &name, &mut out) {
+                if let Err(e) = handle_describe(&mut session, kind, &name, &mut out).await {
                     fail_extended(&mut ext, &mut out, &e);
                 }
                 stream.write_all(&out).await?;
@@ -894,8 +705,11 @@ where
                 // Cancel window: between extended messages no engine future runs; the pending flag in CancelRegistry makes a cancel received there fire on the next engine call.
                 let token = cancel.begin_query();
                 if let Err(e) =
-                    handle_execute(&mut ext, &mut session, &portal, max_rows, token, &mut out).await
+                    handle_execute(&mut session, &portal, max_rows, token, &mut out).await
                 {
+                    if e.code == sqlstate::QUERY_CANCELED {
+                        session.mark_statement_failed();
+                    }
                     fail_extended(&mut ext, &mut out, &e);
                 }
                 stream.write_all(&out).await?;
@@ -905,13 +719,9 @@ where
                 if ext.failed {
                     continue;
                 }
-                match kind {
-                    b'S' => {
-                        ext.statements.remove(&name);
-                    }
-                    b'P' => {
-                        ext.portals.remove(&name);
-                    }
+                let result = match kind {
+                    b'S' => session.close(CloseTarget::Statement(&name)).await,
+                    b'P' => session.close(CloseTarget::Portal(&name)).await,
                     _ => {
                         let e = PgError::protocol(format!("invalid close kind {:?}", kind as char));
                         fail_extended(&mut ext, &mut out, &e);
@@ -919,6 +729,12 @@ where
                         out.clear();
                         continue;
                     }
+                };
+                if let Err(e) = result {
+                    fail_extended(&mut ext, &mut out, &e);
+                    stream.write_all(&out).await?;
+                    out.clear();
+                    continue;
                 }
                 backend::close_complete(&mut out);
                 stream.write_all(&out).await?;
@@ -959,6 +775,42 @@ fn write_results(out: &mut BytesMut, results: &[QueryResult]) {
             }
             QueryResult::Command { tag } => backend::command_complete(out, tag),
             QueryResult::Empty => backend::empty_query_response(out),
+        }
+    }
+}
+
+#[cfg(test)]
+mod execute_outcome_tests {
+    use super::*;
+    use crate::engine::{CopyOutResponse, Notification};
+
+    #[test]
+    fn reserved_execute_outcomes_are_shaped_feature_errors() {
+        let outcomes = [
+            ExecuteOutcome::CopyIn {
+                response: CopyInResponse {
+                    overall_format: 0,
+                    column_formats: vec![],
+                },
+            },
+            ExecuteOutcome::CopyOut {
+                response: CopyOutResponse {
+                    overall_format: 0,
+                    column_formats: vec![],
+                },
+            },
+            ExecuteOutcome::Notification {
+                notification: Notification {
+                    process_id: 1,
+                    channel: "c".into(),
+                    payload: "p".into(),
+                },
+            },
+        ];
+        for outcome in outcomes {
+            let error = encode_execute_outcome(&mut BytesMut::new(), outcome)
+                .expect_err("reserved outcome must fail");
+            assert_eq!(error.code, sqlstate::FEATURE_NOT_SUPPORTED);
         }
     }
 }

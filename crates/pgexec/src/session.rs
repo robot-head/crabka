@@ -20,7 +20,10 @@ use crabka_pgparser::ast::{
 };
 use crabka_pgtypes::{ColumnType, Datum};
 use crabka_pgwire::{
-    engine::{BoundParam, CopyInResponse, FieldDescription, QueryResult, Session, TxStatus},
+    engine::{
+        BoundParam, CloseTarget, CopyInResponse, ExecuteOutcome, FieldDescription,
+        PortalDescription, PreparedDescription, QueryResult, Session, TxStatus,
+    },
     error::{PgError, sqlstate},
 };
 use tokio::sync::{OwnedRwLockReadGuard, OwnedRwLockWriteGuard};
@@ -500,6 +503,34 @@ pub struct SqlSession {
     session_user: String,
     current_role: String,
     state: TxnState,
+    prepared: HashMap<String, SqlPrepared>,
+    portals: HashMap<String, SqlPortal>,
+}
+
+#[derive(Clone)]
+struct SqlPrepared {
+    statement: Option<Statement>,
+    description: PreparedDescription,
+}
+
+struct SqlPortal {
+    statement: Option<Statement>,
+    description: PortalDescription,
+    formats: Vec<i16>,
+    execution: SqlPortalExecution,
+}
+
+enum SqlPortalExecution {
+    NotStarted,
+    Rows {
+        rows: Vec<Vec<Option<crabka_pgwire::engine::Cell>>>,
+        tag: String,
+        position: usize,
+    },
+    Command {
+        tag: String,
+    },
+    Empty,
 }
 
 impl SqlSession {
@@ -554,6 +585,8 @@ impl SqlSession {
             session_user: "public".into(),
             current_role: "public".into(),
             state: TxnState::Idle,
+            prepared: HashMap::new(),
+            portals: HashMap::new(),
         }
     }
 
@@ -3287,6 +3320,76 @@ fn malformed_binary_parameter() -> PgError {
     PgError::error("22P03", "incorrect binary data format in bind parameter")
 }
 
+fn resolve_result_formats(requested: &[i16], count: usize) -> Result<Vec<i16>, PgError> {
+    let validate = |value| match value {
+        0 | 1 => Ok(value),
+        _ => Err(PgError::protocol(format!("invalid format code {value}"))),
+    };
+    match requested.len() {
+        0 => Ok(vec![0; count]),
+        1 => Ok(vec![validate(requested[0])?; count]),
+        n if n == count => requested.iter().copied().map(validate).collect(),
+        n => Err(PgError::protocol(format!(
+            "bind message has {n} result formats but query has {count} columns"
+        ))),
+    }
+}
+
+#[cfg(test)]
+impl SqlSession {
+    async fn test_extended_query(
+        &mut self,
+        sql: &str,
+        params: &[BoundParam],
+    ) -> Result<Vec<QueryResult>, PgError> {
+        let parameter_types = params
+            .iter()
+            .map(|p| p.type_oid.unwrap_or(0))
+            .collect::<Vec<_>>();
+        let description = self.parse("", sql, &parameter_types).await?;
+        self.bind("", "", params, &[]).await?;
+        match self.execute("", 0).await? {
+            ExecuteOutcome::Rows { rows, completion } => Ok(vec![QueryResult::Rows {
+                fields: description.fields,
+                rows: rows
+                    .into_iter()
+                    .map(|row| {
+                        row.into_iter()
+                            .map(|value| {
+                                value.map(|bytes| crabka_pgwire::engine::Cell {
+                                    text: bytes.clone(),
+                                    binary: bytes,
+                                })
+                            })
+                            .collect()
+                    })
+                    .collect(),
+                tag: completion.unwrap_or_default(),
+            }]),
+            ExecuteOutcome::CommandComplete { tag } => Ok(vec![QueryResult::Command { tag }]),
+            ExecuteOutcome::EmptyQuery => Ok(vec![QueryResult::Empty]),
+            _ => unreachable!("reserved outcomes are not returned by SqlSession"),
+        }
+    }
+
+    pub(crate) async fn test_describe(
+        &mut self,
+        sql: &str,
+    ) -> Result<Vec<FieldDescription>, PgError> {
+        self.parse("", sql, &[]).await.map(|d| d.fields)
+    }
+
+    async fn test_describe_prepared(
+        &mut self,
+        sql: &str,
+        params: &[u32],
+    ) -> Result<(Vec<FieldDescription>, Vec<u32>), PgError> {
+        self.parse("", sql, params)
+            .await
+            .map(|d| (d.fields, d.parameter_types))
+    }
+}
+
 fn invalid_parameter_encoding(_: std::str::Utf8Error) -> PgError {
     PgError::error("22021", "invalid byte sequence for encoding \"UTF8\"")
 }
@@ -3307,50 +3410,44 @@ impl Session for SqlSession {
         Ok(results)
     }
 
-    async fn extended_query(
+    async fn parse(
         &mut self,
-        sql: &str,
-        params: &[BoundParam],
-    ) -> Result<Vec<QueryResult>, PgError> {
-        if matches!(self.state, TxnState::Failed(_)) {
-            return Err(ExecError::InFailedTransaction.into_pg());
-        }
-        if sql.trim().is_empty() {
-            return Ok(vec![QueryResult::Empty]);
-        }
-        self.reject_prepared_participant()
-            .map_err(ExecError::into_pg)?;
-        let mut stmt = parse_single_extended_statement(sql)?;
-        self.bind_extended_statement_params(&mut stmt, params)?;
-        self.run_one(&stmt)
-            .await
-            .map(|result| vec![result])
-            .map_err(ExecError::into_pg)
-    }
-
-    async fn describe(&mut self, sql: &str) -> Result<Vec<FieldDescription>, PgError> {
-        crate::exec::describe(&*self.catalog_kv, &*self.kv, sql).map_err(ExecError::into_pg)
-    }
-
-    async fn describe_prepared(
-        &mut self,
+        name: &str,
         sql: &str,
         param_types: &[u32],
-    ) -> Result<(Vec<FieldDescription>, Vec<u32>), PgError> {
+    ) -> Result<PreparedDescription, PgError> {
         if matches!(self.state, TxnState::Failed(_)) {
             return Err(ExecError::InFailedTransaction.into_pg());
         }
+        if !name.is_empty() && self.prepared.contains_key(name) {
+            return Err(PgError::error(
+                sqlstate::DUPLICATE_PREPARED_STATEMENT,
+                format!("prepared statement \"{name}\" already exists"),
+            ));
+        }
         if sql.trim().is_empty() {
-            return Ok((Vec::new(), param_types.to_vec()));
+            let description = PreparedDescription {
+                parameter_types: param_types.to_vec(),
+                fields: vec![],
+            };
+            self.prepared.insert(
+                name.to_owned(),
+                SqlPrepared {
+                    statement: None,
+                    description: description.clone(),
+                },
+            );
+            return Ok(description);
         }
         self.reject_prepared_participant()
             .map_err(ExecError::into_pg)?;
         let result = (|| {
-            let mut stmt = parse_single_extended_statement(sql)?;
-            let params = param_types
-                .iter()
-                .map(|type_oid| BoundParam {
-                    type_oid: match *type_oid {
+            let statement = parse_single_extended_statement(sql)?;
+            let mut inferred_statement = statement.clone();
+            let parameter_count = max_statement_param(&statement).max(param_types.len());
+            let params = (0..parameter_count)
+                .map(|index| BoundParam {
+                    type_oid: match param_types.get(index).copied().unwrap_or(0) {
                         0 => None,
                         type_oid => Some(type_oid),
                     },
@@ -3375,15 +3472,211 @@ impl Session for SqlSession {
                 time_zone: &time_zone,
                 inferred_param_types: RefCell::new(vec![None; params.len()]),
             };
-            binder.bind_statement_params(&mut stmt)?;
-            let fields = crate::exec::describe_statement(&*self.catalog_kv, &stmt)
+            binder.bind_statement_params(&mut inferred_statement)?;
+            let fields = crate::exec::describe_statement(&*self.catalog_kv, &inferred_statement)
                 .map_err(ExecError::into_pg)?;
-            Ok((fields, binder.resolved_param_types()?))
+            let description = PreparedDescription {
+                fields,
+                parameter_types: binder.resolved_param_types()?,
+            };
+            Ok((statement, description))
         })();
         if result.is_err() {
             self.mark_transaction_failed();
         }
-        result
+        let (statement, description) = result?;
+        self.prepared.insert(
+            name.to_owned(),
+            SqlPrepared {
+                statement: Some(statement),
+                description: description.clone(),
+            },
+        );
+        Ok(description)
+    }
+
+    async fn bind(
+        &mut self,
+        portal: &str,
+        statement: &str,
+        params: &[BoundParam],
+        result_formats: &[i16],
+    ) -> Result<PortalDescription, PgError> {
+        if matches!(self.state, TxnState::Failed(_)) {
+            return Err(ExecError::InFailedTransaction.into_pg());
+        }
+        if !portal.is_empty() && self.portals.contains_key(portal) {
+            return Err(PgError::error(
+                sqlstate::DUPLICATE_CURSOR,
+                format!("cursor \"{portal}\" already exists"),
+            ));
+        }
+        let prepared = self.prepared.get(statement).cloned().ok_or_else(|| {
+            PgError::error(
+                sqlstate::INVALID_SQL_STATEMENT_NAME,
+                format!("prepared statement \"{statement}\" does not exist"),
+            )
+        })?;
+        if params.len() != prepared.description.parameter_types.len() {
+            return Err(PgError::protocol(format!(
+                "bind message supplies {} parameters, but prepared statement requires {}",
+                params.len(),
+                prepared.description.parameter_types.len()
+            )));
+        }
+        let formats = resolve_result_formats(result_formats, prepared.description.fields.len())?;
+        let mut bound = prepared.statement;
+        let typed_params = params
+            .iter()
+            .zip(&prepared.description.parameter_types)
+            .map(|(p, oid)| BoundParam {
+                type_oid: Some(*oid).filter(|v| *v != 0).or(p.type_oid),
+                ..p.clone()
+            })
+            .collect::<Vec<_>>();
+        if let Some(stmt) = &mut bound {
+            self.bind_extended_statement_params(stmt, &typed_params)?;
+        }
+        let description = PortalDescription {
+            fields: prepared
+                .description
+                .fields
+                .iter()
+                .zip(&formats)
+                .map(|(f, &format)| FieldDescription {
+                    format,
+                    ..f.clone()
+                })
+                .collect(),
+        };
+        self.portals.insert(
+            portal.to_owned(),
+            SqlPortal {
+                statement: bound,
+                description: description.clone(),
+                formats,
+                execution: SqlPortalExecution::NotStarted,
+            },
+        );
+        Ok(description)
+    }
+
+    async fn describe_statement(&mut self, name: &str) -> Result<PreparedDescription, PgError> {
+        self.prepared
+            .get(name)
+            .map(|p| p.description.clone())
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_SQL_STATEMENT_NAME,
+                    format!("prepared statement \"{name}\" does not exist"),
+                )
+            })
+    }
+
+    async fn describe_portal(&mut self, name: &str) -> Result<PortalDescription, PgError> {
+        self.portals
+            .get(name)
+            .map(|p| p.description.clone())
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_CURSOR_NAME,
+                    format!("portal \"{name}\" does not exist"),
+                )
+            })
+    }
+
+    async fn execute(&mut self, portal: &str, max_rows: u32) -> Result<ExecuteOutcome, PgError> {
+        let needs_run = matches!(
+            self.portals
+                .get(portal)
+                .ok_or_else(|| PgError::error(
+                    sqlstate::INVALID_CURSOR_NAME,
+                    format!("portal \"{portal}\" does not exist")
+                ))?
+                .execution,
+            SqlPortalExecution::NotStarted
+        );
+        if needs_run {
+            let statement = self.portals.get(portal).and_then(|p| p.statement.clone());
+            let execution = match statement {
+                None => SqlPortalExecution::Empty,
+                Some(stmt) => match self.run_one(&stmt).await.map_err(ExecError::into_pg)? {
+                    QueryResult::Rows { rows, tag, .. } => SqlPortalExecution::Rows {
+                        rows,
+                        tag,
+                        position: 0,
+                    },
+                    QueryResult::Command { tag } => SqlPortalExecution::Command { tag },
+                    QueryResult::Empty => SqlPortalExecution::Empty,
+                },
+            };
+            self.portals
+                .get_mut(portal)
+                .expect("portal exists throughout execute")
+                .execution = execution;
+        }
+        let p = self
+            .portals
+            .get_mut(portal)
+            .expect("portal exists throughout execute");
+        match &mut p.execution {
+            SqlPortalExecution::Rows {
+                rows,
+                tag,
+                position,
+            } => {
+                let remaining = rows.len() - *position;
+                let take = if max_rows == 0 {
+                    remaining
+                } else {
+                    remaining.min(max_rows as usize)
+                };
+                let encoded = rows[*position..*position + take]
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .zip(&p.formats)
+                            .map(|(cell, format)| {
+                                cell.as_ref().map(|cell| {
+                                    if *format == 1 {
+                                        cell.binary.clone()
+                                    } else {
+                                        cell.text.clone()
+                                    }
+                                })
+                            })
+                            .collect()
+                    })
+                    .collect();
+                *position += take;
+                Ok(ExecuteOutcome::Rows {
+                    rows: encoded,
+                    completion: (*position == rows.len()).then(|| tag.clone()),
+                })
+            }
+            SqlPortalExecution::Command { tag } => {
+                Ok(ExecuteOutcome::CommandComplete { tag: tag.clone() })
+            }
+            SqlPortalExecution::Empty => Ok(ExecuteOutcome::EmptyQuery),
+            SqlPortalExecution::NotStarted => unreachable!(),
+        }
+    }
+
+    async fn close(&mut self, target: CloseTarget<'_>) -> Result<(), PgError> {
+        match target {
+            CloseTarget::Statement(name) => {
+                self.prepared.remove(name);
+            }
+            CloseTarget::Portal(name) => {
+                self.portals.remove(name);
+            }
+        }
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), PgError> {
+        self.portals.clear();
+        Ok(())
     }
 
     async fn begin_copy_in(&mut self, sql: &str) -> Result<Option<CopyInResponse>, PgError> {
@@ -3707,7 +4000,7 @@ mod tests {
         let params = [text_param(Some("42"), None)];
 
         let results = session
-            .extended_query("SELECT $1::int4", &params)
+            .test_extended_query("SELECT $1::int4", &params)
             .await
             .expect("extended select");
 
@@ -3965,7 +4258,7 @@ mod tests {
         let params = [binary_int4_param(314)];
 
         let results = session
-            .extended_query("SELECT $1::int4", &params)
+            .test_extended_query("SELECT $1::int4", &params)
             .await
             .expect("extended binary select");
 
@@ -3979,7 +4272,7 @@ mod tests {
         let params = [text_param(Some("hello"), None)];
 
         let results = session
-            .extended_query("SELECT $1", &params)
+            .test_extended_query("SELECT $1", &params)
             .await
             .expect("extended select");
 
@@ -4111,7 +4404,7 @@ mod tests {
         let params = [text_param(Some("2"), None)];
 
         let results = session
-            .extended_query("SELECT name FROM t WHERE id = $1", &params)
+            .test_extended_query("SELECT name FROM t WHERE id = $1", &params)
             .await
             .expect("parameterized where");
 
@@ -4133,7 +4426,7 @@ mod tests {
         ];
 
         session
-            .extended_query("INSERT INTO t VALUES ($1, $2, $3)", &params)
+            .test_extended_query("INSERT INTO t VALUES ($1, $2, $3)", &params)
             .await
             .expect("insert with inferred params");
         let selected = session
@@ -4151,7 +4444,7 @@ mod tests {
         let params = [binary_bool_param(true)];
 
         let results = session
-            .extended_query("SELECT $1", &params)
+            .test_extended_query("SELECT $1", &params)
             .await
             .expect("extended binary bool select");
 
@@ -4171,12 +4464,12 @@ mod tests {
             binary_param(&1.5_f64.to_be_bytes(), crabka_pgtypes::oids::FLOAT8),
         ];
         session
-            .extended_query("INSERT INTO t VALUES ($1, $2)", &params)
+            .test_extended_query("INSERT INTO t VALUES ($1, $2)", &params)
             .await
             .expect("insert binary scalar values");
 
         let results = session
-            .extended_query("SELECT id FROM t WHERE id = $1 AND score = $2", &params)
+            .test_extended_query("SELECT id FROM t WHERE id = $1 AND score = $2", &params)
             .await
             .expect("predicate with binary scalar values");
         assert_eq!(single_text(&results), "9000000000");
@@ -4200,12 +4493,12 @@ mod tests {
             binary_param(&8_767_i32.to_be_bytes(), crabka_pgtypes::oids::DATE),
         ];
         session
-            .extended_query("SELECT $1", &params[..1])
+            .test_extended_query("SELECT $1", &params[..1])
             .await
             .map(|results| assert_eq!(single_text(&results), "\\xdeadbeef"))
             .expect("decode text bytea");
         session
-            .extended_query("SELECT $1", &params[1..2])
+            .test_extended_query("SELECT $1", &params[1..2])
             .await
             .map(|results| {
                 assert_eq!(
@@ -4215,12 +4508,12 @@ mod tests {
             })
             .expect("decode binary uuid");
         session
-            .extended_query("INSERT INTO t VALUES ($1)", &params[2..])
+            .test_extended_query("INSERT INTO t VALUES ($1)", &params[2..])
             .await
             .expect("insert binary date");
 
         let results = session
-            .extended_query("SELECT occurred FROM t WHERE occurred = $1", &params[2..])
+            .test_extended_query("SELECT occurred FROM t WHERE occurred = $1", &params[2..])
             .await
             .expect("predicate with binary date");
         assert_eq!(single_text(&results), "2024-01-02");
@@ -4261,7 +4554,7 @@ mod tests {
         let params = [text_param(None, None)];
 
         let results = session
-            .extended_query("SELECT $1::int4", &params)
+            .test_extended_query("SELECT $1::int4", &params)
             .await
             .expect("extended null select");
 
@@ -4285,7 +4578,7 @@ mod tests {
         ];
 
         session
-            .extended_query("INSERT INTO t (id, name) VALUES ($1, $2)", &params)
+            .test_extended_query("INSERT INTO t (id, name) VALUES ($1, $2)", &params)
             .await
             .expect("insert with params");
         let selected = session
@@ -4303,7 +4596,7 @@ mod tests {
         let params = [text_param(Some("1"), None), text_param(Some("extra"), None)];
 
         let err = session
-            .extended_query("SELECT $1", &params)
+            .test_extended_query("SELECT $1", &params)
             .await
             .expect_err("extra param rejected");
 
@@ -4322,7 +4615,7 @@ mod tests {
         let params = [text_param(Some("not-an-int"), None)];
 
         let err = session
-            .extended_query("INSERT INTO t VALUES ($1)", &params)
+            .test_extended_query("INSERT INTO t VALUES ($1)", &params)
             .await
             .expect_err("bad int rejected");
 
@@ -4336,7 +4629,7 @@ mod tests {
         let mut session = engine.connect();
 
         let err = session
-            .describe_prepared("SELECT 1; SELECT 2", &[])
+            .test_describe_prepared("SELECT 1; SELECT 2", &[])
             .await
             .expect_err("extended parse rejects multi-statement prepare");
 
@@ -4350,7 +4643,7 @@ mod tests {
         let mut session = engine.connect();
 
         let results = session
-            .extended_query(" \t\n", &[])
+            .test_extended_query(" \t\n", &[])
             .await
             .expect("empty extended query succeeds");
         assert!(matches!(
@@ -4359,7 +4652,7 @@ mod tests {
         ));
 
         let (fields, param_types) = session
-            .describe_prepared(" \t\n", &[])
+            .test_describe_prepared(" \t\n", &[])
             .await
             .expect("empty extended describe succeeds");
         assert!(fields.is_empty());
@@ -4379,24 +4672,24 @@ mod tests {
         assert_eq!(original_error.code, "42P01");
 
         let execute_error = session
-            .extended_query("", &[])
+            .test_extended_query("", &[])
             .await
             .expect_err("empty extended execute is rejected in failed transaction");
         assert_eq!(execute_error.code, "25P02");
 
         let describe_error = session
-            .describe_prepared("", &[])
+            .test_describe_prepared("", &[])
             .await
             .expect_err("empty extended prepare/describe is rejected in failed transaction");
         assert_eq!(describe_error.code, "25P02");
 
         session.simple_query("ROLLBACK").await.expect("rollback");
         session
-            .extended_query("", &[])
+            .test_extended_query("", &[])
             .await
             .expect("rollback restores empty extended execute behavior");
         session
-            .describe_prepared("", &[])
+            .test_describe_prepared("", &[])
             .await
             .expect("rollback restores empty extended describe behavior");
         let selected = session
