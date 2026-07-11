@@ -2865,6 +2865,8 @@ dependencies = [
  "arc-swap",
  "assert2",
  "async-trait",
+ "crabka-broker",
+ "crabka-client-admin",
  "crabka-gres-control",
  "crabka-pgcatalog",
  "crabka-pgexec",
@@ -2883,6 +2885,7 @@ dependencies = [
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
+ "tokio-postgres",
  "tokio-rustls",
  "tracing",
 ]
