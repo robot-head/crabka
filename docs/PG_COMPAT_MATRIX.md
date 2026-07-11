@@ -143,7 +143,6 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | DROP FOREIGN TABLE | Implemented | FDW DDL is parsed in the current baseline. |
 | DROP FUNCTION | Wave-assigned(P2) | SQL routines. |
 | DROP GROUP | Wave-assigned(D8) | Role synonym surface. |
-| DROP INDEX | Wave-assigned(D2) | Secondary indexes. |
 | DROP LANGUAGE | Non-goal(built-in languages only) | C-bound language object lifecycle is excluded. |
 | DROP MATERIALIZED VIEW | Wave-assigned(D5) | Materialized views. |
 | DROP OPERATOR | Non-goal(C-bound operator objects) | C-bound object kind excluded. |
