@@ -124,7 +124,10 @@ mod tests {
                 .get(topic_id, PartitionIndex(0), 0, usize::MAX)
                 .is_none()
         );
-        assert!(cache.get(topic_id, PartitionIndex(0), 2, usize::MAX) == Some(second));
+        assert_eq!(
+            cache.get(topic_id, PartitionIndex(0), 2, usize::MAX),
+            Some(second)
+        );
         assert!(
             cache
                 .get(topic_id, PartitionIndex(0), 3, usize::MAX)

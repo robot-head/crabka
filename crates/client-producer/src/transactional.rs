@@ -378,7 +378,7 @@ mod tests {
             .init_transactions()
             .await
             .expect("reinitialization obtains a new epoch");
-        assert!(*producer.txn_pid_epoch.lock().await == (7, 4));
+        assert_eq!(*producer.txn_pid_epoch.lock().await, (7, 4));
         producer
             .begin_transaction()
             .await

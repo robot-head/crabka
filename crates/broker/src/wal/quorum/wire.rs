@@ -173,7 +173,7 @@ mod tests {
     fn classify_fetch_distinguishes_metadata_quorum() {
         let body = encode_fetch_for_group(QuorumGroup::Metadata, NodeId(2), 7, 11);
 
-        assert!(classify_fetch(&body) == Some(QuorumGroup::Metadata));
+        assert_eq!(classify_fetch(&body), Some(QuorumGroup::Metadata));
     }
 
     #[test]
@@ -186,12 +186,12 @@ mod tests {
             11,
         );
 
-        assert!(
-            classify_fetch(&body)
-                == Some(QuorumGroup::DisklessWal {
-                    topic_id,
-                    partition: PartitionIndex(3),
-                })
+        assert_eq!(
+            classify_fetch(&body),
+            Some(QuorumGroup::DisklessWal {
+                topic_id,
+                partition: PartitionIndex(3),
+            })
         );
     }
 }
