@@ -2159,7 +2159,7 @@ impl GatewaySession {
             return Ok(description);
         }
         let route = route.expect("concrete route checked above");
-        if route.scatter_ranges.is_some() {
+        if route.scatter_ranges.is_some() && route.kind != StatementKind::Dml {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
                 "extended statements must target one range",
@@ -2423,19 +2423,29 @@ impl GatewaySession {
             table_id: portal_state.route.table_id,
         });
         let _table_write_gate = self.acquire_routed_dml_gate(&portal_state.route).await?;
+        let own_start_ts = match &self.transaction {
+            GatewayTransaction::Timestamp { identity, .. }
+                if portal_state.route.kind == StatementKind::Query =>
+            {
+                Some(identity.start_ts)
+            }
+            _ => None,
+        };
         if portal_state.route.kind == StatementKind::Dml {
             self.touch_write_range(portal_state.route.range_id).await?;
         }
         if let Some(session) = self.sessions.get_mut(&portal_state.route.range_id) {
+            session.set_timestamp_own_start_ts(own_start_ts);
             session.execute(portal, max_rows).await
         } else {
             self.ensure_remote_session(portal_state.route.range_id)
                 .await?;
-            self.remote_sessions
+            let remote = self
+                .remote_sessions
                 .get_mut(&portal_state.route.range_id)
-                .expect("remote session inserted")
-                .execute(portal.to_owned(), max_rows)
-                .await
+                .expect("remote session inserted");
+            remote.set_timestamp_own_start_ts(own_start_ts).await?;
+            remote.execute(portal.to_owned(), max_rows).await
         }
     }
 
@@ -3686,19 +3696,65 @@ impl Drop for GatewaySession {
             let participants = participants.clone();
             let serving = self.inner.serving.load_full();
             let remote_sessions = self.remote_sessions.clone();
-            if let Ok(handle) = tokio::runtime::Handle::try_current() {
-                handle.spawn(async move {
-                    let _ = cleanup_dropped_timestamp_session(
+            dispatch_dropped_timestamp_cleanup(serving, remote_sessions, identity, participants);
+        }
+        self.release_explicit_transaction();
+    }
+}
+
+fn dispatch_dropped_timestamp_cleanup(
+    serving: Arc<ServingSnapshot>,
+    remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
+    identity: crabka_pgexec::TimestampTxnIdentity,
+    participants: BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
+) {
+    if let Ok(handle) = tokio::runtime::Handle::try_current() {
+        handle.spawn(async move {
+            if let Err(error) = cleanup_dropped_timestamp_session(
+                serving,
+                remote_sessions,
+                identity,
+                participants,
+            )
+            .await
+            {
+                tracing::warn!(%error, start_ts = identity.start_ts.get(), "dropped timestamp session cleanup failed; descriptor recovery remains authoritative");
+            }
+        });
+        return;
+    }
+    let spawn = std::thread::Builder::new()
+        .name("crabka-timestamp-drop-cleanup".into())
+        .spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build();
+            match runtime {
+                Ok(runtime) => {
+                    if let Err(error) = runtime.block_on(cleanup_dropped_timestamp_session(
                         serving,
                         remote_sessions,
                         identity,
                         participants,
-                    )
-                    .await;
-                });
+                    )) {
+                        tracing::warn!(%error, start_ts = identity.start_ts.get(), "fallback timestamp session cleanup failed; descriptor recovery remains authoritative");
+                    }
+                }
+                Err(error) => tracing::warn!(%error, start_ts = identity.start_ts.get(), "failed to build timestamp cleanup runtime; descriptor recovery remains authoritative"),
+            }
+        });
+    match spawn {
+        Ok(thread) => {
+            if thread.join().is_err() {
+                tracing::warn!(
+                    start_ts = identity.start_ts.get(),
+                    "timestamp cleanup executor panicked; descriptor recovery remains authoritative"
+                );
             }
         }
-        self.release_explicit_transaction();
+        Err(error) => {
+            tracing::warn!(%error, start_ts = identity.start_ts.get(), "failed to spawn timestamp cleanup executor; descriptor recovery remains authoritative");
+        }
     }
 }
 
@@ -4886,6 +4942,24 @@ fn routing_param_literal(param: &BoundParam, inferred_oid: u32) -> Result<String
         return Ok("null".to_owned());
     };
     match (oid, param.format) {
+        (16, 0) => match std::str::from_utf8(value).unwrap_or_default() {
+            "true" | "t" | "1" => Ok("true".into()),
+            "false" | "f" | "0" => Ok("false".into()),
+            _ => Err(PgError::error("22P02", "invalid boolean parameter")),
+        },
+        (16, 1) if value.len() == 1 => match value[0] {
+            0 => Ok("false".into()),
+            1 => Ok("true".into()),
+            _ => Err(PgError::error("22P02", "invalid boolean parameter")),
+        },
+        (21, 0) => std::str::from_utf8(value)
+            .ok()
+            .and_then(|value| value.parse::<i16>().ok())
+            .map(|value| value.to_string())
+            .ok_or_else(|| PgError::error("22P02", "invalid smallint parameter")),
+        (21, 1) if value.len() == 2 => {
+            Ok(i16::from_be_bytes(value.try_into().expect("length checked")).to_string())
+        }
         (23, 0) | (20, 0) => std::str::from_utf8(value)
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
@@ -4897,11 +4971,34 @@ fn routing_param_literal(param: &BoundParam, inferred_oid: u32) -> Result<String
         (20, 1) if value.len() == 8 => {
             Ok(i64::from_be_bytes(value.try_into().expect("length checked")).to_string())
         }
-        (25, 0 | 1) => {
+        (700, 1) if value.len() == 4 => Ok(f32::from_bits(u32::from_be_bytes(
+            value.try_into().expect("length checked"),
+        ))
+        .to_string()),
+        (701, 1) if value.len() == 8 => Ok(f64::from_bits(u64::from_be_bytes(
+            value.try_into().expect("length checked"),
+        ))
+        .to_string()),
+        (17, 1) => Ok(format!("'\\x{}'", hex_bytes(value))),
+        (25 | 1043 | 1042, 0 | 1) => {
             let value = std::str::from_utf8(value)
                 .map_err(|_| PgError::error("22021", "invalid UTF-8 text parameter"))?;
             Ok(format!("'{}'", value.replace('\'', "''")))
         }
+        (17, 0) => {
+            let value = std::str::from_utf8(value)
+                .map_err(|_| PgError::error("22021", "invalid UTF-8 bytea parameter"))?;
+            Ok(format!("'{}'", value.replace('\'', "''")))
+        }
+        (700, 0) => typed_numeric_literal(value, "real"),
+        (701, 0) => typed_numeric_literal(value, "double precision"),
+        (1700, 0) => typed_numeric_literal(value, "numeric"),
+        (1082, 0) => quoted_typed_literal(value, "date"),
+        (1083, 0) => quoted_typed_literal(value, "time"),
+        (1114, 0) => quoted_typed_literal(value, "timestamp"),
+        (1184, 0) => quoted_typed_literal(value, "timestamptz"),
+        (1186, 0) => quoted_typed_literal(value, "interval"),
+        (2950, 0 | 1) => quoted_typed_literal(value, "uuid"),
         (_, 0 | 1) => Err(PgError::error(
             sqlstate::FEATURE_NOT_SUPPORTED,
             format!("parameter type {oid} cannot be used as a shard key"),
@@ -4910,6 +5007,35 @@ fn routing_param_literal(param: &BoundParam, inferred_oid: u32) -> Result<String
             "unsupported parameter format code {format}"
         ))),
     }
+}
+
+fn quoted_typed_literal(value: &[u8], ty: &str) -> Result<String, PgError> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| PgError::error("22021", "invalid UTF-8 parameter"))?;
+    Ok(format!("'{}'::{ty}", value.replace('\'', "''")))
+}
+
+fn typed_numeric_literal(value: &[u8], ty: &str) -> Result<String, PgError> {
+    let value = std::str::from_utf8(value)
+        .map_err(|_| PgError::error("22021", "invalid UTF-8 numeric parameter"))?;
+    if value
+        .bytes()
+        .all(|byte| byte.is_ascii_digit() || matches!(byte, b'+' | b'-' | b'.' | b'e' | b'E'))
+    {
+        Ok(format!("{value}::{ty}"))
+    } else {
+        Err(PgError::error("22P02", "invalid numeric parameter"))
+    }
+}
+
+fn hex_bytes(value: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(value.len() * 2);
+    for byte in value {
+        encoded.push(HEX[usize::from(byte >> 4)] as char);
+        encoded.push(HEX[usize::from(byte & 0x0f)] as char);
+    }
+    encoded
 }
 
 fn unknown_shard_key_error() -> PgError {

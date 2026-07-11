@@ -516,7 +516,70 @@ async fn extended_sharded_writes_join_explicit_timestamp_transaction() {
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
         vec![10, 20]
     );
+    let rows = session
+        .extended_query_v2("SELECT value FROM t150 WHERE id = $1", &[text_param("120")])
+        .await
+        .expect("extended read-your-writes");
+    assert!(format!("{rows:?}").contains("20"));
     session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[tokio::test]
+async fn extended_timestamp_dml_accepts_non_shard_parameter_types() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, flag bool, payload bytea, score float8) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES (20, $1, $2, $3), (120, false, '\\x00', 0.0)",
+            &[
+                text_typed_param("true", crabka_pgtypes::oids::BOOL),
+                binary_typed_param(&[0xde, 0xad], crabka_pgtypes::oids::BYTEA),
+                binary_typed_param(
+                    &42.5f64.to_bits().to_be_bytes(),
+                    crabka_pgtypes::oids::FLOAT8,
+                ),
+            ],
+        )
+        .await
+        .expect("typed extended write");
+    session.simple_query("COMMIT").await.expect("commit");
+}
+
+#[test]
+fn dropping_timestamp_session_without_caller_runtime_cleans_up() {
+    let runtime = tokio::runtime::Runtime::new().expect("runtime");
+    let (gateway, session) = runtime.block_on(async {
+        let (gateway, _handles) =
+            MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+        let mut session = gateway.connect();
+        session
+            .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+            .await
+            .expect("create");
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+            .await
+            .expect("prewrite");
+        (gateway, session)
+    });
+    drop(runtime);
+    drop(session);
+
+    tokio::runtime::Runtime::new()
+        .expect("observer runtime")
+        .block_on(async move {
+            let mut observer = gateway.connect();
+            observer
+                .simple_query("INSERT INTO t150 VALUES (20, 30), (120, 40)")
+                .await
+                .expect("fallback cleanup resolved intents");
+        });
 }
 
 #[tokio::test]
@@ -849,6 +912,22 @@ fn text_param(value: &str) -> BoundParam {
         type_oid: None,
         format: 0,
         value: Some(value.as_bytes().to_vec().into()),
+    }
+}
+
+fn text_typed_param(value: &str, oid: u32) -> BoundParam {
+    BoundParam {
+        type_oid: Some(oid),
+        format: 0,
+        value: Some(value.as_bytes().to_vec().into()),
+    }
+}
+
+fn binary_typed_param(value: &[u8], oid: u32) -> BoundParam {
+    BoundParam {
+        type_oid: Some(oid),
+        format: 1,
+        value: Some(value.to_vec().into()),
     }
 }
 
