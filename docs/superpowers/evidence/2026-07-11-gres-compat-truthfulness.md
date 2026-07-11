@@ -6,14 +6,14 @@ Scope: SQL-Parity Program Task 1 metadata and executable behavior only. This doe
 
 ## Authoritative inventory
 
-- `docs/pg18-allfiles-REL_18_0.sgml` is the immutable PostgreSQL source snapshot; the checker pins SHA-256 `4240987b5fddaa5ab5ffa2562551cb1325f2e5527b552c3bbe5be7ca6fd42fc7`.
-- The deterministic extractor reads 183 SQL-command entities, expands PostgreSQL's 20 abbreviated entity filenames to their documented command titles, and adds the seven explicitly tracked syntax families to derive exactly 190 titles.
-- The checker requires exact equality between that derived set, `pg18-command-inventory.json`, and the command matrix. Independent mutation tests cover missing, extra, renamed, fake, duplicate, and wrong-count inventories.
+- Four immutable PostgreSQL `REL_18_0` artifacts are checked and hashed: `allfiles.sgml` (`4240987b5fddaa5ab5ffa2562551cb1325f2e5527b552c3bbe5be7ca6fd42fc7`), `alter_table.sgml` (`dc44b2b50476dff8ed0e7f79d425e6b404f3b0860a91f18f536490f912c02dbe`), `create_table.sgml` (`8f281d48523129f41a81d6c6e1fdc4d6de7637cf31f36f5c63940fd2d1b51972`), and `select.sgml` (`300d0d5eb2bc5b7a1ef69f528c2a673c11819bb4dc975f9a7f82dff7fe2c560d`).
+- The deterministic extractor reads 183 SQL-command entities, expands PostgreSQL's 20 abbreviated entity filenames, and extracts the remaining seven titles from the authoritative command synopses. No unconditional title expansion set exists.
+- The checker requires exact equality between that derived set, `pg18-command-inventory.json`, and the command matrix. Mutation tests cover missing, extra, renamed, fake, duplicate, and wrong-count inventories plus missing/fake/extra synopsis sources and mappings.
 - All 23 major language-feature rows live in a separate typed manifest and are excluded from the 190-command count. Implemented representatives execute, the extended-protocol representative binds a parameter, explicit refusals assert their error contracts, and pending representatives record observed parser/session behavior.
 
 ## Executable behavior manifest
 
-- The parser-owned `CommandIdentity` registry contains 92 accepted command identities and gates every public parse boundary. Aliases sharing AST variants retain distinct identities without deriving acceptance from behavior probes.
+- Actual parser dispatch branches emit `ParsedStatement { statement, command_identity }`; a bare successful branch does not type-check. The registry contains 92 accepted identities, aliases sharing AST variants emit distinct identities in their consuming branch, and public wrappers only strip or expose already-emitted identities. No raw-SQL/AST classifier exists.
 - Report format v2 separately contains 92 behavior probes: all 42 `Implemented`/`Mapped` command rows and all 50 `Error-with-notice`/executable `Non-goal` command rows.
 - Every probe records representative SQL and expected parser shape. Refusals additionally record exact SQLSTATE and a stable message fragment.
 - `compatibility_behavior.rs` executes all 92 through `SqlEngine` sessions with deterministic per-probe setup. Its COPY representative uses the session CopyIn API rather than treating a simple-query refusal as success.

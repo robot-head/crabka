@@ -37,11 +37,20 @@ PG18_SOURCE_ALIASES = {
     "DROP TSPARSER": "DROP TEXT SEARCH PARSER", "DROP TSTEMPLATE": "DROP TEXT SEARCH TEMPLATE",
     "ROLLBACK TO": "ROLLBACK TO SAVEPOINT", "SET SESSION AUTH": "SET SESSION AUTHORIZATION",
 }
-PG18_TRACKED_SYNTAX_FAMILIES = {
-    "ALTER TABLE ATTACH PARTITION", "ALTER TABLE DETACH PARTITION",
-    "ALTER TABLE ENABLE ROW LEVEL SECURITY", "CREATE TABLE INHERITS",
-    "CREATE TABLE PARTITION BY", "CREATE TABLE PARTITION OF", "TABLE",
+PG18_SYNTAX_SNAPSHOT_HASHES = {
+    "pg18-alter_table-REL_18_0.sgml": "dc44b2b50476dff8ed0e7f79d425e6b404f3b0860a91f18f536490f912c02dbe",
+    "pg18-create_table-REL_18_0.sgml": "8f281d48523129f41a81d6c6e1fdc4d6de7637cf31f36f5c63940fd2d1b51972",
+    "pg18-select-REL_18_0.sgml": "300d0d5eb2bc5b7a1ef69f528c2a673c11819bb4dc975f9a7f82dff7fe2c560d",
 }
+PG18_SYNTAX_PATTERNS = (
+    ("pg18-alter_table-REL_18_0.sgml", "ALTER TABLE", r"(?m)^\s*(ATTACH PARTITION)\s"),
+    ("pg18-alter_table-REL_18_0.sgml", "ALTER TABLE", r"(?m)^\s*(DETACH PARTITION)\s"),
+    ("pg18-alter_table-REL_18_0.sgml", "ALTER TABLE", r"(?m)^\s*(ENABLE ROW LEVEL SECURITY)\s*$"),
+    ("pg18-create_table-REL_18_0.sgml", "CREATE TABLE", r"(?m)^\s*\[\s*(INHERITS)\s*\("),
+    ("pg18-create_table-REL_18_0.sgml", "CREATE TABLE", r"(?m)^\s*\[\s*(PARTITION BY)\s"),
+    ("pg18-create_table-REL_18_0.sgml", "CREATE TABLE", r"(?m)^\s*(PARTITION OF)\s"),
+    ("pg18-select-REL_18_0.sgml", "", r"(?m)^\s*(TABLE)\s+\[\s*ONLY\s*\]"),
+)
 PARSER_COMMAND_REPORT_FORMAT_VERSION = 2
 DEFAULT_PARSER_COMMAND = [
     "cargo",
@@ -214,6 +223,24 @@ def load_inventory(path: Path) -> set[str]:
     digest = hashlib.sha256(snapshot).hexdigest()
     if document.get("source_sha256") != PG18_SOURCE_SHA256 or digest != PG18_SOURCE_SHA256:
         raise ValueError(f"{path}: PostgreSQL REL_18_0 source snapshot SHA-256 mismatch")
+    syntax_metadata = document.get("syntax_snapshots")
+    if not isinstance(syntax_metadata, list):
+        raise ValueError(f"{path}: syntax_snapshots must be an array")
+    syntax_sources: dict[str, str] = {}
+    metadata_hashes: dict[str, str] = {}
+    for entry in syntax_metadata:
+        if not isinstance(entry, dict) or not isinstance(entry.get("file"), str):
+            raise ValueError(f"{path}: invalid syntax snapshot metadata")
+        filename = entry["file"]
+        if Path(filename).name != filename or not isinstance(entry.get("sha256"), str):
+            raise ValueError(f"{path}: invalid syntax snapshot filename/hash")
+        metadata_hashes[filename] = entry["sha256"]
+        content = (path.parent / filename).read_bytes()
+        if hashlib.sha256(content).hexdigest() != PG18_SYNTAX_SNAPSHOT_HASHES.get(filename):
+            raise ValueError(f"{path}: syntax snapshot SHA-256 mismatch for {filename}")
+        syntax_sources[filename] = content.decode("utf-8")
+    if metadata_hashes != PG18_SYNTAX_SNAPSHOT_HASHES:
+        raise ValueError(f"{path}: syntax snapshot metadata does not match pinned REL_18_0 artifacts")
     commands = document.get("commands")
     if not isinstance(commands, list) or not all(isinstance(command, str) for command in commands):
         raise ValueError(f"{path}: commands must be a JSON string array")
@@ -223,7 +250,7 @@ def load_inventory(path: Path) -> set[str]:
         raise ValueError(f"{path}: duplicate command names are forbidden")
     if commands != sorted(commands):
         raise ValueError(f"{path}: commands must be sorted")
-    derived = derive_pg18_commands(snapshot.decode("utf-8"))
+    derived = derive_pg18_commands(snapshot.decode("utf-8"), syntax_sources)
     if set(commands) != derived:
         missing = sorted(derived - set(commands))
         extra = sorted(set(commands) - derived)
@@ -233,7 +260,13 @@ def load_inventory(path: Path) -> set[str]:
     return set(commands)
 
 
-def derive_pg18_commands(snapshot: str) -> set[str]:
+def derive_pg18_commands(
+    snapshot: str,
+    syntax_sources: dict[str, str],
+    *,
+    aliases: dict[str, str] = PG18_SOURCE_ALIASES,
+    syntax_patterns: tuple[tuple[str, str, str], ...] = PG18_SYNTAX_PATTERNS,
+) -> set[str]:
     try:
         sql_section = snapshot.split("<!-- SQL commands -->", 1)[1].split(
             "<!-- applications and utilities -->", 1
@@ -244,10 +277,17 @@ def derive_pg18_commands(snapshot: str) -> set[str]:
     if len(filenames) != 183:
         raise ValueError(f"PostgreSQL REL_18_0 snapshot expected 183 SQL entities, found {len(filenames)}")
     commands = {
-        PG18_SOURCE_ALIASES.get(filename.replace("_", " ").upper(), filename.replace("_", " ").upper())
+        aliases.get(filename.replace("_", " ").upper(), filename.replace("_", " ").upper())
         for filename in filenames
     }
-    commands.update(PG18_TRACKED_SYNTAX_FAMILIES)
+    for source_name, base_command, pattern in syntax_patterns:
+        source = syntax_sources.get(source_name)
+        if source is None:
+            raise ValueError(f"missing PostgreSQL syntax source artifact: {source_name}")
+        match = re.search(pattern, source)
+        if match is None:
+            raise ValueError(f"PostgreSQL syntax source {source_name} lacks required synopsis {pattern}")
+        commands.add(" ".join(part for part in (base_command, match.group(1)) if part))
     if len(commands) != 190:
         raise ValueError(f"derived PostgreSQL 18 command inventory has {len(commands)} titles, expected 190")
     return commands
@@ -426,6 +466,14 @@ def run_self_test(parser_commands: set[str]) -> None:
         (directory_path / snapshot_name).write_bytes(
             (DEFAULT_INVENTORY.parent / snapshot_name).read_bytes()
         )
+        syntax_metadata = [
+            {"file": filename, "sha256": digest}
+            for filename, digest in PG18_SYNTAX_SNAPSHOT_HASHES.items()
+        ]
+        for filename in PG18_SYNTAX_SNAPSHOT_HASHES:
+            (directory_path / filename).write_bytes(
+                (DEFAULT_INVENTORY.parent / filename).read_bytes()
+            )
         base = sorted(inventory)
         mutations = {
             "missing": base[:-1],
@@ -444,6 +492,7 @@ def run_self_test(parser_commands: set[str]) -> None:
                     "source": "https://github.com/postgres/postgres/blob/REL_18_0/doc/src/sgml/ref/allfiles.sgml",
                     "source_snapshot": snapshot_name,
                     "source_sha256": PG18_SOURCE_SHA256,
+                    "syntax_snapshots": syntax_metadata,
                     "commands": mutated_commands,
                 }),
                 encoding="utf-8",
@@ -454,6 +503,41 @@ def run_self_test(parser_commands: set[str]) -> None:
                 pass
             else:
                 raise AssertionError(f"self-test expected {label}-inventory direction to fail")
+
+    allfiles_source = (DEFAULT_INVENTORY.parent / "pg18-allfiles-REL_18_0.sgml").read_text(
+        encoding="utf-8"
+    )
+    syntax_sources = {
+        filename: (DEFAULT_INVENTORY.parent / filename).read_text(encoding="utf-8")
+        for filename in PG18_SYNTAX_SNAPSHOT_HASHES
+    }
+    extraction_mutations = {
+        "missing expansion source": lambda: derive_pg18_commands(
+            allfiles_source,
+            {name: source for name, source in syntax_sources.items() if not name.startswith("pg18-select")},
+        ),
+        "missing expansion mapping": lambda: derive_pg18_commands(
+            allfiles_source, syntax_sources, syntax_patterns=PG18_SYNTAX_PATTERNS[:-1]
+        ),
+        "fake expansion mapping": lambda: derive_pg18_commands(
+            allfiles_source,
+            syntax_sources,
+            aliases={**PG18_SOURCE_ALIASES, "ALTER OPCLASS": "FAKE OPERATOR CLASS"},
+        ),
+        "extra expansion mapping": lambda: derive_pg18_commands(
+            allfiles_source,
+            syntax_sources,
+            syntax_patterns=PG18_SYNTAX_PATTERNS
+            + (("pg18-select-REL_18_0.sgml", "FAKE", r"(?m)^\s*(TABLE)\s+\[\s*ONLY\s*\]"),),
+        ),
+    }
+    for label, mutation in extraction_mutations.items():
+        try:
+            mutated = mutation()
+        except ValueError:
+            continue
+        if mutated == inventory:
+            raise AssertionError(f"self-test expected {label} direction to fail")
 
     missing_inventory = set(inventory)
     missing_inventory.remove("ABORT")
