@@ -76,30 +76,33 @@ type ElleChecker = Arc<Mutex<LinearizabilityTester<u8, ListAppendSpec>>>;
 async fn stateright_elle_accepts_real_process_history_across_participant_kill() {
     let mut system = ProcessHarness::start("tenant-real-elle").await;
     system
-        .create_table_on_all("CREATE TABLE elle50 (id int4); CREATE TABLE elle150 (id int4)")
+        .create_table_on_all(
+            "CREATE TABLE elle50 (position int4, value int4); \
+             CREATE TABLE elle150 (position int4, value int4)",
+        )
         .await;
     let checker = Arc::new(Mutex::new(LinearizabilityTester::new(
         ListAppendSpec::default(),
     )));
 
     let first =
-        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 0, Key::Left, 1);
+        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 0, Key::Left, 20);
     let second =
-        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 1, Key::Right, 1);
+        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 1, Key::Right, 30);
     let (first, second) = tokio::join!(first, second);
     first.expect("first concurrent list append");
     second.expect("second concurrent list append");
 
     system.kill(1).await;
     assert!(
-        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 2, Key::Right, 2)
+        real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 2, Key::Right, 10)
             .await
             .is_err(),
         "operation against killed participant must be indeterminate"
     );
     system.restart(1).await;
 
-    real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 3, Key::Left, 2)
+    real_observe_then_append(system.sql(0).await, Arc::clone(&checker), 3, Key::Left, 5)
         .await
         .expect("post-recovery list append");
 
@@ -128,9 +131,13 @@ async fn real_observe_then_append(
     client.simple_query("BEGIN").await?;
     let left = query_list(&client, "elle50").await?;
     let right = query_list(&client, "elle150").await?;
+    let position = match key {
+        Key::Left => left.len(),
+        Key::Right => right.len(),
+    } + 1;
     client
         .simple_query(&format!(
-            "INSERT INTO {} VALUES ({value})",
+            "INSERT INTO {} VALUES ({position}, {value})",
             key.table_name()
         ))
         .await?;
@@ -149,11 +156,54 @@ async fn query_list(
     table: &str,
 ) -> Result<Vec<i32>, tokio_postgres::Error> {
     Ok(client
-        .query(&format!("SELECT id FROM {table} ORDER BY id"), &[])
+        .query(&format!("SELECT value FROM {table} ORDER BY position"), &[])
         .await?
         .into_iter()
         .map(|row| row.get(0))
         .collect())
+}
+
+#[test]
+fn list_append_checker_rejects_a_value_sorted_reordering() {
+    let mut checker = LinearizabilityTester::<u8, ListAppendSpec>::new(ListAppendSpec::default());
+    checker
+        .on_invoke(
+            0,
+            ListAppendOp {
+                key: Key::Left,
+                value: 20,
+            },
+        )
+        .unwrap();
+    checker
+        .on_return(
+            0,
+            ListAppendRet {
+                left: vec![],
+                right: vec![],
+            },
+        )
+        .unwrap();
+    checker
+        .on_invoke(
+            0,
+            ListAppendOp {
+                key: Key::Left,
+                value: 5,
+            },
+        )
+        .unwrap();
+    checker
+        .on_return(
+            0,
+            ListAppendRet {
+                left: vec![5, 20],
+                right: vec![],
+            },
+        )
+        .unwrap();
+
+    assert!(!checker.is_consistent());
 }
 
 #[tokio::test]
