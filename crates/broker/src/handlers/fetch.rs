@@ -1122,7 +1122,13 @@ async fn do_read(
                 ))]
                 let records: RecordsPayload = {
                     let mut chosen: Option<RecordsPayload> = None;
-                    if sendfile_capable {
+                    // READ_COMMITTED responses also carry aborted-transaction
+                    // metadata and are consumed by ordinary Kafka clients as one
+                    // framed response. Keep those on the raw-byte encoder; the
+                    // file-region writer can otherwise detach the records payload
+                    // from the metadata frame and leave a fresh stable-topic reader
+                    // with HW/LSO but no decoded batches.
+                    if sendfile_capable && !read_committed_aborts {
                         let desc = log.read_raw_desc(fetch_offset, limit_offset, read_max)?;
                         if desc.total >= crate::network::fetch_writer::SENDFILE_MIN_BYTES
                             && !desc.regions.is_empty()
