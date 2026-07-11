@@ -41,3 +41,14 @@ Result: exit 0; live mode; range-local 4x/1x `3.7538`; sharded 4x/1x `3.2558`; r
 ## Concerns
 
 - GitHub-hosted runner scheduling noise may occasionally require increasing the fast sample count; the current 30-minute timeout leaves room to do so without reverting to synthetic evidence.
+
+## Scaling review remediation
+
+- Replaced one-`psql`-process-per-transaction with persistent worker sessions using one timed SQL stream, explicit warmup markers, and 50 measured commits/session.
+- Fast mode now runs two sessions/range and three full trials. Canonical results use median throughput, embed every raw trial, record warmup/sample/trial counts, and state the aggregation derivation.
+- Corrected shard-key spacing so each range receives its intended workers; the robust run exposed that the previous tiny apparent sharded scaling was not valid.
+- Replaced substring-only anti-rot checks with an exact job-block parser and negative mutations for invocation removal, live assertion removal, expression-valued continue-on-error, comment-only fast mode, and upper-envelope removal.
+- Expanded Gres path filtering to broker/client/protocol dependencies plus root Cargo/toolchain inputs.
+- Decision-envelope success now requires every point to remain within both 0.70 and 1.25 bounds.
+
+Static checks and dry-run compatibility pass. The required fresh robust live run completed all trials but correctly exited nonzero: range-local scaled `3.2333x`, while sharded scaled only `0.9611x` (raw medians 155.7632 to 149.7006 tx/s). This is a genuine remaining product/topology scaling failure, not a harness error that can be honestly papered over in CI.

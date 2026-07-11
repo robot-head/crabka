@@ -1,40 +1,83 @@
 #!/usr/bin/env bash
 set -euo pipefail
-
 cd "$(dirname "$0")/../.."
-
-workflow=.github/workflows/ci.yml
-
-job="$(sed -n '/^  gres-range-scaling:/,/^  gres-sharded-conformance:/p' "$workflow")"
-
-grep -q 'dtolnay/rust-toolchain@stable' <<<"$job"
-grep -q 'Swatinem/rust-cache@v2' <<<"$job"
-grep -q 'postgresql-client' <<<"$job"
-grep -q 'CRABKA_GRES_RANGE_SCALING_MODE=fast' <<<"$job"
-grep -q 'cargo build --locked' scripts/gres-range-scaling.sh
-grep -q 'if:.*!cancelled()' <<<"$job"
-
-if grep -q 'continue-on-error: true' <<<"$job"; then
-    echo 'scaling job must gate CI' >&2
-    exit 1
-fi
-if grep -q 'CRABKA_GRES_RANGE_SCALING_MODE=dry-run' <<<"$job"; then
-    echo 'scaling job must publish live evidence' >&2
-    exit 1
-fi
 
 python3 - <<'PY'
 from pathlib import Path
 
-source = Path("scripts/gres-range-scaling.sh").read_text()
-required = [
-    '"mode": mode',
-    '"g8_decision_ceiling_curve": g8_points',
-    '"commit_rate_curve": timestamp_points',
-    '"overall": range_passed and sharded_passed and decision_ceiling_passed',
+workflow = Path('.github/workflows/ci.yml').read_text()
+script = Path('scripts/gres-range-scaling.sh').read_text()
+
+def job_block(source):
+    marker = '  gres-range-scaling:\n'
+    start = source.index(marker)
+    lines = source[start:].splitlines()
+    kept = [lines[0]]
+    for line in lines[1:]:
+        if line.startswith('  ') and not line.startswith('    ') and line.strip():
+            break
+        kept.append(line)
+    return '\n'.join(kept)
+
+def validate(source, benchmark=script):
+    job = job_block(source)
+    required_job = [
+        'runs-on: ubuntu-latest', 'timeout-minutes: 30',
+        'dtolnay/rust-toolchain@stable', 'Swatinem/rust-cache@v2',
+        'postgresql-client', 'bash scripts/tests/gres-range-scaling-ci.sh',
+        'CRABKA_GRES_RANGE_SCALING_MODE=fast',
+        './scripts/gres-range-scaling.sh', 'artifact["mode"] == "live"',
+        'artifact["passed"]["overall"] is True', 'actions/upload-artifact@v7',
+    ]
+    for needle in required_job:
+        assert needle in job, f'missing live scaling job contract: {needle!r}'
+    forbidden = ['continue-on-error:', '|| true', 'if: false', 'if: ${{ false }}']
+    for needle in forbidden:
+        assert needle not in job, f'non-gating scaling job token: {needle}'
+    invocation_lines = [line.strip() for line in job.splitlines() if './scripts/gres-range-scaling.sh' in line and not line.lstrip().startswith('#')]
+    assert invocation_lines == ['./scripts/gres-range-scaling.sh'], invocation_lines
+    dependencies = [
+        "'crates/broker/**'", "'crates/client-admin/**'", "'crates/client-core/**'",
+        "'crates/client-producer/**'", "'crates/client-consumer/**'", "'crates/protocol/**'",
+        "'crates/security/**'", "'crates/gres-control/**'", "'Cargo.toml'", "'Cargo.lock'",
+        "'rust-toolchain.toml'", "'scripts/gres-range-scaling.sh'",
+        "'scripts/tests/gres-range-scaling-ci.sh'", "'.github/workflows/ci.yml'",
+    ]
+    gres_filter = source[source.index('            gres:'):source.index('\n  rust:', source.index('            gres:'))]
+    for needle in dependencies:
+        assert needle in gres_filter, f'missing direct dependency path: {needle}'
+    required_script = [
+        'cargo build --locked', 'MEASURE_BEGIN', 'warmup_txns_per_session',
+        'aggregate["trials"] = samples', 'statistics.median',
+        'decision_ceiling_passed = all(point["within_expected_envelope"] for point in decision_points)',
+        'expected_min_tps <= measured_tps <= expected_max_tps',
+    ]
+    for needle in required_script:
+        assert needle in benchmark, f'missing benchmark/gate contract: {needle}'
+
+validate(workflow)
+
+mutations = [
+    workflow.replace('./scripts/gres-range-scaling.sh', './scripts/not-the-scaling-script.sh', 1),
+    workflow.replace('artifact["mode"] == "live"', 'artifact["mode"] == "dry-run"', 1),
+    workflow.replace('  gres-range-scaling:\n', '  gres-range-scaling:\n    continue-on-error: ${{ true }}\n', 1),
+    workflow.replace('CRABKA_GRES_RANGE_SCALING_MODE=fast', '# fast mode removed', 1),
 ]
-for needle in required:
-    assert needle in source, needle
+for index, mutated in enumerate(mutations):
+    try:
+        validate(mutated)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(f'negative workflow mutation {index} unexpectedly passed')
+
+upper_mutation = script.replace('expected_min_tps <= measured_tps <= expected_max_tps', 'expected_min_tps <= measured_tps')
+try:
+    validate(workflow, upper_mutation)
+except AssertionError:
+    pass
+else:
+    raise AssertionError('upper envelope mutation unexpectedly passed')
 PY
 
-echo 'PASS: live Gres scaling CI contract'
+echo 'PASS: live Gres scaling CI contract and negative mutations'

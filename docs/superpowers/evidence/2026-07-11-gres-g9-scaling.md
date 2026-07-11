@@ -28,3 +28,14 @@ The JSON publishes both curves:
 
 - `sharded_table.timestamp_transactions.commit_rate_curve` is the current measured G-9 curve.
 - `sharded_table.decision_ceiling.g8_decision_ceiling_curve` retains the prior flattened G-8 ceiling as an explicitly synthetic contrast generated from the same one-range baseline.
+
+## Robust rerun correction
+
+The earlier two-transaction measurements above are retained as historical evidence but are not a valid commit-scaling proof: fresh `psql` startup dominated them. The corrected persistent-session workload (two sessions/range, five warmups, 50 measured transactions/session, three trials, median throughput) measured:
+
+- range-local: 515.4639, 917.4312, 1666.6667 tx/s for 1/2/4 ranges (`3.2333x`, passes 2.5 floor);
+- sharded: 155.7632, 154.6790, 149.7006 tx/s (`0.9611x`, fails 2.5 floor).
+
+Command: `CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_RANGE_SCALING_MODE=fast CRABKA_GRES_RANGE_SCALING_ARTIFACT_DIR=target/gres-scaling-task3-review2 ./scripts/gres-range-scaling.sh`.
+
+This environment-qualified result fails the intended G-9 scaling gate and is reported rather than relabeled as passing. The corrected CI job will likewise fail until the sharded commit bottleneck is removed or the intended multi-process topology is represented by the harness.

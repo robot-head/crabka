@@ -29,6 +29,8 @@ Environment:
                                                Concurrent psql workers per range (default: 2; fast: 1).
   CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION=n
                                                Insert transactions per worker (default: 20; fast: 2).
+  CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS=n      Warmup transactions per persistent worker (fast: 5).
+  CRABKA_GRES_RANGE_SCALING_TRIALS=n           Repeated trials aggregated by median (fast: 3).
   CRABKA_GRES_RANGE_SCALING_KEEP_ARTIFACTS=0  Accepted for parity with other Gres scripts; artifacts are always kept.
 EOF
 }
@@ -180,7 +182,7 @@ range_boundaries() {
     local boundaries=()
     local index
     for index in $(seq 0 $((range_count - 1))); do
-        boundaries+=("$((index * 100))")
+        boundaries+=("$((index * 1000000))")
     done
     local joined="${boundaries[*]}"
     printf '%s\n' "${joined// /,}"
@@ -188,7 +190,7 @@ range_boundaries() {
 
 range_table_id() {
     local range_index="$1"
-    printf '%s\n' "$((range_index * 100))"
+    printf '%s\n' "$((range_index * 1000000))"
 }
 
 start_broker() {
@@ -284,22 +286,28 @@ run_psql_worker() {
     local conninfo="$1"
     local table_name="$2"
     local txns="$3"
-    local worker_id="$4"
-    local out_file="$5"
+    local warmup_txns="$4"
+    local worker_id="$5"
+    local out_file="$6"
+    local id_base="$7"
     local iteration
+    local sql_file="${out_file}.sql"
+    local raw_file="${out_file}.psql"
 
-    : >"$out_file"
+    : >"$sql_file"
+    printf '\\timing on\n' >>"$sql_file"
+    for iteration in $(seq 1 "$warmup_txns"); do
+        printf 'INSERT INTO %s VALUES (%s);\n' "$table_name" "$((id_base + 500000 + iteration))" >>"$sql_file"
+    done
+    printf '\\echo MEASURE_BEGIN\n' >>"$sql_file"
     for iteration in $(seq 1 "$txns"); do
         local id
-        local started_ns
-        local elapsed_ms
-        id=$((worker_id * 1000000 + iteration))
-        started_ns="$(date +%s%N)"
-        PGAPPNAME= psql "$conninfo" -v ON_ERROR_STOP=1 -qAt -c "INSERT INTO ${table_name} VALUES (${id});" \
-            >"${out_file}.${iteration}.out" 2>"${out_file}.${iteration}.err"
-        elapsed_ms=$((( $(date +%s%N) - started_ns ) / 1000000))
-        printf '%s\n' "$elapsed_ms" >>"$out_file"
+        id=$((id_base + iteration))
+        printf 'INSERT INTO %s VALUES (%s);\n' "$table_name" "$id" >>"$sql_file"
     done
+    PGAPPNAME= psql "$conninfo" -v ON_ERROR_STOP=1 -qAt -f "$sql_file" >"$raw_file" 2>"${out_file}.err"
+    awk '/MEASURE_BEGIN/{measured=1; next} measured && /^Time:/{value=$2+0; print value < 1 ? 1 : int(value + 0.5)}' "$raw_file" >"$out_file"
+    [ "$(wc -l <"$out_file")" -eq "$txns" ] || fail "persistent worker recorded the wrong measured sample count"
 }
 
 wait_for_workers() {
@@ -362,10 +370,12 @@ run_live_workload() {
     local range_count="$1"
     local sessions_per_range="$2"
     local txns_per_session="$3"
-    local tenant="range-scale-${range_count}-${GRES_PORT}"
+    local warmup_txns="$4"
+    local trial="$5"
+    local tenant="range-scale-${range_count}-${trial}-${GRES_PORT}"
     local boundaries
     local conninfo="host=127.0.0.1 port=${GRES_PORT} user=${SQL_USER} dbname=crab sslmode=prefer"
-    local run_dir="${ARTIFACT_DIR}/run-${range_count}"
+    local run_dir="${ARTIFACT_DIR}/run-${range_count}-trial-${trial}"
     local pids=()
     local worker_id=0
     local range_index
@@ -385,7 +395,7 @@ run_live_workload() {
         table_id="$(range_table_id "$range_index")"
         for session_index in $(seq 1 "$sessions_per_range"); do
             worker_id=$((worker_id + 1))
-            run_psql_worker "$conninfo" "t${table_id}" "$txns_per_session" "$worker_id" "${run_dir}/latencies-${worker_id}.txt" &
+            run_psql_worker "$conninfo" "t${table_id}" "$txns_per_session" "$warmup_txns" "$worker_id" "${run_dir}/latencies-${worker_id}.txt" "$((worker_id * 10000000))" &
             pids+=("$!")
         done
     done
@@ -394,7 +404,7 @@ run_live_workload() {
     stop_gres
 
     python3 - "$range_count" "$sessions_per_range" "$txns_per_session" "$elapsed_ms" "$run_dir" \
-        >"${ARTIFACT_DIR}/result-${range_count}.json" <<'PY'
+        >"${ARTIFACT_DIR}/result-${range_count}-trial-${trial}.json" <<'PY'
 import json
 import math
 import pathlib
@@ -449,10 +459,12 @@ run_live_sharded_workload() {
     local range_count="$1"
     local sessions_per_range="$2"
     local txns_per_session="$3"
-    local tenant="sharded-scale-${range_count}-${GRES_PORT}"
+    local warmup_txns="$4"
+    local trial="$5"
+    local tenant="sharded-scale-${range_count}-${trial}-${GRES_PORT}"
     local boundaries
     local conninfo="host=127.0.0.1 port=${GRES_PORT} user=${SQL_USER} dbname=crab sslmode=prefer"
-    local run_dir="${ARTIFACT_DIR}/run-sharded-${range_count}"
+    local run_dir="${ARTIFACT_DIR}/run-sharded-${range_count}-trial-${trial}"
     local pids=()
     local worker_id=0
     local range_index
@@ -470,7 +482,7 @@ run_live_sharded_workload() {
     for range_index in $(seq 0 $((range_count - 1))); do
         for session_index in $(seq 1 "$sessions_per_range"); do
             worker_id=$((worker_id + 1))
-            run_psql_worker "$conninfo" "$SHARDED_TABLE_NAME" "$txns_per_session" "$worker_id" "${run_dir}/latencies-${worker_id}.txt" &
+            run_psql_worker "$conninfo" "$SHARDED_TABLE_NAME" "$txns_per_session" "$warmup_txns" "$worker_id" "${run_dir}/latencies-${worker_id}.txt" "$((range_index * 1000000 + session_index * 10000))" &
             pids+=("$!")
         done
     done
@@ -486,7 +498,7 @@ run_live_sharded_workload() {
     stop_gres
 
     python3 - "$range_count" "$sessions_per_range" "$txns_per_session" "$elapsed_ms" "$run_dir" "$SHARDED_TABLE_NAME" \
-        >"${ARTIFACT_DIR}/result-sharded-${range_count}.json" <<'PY'
+        >"${ARTIFACT_DIR}/result-sharded-${range_count}-trial-${trial}.json" <<'PY'
 import json
 import math
 import pathlib
@@ -584,8 +596,10 @@ write_range_scaling_json() {
     local mode="$1"
     local sessions_per_range="$2"
     local txns_per_session="$3"
+    local warmup_txns="$4"
+    local trials="$5"
 
-    python3 - "$ARTIFACT_DIR" "$FLOOR" "$SHARDED_FLOOR" "$DECISION_CEILING_MIN_RATIO" "$mode" "$sessions_per_range" "$txns_per_session" <<'PY'
+    python3 - "$ARTIFACT_DIR" "$FLOOR" "$SHARDED_FLOOR" "$DECISION_CEILING_MIN_RATIO" "$mode" "$sessions_per_range" "$txns_per_session" "$warmup_txns" "$trials" <<'PY'
 import json
 import os
 import pathlib
@@ -602,6 +616,8 @@ decision_ceiling_min_ratio = float(sys.argv[4])
 mode = sys.argv[5]
 sessions_per_range = int(sys.argv[6])
 txns_per_session = int(sys.argv[7])
+warmup_txns = int(sys.argv[8])
+trials = int(sys.argv[9])
 range_results = []
 for range_count in (1, 2, 4):
     with (artifact_dir / f"result-{range_count}.json").open(encoding="utf-8") as handle:
@@ -691,7 +707,7 @@ timestamp_points = timestamp_commit_rate_curve(sharded_results, sharded_baseline
 range4_decision_ratio = next(
     point["envelope_ratio"] for point in decision_points if point["range_count"] == 4
 )
-decision_ceiling_passed = range4_decision_ratio >= decision_ceiling_min_ratio
+decision_ceiling_passed = all(point["within_expected_envelope"] for point in decision_points)
 
 def optional_command(args):
     try:
@@ -710,6 +726,7 @@ payload = {
         "sharded_range4_vs_range1_min": sharded_floor,
         "decision_ceiling_min_ratio_env": "CRABKA_GRES_DECISION_CEILING_MIN_RATIO",
         "decision_ceiling_range4_min_ratio": decision_ceiling_min_ratio,
+        "decision_ceiling_all_points_max_ratio": 1.25,
     },
     "environment": {
         "host": socket.gethostname(),
@@ -721,6 +738,9 @@ payload = {
         "crabka_gres_skip_build": os.environ.get("CRABKA_GRES_SKIP_BUILD") == "1",
         "sessions_per_range": sessions_per_range,
         "txns_per_session": txns_per_session,
+        "warmup_txns_per_session": warmup_txns,
+        "trial_count": trials,
+        "aggregate_derivation": "median throughput across repeated live trials",
     },
     "results": range_results,
     "scaling": {
@@ -806,7 +826,8 @@ if not sharded_passed:
     )
 if not decision_ceiling_passed:
     raise SystemExit(
-        f"sharded 4-range decision-ceiling efficiency {range4_decision_ratio:.4f} is below floor {decision_ceiling_min_ratio:.4f}"
+        "one or more sharded decision-envelope points are outside "
+        f"[{decision_ceiling_min_ratio:.4f}, 1.2500]"
     )
 PY
 }
@@ -876,7 +897,10 @@ PY
 run_live() {
     local sessions_per_range="$1"
     local txns_per_session="$2"
+    local warmup_txns="$3"
+    local trials="$4"
     local range_count
+    local trial
 
     if [ "${CRABKA_GRES_SKIP_BUILD:-}" != "1" ]; then
         cargo build --locked -p crabka-cli -p crabka-broker -p crabka-gres
@@ -889,14 +913,34 @@ run_live() {
     start_broker
 
     for range_count in 1 2 4; do
-        log "running ${range_count}-range workload (${sessions_per_range} sessions/range, ${txns_per_session} txns/session)"
-        run_live_workload "$range_count" "$sessions_per_range" "$txns_per_session"
+        for trial in $(seq 1 "$trials"); do
+            log "running ${range_count}-range workload trial ${trial}/${trials} (${sessions_per_range} persistent sessions/range, ${warmup_txns} warmup + ${txns_per_session} measured txns/session)"
+            run_live_workload "$range_count" "$sessions_per_range" "$txns_per_session" "$warmup_txns" "$trial"
+        done
     done
 
     for range_count in 1 2 4; do
-        log "running ${range_count}-range SHARDED-table workload (${sessions_per_range} sessions/range, ${txns_per_session} txns/session)"
-        run_live_sharded_workload "$range_count" "$sessions_per_range" "$txns_per_session"
+        for trial in $(seq 1 "$trials"); do
+            log "running ${range_count}-range SHARDED-table workload trial ${trial}/${trials} (${sessions_per_range} persistent sessions/range, ${warmup_txns} warmup + ${txns_per_session} measured txns/session)"
+            run_live_sharded_workload "$range_count" "$sessions_per_range" "$txns_per_session" "$warmup_txns" "$trial"
+        done
     done
+
+    python3 - "$ARTIFACT_DIR" "$trials" "$warmup_txns" <<'PY'
+import json, pathlib, statistics, sys
+root = pathlib.Path(sys.argv[1]); trials = int(sys.argv[2]); warmup = int(sys.argv[3])
+for prefix in ("result", "result-sharded"):
+    for ranges in (1, 2, 4):
+        samples = [json.loads((root / f"{prefix}-{ranges}-trial-{trial}.json").read_text()) for trial in range(1, trials + 1)]
+        median_sample = sorted(samples, key=lambda item: item["throughput_tps"])[len(samples) // 2]
+        aggregate = dict(median_sample)
+        aggregate["throughput_tps"] = round(statistics.median(item["throughput_tps"] for item in samples), 4)
+        aggregate["trials"] = samples
+        aggregate["trial_count"] = trials
+        aggregate["warmup_txns_per_session"] = warmup
+        aggregate["aggregate_derivation"] = "median throughput across repeated live trials; latency summary from the median-throughput trial"
+        (root / f"{prefix}-{ranges}.json").write_text(json.dumps(aggregate, sort_keys=True) + "\n")
+PY
 }
 
 require_decimal CRABKA_GRES_RANGE_SCALING_FLOOR "$FLOOR"
@@ -904,6 +948,8 @@ require_decimal CRABKA_GRES_SHARDED_SCALING_FLOOR "$SHARDED_FLOOR"
 require_decimal CRABKA_GRES_DECISION_CEILING_MIN_RATIO "$DECISION_CEILING_MIN_RATIO"
 require_positive_integer CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE "${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-1}"
 require_positive_integer CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION "${CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION:-1}"
+require_positive_integer CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS "${CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS:-1}"
+require_positive_integer CRABKA_GRES_RANGE_SCALING_TRIALS "${CRABKA_GRES_RANGE_SCALING_TRIALS:-1}"
 command -v python3 >/dev/null 2>&1 || fail "python3 is required"
 
 rm -rf "$ARTIFACT_DIR"
@@ -914,14 +960,24 @@ if [ "$MODE" = "dry-run" ]; then
     SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-1}"
     TXNS_PER_SESSION="${CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION:-2}"
 elif [ "${MODE_REQUEST}" = "fast" ] || [ "${CRABKA_GRES_RANGE_SCALING_FAST:-0}" = "1" ]; then
-    SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-1}"
-    TXNS_PER_SESSION="${CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION:-2}"
+    SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-2}"
+    TXNS_PER_SESSION="${CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION:-50}"
+    WARMUP_TXNS="${CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS:-5}"
+    TRIALS="${CRABKA_GRES_RANGE_SCALING_TRIALS:-3}"
 else
     SESSIONS_PER_RANGE="${CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE:-2}"
     TXNS_PER_SESSION="${CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION:-20}"
+    WARMUP_TXNS="${CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS:-5}"
+    TRIALS="${CRABKA_GRES_RANGE_SCALING_TRIALS:-3}"
+fi
+if [ "$MODE" = "dry-run" ]; then
+    WARMUP_TXNS="${CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS:-5}"
+    TRIALS="${CRABKA_GRES_RANGE_SCALING_TRIALS:-3}"
 fi
 require_positive_integer CRABKA_GRES_RANGE_SCALING_SESSIONS_PER_RANGE "$SESSIONS_PER_RANGE"
 require_positive_integer CRABKA_GRES_RANGE_SCALING_TXNS_PER_SESSION "$TXNS_PER_SESSION"
+require_positive_integer CRABKA_GRES_RANGE_SCALING_WARMUP_TXNS "$WARMUP_TXNS"
+require_positive_integer CRABKA_GRES_RANGE_SCALING_TRIALS "$TRIALS"
 
 case "$MODE" in
     dry-run)
@@ -930,11 +986,11 @@ case "$MODE" in
         ;;
     live)
         command -v psql >/dev/null 2>&1 || fail "psql is required for live mode"
-        run_live "$SESSIONS_PER_RANGE" "$TXNS_PER_SESSION"
+        run_live "$SESSIONS_PER_RANGE" "$TXNS_PER_SESSION" "$WARMUP_TXNS" "$TRIALS"
         ;;
     *) fail "internal error: unsupported resolved mode ${MODE}" ;;
 esac
 
-write_range_scaling_json "$MODE" "$SESSIONS_PER_RANGE" "$TXNS_PER_SESSION"
+write_range_scaling_json "$MODE" "$SESSIONS_PER_RANGE" "$TXNS_PER_SESSION" "$WARMUP_TXNS" "$TRIALS"
 write_step_summary
 log "PASS: wrote ${ARTIFACT_DIR}/range-scaling.json"
