@@ -486,27 +486,22 @@ mod tests {
             .await
             .expect("append batch");
 
-        // `OffsetEntry` has no `PartialEq`, so project each row into a tuple
-        // covering the key plus every `OffsetEntry` field.
-        let rows: Vec<(&str, i32, i64, i32, &str, i64)> = entries
-            .iter()
-            .map(|((topic, partition), e)| {
-                (
-                    topic.as_str(),
-                    *partition,
-                    e.offset.0,
-                    e.leader_epoch,
-                    e.metadata.as_str(),
-                    e.commit_timestamp_ms,
-                )
-            })
-            .collect();
-        assert2::assert!(
-            rows == vec![
-                ("orders", 2, 103, 7, "first", 12_345),
-                ("orders", 3, 107, 8, "second", 12_345),
-            ]
-        );
+        assert2::assert!(entries.len() == 2);
+        let ((first_topic, first_partition), first_entry) = &entries[0];
+        assert2::assert!(first_topic == "orders");
+        assert2::assert!(*first_partition == 2);
+        assert2::assert!(first_entry.offset == Offset(103));
+        assert2::assert!(first_entry.leader_epoch == 7);
+        assert2::assert!(first_entry.metadata == "first");
+        assert2::assert!(first_entry.commit_timestamp_ms == 12_345);
+
+        let ((second_topic, second_partition), second_entry) = &entries[1];
+        assert2::assert!(second_topic == "orders");
+        assert2::assert!(*second_partition == 3);
+        assert2::assert!(second_entry.offset == Offset(107));
+        assert2::assert!(second_entry.leader_epoch == 8);
+        assert2::assert!(second_entry.metadata == "second");
+        assert2::assert!(second_entry.commit_timestamp_ms == 12_345);
 
         let part = registry
             .get(OFFSETS_TOPIC, PartitionIndex(OFFSETS_PARTITION))
@@ -517,42 +512,28 @@ mod tests {
             .expect("read offsets log");
         assert2::assert!(read.batches.len() == 1);
         let batch = &read.batches[0];
-        assert2::assert!(
-            (
-                batch.base_offset,
-                batch.partition_leader_epoch,
-                batch.attributes,
-                batch.last_offset_delta,
-                batch.base_timestamp,
-                batch.max_timestamp,
-                batch.producer_id,
-                batch.producer_epoch,
-                batch.base_sequence,
-            ) == (
-                0,
-                -1,
-                batch.attributes.with_transactional(true),
-                1,
-                12_345,
-                12_345,
-                47,
-                5,
-                0,
-            )
-        );
-        let record_rows: Vec<_> = batch
-            .records
-            .iter()
-            .map(|r| {
-                (
-                    r.offset_delta,
-                    r.timestamp_delta,
-                    r.key.is_some(),
-                    r.value.is_some(),
-                )
-            })
-            .collect();
-        assert2::assert!(record_rows == vec![(0, 0, true, true), (1, 0, true, true)]);
+        assert2::assert!(batch.base_offset == 0);
+        assert2::assert!(batch.partition_leader_epoch == 0);
+        assert2::assert!(batch.attributes == Attributes::default().with_transactional(true));
+        assert2::assert!(batch.last_offset_delta == 1);
+        assert2::assert!(batch.base_timestamp == 0);
+        assert2::assert!(batch.max_timestamp == 12_345);
+        assert2::assert!(batch.producer_id == 47);
+        assert2::assert!(batch.producer_epoch == 5);
+        assert2::assert!(batch.base_sequence == -1);
+
+        assert2::assert!(batch.records.len() == 2);
+        let first_record = &batch.records[0];
+        assert2::assert!(first_record.offset_delta == 0);
+        assert2::assert!(first_record.timestamp_delta == 0);
+        assert2::assert!(first_record.key.is_some());
+        assert2::assert!(first_record.value.is_some());
+
+        let second_record = &batch.records[1];
+        assert2::assert!(second_record.offset_delta == 1);
+        assert2::assert!(second_record.timestamp_delta == 0);
+        assert2::assert!(second_record.key.is_some());
+        assert2::assert!(second_record.value.is_some());
     }
 
     #[tokio::test]

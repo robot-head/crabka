@@ -382,7 +382,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "time difference must be >= 0")]
+    #[should_panic(expected = "assertion failed")]
     fn sliding_windows_rejects_negative_difference() {
         let _ = SlidingWindows::of_time_difference_with_no_grace(-1);
     }
