@@ -100,6 +100,28 @@ Results:
 - pgexec lib: 337 passed, 0 failed.
 - all-target check and diff check: passed.
 
-### Remaining operational note
+## Second review-fix wave
 
-Drop cleanup requires an active Tokio runtime; `Drop` cannot synchronously await network/durable participant resolution. Normal gateway sessions are runtime-owned, and the tested path transfers cleanup deterministically to that runtime. If a session were dropped outside every runtime, descriptor recovery remains the fallback.
+- Replaced the no-runtime Drop gap with an owned cleanup executor. Runtime-owned drops spawn cleanup and trace failures; no-runtime drops start a named current-thread Tokio runtime on an owned thread, synchronously join it, and trace executor/runtime/cleanup failures with `start_ts`. Every failure log states that the durable descriptor remains recovery authority.
+- Extended Execute now sets or clears `timestamp_own_start_ts` immediately before local and remote query execution. A bound extended SELECT in the explicit transaction sees pending timestamp intents.
+- Generalized bound parameter SQL rendering independently of shard-key routing. It now validates OIDs and formats and supports bool, int2/int4/int8, text/varchar/char, bytea, float4/float8, numeric, date/time/timestamps/interval, and UUID literals. Binary bool/integer/floating/bytea encodings are rendered without treating non-shard parameters as shard keys.
+- Added bytea assignment coercion for the materialized typed extended path by reusing pgexec's existing bytea text decoder.
+
+### Second-wave RED evidence
+
+- Extended SELECT initially returned no pending row because Execute did not install the owner identity.
+- The bool-text/bytea-binary/float8-binary INSERT initially failed at Bind with `0A000`, then exposed bytea materialization type errors until the existing decoder was reused at assignment.
+- The no-runtime Drop test initially represented a silent cleanup leak; the fallback executor now resolves intents before Drop returns.
+
+### Second-wave verification
+
+```text
+cargo test -p crabka-gres-ranges --test multirange &&
+cargo test -p crabka-gres-ranges --test sharded_visibility &&
+cargo test -p crabka-gres-ranges --lib &&
+cargo test -p crabka-pgexec --lib &&
+cargo check -p crabka-gres-ranges --all-targets &&
+git diff --check
+```
+
+Results: multirange 31/31, sharded_visibility 7/7, gres-ranges lib 105/105, pgexec lib 337/337; all-target check and diff check passed.

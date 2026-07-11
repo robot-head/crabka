@@ -3639,7 +3639,7 @@ fn decode_text_bound_param(
     crabka_pgtypes::cast::cast(&Datum::Text(text.to_string()), ty, time_zone)
 }
 
-fn decode_bytea_text(text: &str) -> Result<Vec<u8>, crabka_pgtypes::TypeError> {
+pub(crate) fn decode_bytea_text(text: &str) -> Result<Vec<u8>, crabka_pgtypes::TypeError> {
     if let Some(hex) = text.strip_prefix("\\x") {
         return decode_bytea_hex(hex, text);
     }

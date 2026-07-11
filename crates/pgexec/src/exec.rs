@@ -2140,6 +2140,8 @@ fn coerce(
         (Datum::Text(s), ColumnType::Uuid) => {
             Datum::Text(crabka_pgtypes::uuid::UuidBytes::parse(&s)?.to_canonical_text())
         }
+        (Datum::Bytea(bytes), ColumnType::Bytea) => Datum::Bytea(bytes),
+        (Datum::Text(s), ColumnType::Bytea) => Datum::Bytea(crate::session::decode_bytea_text(&s)?),
         // SP30: float8 assignment casts. int → float8 is the standard widening;
         // float8 → int rounds half-to-even (PG's float→int assignment cast) and
         // range-checks (out of range / non-finite → 22003).
