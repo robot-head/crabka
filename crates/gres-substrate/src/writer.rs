@@ -14,7 +14,7 @@ use crabka_gres_ranges::tso::{
     EpochHeartbeat, HeartbeatVerdict, MAX_TS_KEY, TsoError, TsoHorizonCommitter, TsoTimestamp,
 };
 use crabka_pgexec::{Committer, ExecError, Linearizer};
-use crabka_pgkv::{Kv, WriteOp};
+use crabka_pgkv::{Kv, KvSnapshot, SnapshotKv, WriteOp};
 use tokio::sync::{OwnedSemaphorePermit, Semaphore};
 
 use crate::{
@@ -47,6 +47,7 @@ pub struct CheckpointSnapshotSource {
     journal_seq: std::sync::atomic::AtomicU64,
     wal_generation: std::sync::atomic::AtomicU64,
     producer_epoch: std::sync::atomic::AtomicI16,
+    group_gate: Arc<Semaphore>,
 }
 
 impl CheckpointSnapshotSource {
@@ -58,7 +59,26 @@ impl CheckpointSnapshotSource {
             journal_seq: std::sync::atomic::AtomicU64::new(journal_seq),
             wal_generation: std::sync::atomic::AtomicU64::new(generation.0),
             producer_epoch: std::sync::atomic::AtomicI16::new(producer_epoch(generation)),
+            group_gate: Arc::new(Semaphore::new(1)),
         }
+    }
+
+    /// Atomically capture WAL metadata and the matching KV snapshot between commit groups.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error if the writer gate is closed or the KV snapshot cannot be opened.
+    pub async fn capture(
+        &self,
+        kv: &dyn SnapshotKv,
+    ) -> Result<(CheckpointSnapshot, Box<dyn KvSnapshot>), SubstrateError> {
+        let _permit = Arc::clone(&self.group_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| SubstrateError::Unavailable("checkpoint group gate closed".into()))?;
+        let metadata = self.snapshot();
+        let snapshot = kv.snapshot()?;
+        Ok((metadata, snapshot))
     }
 
     /// Capture a checkpoint snapshot from the latest committed WAL acknowledgement.
@@ -772,6 +792,7 @@ impl<W> SubstrateCommitter<W> {
         mut self,
         source: Arc<CheckpointSnapshotSource>,
     ) -> Self {
+        self.commit_gate = Arc::clone(&source.group_gate);
         self.checkpoint_snapshot_source = Some(source);
         self
     }
@@ -1153,6 +1174,55 @@ mod tests {
                     garbage_horizon_xid: 0,
                 }
         );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_capture_is_between_acknowledged_commit_groups() {
+        let kv = Arc::new(MemKv::default());
+        let writer = Arc::new(FakeWalWriter::default());
+        let snapshot_source = Arc::new(CheckpointSnapshotSource::new(-1, 0, WriterGeneration(0)));
+        let committer = Arc::new(
+            SubstrateCommitter::new(kv.clone() as Arc<dyn Kv>, writer, WriterGeneration(0), 0)
+                .with_checkpoint_snapshot_source(Arc::clone(&snapshot_source)),
+        );
+        committer
+            .commit(vec![WriteOp::Put {
+                key: b"before".to_vec(),
+                value: b"included".to_vec(),
+            }])
+            .await
+            .expect("pre-request group");
+
+        let gate = Arc::clone(&snapshot_source.group_gate)
+            .acquire_owned()
+            .await
+            .expect("hold group boundary");
+        let capture_source = Arc::clone(&snapshot_source);
+        let capture_kv = Arc::clone(&kv);
+        let capture =
+            tokio::spawn(async move { capture_source.capture(capture_kv.as_ref()).await });
+        tokio::task::yield_now().await;
+        let post_committer = Arc::clone(&committer);
+        let post = tokio::spawn(async move {
+            post_committer
+                .commit(vec![WriteOp::Put {
+                    key: b"after".to_vec(),
+                    value: b"excluded".to_vec(),
+                }])
+                .await
+        });
+        drop(gate);
+
+        let (metadata, mut snapshot) = capture.await.expect("capture task").expect("capture");
+        post.await.expect("post task").expect("post-request group");
+        let mut pairs = Vec::new();
+        while let Some(pair) = snapshot.next().expect("snapshot pair") {
+            pairs.push(pair);
+        }
+        assert!(metadata.covered_offset == 0);
+        assert!(metadata.journal_seq == 1);
+        assert!(pairs == vec![(b"before".to_vec(), b"included".to_vec())]);
+        assert!(kv.get(b"after").expect("live after") == Some(b"excluded".to_vec()));
     }
 
     #[tokio::test]

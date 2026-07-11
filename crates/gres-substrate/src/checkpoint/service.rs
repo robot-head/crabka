@@ -7,7 +7,7 @@ use std::{
 
 use crabka_client_admin::DeleteRecordsOp;
 use crabka_object_store::{ObjectOps, ObjectStoreClient, ObjectStoreConfig, build_object_store};
-use crabka_pgkv::SnapshotKv;
+use crabka_pgkv::{KvSnapshot, SnapshotKv};
 use tokio::{
     sync::{Mutex as AsyncMutex, mpsc, oneshot},
     task::JoinHandle,
@@ -17,7 +17,27 @@ use super::{
     CheckpointMetadata, CheckpointSnapshot, CheckpointStore, Manifest, ObjectOpsCheckpointStore,
     WalPrunePlan, ckpt_dir, latest_checkpoint_metadata, manifest_key, plan_prune, write_checkpoint,
 };
-use crate::error::SubstrateError;
+use crate::{error::SubstrateError, writer::CheckpointSnapshotSource};
+
+/// Durable checkpoint-service boundaries available only to the crash-test feature.
+#[cfg(feature = "checkpoint-test-hooks")]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CheckpointServiceStep {
+    /// Snapshot has been materialized, before the first part upload.
+    BeforeParts,
+    /// A checkpoint part is durable, before the manifest.
+    PartsUploaded,
+    /// The manifest is durable, before `DeleteRecords`.
+    ManifestWritten,
+    /// `DeleteRecords` completed, before object pruning.
+    Truncated,
+    /// Object pruning completed.
+    Pruned,
+}
+
+/// Compile-time test-only crash callback; returning true aborts at `step`.
+#[cfg(feature = "checkpoint-test-hooks")]
+pub type CheckpointFailpoint = Arc<dyn Fn(CheckpointServiceStep) -> bool + Send + Sync>;
 
 /// Default number of checkpoint directories to retain.
 pub const DEFAULT_CHECKPOINT_RETAIN: usize = 2;
@@ -183,6 +203,8 @@ pub struct CheckpointService<P> {
     pruner: Arc<P>,
     stats: Arc<CheckpointStats>,
     attempt_lock: AsyncMutex<()>,
+    #[cfg(feature = "checkpoint-test-hooks")]
+    failpoint: Option<CheckpointFailpoint>,
 }
 
 impl<P> CheckpointService<P>
@@ -209,7 +231,17 @@ where
             pruner,
             stats,
             attempt_lock: AsyncMutex::new(()),
+            #[cfg(feature = "checkpoint-test-hooks")]
+            failpoint: None,
         })
+    }
+
+    /// Install a deterministic crash hook in builds explicitly compiled for checkpoint tests.
+    #[cfg(feature = "checkpoint-test-hooks")]
+    #[must_use]
+    pub fn with_test_failpoint(mut self, failpoint: CheckpointFailpoint) -> Self {
+        self.failpoint = Some(failpoint);
+        self
     }
 
     /// Build a service backed by a workspace [`ObjectStoreConfig`].
@@ -282,6 +314,7 @@ where
     ) -> Result<CheckpointRun, SubstrateError> {
         let _guard = self.attempt_lock.lock().await;
         let checkpointed_stats = self.stats.snapshot();
+        #[cfg(not(feature = "checkpoint-test-hooks"))]
         let manifest = write_checkpoint(
             self.store.as_ref(),
             &self.config.tenant,
@@ -290,6 +323,100 @@ where
             self.config.part_max_bytes,
         )
         .await?;
+        #[cfg(feature = "checkpoint-test-hooks")]
+        let manifest = match &self.failpoint {
+            Some(failpoint) => {
+                super::runtime::write_checkpoint_with_failpoint(
+                    self.store.as_ref(),
+                    &self.config.tenant,
+                    self.kv.as_ref(),
+                    snapshot,
+                    self.config.part_max_bytes,
+                    failpoint,
+                )
+                .await?
+            }
+            None => {
+                write_checkpoint(
+                    self.store.as_ref(),
+                    &self.config.tenant,
+                    self.kv.as_ref(),
+                    snapshot,
+                    self.config.part_max_bytes,
+                )
+                .await?
+            }
+        };
+        let prune = plan_prune(
+            self.store.as_ref(),
+            &self.config.tenant,
+            &self.config.topic,
+            &manifest,
+            self.config.retain_checkpoints,
+        )
+        .await?;
+        self.pruner.delete_records(&prune.delete_records).await?;
+        #[cfg(feature = "checkpoint-test-hooks")]
+        self.fail_at(CheckpointServiceStep::Truncated)?;
+        for key in &prune.delete_object_keys {
+            self.store.delete(key).await?;
+        }
+        #[cfg(feature = "checkpoint-test-hooks")]
+        self.fail_at(CheckpointServiceStep::Pruned)?;
+        let metadata = latest_checkpoint_metadata(
+            self.store.as_ref(),
+            &self.config.tenant,
+            manifest.wal_generation,
+            None,
+        )
+        .await?
+        .unwrap_or_else(|| checkpoint_metadata_from_manifest(&manifest));
+        self.stats.discard_checkpointed(checkpointed_stats);
+        Ok(CheckpointRun {
+            trigger,
+            manifest,
+            prune,
+            metadata,
+        })
+    }
+
+    async fn checkpoint_from_source(
+        &self,
+        source: &CheckpointSnapshotSource,
+        trigger: CheckpointTrigger,
+    ) -> Result<CheckpointRun, SubstrateError> {
+        let _guard = self.attempt_lock.lock().await;
+        let checkpointed_stats = self.stats.snapshot();
+        let (snapshot, kv_snapshot) = source.capture(self.kv.as_ref()).await?;
+        self.finish_captured_checkpoint(snapshot, kv_snapshot, trigger, checkpointed_stats)
+            .await
+    }
+
+    async fn finish_captured_checkpoint(
+        &self,
+        snapshot: CheckpointSnapshot,
+        kv_snapshot: Box<dyn KvSnapshot>,
+        trigger: CheckpointTrigger,
+        checkpointed_stats: (u64, u64),
+    ) -> Result<CheckpointRun, SubstrateError> {
+        let manifest = super::runtime::write_captured_checkpoint(
+            self.store.as_ref(),
+            &self.config.tenant,
+            kv_snapshot,
+            snapshot,
+            self.config.part_max_bytes,
+        )
+        .await?;
+        self.finish_manifest(manifest, trigger, checkpointed_stats)
+            .await
+    }
+
+    async fn finish_manifest(
+        &self,
+        manifest: Manifest,
+        trigger: CheckpointTrigger,
+        checkpointed_stats: (u64, u64),
+    ) -> Result<CheckpointRun, SubstrateError> {
         let prune = plan_prune(
             self.store.as_ref(),
             &self.config.tenant,
@@ -319,6 +446,16 @@ where
         })
     }
 
+    #[cfg(feature = "checkpoint-test-hooks")]
+    fn fail_at(&self, step: CheckpointServiceStep) -> Result<(), SubstrateError> {
+        if self.failpoint.as_ref().is_some_and(|hook| hook(step)) {
+            return Err(SubstrateError::Checkpoint(format!(
+                "test failpoint stopped checkpoint after {step:?}"
+            )));
+        }
+        Ok(())
+    }
+
     /// Spawn a narrow background control loop.
     #[must_use]
     pub fn spawn(self: Arc<Self>) -> CheckpointHandle {
@@ -336,6 +473,14 @@ where
                     }
                     CheckpointCommand::RunIfThreshold { snapshot, reply } => {
                         let result = self.checkpoint_if_threshold_crossed(snapshot).await;
+                        let _ignored = reply.send(result);
+                    }
+                    CheckpointCommand::RunFromSource {
+                        source,
+                        trigger,
+                        reply,
+                    } => {
+                        let result = self.checkpoint_from_source(&source, trigger).await;
                         let _ignored = reply.send(result);
                     }
                     CheckpointCommand::Shutdown => break,
@@ -372,6 +517,11 @@ enum CheckpointCommand {
         snapshot: CheckpointSnapshot,
         reply: oneshot::Sender<Result<Option<CheckpointRun>, SubstrateError>>,
     },
+    RunFromSource {
+        source: Arc<CheckpointSnapshotSource>,
+        trigger: CheckpointTrigger,
+        reply: oneshot::Sender<Result<CheckpointRun, SubstrateError>>,
+    },
     Shutdown,
 }
 
@@ -382,6 +532,24 @@ pub struct CheckpointHandle {
 }
 
 impl CheckpointHandle {
+    /// Atomically capture the matching WAL metadata and KV snapshot between commit groups.
+    pub async fn checkpoint_from_source(
+        &self,
+        source: Arc<CheckpointSnapshotSource>,
+        trigger: CheckpointTrigger,
+    ) -> Result<CheckpointRun, SubstrateError> {
+        let (reply, wait) = oneshot::channel();
+        self.commands
+            .send(CheckpointCommand::RunFromSource {
+                source,
+                trigger,
+                reply,
+            })
+            .await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?;
+        wait.await
+            .map_err(|_| SubstrateError::Checkpoint("checkpoint service stopped".into()))?
+    }
     /// Request a checkpoint from the background service.
     ///
     /// # Errors

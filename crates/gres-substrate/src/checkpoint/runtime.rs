@@ -107,9 +107,60 @@ pub async fn write_checkpoint(
     snapshot: CheckpointSnapshot,
     part_max_bytes: usize,
 ) -> Result<Manifest, SubstrateError> {
-    let mut kv_snapshot = kv.snapshot()?;
+    write_checkpoint_inner(
+        store,
+        tenant,
+        kv.snapshot()?,
+        snapshot,
+        part_max_bytes,
+        None,
+    )
+    .await
+}
+
+pub(crate) async fn write_captured_checkpoint(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    kv_snapshot: Box<dyn KvSnapshot>,
+    snapshot: CheckpointSnapshot,
+    part_max_bytes: usize,
+) -> Result<Manifest, SubstrateError> {
+    write_checkpoint_inner(store, tenant, kv_snapshot, snapshot, part_max_bytes, None).await
+}
+
+#[cfg(feature = "checkpoint-test-hooks")]
+pub(crate) async fn write_checkpoint_with_failpoint(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    kv: &dyn SnapshotKv,
+    snapshot: CheckpointSnapshot,
+    part_max_bytes: usize,
+    failpoint: &super::CheckpointFailpoint,
+) -> Result<Manifest, SubstrateError> {
+    write_checkpoint_inner(
+        store,
+        tenant,
+        kv.snapshot()?,
+        snapshot,
+        part_max_bytes,
+        Some(failpoint),
+    )
+    .await
+}
+
+async fn write_checkpoint_inner(
+    store: &dyn CheckpointStore,
+    tenant: &str,
+    mut kv_snapshot: Box<dyn KvSnapshot>,
+    snapshot: CheckpointSnapshot,
+    part_max_bytes: usize,
+    #[cfg_attr(not(feature = "checkpoint-test-hooks"), allow(unused_variables))] failpoint: Option<
+        &CheckpointFailpoint,
+    >,
+) -> Result<Manifest, SubstrateError> {
     let pairs = collect_snapshot_pairs(kv_snapshot.as_mut())?;
     let pairs = rewrite_snapshot_pairs(pairs, snapshot.garbage_horizon_xid)?;
+    checkpoint_fail(failpoint, CheckpointServiceStep::BeforeParts)?;
     let dir = ckpt_dir(
         tenant,
         snapshot.wal_generation,
@@ -124,6 +175,7 @@ pub async fn write_checkpoint(
         let bytes = part.encode();
         store.put(&key, bytes.clone()).await?;
         entries.push(PartEntry::from_encoded_part(key, &bytes)?);
+        checkpoint_fail(failpoint, CheckpointServiceStep::PartsUploaded)?;
     }
 
     let manifest = Manifest::new(
@@ -135,7 +187,43 @@ pub async fn write_checkpoint(
         entries,
     );
     store.put(&manifest_key(&dir), manifest.encode()?).await?;
+    checkpoint_fail(failpoint, CheckpointServiceStep::ManifestWritten)?;
     Ok(manifest)
+}
+
+#[cfg(feature = "checkpoint-test-hooks")]
+use super::{CheckpointFailpoint, CheckpointServiceStep};
+
+#[cfg(not(feature = "checkpoint-test-hooks"))]
+type CheckpointFailpoint = ();
+
+#[cfg(not(feature = "checkpoint-test-hooks"))]
+#[derive(Clone, Copy)]
+enum CheckpointServiceStep {
+    BeforeParts,
+    PartsUploaded,
+    ManifestWritten,
+}
+
+#[cfg(feature = "checkpoint-test-hooks")]
+fn checkpoint_fail(
+    failpoint: Option<&CheckpointFailpoint>,
+    step: CheckpointServiceStep,
+) -> Result<(), SubstrateError> {
+    if failpoint.is_some_and(|hook| hook(step)) {
+        return Err(SubstrateError::Checkpoint(format!(
+            "test failpoint stopped checkpoint after {step:?}"
+        )));
+    }
+    Ok(())
+}
+
+#[cfg(not(feature = "checkpoint-test-hooks"))]
+fn checkpoint_fail(
+    _failpoint: Option<&CheckpointFailpoint>,
+    _step: CheckpointServiceStep,
+) -> Result<(), SubstrateError> {
+    Ok(())
 }
 
 /// Restore the newest valid checkpoint for `tenant`, skipping incomplete attempts.
