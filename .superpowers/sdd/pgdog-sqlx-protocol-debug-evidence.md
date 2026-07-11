@@ -14,7 +14,16 @@ crabka-gres-driver-smoke --driver sqlx --database-url postgresql://REDACTED@127.
 Status: `0`; stdout: `PASS: selected Rust parameterized transaction-pooling smoke`.
 Pinned components: `postgres:18` and `ghcr.io/pgdogdev/pgdog:0.1.6`, transaction pooling.
 
-PostgreSQL backend sequence after the two tokio-postgres transactions:
+The sequence below came from a separate combined-driver capture. Command (URL
+credentials redacted):
+
+```text
+crabka-gres-driver-smoke --driver all --database-url postgresql://REDACTED@127.0.0.1:6432/tenant-b?sslmode=disable&connect_timeout=5
+```
+
+Status: `0`; stdout: `PASS: selected Rust parameterized transaction-pooling smoke`.
+The displayed suffix begins after that combined run's two tokio-postgres
+transactions and continues through its sqlx connection and two transactions:
 
 ```text
 frontend: Q(35) Q(37) Q(29) Q(11) P(37) D(16) S(5) B(34) E(10) C(7) S(5) Q(12) Q(11) B(34) E(10) C(7) S(5) Q(12)
