@@ -2455,6 +2455,7 @@ dependencies = [
  "clap",
  "crabka-broker",
  "crabka-client-admin",
+ "crabka-client-core",
  "crabka-gres-balancer",
  "crabka-gres-control",
  "crabka-metadata",

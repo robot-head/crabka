@@ -60,12 +60,12 @@ fail() {
 }
 
 is_kafka_authorization_denial() {
-    local _status="$1"
+    local status="$1"
     local output_file="$2"
+    local topic="$3"
 
-    # kafka-console-consumer may report a broker authorization exception yet
-    # exit zero, so the explicit broker/client signature is authoritative.
-    grep -Eqi 'TopicAuthorizationException|not authorized|TOPIC_AUTHORIZATION_FAILED|UNKNOWN \(29\)' "$output_file"
+    [ "$status" -eq 1 ] &&
+        grep -Fqx "crabka gres: topic ${topic} metadata: UNKNOWN (29)" "$output_file"
 }
 
 # Shell-level contract test hook: keep denial classification deterministic and
@@ -74,7 +74,7 @@ if [ -n "${CRABKA_GRES_E2E_TEST_CLASSIFY_STATUS:-}" ]; then
     classifier_output=$(mktemp)
     trap 'rm -f "$classifier_output"' EXIT
     printf '%s\n' "${CRABKA_GRES_E2E_TEST_CLASSIFY_OUTPUT:-}" >"$classifier_output"
-    if is_kafka_authorization_denial "$CRABKA_GRES_E2E_TEST_CLASSIFY_STATUS" "$classifier_output"; then
+    if is_kafka_authorization_denial "$CRABKA_GRES_E2E_TEST_CLASSIFY_STATUS" "$classifier_output" "${CRABKA_GRES_E2E_TEST_CLASSIFY_TOPIC:-__gres_tenants}"; then
         echo denied
         exit 0
     fi
@@ -225,32 +225,24 @@ expect_kafka_topic_read_denied() {
     local topic="$2"
     local username="$3"
     local password="$4"
-    local client_properties="${ARTIFACT_DIR}/${label}.properties"
+    local client_properties="${ARTIFACT_DIR}/${label}.password"
     local output="${ARTIFACT_DIR}/${label}.log"
     local status
 
-    cat >"$client_properties" <<EOF
-security.protocol=SASL_PLAINTEXT
-sasl.mechanism=SCRAM-SHA-512
-sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${username}" password="${password}";
-EOF
+    printf '%s\n' "$password" >"$client_properties"
     chmod 600 "$client_properties"
 
     set +e
-    # Run as the invoking user so the container can read the deliberately 0600
-    # bind-mounted credentials without weakening their host permissions.
-    timeout 20s docker run --rm --network host --user "$(id -u):$(id -g)" \
-        -v "${PWD}/${client_properties}:/tmp/client.properties:ro" \
-        "$KAFKA_IMAGE" \
-        /opt/kafka/bin/kafka-console-consumer.sh \
-        --bootstrap-server "127.0.0.1:${SASL_PORT}" \
-        --consumer.config /tmp/client.properties \
-        --topic "$topic" --partition 0 --offset earliest --max-messages 1 --timeout-ms 5000 \
+    timeout 20s ./target/debug/crabka gres probe-topic-read \
+        --bootstrap "127.0.0.1:${SASL_PORT}" \
+        --topic "$topic" \
+        --username "$username" \
+        --password-file "$client_properties" \
         >"$output" 2>&1
     status=$?
     set -e
 
-    if is_kafka_authorization_denial "$status" "$output"; then
+    if is_kafka_authorization_denial "$status" "$output" "$topic"; then
         log "PASS: ${label} denied by Kafka ACL"
         return 0
     fi
