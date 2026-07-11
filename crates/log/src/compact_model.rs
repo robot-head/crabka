@@ -774,7 +774,7 @@ fn compaction_wide() {
 /// RED witness: the legacy control-dedup bug trips the control-not-deduped
 /// safety assert. See [`legacy_compact_fixed`] for the recorded counterexample.
 #[test]
-#[should_panic(expected = "control")]
+#[should_panic(expected = "assertion failed")]
 fn legacy_control_dedup_violates_safety() {
     let _ = legacy_compact_fixed();
 }

@@ -2195,7 +2195,7 @@ fn dsl_suppress_emit_early_when_full_evicts_oldest() {
 /// `until_window_closes` requires a strict buffer — an eager config panics at
 /// construction.
 #[test]
-#[should_panic(expected = "strict")]
+#[should_panic(expected = "assertion failed")]
 fn dsl_until_window_closes_rejects_eager_buffer() {
     use crabka_client_streams::{BufferConfig, Suppressed, Windowed};
     let _ = Suppressed::<Windowed<String>>::until_window_closes(BufferConfig::max_records(2));

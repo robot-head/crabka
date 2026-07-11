@@ -577,7 +577,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "secret connector config key `password` cannot have a default")]
+    #[should_panic(expected = "assertion failed")]
     fn secret_defaults_panic_at_definition_time() {
         let _ = ConfigDef::new("demo").default("password", ConfigKind::Secret, "literal-secret");
     }

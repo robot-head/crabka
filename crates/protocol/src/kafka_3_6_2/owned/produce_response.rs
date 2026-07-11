@@ -23,19 +23,17 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-
-    use bytes::BytesMut;
-
     use super::*;
     use crate::{Decode, Encode};
+    use bytes::BytesMut;
     fn roundtrip(case: &str, msg: &ProduceResponse, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert2::assert!(msg.encoded_len(v) == buf.len());
+        assert2::assert!(msg.encoded_len(v) == buf.len(), "case {case}, version {v}");
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = ProduceResponse::decode(&mut cur, v).unwrap();
-        assert2::assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty(), "case {case}, version {v}");
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
         assert2::assert!(&reencoded[..] == &bytes[..]);

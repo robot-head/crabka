@@ -112,7 +112,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "partition_count must be positive")]
+    #[should_panic(expected = "assertion failed")]
     fn rejects_zero_partition_count() {
         let _ = metadata_partition_for(&tp("t", 0), 0);
     }

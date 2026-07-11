@@ -97,6 +97,16 @@ pub fn emit(
     out.push_str(&include_tokens.to_string());
     out.push('\n');
 
+    if namespace.is_none() && flavor == Flavor::Owned && type_name == "FetchResponse" {
+        let extension_tokens = quote! {
+            #[path = "fetch_response_plan.rs"]
+            mod plan;
+            pub use plan::FetchWriteOp;
+        };
+        out.push_str(&extension_tokens.to_string());
+        out.push('\n');
+    }
+
     // 5. #[cfg(test)] mod tests { ... } built with quote!.
     let tests_tokens = match flavor {
         Flavor::Owned => owned_tests_tokens(&type_name),
@@ -121,11 +131,14 @@ fn owned_tests_tokens(type_name: &str) -> TokenStream {
             fn roundtrip(case: &str, msg: &#ty, v: i16) {
                 let mut buf = BytesMut::new();
                 msg.encode(&mut buf, v).unwrap();
-                assert2::assert!(msg.encoded_len(v) == buf.len());
+                assert2::assert!(
+                    msg.encoded_len(v) == buf.len(),
+                    "case {case}, version {v}"
+                );
                 let bytes = buf.freeze();
                 let mut cur = &bytes[..];
                 let decoded = #ty::decode(&mut cur, v).unwrap();
-                assert2::assert!(cur.is_empty());
+                assert2::assert!(cur.is_empty(), "case {case}, version {v}");
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();
                 assert2::assert!(&reencoded[..] == &bytes[..]);
@@ -164,7 +177,7 @@ fn borrowed_tests_tokens(type_name: &str) -> TokenStream {
             fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
                 let mut cur: &[u8] = msg_bytes;
                 let decoded = #ty::decode_borrow(&mut cur, v).unwrap();
-                assert2::assert!(cur.is_empty());
+                assert2::assert!(cur.is_empty(), "case {case}, version {v}");
                 assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
                 let mut reencoded = BytesMut::new();
                 decoded.encode(&mut reencoded, v).unwrap();

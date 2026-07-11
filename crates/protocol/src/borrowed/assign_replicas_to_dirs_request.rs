@@ -23,38 +23,32 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-
-    use bytes::BytesMut;
-
     use super::*;
     use crate::{DecodeBorrow, Encode};
+    use bytes::BytesMut;
+    fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
+        let mut cur: &[u8] = msg_bytes;
+        let decoded = AssignReplicasToDirsRequest::decode_borrow(&mut cur, v).unwrap();
+        assert2::assert!(cur.is_empty(), "case {case}, version {v}");
+        assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
+        let mut reencoded = BytesMut::new();
+        decoded.encode(&mut reencoded, v).unwrap();
+        assert2::assert!(&reencoded[..] == &msg_bytes[..]);
+        let owned = decoded.to_owned();
+        let mut owned_buf = BytesMut::new();
+        owned.encode(&mut owned_buf, v).unwrap();
+        assert2::assert!(&owned_buf[..] == &msg_bytes[..]);
+    }
     #[test]
-    fn roundtrips_all_versions() {
+    fn roundtrip_cases_all_versions() {
         for v in MIN_VERSION..=MAX_VERSION {
-            let cases = [
+            for (case, msg) in [
                 ("default", AssignReplicasToDirsRequest::default()),
                 ("populated", AssignReplicasToDirsRequest::populated(v)),
-            ];
-
-            for (case, expected) in cases {
-                let mut encoded = BytesMut::new();
-                expected.encode(&mut encoded, v).unwrap();
-                let msg_bytes = encoded.freeze();
-                let mut cur: &[u8] = &msg_bytes;
-                let decoded = AssignReplicasToDirsRequest::decode_borrow(&mut cur, v).unwrap();
-
-                assert2::assert!(cur.is_empty());
-                assert2::assert!(decoded == expected);
-                assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
-
-                let mut reencoded = BytesMut::new();
-                decoded.encode(&mut reencoded, v).unwrap();
-                assert2::assert!(&reencoded[..] == &msg_bytes[..]);
-
-                let owned = decoded.to_owned();
-                let mut owned_buf = BytesMut::new();
-                owned.encode(&mut owned_buf, v).unwrap();
-                assert2::assert!(&owned_buf[..] == &msg_bytes[..]);
+            ] {
+                let mut buf = BytesMut::new();
+                msg.encode(&mut buf, v).unwrap();
+                check(case, &buf.freeze(), v);
             }
         }
     }

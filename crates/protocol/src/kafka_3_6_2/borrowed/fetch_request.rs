@@ -23,15 +23,13 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-
-    use bytes::BytesMut;
-
     use super::*;
     use crate::{DecodeBorrow, Encode};
+    use bytes::BytesMut;
     fn check(case: &str, msg_bytes: &bytes::Bytes, v: i16) {
         let mut cur: &[u8] = msg_bytes;
         let decoded = FetchRequest::decode_borrow(&mut cur, v).unwrap();
-        assert2::assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty(), "case {case}, version {v}");
         assert2::assert!(decoded.encoded_len(v) == msg_bytes.len());
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();

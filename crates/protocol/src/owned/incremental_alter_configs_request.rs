@@ -23,36 +23,30 @@ include!(concat!(
 ));
 #[cfg(test)]
 mod tests {
-
-    use bytes::BytesMut;
-
     use super::*;
     use crate::{Decode, Encode};
-    fn roundtrip(case_name: &str, msg: &IncrementalAlterConfigsRequest, v: i16) {
+    use bytes::BytesMut;
+    fn roundtrip(case: &str, msg: &IncrementalAlterConfigsRequest, v: i16) {
         let mut buf = BytesMut::new();
         msg.encode(&mut buf, v).unwrap();
-        assert2::assert!(msg.encoded_len(v) == buf.len());
+        assert2::assert!(msg.encoded_len(v) == buf.len(), "case {case}, version {v}");
         let bytes = buf.freeze();
         let mut cur = &bytes[..];
         let decoded = IncrementalAlterConfigsRequest::decode(&mut cur, v).unwrap();
-        assert2::assert!(cur.is_empty());
+        assert2::assert!(cur.is_empty(), "case {case}, version {v}");
         let mut reencoded = BytesMut::new();
         decoded.encode(&mut reencoded, v).unwrap();
         assert2::assert!(&reencoded[..] == &bytes[..]);
         let _ = default_json(v);
     }
     #[test]
-    fn roundtrips_all_versions() {
-        type TestCase1<'a> = (&'a str, fn(i16) -> IncrementalAlterConfigsRequest);
-        let cases: [TestCase1<'_>; 2] = [
-            ("default", |_| IncrementalAlterConfigsRequest::default()),
-            ("populated", IncrementalAlterConfigsRequest::populated),
-        ];
-
-        for (name, make_message) in cases {
-            for v in MIN_VERSION..=MAX_VERSION {
-                let message = make_message(v);
-                roundtrip(name, &message, v);
+    fn roundtrip_cases_all_versions() {
+        for v in MIN_VERSION..=MAX_VERSION {
+            for (case, msg) in [
+                ("default", IncrementalAlterConfigsRequest::default()),
+                ("populated", IncrementalAlterConfigsRequest::populated(v)),
+            ] {
+                roundtrip(case, &msg, v);
             }
         }
     }
