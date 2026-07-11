@@ -3330,6 +3330,7 @@ dependencies = [
  "crabka-security",
  "derive_more",
  "futures",
+ "hex",
  "http",
  "http-body-util",
  "hyper",

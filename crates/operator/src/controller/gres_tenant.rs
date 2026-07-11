@@ -10,9 +10,11 @@ use crabka_gres_control::{
     RangeBoundary, RangeLayoutEntry, SqlUser, TENANT_REGISTRY_TOPIC, TenantId, TenantName,
     TenantRecord, TenantState, tenant_config_topic,
 };
+use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
 use crabka_security::scram::PgScramVerifier;
 use futures::StreamExt as _;
 use k8s_openapi::{
+    ByteString,
     api::{
         apps::v1::Deployment,
         core::v1::{Secret, Service},
@@ -33,6 +35,7 @@ use kube::{
     },
 };
 use serde_json::json;
+use sha2::{Digest as _, Sha256};
 
 use crate::{
     context::Context,
@@ -53,6 +56,8 @@ const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CAR
 const COMPUTE_PORT: i32 = 5432;
 const RANGE_PORT: i32 = 7432;
 const RANGE_TLS_DIR: &str = "/etc/crabka/range-tls";
+const RANGE_TLS_IDENTITY_ANNOTATION: &str = "crabka.io/range-tls-identity";
+const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
 const LIFECYCLE_REQUEUE: Duration = Duration::from_secs(5);
 
 /// Run the controller forever.
@@ -181,6 +186,11 @@ async fn reconcile_inner(
     let kafka_sasl = kafka
         .as_ref()
         .is_some_and(kafka_internal_listener_requires_sasl);
+    let range_tls_hash = if tenant_ranges.len() > 1 {
+        Some(reconcile_range_tls_secret(&ctx, &ns, &obj).await?)
+    } else {
+        None
+    };
     let reconcile_result: Result<Action, ReconcileError> = async {
         let admin_handle = ctx.admin_client_for(&cluster, &bootstrap).await?;
         let mut admin = admin_handle.lock().await;
@@ -318,6 +328,7 @@ async fn reconcile_inner(
                 &cfg_topic,
                 record.state,
                 kafka_sasl,
+                range_tls_hash.as_deref(),
             )
             .await?;
             return Ok(Action::requeue(LIFECYCLE_REQUEUE));
@@ -358,6 +369,7 @@ async fn reconcile_inner(
             &cfg_topic,
             record.state,
             kafka_sasl,
+            range_tls_hash.as_deref(),
         )
         .await?;
         apply_object(
@@ -420,6 +432,19 @@ enum ParkingProgress {
     Complete,
 }
 
+async fn reconcile_range_tls_secret(
+    ctx: &Context,
+    namespace: &str,
+    obj: &GresTenant,
+) -> Result<String, ReconcileError> {
+    let api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
+    let name = range_tls_secret_name(&obj.name_any());
+    let existing = api.get_opt(&name).await?;
+    let (secret, hash) = render_range_tls_secret(obj, existing.as_ref())?;
+    apply_object(&api, &name, &secret).await?;
+    Ok(hash)
+}
+
 #[allow(clippy::too_many_arguments)]
 async fn reconcile_compute_deployments(
     ctx: &Context,
@@ -431,6 +456,7 @@ async fn reconcile_compute_deployments(
     config_topic: &str,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
+    range_tls_hash: Option<&str>,
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
     let image = ctx
@@ -452,6 +478,7 @@ async fn reconcile_compute_deployments(
             compute_replicas(lifecycle_state),
             &ctx.config,
             kafka_sasl,
+            range_tls_hash,
         )?;
         apply_object(
             &dep_api,
@@ -1059,6 +1086,102 @@ fn network_policy_name(name: &str) -> String {
     format!("{name}-gres-range-policy")
 }
 
+fn range_tls_secret_name(name: &str) -> String {
+    format!("{name}-gres-range-tls")
+}
+
+fn range_tls_identity(obj: &GresTenant) -> String {
+    format!("{}|{}.range.internal", obj.name_any(), obj.name_any())
+}
+
+fn range_tls_data_hash(data: &BTreeMap<String, ByteString>) -> String {
+    let mut digest = Sha256::new();
+    for key in ["ca.crt", "tls.crt", "tls.key"] {
+        digest.update(key.as_bytes());
+        if let Some(value) = data.get(key) {
+            digest.update(&value.0);
+        }
+    }
+    hex::encode(digest.finalize())
+}
+
+fn existing_range_tls_is_current(existing: &Secret, identity: &str) -> bool {
+    let identity_matches = existing
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(RANGE_TLS_IDENTITY_ANNOTATION))
+        .is_some_and(|value| value == identity);
+    let Some(data) = existing.data.as_ref() else {
+        return false;
+    };
+    if !identity_matches
+        || !["ca.crt", "ca.key", "tls.crt", "tls.key"]
+            .iter()
+            .all(|key| data.contains_key(*key))
+    {
+        return false;
+    }
+    let Ok(cert_pem) = std::str::from_utf8(&data["tls.crt"].0) else {
+        return false;
+    };
+    crate::controller::cluster_ca::cert_not_after(cert_pem).is_ok_and(|not_after| {
+        not_after > time::OffsetDateTime::now_utc() + time::Duration::days(30)
+    })
+}
+
+fn render_range_tls_secret(
+    obj: &GresTenant,
+    existing: Option<&Secret>,
+) -> Result<(Secret, String), ReconcileError> {
+    let name = obj.name_any();
+    let identity = range_tls_identity(obj);
+    let data = if let Some(existing) =
+        existing.filter(|secret| existing_range_tls_is_current(secret, &identity))
+    {
+        existing.data.clone().expect("validated existing TLS data")
+    } else {
+        let ca = generate_cluster_ca(&format!("{name}-range-ca"), 365).map_err(|error| {
+            ReconcileError::Malformed(format!("range TLS CA generation failed: {error}"))
+        })?;
+        let leaf = issue_broker_cert(
+            &ca.cert_pem,
+            &ca.key_pem,
+            &format!("{name}-range"),
+            &[SubjectAltName::Dns(format!("{name}.range.internal"))],
+            &[],
+            90,
+        )
+        .map_err(|error| {
+            ReconcileError::Malformed(format!("range TLS leaf issuance failed: {error}"))
+        })?;
+        BTreeMap::from([
+            ("ca.crt".into(), ByteString(ca.cert_pem.into_bytes())),
+            ("ca.key".into(), ByteString(ca.key_pem.into_bytes())),
+            ("tls.crt".into(), ByteString(leaf.cert_pem.into_bytes())),
+            ("tls.key".into(), ByteString(leaf.key_pem.into_bytes())),
+        ])
+    };
+    let hash = range_tls_data_hash(&data);
+    let secret = Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(range_tls_secret_name(&name)),
+            namespace: obj.namespace(),
+            labels: Some(meta_labels(obj)),
+            annotations: Some(BTreeMap::from([
+                (RANGE_TLS_IDENTITY_ANNOTATION.into(), identity),
+                (RANGE_TLS_HASH_ANNOTATION.into(), hash.clone()),
+            ])),
+            owner_references: Some(vec![owner_ref::<GresTenant>(obj)?]),
+            ..Default::default()
+        },
+        data: Some(data),
+        type_: Some("kubernetes.io/tls".into()),
+        ..Default::default()
+    };
+    Ok((secret, hash))
+}
+
 fn selector_labels(obj: &GresTenant) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("app.kubernetes.io/name".into(), APP_NAME.into()),
@@ -1175,6 +1298,7 @@ fn render_deployment(
     replicas: i32,
     operator_config: &crate::config::OperatorConfig,
     kafka_sasl: bool,
+    range_tls_hash: Option<&str>,
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
     let selector = range_labels(obj, range.range_id);
@@ -1240,13 +1364,15 @@ fn render_deployment(
     } else {
         (Vec::new(), Vec::new())
     };
+    let pod_annotations = range_tls_hash
+        .map(|hash| BTreeMap::from([(RANGE_TLS_HASH_ANNOTATION.to_owned(), hash.to_owned())]));
     Ok(serde_json::from_value(json!({
         "metadata": { "name": deployment_name(&name, range.range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
         "spec": {
             "replicas": replicas,
             "selector": { "matchLabels": selector },
             "template": {
-                "metadata": { "labels": selector },
+                "metadata": { "labels": selector, "annotations": pod_annotations },
                 "spec": {
                     "securityContext": { "runAsNonRoot": true, "runAsUser": 65532, "fsGroup": 65532 },
                     "containers": [{
@@ -1626,6 +1752,7 @@ mod tests {
             1,
             &ConfigArgs::parse_from(["operator"]).config,
             false,
+            None,
         )
         .unwrap();
         let json = serde_json::to_string(&deployment).unwrap();
@@ -1658,6 +1785,7 @@ mod tests {
             1,
             &ConfigArgs::parse_from(["operator"]).config,
             true,
+            None,
         )
         .unwrap();
         let json = serde_json::to_string(&deployment).unwrap();
@@ -1695,6 +1823,7 @@ mod tests {
             1,
             &ConfigArgs::parse_from(["operator"]).config,
             false,
+            Some("range-tls-hash"),
         )
         .expect("render r1 deployment");
         let args = deployment
@@ -1739,6 +1868,36 @@ mod tests {
         let port = &spec.ports.expect("ports")[0];
         assert_eq!(port.name.as_deref(), Some("range"));
         assert_eq!(port.port, RANGE_PORT);
+    }
+
+    #[test]
+    fn range_tls_secret_is_preserved_and_rotates_on_identity_drift() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let (first, first_hash) = render_range_tls_secret(&obj, None).expect("issue TLS secret");
+        let data = first.data.as_ref().expect("TLS data");
+        for key in ["ca.crt", "ca.key", "tls.crt", "tls.key"] {
+            assert!(data.contains_key(key), "missing {key}");
+        }
+        let (preserved, preserved_hash) =
+            render_range_tls_secret(&obj, Some(&first)).expect("preserve valid identity");
+        assert_eq!(first_hash, preserved_hash);
+        assert_eq!(first.data, preserved.data);
+
+        let mut drifted = first.clone();
+        drifted
+            .metadata
+            .annotations
+            .as_mut()
+            .expect("annotations")
+            .insert(
+                RANGE_TLS_IDENTITY_ANNOTATION.into(),
+                "wrong identity".into(),
+            );
+        let (_rotated, rotated_hash) =
+            render_range_tls_secret(&obj, Some(&drifted)).expect("rotate drifted identity");
+        assert_ne!(first_hash, rotated_hash);
     }
 
     #[test]

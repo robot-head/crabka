@@ -300,6 +300,28 @@ fn multi_range_reconcile_rules() -> Vec<MockRule> {
             response: json_response(200, &secret_body("pw", "ns", "hunter2")),
         },
     ];
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/secrets/tenant-a-gres-range-tls".into(),
+        response: json_response(
+            404,
+            &serde_json::json!({
+                "apiVersion":"v1", "kind":"Status", "status":"Failure",
+                "reason":"NotFound", "code":404
+            }),
+        ),
+    });
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: "/secrets/tenant-a-gres-range-tls".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({
+                "apiVersion":"v1", "kind":"Secret",
+                "metadata":{"name":"tenant-a-gres-range-tls","namespace":"ns"}
+            }),
+        ),
+    });
     for name in [
         "tenant-a-gres-pg",
         "tenant-a-gres",
