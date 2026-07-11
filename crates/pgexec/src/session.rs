@@ -857,6 +857,7 @@ pub struct SqlSession {
     range_scanner: Arc<dyn crate::scanner::RangeScanner>,
     /// Timestamp oracle for sharded timestamp transactions.
     timestamp_oracle: Arc<dyn crate::timestamp_txn::TimestampOracle>,
+    timestamp_own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     sequence_currvals: Arc<Mutex<HashMap<String, i64>>>,
     session_user: String,
     current_role: String,
@@ -939,6 +940,7 @@ impl SqlSession {
             foreign_scanner,
             range_scanner,
             timestamp_oracle,
+            timestamp_own_start_ts: None,
             sequence_currvals: Arc::new(Mutex::new(HashMap::new())),
             session_user: "public".into(),
             current_role: "public".into(),
@@ -981,6 +983,14 @@ impl SqlSession {
                 currvals: Arc::clone(&self.sequence_currvals),
             })),
         }
+    }
+
+    /// Set the timestamp transaction whose pending intents are owned by this SQL session.
+    pub fn set_timestamp_own_start_ts(
+        &mut self,
+        start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
+    ) {
+        self.timestamp_own_start_ts = start_ts;
     }
 
     /// Apply a typed practical-subset GUC mutation and return the `SET` command
@@ -1621,8 +1631,15 @@ impl SqlSession {
                 return Err(ExecError::InFailedTransaction);
             }
         };
-        let statement_scanner =
-            crate::scanner::TimestampedRangeScanner::new(Arc::clone(&self.range_scanner), read_ts);
+        let statement_scanner = if let Some(own_start_ts) = self.timestamp_own_start_ts {
+            crate::scanner::TimestampedRangeScanner::with_own_transaction(
+                Arc::clone(&self.range_scanner),
+                read_ts,
+                own_start_ts,
+            )
+        } else {
+            crate::scanner::TimestampedRangeScanner::new(Arc::clone(&self.range_scanner), read_ts)
+        };
         let ctx = self.eval_ctx();
         // SP40: the session does not track an authenticated SQL user, so foreign-table
         // user-mapping lookups resolve against the conventional `"public"` mapping.
@@ -3852,6 +3869,7 @@ impl SqlSession {
                         snapshot: &snapshot,
                         own_xid: own,
                         read_ts: None,
+                        own_start_ts: None,
                         table: &table,
                         interval: crate::scanner::RowInterval::ALL,
                         predicate: plan.predicate,

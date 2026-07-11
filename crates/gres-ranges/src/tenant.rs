@@ -1267,12 +1267,13 @@ impl crabka_pgexec::RangeScanner for InProcessRangeScanner {
                     segment.range_id
                 )));
             };
-            let local_rows = engine.scan_local_visible(
+            let local_rows = engine.scan_local_visible_with_timestamp_owner(
                 request.table,
                 request.global_snapshot,
                 request.snapshot,
                 request.own_xid,
                 request.read_ts,
+                request.own_start_ts,
                 local_scan_interval(request.interval, segment.interval),
             )?;
             rows.extend(crabka_pgexec::scanner::apply_executable_scan_pushdown(
@@ -1739,6 +1740,11 @@ enum GatewayTransaction {
     Open {
         touched: Vec<RangeId>,
         escalated: bool,
+    },
+    Timestamp {
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        participants: BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
+        commit_ops: Vec<crabka_pgkv::WriteOp>,
     },
     Failed {
         touched: Vec<RangeId>,
@@ -2414,7 +2420,39 @@ impl GatewaySession {
 
     async fn execute_one(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
         let result = self.execute_one_inner(statement).await;
+        if result.is_err() && matches!(self.transaction, GatewayTransaction::Timestamp { .. }) {
+            self.abort_failed_timestamp_transaction().await?;
+        }
         self.finish_statement(result)
+    }
+
+    async fn abort_failed_timestamp_transaction(&mut self) -> Result<(), PgError> {
+        let GatewayTransaction::Timestamp {
+            identity,
+            participants,
+            ..
+        } = std::mem::replace(&mut self.transaction, GatewayTransaction::Idle)
+        else {
+            return Ok(());
+        };
+        let serving = self.current_serving()?;
+        let coordinator = serving
+            .engine(RangeId::COORDINATOR)
+            .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+        self.abort_timestamp_scatter(
+            coordinator,
+            identity,
+            &participants.into_iter().collect::<Vec<_>>(),
+        )
+        .await
+        .map_err(ExecError::into_pg)?;
+        self.transaction = GatewayTransaction::Failed {
+            touched: Vec::new(),
+            escalated: false,
+            recovery: None,
+        };
+        self.status = TxStatus::Failed;
+        Ok(())
     }
 
     async fn execute_one_inner(&mut self, statement: &str) -> Result<Vec<QueryResult>, PgError> {
@@ -2431,6 +2469,15 @@ impl GatewaySession {
         if let Some(ranges) = route.scatter_ranges.clone() {
             return self
                 .execute_timestamp_scatter(statement, ranges)
+                .await
+                .map(|result| vec![result]);
+        }
+        if route.kind == StatementKind::Dml
+            && matches!(self.transaction, GatewayTransaction::Timestamp { .. })
+            && self.route_table_is_sharded(&route)?
+        {
+            return self
+                .execute_timestamp_scatter(statement, vec![route.range_id])
                 .await
                 .map(|result| vec![result]);
         }
@@ -2473,6 +2520,9 @@ impl GatewaySession {
     }
 
     async fn commit_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
+        if matches!(self.transaction, GatewayTransaction::Timestamp { .. }) {
+            return self.commit_explicit_timestamp_transaction().await;
+        }
         let GatewayTransaction::Open { touched, escalated } = &self.transaction else {
             self.status = TxStatus::Idle;
             return Ok(vec![QueryResult::Command {
@@ -2535,6 +2585,27 @@ impl GatewaySession {
 
     async fn rollback_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
         let previous = std::mem::replace(&mut self.transaction, GatewayTransaction::Idle);
+        if let GatewayTransaction::Timestamp {
+            identity,
+            participants,
+            ..
+        } = previous
+        {
+            let serving = self.current_serving()?;
+            let coordinator = serving
+                .engine(RangeId::COORDINATOR)
+                .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+            self.abort_timestamp_scatter(
+                &coordinator,
+                identity,
+                &participants.into_iter().collect::<Vec<_>>(),
+            )
+            .await
+            .map_err(ExecError::into_pg)?;
+            self.status = TxStatus::Idle;
+            self.release_explicit_transaction();
+            return Ok(rollback_command_response());
+        }
         let Some((touched, escalated, recovery)) = transaction_participants(previous) else {
             self.status = TxStatus::Idle;
             return Ok(rollback_command_response());
@@ -2947,6 +3018,21 @@ impl GatewaySession {
         Ok(Some(table_write_gate))
     }
 
+    fn route_table_is_sharded(&self, route: &StatementRoute) -> Result<bool, PgError> {
+        let Some(table_id) = route.table_id else {
+            return Ok(false);
+        };
+        let serving = self.current_serving()?;
+        let catalog = serving
+            .engine(RangeId::COORDINATOR)
+            .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+        Ok(crabka_pgcatalog::list_tables(catalog.catalog_kv())
+            .map_err(ExecError::from)
+            .map_err(ExecError::into_pg)?
+            .into_iter()
+            .any(|table| u64::from(table.id) == table_id.as_u64() && table.sharded))
+    }
+
     async fn execute_routed_statement(
         &mut self,
         statement: &str,
@@ -2961,6 +3047,14 @@ impl GatewaySession {
         if kind == StatementKind::Dml {
             self.touch_write_range(range_id).await?;
         }
+        let own_start_ts = match &self.transaction {
+            GatewayTransaction::Timestamp { identity, .. } if kind == StatementKind::Query => {
+                Some(identity.start_ts)
+            }
+            _ => None,
+        };
+        self.session_for(range_id)?
+            .set_timestamp_own_start_ts(own_start_ts);
         let result = self.session_for(range_id)?.simple_query(statement).await;
         if result.is_err() && matches!(self.transaction, GatewayTransaction::Open { .. }) {
             self.fail_transaction_preserving_participants();
@@ -3004,10 +3098,12 @@ impl GatewaySession {
         statement: &str,
         ranges: Vec<RangeId>,
     ) -> Result<QueryResult, PgError> {
-        if !matches!(self.transaction, GatewayTransaction::Idle) {
+        let explicit_timestamp = matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty())
+            || matches!(self.transaction, GatewayTransaction::Timestamp { .. });
+        if !matches!(self.transaction, GatewayTransaction::Idle) && !explicit_timestamp {
             return Err(PgError::error(
                 sqlstate::FEATURE_NOT_SUPPORTED,
-                "multi-range sharded timestamp DML is only supported in autocommit",
+                "cannot mix ordinary and timestamp writes in one explicit transaction",
             ));
         }
         for range_id in &ranges {
@@ -3069,12 +3165,27 @@ impl GatewaySession {
                 "timestamp scatter plan does not match routed ranges",
             ));
         }
-        let (start_ts, identity) = self
-            .begin_timestamp_scatter(coordinator, writes_by_range.keys().copied())
-            .await?;
-        let mut participants = Vec::with_capacity(writes_by_range.len());
+        let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
+        let (start_ts, identity) =
+            if let GatewayTransaction::Timestamp { identity, .. } = &self.transaction {
+                (identity.start_ts, *identity)
+            } else {
+                let begun = self
+                    .begin_timestamp_scatter(coordinator, writes_by_range.keys().copied())
+                    .await?;
+                if !autocommit {
+                    self.transaction = GatewayTransaction::Timestamp {
+                        identity: begun.1,
+                        participants: BTreeMap::new(),
+                        commit_ops: Vec::new(),
+                    };
+                }
+                begun
+            };
+        let mut statement_participants = Vec::with_capacity(writes_by_range.len());
         for (range_id, writes) in &writes_by_range {
             if let Err(error) = self.timestamp_prewrite(*range_id, identity, writes).await {
+                let participants = self.timestamp_participants_with(&statement_participants);
                 self.abort_timestamp_scatter(coordinator, identity, &participants)
                     .await
                     .map_err(ExecError::into_pg)?;
@@ -3082,7 +3193,7 @@ impl GatewaySession {
             }
             // Track durable prewrite before the range-0 acknowledgement. An ack
             // write failure must still abort and resolve this participant.
-            participants.push((*range_id, writes.clone()));
+            statement_participants.push((*range_id, writes.clone()));
             let operations = writes
                 .iter()
                 .map(|write| crabka_pgexec::TimestampTxnOperation {
@@ -3103,11 +3214,27 @@ impl GatewaySession {
                 // The primary descriptor was begun durably; choose abort and
                 // resolve every participant known to have prewritten, including
                 // this one whose acknowledgement did not reach range 0.
+                let participants = self.timestamp_participants_with(&statement_participants);
                 self.abort_timestamp_scatter(coordinator, identity, &participants)
                     .await
                     .map_err(ExecError::into_pg)?;
                 return Err(error.into_pg());
             }
+        }
+        if !autocommit {
+            let GatewayTransaction::Timestamp {
+                participants,
+                commit_ops,
+                ..
+            } = &mut self.transaction
+            else {
+                unreachable!()
+            };
+            for (range_id, writes) in statement_participants {
+                participants.entry(range_id).or_default().extend(writes);
+            }
+            commit_ops.extend(plan.commit_ops);
+            return Ok(plan.result);
         }
         if self
             .take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampPrewriteBeforeDecision)
@@ -3129,7 +3256,7 @@ impl GatewaySession {
             .await
             .map_err(ExecError::into_pg)?;
         let crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) = decision else {
-            self.abort_timestamp_scatter(coordinator, identity, &participants)
+            self.abort_timestamp_scatter(coordinator, identity, &statement_participants)
                 .await
                 .map_err(ExecError::into_pg)?;
             return Err(PgError::error("40001", "timestamp transaction aborted"));
@@ -3141,7 +3268,7 @@ impl GatewaySession {
             ));
         }
         let mut commit_ops = Some(plan.commit_ops);
-        for (range_id, writes) in &participants {
+        for (range_id, writes) in &statement_participants {
             let extra_ops = commit_ops.take().unwrap_or_default();
             self.timestamp_resolve(
                 *range_id,
@@ -3158,6 +3285,71 @@ impl GatewaySession {
             }
         }
         Ok(plan.result)
+    }
+
+    fn timestamp_participants_with(
+        &self,
+        current: &[(RangeId, Vec<crabka_pgexec::TimestampWrite>)],
+    ) -> Vec<(RangeId, Vec<crabka_pgexec::TimestampWrite>)> {
+        let mut all = match &self.transaction {
+            GatewayTransaction::Timestamp { participants, .. } => participants.clone(),
+            _ => BTreeMap::new(),
+        };
+        for (range_id, writes) in current {
+            all.entry(*range_id).or_default().extend(writes.clone());
+        }
+        all.into_iter().collect()
+    }
+
+    async fn commit_explicit_timestamp_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
+        let GatewayTransaction::Timestamp {
+            identity,
+            participants,
+            commit_ops,
+        } = &self.transaction
+        else {
+            unreachable!()
+        };
+        let identity = *identity;
+        let participants = participants.clone();
+        let commit_ops = commit_ops.clone();
+        let serving = self.current_serving()?;
+        let coordinator = serving
+            .engine(RangeId::COORDINATOR)
+            .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
+        let commit_ts = coordinator
+            .allocate_commit_timestamp_after(identity.start_ts)
+            .await
+            .map_err(ExecError::into_pg)?;
+        let decision = coordinator
+            .decide_timestamp_transaction(
+                identity.start_ts,
+                crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
+            )
+            .await
+            .map_err(ExecError::into_pg)?;
+        let crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) = decision else {
+            return Err(PgError::error("40001", "timestamp transaction aborted"));
+        };
+        for (range_id, writes) in &participants {
+            self.timestamp_resolve(
+                *range_id,
+                identity,
+                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                writes,
+            )
+            .await?;
+        }
+        coordinator
+            .commit_timestamp_statement_ops(commit_ops)
+            .await
+            .map_err(ExecError::into_pg)?;
+        self.transaction = GatewayTransaction::Idle;
+        self.status = TxStatus::Idle;
+        self.release_explicit_transaction();
+        Ok(vec![QueryResult::Command {
+            tag: "COMMIT".into(),
+        }])
     }
 
     async fn begin_timestamp_scatter(
@@ -3652,6 +3844,7 @@ fn transaction_participants(
 ) -> Option<(Vec<RangeId>, bool, Option<GlobalCommitRecovery>)> {
     match transaction {
         GatewayTransaction::Idle => None,
+        GatewayTransaction::Timestamp { .. } => None,
         GatewayTransaction::Open { touched, escalated } => Some((touched, escalated, None)),
         GatewayTransaction::Failed {
             touched,
@@ -5053,7 +5246,6 @@ mod tests {
         for (statement, expected_code) in [
             ("SELECT * FROM missing", "42P01"),
             ("CREATE TABLE t (id int4)", "42P07"),
-            ("INSERT INTO s VALUES (10), (60)", "0A000"),
             ("SELECT missing_column FROM t", "42703"),
         ] {
             session

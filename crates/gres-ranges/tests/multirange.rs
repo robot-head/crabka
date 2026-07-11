@@ -440,7 +440,7 @@ async fn in_process_scanner_merges_partial_aggregates_across_row_ranges() {
 }
 
 #[tokio::test]
-async fn sharded_multi_row_insert_in_explicit_transaction_remains_fail_clear() {
+async fn sharded_multi_row_inserts_in_explicit_transaction_read_own_writes_and_commit() {
     let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
     let mut session = gateway.connect();
     session
@@ -449,12 +449,71 @@ async fn sharded_multi_row_insert_in_explicit_transaction_remains_fail_clear() {
         .expect("create");
     session.simple_query("BEGIN").await.expect("begin");
 
-    let error = session
+    session
         .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
         .await
-        .expect_err("explicit transaction rejected");
+        .expect("first timestamp statement");
+    session
+        .simple_query("INSERT INTO t150 VALUES (30, 30)")
+        .await
+        .expect("second timestamp statement");
+    session
+        .simple_query("INSERT INTO t150 VALUES (130, 40)")
+        .await
+        .expect("third timestamp statement");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 30, 20, 40]
+    );
+    session.simple_query("COMMIT").await.expect("commit");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        vec![10, 30, 20, 40]
+    );
+}
 
-    assert_eq!(error.code, "0A000");
+#[tokio::test]
+async fn sharded_multi_row_insert_in_explicit_transaction_rolls_back() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("timestamp statement");
+    session.simple_query("ROLLBACK").await.expect("rollback");
+    assert_eq!(
+        select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,
+        Vec::<i32>::new()
+    );
+}
+
+#[tokio::test]
+async fn failed_explicit_timestamp_transaction_requires_rollback_and_aborts_intents() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, value int4) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    session
+        .simple_query("INSERT INTO t150 VALUES (20, 10), (120, 20)")
+        .await
+        .expect("timestamp statement");
+    session
+        .simple_query("INSERT INTO t150 VALUES (30, 'bad'), (130, 40)")
+        .await
+        .expect_err("statement failure");
+    let failed = session
+        .simple_query("SELECT value FROM t150 ORDER BY id")
+        .await
+        .expect_err("transaction remains failed");
+    assert_eq!(failed.code, "25P02");
     session.simple_query("ROLLBACK").await.expect("rollback");
     assert_eq!(
         select_values(&mut session, "SELECT value FROM t150 ORDER BY id").await,

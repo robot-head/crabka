@@ -193,6 +193,8 @@ pub struct ScanRequest<'a> {
     pub own_xid: Option<u64>,
     /// Optional timestamp read point for sharded-table G-9 visibility.
     pub read_ts: Option<crate::timestamp_txn::ReadTimestamp>,
+    /// Optional timestamp transaction whose pending intents belong to this reader.
+    pub own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
     /// Table metadata.
     pub table: &'a Table,
     /// Rowid interval to scan.
@@ -350,6 +352,7 @@ pub(crate) fn memory_budget_exceeded() -> ExecError {
 pub struct TimestampedRangeScanner {
     inner: std::sync::Arc<dyn RangeScanner>,
     read_ts: crate::timestamp_txn::ReadTimestamp,
+    own_start_ts: Option<crate::timestamp_txn::TimestampTransactionId>,
 }
 
 impl TimestampedRangeScanner {
@@ -359,7 +362,25 @@ impl TimestampedRangeScanner {
         inner: std::sync::Arc<dyn RangeScanner>,
         read_ts: crate::timestamp_txn::ReadTimestamp,
     ) -> Self {
-        Self { inner, read_ts }
+        Self {
+            inner,
+            read_ts,
+            own_start_ts: None,
+        }
+    }
+
+    /// Build a statement scanner that also exposes this transaction's intents.
+    #[must_use]
+    pub fn with_own_transaction(
+        inner: std::sync::Arc<dyn RangeScanner>,
+        read_ts: crate::timestamp_txn::ReadTimestamp,
+        own_start_ts: crate::timestamp_txn::TimestampTransactionId,
+    ) -> Self {
+        Self {
+            inner,
+            read_ts,
+            own_start_ts: Some(own_start_ts),
+        }
     }
 }
 
@@ -367,6 +388,7 @@ impl RangeScanner for TimestampedRangeScanner {
     fn scan(&self, mut request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError> {
         if request.table.sharded {
             request.read_ts = Some(self.read_ts);
+            request.own_start_ts = self.own_start_ts;
         }
         self.inner.scan(request)
     }
@@ -377,6 +399,7 @@ impl RangeScanner for TimestampedRangeScanner {
     ) -> Result<Box<dyn RangeCursor + 'a>, ExecError> {
         if request.table.sharded {
             request.read_ts = Some(self.read_ts);
+            request.own_start_ts = self.own_start_ts;
         }
         self.inner.scan_cursor(request)
     }
@@ -425,6 +448,7 @@ impl RangeCursor for LocalRangeCursor<'_> {
                 self.request.global,
                 self.request.table,
                 read_ts,
+                self.request.own_start_ts,
                 interval,
             )?
         } else {
@@ -467,6 +491,7 @@ impl RangeScanner for LocalRangeScanner {
                 request.global,
                 request.table,
                 read_ts,
+                request.own_start_ts,
                 request.interval,
             )?;
             return apply_executable_scan_pushdown(
@@ -1211,6 +1236,7 @@ mod cursor_contract_tests {
                 snapshot: &snapshot,
                 own_xid: None,
                 read_ts: None,
+                own_start_ts: None,
                 table: &table,
                 interval: RowInterval::default(),
                 predicate: PredicatePushdown::FullScan,
@@ -1256,6 +1282,7 @@ mod cursor_contract_tests {
                 snapshot: &snapshot,
                 own_xid: None,
                 read_ts: None,
+                own_start_ts: None,
                 table: &table,
                 interval: RowInterval::ALL,
                 predicate: PredicatePushdown::FullScan,
