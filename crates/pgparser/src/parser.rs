@@ -54,6 +54,22 @@ pub(crate) struct Parser {
     depth: Rc<Cell<usize>>,
 }
 
+#[derive(Debug, Clone, PartialEq)]
+struct ParsedStatement {
+    statement: crate::ast::Statement,
+    command_identity: crate::command::CommandIdentity,
+}
+
+fn emitted(
+    command_identity: crate::command::CommandIdentity,
+    statement: Result<crate::ast::Statement, ParseError>,
+) -> Result<ParsedStatement, ParseError> {
+    statement.map(|statement| ParsedStatement {
+        statement,
+        command_identity,
+    })
+}
+
 /// RAII depth counter: increments the shared depth `Cell` on construction and
 /// decrements it on `Drop` (so a `?` early-return still restores the count).
 /// Holds an owned `Rc` clone, so it does not borrow the `Parser` and never fights
@@ -847,11 +863,10 @@ impl Parser {
     /// Pairs each statement with the byte range of its source in
     /// the original input — from its first token's offset up to the trailing `;`
     /// (or end of input). Powers [`parse_with_source`].
-    pub(crate) fn program_spanned(
+    fn program_spanned(
         &mut self,
-    ) -> Result<Vec<(crate::ast::Statement, std::ops::Range<usize>)>, ParseError> {
-        use crate::ast::Statement;
-        let mut stmts: Vec<(Statement, std::ops::Range<usize>)> = Vec::new();
+    ) -> Result<Vec<(ParsedStatement, std::ops::Range<usize>)>, ParseError> {
+        let mut stmts = Vec::new();
         loop {
             while *self.peek() == Token::Semicolon {
                 self.bump();
@@ -883,9 +898,12 @@ impl Parser {
         clippy::too_many_lines,
         reason = "statement dispatch keeps top-level SQL forms in one exhaustive match"
     )]
-    fn statement(&mut self) -> Result<crate::ast::Statement, ParseError> {
+    fn statement(&mut self) -> Result<ParsedStatement, ParseError> {
+        use crate::command::CommandIdentity as I;
+
         if self.starts_query_expr() {
-            return self.query_statement();
+            let identity = self.query_command_identity();
+            return emitted(identity, self.query_statement());
         }
         match self.peek() {
             Token::Keyword(Keyword::Create) => {
@@ -893,13 +911,17 @@ impl Parser {
                 match self.peek2() {
                     Token::Keyword(
                         Keyword::Index | Keyword::Unique | Keyword::Global | Keyword::Local,
-                    ) => self.create_index(),
-                    Token::Keyword(Keyword::View) => self.create_view(),
+                    ) => emitted(I::CreateIndex, self.create_index()),
+                    Token::Keyword(Keyword::View) => emitted(I::CreateView, self.create_view()),
                     Token::Keyword(Keyword::Foreign) => {
                         // CREATE FOREIGN ... — look at the third token
                         match self.peek3() {
-                            Token::Keyword(Keyword::Table) => self.create_foreign_table(),
-                            Token::Keyword(Keyword::Data) => self.create_fdw(),
+                            Token::Keyword(Keyword::Table) => {
+                                emitted(I::CreateForeignTable, self.create_foreign_table())
+                            }
+                            Token::Keyword(Keyword::Data) => {
+                                emitted(I::CreateForeignDataWrapper, self.create_fdw())
+                            }
                             _ => Err(ParseError::new(
                                 format!(
                                     "unexpected token after CREATE FOREIGN: {:?}",
@@ -909,18 +931,26 @@ impl Parser {
                             )),
                         }
                     }
-                    Token::Keyword(Keyword::Server) => self.create_server(),
+                    Token::Keyword(Keyword::Server) => {
+                        emitted(I::CreateServer, self.create_server())
+                    }
                     Token::Keyword(Keyword::User) => {
                         if matches!(self.peek3(), Token::Keyword(Keyword::Mapping)) {
-                            self.create_user_mapping()
+                            emitted(I::CreateUserMapping, self.create_user_mapping())
                         } else {
-                            self.create_role(true)
+                            emitted(I::CreateUser, self.create_role(true))
                         }
                     }
-                    Token::Ident(s) if s == "role" => self.create_role(false),
-                    Token::Ident(s) if s == "sequence" => self.create_sequence(),
-                    Token::Ident(s) if s == "database" => self.create_database_refusal(),
-                    _ => self.create_table(),
+                    Token::Ident(s) if s == "role" => {
+                        emitted(I::CreateRole, self.create_role(false))
+                    }
+                    Token::Ident(s) if s == "sequence" => {
+                        emitted(I::CreateSequence, self.create_sequence())
+                    }
+                    Token::Ident(s) if s == "database" => {
+                        emitted(I::CreateDatabase, self.create_database_refusal())
+                    }
+                    _ => emitted(I::CreateTable, self.create_table()),
                 }
             }
             Token::Keyword(Keyword::Drop) => {
@@ -931,80 +961,122 @@ impl Parser {
                         // DROP FOREIGN ... — look at the third token to distinguish
                         // DROP FOREIGN DATA WRAPPER from DROP FOREIGN TABLE.
                         match self.peek3() {
-                            Token::Keyword(Keyword::Table) => self.drop_foreign_table(),
-                            Token::Keyword(Keyword::Data) => self.drop_fdw(),
+                            Token::Keyword(Keyword::Table) => {
+                                emitted(I::DropForeignTable, self.drop_foreign_table())
+                            }
+                            Token::Keyword(Keyword::Data) => {
+                                emitted(I::DropForeignDataWrapper, self.drop_fdw())
+                            }
                             _ => Err(ParseError::new(
                                 format!("unexpected token after DROP FOREIGN: {:?}", self.peek3()),
                                 self.peek_pos(),
                             )),
                         }
                     }
-                    Token::Keyword(Keyword::Server) => self.drop_server(),
-                    Token::Keyword(Keyword::View) => self.drop_view(),
-                    Token::Keyword(Keyword::Index) => self.drop_index(),
+                    Token::Keyword(Keyword::Server) => emitted(I::DropServer, self.drop_server()),
+                    Token::Keyword(Keyword::View) => emitted(I::DropView, self.drop_view()),
+                    Token::Keyword(Keyword::Index) => emitted(I::DropIndex, self.drop_index()),
                     Token::Keyword(Keyword::User) => {
                         if matches!(self.peek3(), Token::Keyword(Keyword::Mapping)) {
-                            self.drop_user_mapping()
+                            emitted(I::DropUserMapping, self.drop_user_mapping())
                         } else {
-                            self.drop_role()
+                            emitted(I::DropUser, self.drop_role())
                         }
                     }
-                    Token::Ident(s) if s == "role" => self.drop_role(),
-                    Token::Ident(s) if s == "sequence" => self.drop_sequence(),
-                    Token::Ident(s) if s == "database" => self.drop_database_refusal(),
-                    Token::Ident(s) if s == "extension" => self.drop_extension_refusal(),
-                    _ => self.drop_table(),
+                    Token::Ident(s) if s == "role" => emitted(I::DropRole, self.drop_role()),
+                    Token::Ident(s) if s == "sequence" => {
+                        emitted(I::DropSequence, self.drop_sequence())
+                    }
+                    Token::Ident(s) if s == "database" => {
+                        emitted(I::DropDatabase, self.drop_database_refusal())
+                    }
+                    Token::Ident(s) if s == "extension" => {
+                        emitted(I::DropExtension, self.drop_extension_refusal())
+                    }
+                    _ => emitted(I::DropTable, self.drop_table()),
                 }
             }
-            Token::Ident(s) if s == "grant" => self.grant_table_privileges(),
-            Token::Ident(s) if s == "revoke" => self.revoke_table_privileges(),
-            Token::Keyword(Keyword::Import) => self.import_foreign_schema(),
-            Token::Keyword(Keyword::Insert) => self.insert(),
-            Token::Keyword(Keyword::Copy) => self.copy_stmt(),
+            Token::Ident(s) if s == "grant" => emitted(I::Grant, self.grant_table_privileges()),
+            Token::Ident(s) if s == "revoke" => emitted(I::Revoke, self.revoke_table_privileges()),
+            Token::Keyword(Keyword::Import) => {
+                emitted(I::ImportForeignSchema, self.import_foreign_schema())
+            }
+            Token::Keyword(Keyword::Insert) => emitted(I::Insert, self.insert()),
+            Token::Keyword(Keyword::Copy) => emitted(I::Copy, self.copy_stmt()),
             // SP4: transaction control
-            Token::Keyword(Keyword::Begin | Keyword::Start) => self.begin(),
+            Token::Keyword(Keyword::Begin) => emitted(I::Begin, self.begin()),
+            Token::Keyword(Keyword::Start) => emitted(I::StartTransaction, self.begin()),
             Token::Keyword(Keyword::Commit) if matches!(self.peek2(), Token::Ident(s) if s == "prepared") => {
-                self.prepared_transaction_refusal(crate::ast::RefusalCommand::CommitPrepared)
+                emitted(
+                    I::CommitPrepared,
+                    self.prepared_transaction_refusal(crate::ast::RefusalCommand::CommitPrepared),
+                )
             }
             Token::Keyword(Keyword::Rollback) if matches!(self.peek2(), Token::Ident(s) if s == "prepared") => {
-                self.prepared_transaction_refusal(crate::ast::RefusalCommand::RollbackPrepared)
+                emitted(
+                    I::RollbackPrepared,
+                    self.prepared_transaction_refusal(crate::ast::RefusalCommand::RollbackPrepared),
+                )
             }
-            Token::Keyword(Keyword::Commit | Keyword::End) => {
+            Token::Keyword(keyword @ (Keyword::Commit | Keyword::End)) => {
+                let identity = if *keyword == Keyword::Commit {
+                    I::Commit
+                } else {
+                    I::End
+                };
                 self.bump();
-                Ok(crate::ast::Statement::Commit)
+                emitted(identity, Ok(crate::ast::Statement::Commit))
             }
-            Token::Keyword(Keyword::Rollback | Keyword::Abort) => {
+            Token::Keyword(keyword @ (Keyword::Rollback | Keyword::Abort)) => {
+                let identity = if *keyword == Keyword::Rollback {
+                    I::Rollback
+                } else {
+                    I::Abort
+                };
                 self.bump();
-                Ok(crate::ast::Statement::Rollback)
+                emitted(identity, Ok(crate::ast::Statement::Rollback))
             }
             // SP4: DML
-            Token::Keyword(Keyword::Update) => self.update(),
-            Token::Keyword(Keyword::Delete) => self.delete(),
+            Token::Keyword(Keyword::Update) => emitted(I::Update, self.update()),
+            Token::Keyword(Keyword::Delete) => emitted(I::Delete, self.delete()),
             // SP37: GUC control. `SET` is a keyword; `SHOW`/`RESET`/`ALTER` are matched as
             // plain (lowercased) idents — keyword-free so they stay usable as names.
             Token::Keyword(Keyword::Set) => {
                 if matches!(self.peek2(), Token::Ident(s) if s == "role") {
-                    self.set_role_stmt()
+                    emitted(I::SetRole, self.set_role_stmt())
+                } else if matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) {
+                    emitted(I::SetTransaction, self.set_stmt())
                 } else {
-                    self.set_stmt()
+                    emitted(I::Set, self.set_stmt())
                 }
             }
-            Token::Ident(s) if s == "show" => self.show_stmt(),
-            Token::Ident(s) if s == "reset" => self.reset_stmt(),
-            Token::Ident(s) if s == "discard" => self.discard_stmt(),
+            Token::Ident(s) if s == "show" => emitted(I::Show, self.show_stmt()),
+            Token::Ident(s) if s == "reset" => emitted(I::Reset, self.reset_stmt()),
+            Token::Ident(s) if s == "discard" => emitted(I::Discard, self.discard_stmt()),
             Token::Ident(s)
                 if s == "prepare"
                     && matches!(self.peek2(), Token::Keyword(Keyword::Transaction)) =>
             {
-                self.prepared_transaction_refusal(crate::ast::RefusalCommand::PrepareTransaction)
+                emitted(
+                    I::PrepareTransaction,
+                    self.prepared_transaction_refusal(
+                        crate::ast::RefusalCommand::PrepareTransaction,
+                    ),
+                )
             }
             // SP40: ALTER SERVER / ALTER USER MAPPING; bounded ALTER TABLE rename.
             Token::Ident(s) if s == "alter" => match self.peek2() {
-                Token::Keyword(Keyword::Table) => self.alter_table(),
-                Token::Keyword(Keyword::Server) => self.alter_server(),
-                Token::Keyword(Keyword::User) => self.alter_user_mapping(),
-                Token::Ident(s) if s == "database" => self.alter_database_refusal(),
-                Token::Ident(s) if s == "extension" => self.alter_extension_refusal(),
+                Token::Keyword(Keyword::Table) => emitted(I::AlterTable, self.alter_table()),
+                Token::Keyword(Keyword::Server) => emitted(I::AlterServer, self.alter_server()),
+                Token::Keyword(Keyword::User) => {
+                    emitted(I::AlterUserMapping, self.alter_user_mapping())
+                }
+                Token::Ident(s) if s == "database" => {
+                    emitted(I::AlterDatabase, self.alter_database_refusal())
+                }
+                Token::Ident(s) if s == "extension" => {
+                    emitted(I::AlterExtension, self.alter_extension_refusal())
+                }
                 _ => Err(ParseError::new(
                     format!("unexpected token after ALTER: {:?}", self.peek2()),
                     self.peek_pos(),
@@ -1014,6 +1086,20 @@ impl Parser {
                 format!("unexpected statement start {other:?}"),
                 self.peek_pos(),
             )),
+        }
+    }
+
+    fn query_command_identity(&self) -> crate::command::CommandIdentity {
+        use crate::command::CommandIdentity;
+
+        let mut offset = 0;
+        while matches!(self.peek_n(offset), Token::LParen) {
+            offset += 1;
+        }
+        if matches!(self.peek_n(offset), Token::Keyword(Keyword::Values)) {
+            CommandIdentity::Values
+        } else {
+            CommandIdentity::Select
         }
     }
 
@@ -3152,18 +3238,13 @@ pub fn parse_expr_for_test(sql: &str) -> Result<Expr, ParseError> {
 
 /// Public statement entry — implemented in Task 12.
 pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
-    if let Some(statement) = bounded_non_goal_refusal(sql) {
-        require_command_identity(&statement, sql)?;
+    if let Some((statement, _identity)) = bounded_non_goal_refusal(sql) {
         return Ok(vec![statement]);
     }
     let mut p = Parser::new(lex(sql)?, sql.to_string());
-    let statements = p.program_spanned()?;
-    for (statement, range) in &statements {
-        require_command_identity(statement, &sql[range.clone()])?;
-    }
-    Ok(statements
+    Ok(p.program_spanned()?
         .into_iter()
-        .map(|(statement, _)| statement)
+        .map(|(parsed, _)| parsed.statement)
         .collect())
 }
 
@@ -3172,18 +3253,14 @@ pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
 pub fn parse_with_command_identities(
     sql: &str,
 ) -> Result<Vec<(crate::ast::Statement, crate::command::CommandIdentity)>, ParseError> {
-    if let Some(statement) = bounded_non_goal_refusal(sql) {
-        let identity = require_command_identity(&statement, sql)?;
+    if let Some((statement, identity)) = bounded_non_goal_refusal(sql) {
         return Ok(vec![(statement, identity)]);
     }
     let mut parser = Parser::new(lex(sql)?, sql.to_string());
     parser
         .program_spanned()?
         .into_iter()
-        .map(|(statement, range)| {
-            let identity = require_command_identity(&statement, &sql[range])?;
-            Ok((statement, identity))
-        })
+        .map(|(parsed, _range)| Ok((parsed.statement, parsed.command_identity)))
         .collect()
 }
 
@@ -3193,8 +3270,7 @@ pub fn parse_with_command_identities(
 /// `;`-separated simple-query frame) to a remote range's leader, so a frame mixing a
 /// local and a remote range never re-runs the local statement on the remote node.
 pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String)>, ParseError> {
-    if let Some(statement) = bounded_non_goal_refusal(sql) {
-        require_command_identity(&statement, sql)?;
+    if let Some((statement, _identity)) = bounded_non_goal_refusal(sql) {
         return Ok(vec![(
             statement,
             sql.trim().trim_end_matches(';').trim().to_string(),
@@ -3203,33 +3279,25 @@ pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String
     let mut p = Parser::new(lex(sql)?, sql.to_string());
     p.program_spanned()?
         .into_iter()
-        .map(|(statement, range)| {
-            require_command_identity(&statement, &sql[range.clone()])?;
-            Ok((statement, sql[range].trim().to_string()))
-        })
+        .map(|(parsed, range)| Ok((parsed.statement, sql[range].trim().to_string())))
         .collect()
 }
 
-fn require_command_identity(
-    statement: &crate::ast::Statement,
+fn bounded_non_goal_refusal(
     sql: &str,
-) -> Result<crate::command::CommandIdentity, ParseError> {
-    crate::command::CommandIdentity::classify(statement, sql).ok_or_else(|| {
-        ParseError::new(
-            "accepted statement is missing parser command-dispatch registry identity",
-            0,
-        )
-    })
-}
-
-fn bounded_non_goal_refusal(sql: &str) -> Option<crate::ast::Statement> {
+) -> Option<(crate::ast::Statement, crate::command::CommandIdentity)> {
     let trimmed = sql.trim();
     let statement = trimmed.strip_suffix(';').unwrap_or(trimmed).trim();
     let candidate = lex(statement).ok()?;
     crate::ast::NON_GOAL_REFUSALS
         .iter()
         .find(|spec| refusal_tokens_match(&candidate, spec.representative_sql))
-        .map(|spec| crate::ast::Statement::CompatibilityRefusal(spec.command))
+        .map(|spec| {
+            (
+                crate::ast::Statement::CompatibilityRefusal(spec.command),
+                spec.identity,
+            )
+        })
 }
 
 fn refusal_tokens_match(candidate: &[(Token, usize)], representative: &str) -> bool {
@@ -6101,6 +6169,78 @@ fn fdw_alter_refusals_share_typed_metadata() {
         let statement = parse(sql).expect(sql).pop().expect("one statement");
         assert_eq!(statement.compatibility_refusal(), Some(expected));
     }
+}
+
+#[test]
+fn dispatch_emits_exact_query_and_table_family_identities() {
+    use crate::{command::CommandIdentity, parse_with_command_identities};
+
+    for (sql, expected) in [
+        ("SELECT 1", CommandIdentity::Select),
+        (
+            "WITH q AS (VALUES (1)) SELECT * FROM q",
+            CommandIdentity::Select,
+        ),
+        ("VALUES (1)", CommandIdentity::Values),
+        ("(VALUES (1))", CommandIdentity::Values),
+        ("CREATE TABLE t (id int4)", CommandIdentity::CreateTable),
+        ("ALTER TABLE t RENAME TO t2", CommandIdentity::AlterTable),
+    ] {
+        let parsed = parse_with_command_identities(sql).expect(sql);
+        assert_eq!(parsed[0].1, expected, "{sql}");
+    }
+
+    for sql in [
+        "CREATE TABLE t AS SELECT 1",
+        "CREATE TABLE t (id int4) PARTITION BY HASH (id)",
+        "ALTER TABLE t ATTACH PARTITION p DEFAULT",
+    ] {
+        assert!(
+            parse_with_command_identities(sql).is_err(),
+            "unsupported family parsed: {sql}"
+        );
+    }
+}
+
+#[test]
+fn multi_statement_dispatch_preserves_each_emitted_identity() {
+    use crate::{command::CommandIdentity, parse_with_command_identities};
+
+    let parsed = parse_with_command_identities(
+        "BEGIN; VALUES (1); CREATE USER alice; END; ALTER TABLE t RENAME TO t2",
+    )
+    .expect("mixed statements parse");
+    assert_eq!(
+        parsed
+            .into_iter()
+            .map(|(_, identity)| identity)
+            .collect::<Vec<_>>(),
+        vec![
+            CommandIdentity::Begin,
+            CommandIdentity::Values,
+            CommandIdentity::CreateUser,
+            CommandIdentity::End,
+            CommandIdentity::AlterTable,
+        ]
+    );
+}
+
+#[test]
+fn shared_ast_fake_dispatch_cannot_exist_without_an_identity_argument() {
+    use crate::{ast::Statement, command::CommandIdentity};
+
+    fn fake_branch(identity: CommandIdentity) -> ParsedStatement {
+        emitted(identity, Ok(Statement::Commit)).expect("fake branch emits")
+    }
+
+    assert_eq!(
+        fake_branch(CommandIdentity::Commit).command_identity,
+        CommandIdentity::Commit
+    );
+    assert_eq!(
+        fake_branch(CommandIdentity::End).command_identity,
+        CommandIdentity::End
+    );
 }
 
 #[test]
