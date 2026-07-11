@@ -31,6 +31,47 @@ SUBPROCESS_TIMEOUT = 30
 RECORDER_DEADLINE = 20
 
 
+class CaptureLifecycleError(RuntimeError):
+    """Safe summary preserving failure classes without payload-bearing details."""
+
+    def __init__(self, primary: Exception | None, cleanup_failures: list[tuple[str, Exception]]):
+        if isinstance(primary, CaptureLifecycleError):
+            primary_kind = primary.primary_kind
+            inherited = primary.cleanup_failures
+        else:
+            primary_kind = "none" if primary is None else type(primary).__name__
+            inherited = []
+        self.primary_kind = primary_kind
+        self.cleanup_failures = inherited + [
+            (label, type(error).__name__) for label, error in cleanup_failures
+        ]
+        cleanup = ",".join(f"{label}:{kind}" for label, kind in self.cleanup_failures)
+        message = f"capture lifecycle failure: primary={primary_kind}"
+        if cleanup:
+            message += f"; cleanup={cleanup}"
+        super().__init__(message)
+
+
+def run_with_cleanup(operation, cleanup_actions):
+    primary = None
+    result = None
+    try:
+        result = operation()
+    except Exception as error:  # cleanup must run for every ordinary failure
+        primary = error
+
+    cleanup_failures = []
+    for label, cleanup in reversed(cleanup_actions):
+        try:
+            cleanup()
+        except Exception as error:
+            cleanup_failures.append((label, error))
+
+    if primary is not None or cleanup_failures:
+        raise CaptureLifecycleError(primary, cleanup_failures) from None
+    return result
+
+
 def run(
     *args: str,
     check: bool = True,
@@ -98,6 +139,32 @@ def stop_process(process: subprocess.Popen) -> None:
         process.wait(timeout=5)
 
 
+def reap_recorder(process: subprocess.Popen, wait_for_capture: bool) -> None:
+    if wait_for_capture:
+        try:
+            return_code = process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            stop_process(process)
+            raise RuntimeError("recorder did not exit after completed capture") from None
+        if return_code != 0:
+            raise RuntimeError("recorder exited unsuccessfully")
+        return
+    stop_process(process)
+
+
+def remove_container(name: str) -> None:
+    removed = run(
+        "docker",
+        "rm",
+        "-f",
+        name,
+        check=False,
+        capture_output=True,
+    )
+    if removed.returncode != 0 and "No such container" not in (removed.stderr or ""):
+        raise RuntimeError("container removal failed")
+
+
 def rust_driver(driver: str, port: int) -> None:
     password = CAPTURE_PASSWORD
     url = f"postgresql://{CAPTURE_USER}:{password}@127.0.0.1:{port}/{CAPTURE_DB}?sslmode=disable"
@@ -128,16 +195,18 @@ def direct_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
     recorder_port = free_port()
     output = temp / f"direct-{driver}.json"
     recorder = start_recorder(recorder_port, postgres_port, output)
-    time.sleep(0.1)
-    try:
+    state = {"complete": False}
+    cleanups = [("direct recorder", lambda: reap_recorder(recorder, state["complete"]))]
+
+    def operation() -> None:
+        time.sleep(0.1)
         if driver == "psycopg":
             psycopg_driver(recorder_port)
         else:
             rust_driver(driver, recorder_port)
-        if recorder.wait(timeout=10) != 0:
-            raise RuntimeError(f"direct {driver} recorder failed")
-    finally:
-        stop_process(recorder)
+        state["complete"] = True
+
+    run_with_cleanup(operation, cleanups)
     captured = json.loads(output.read_text())
     if captured["set_batches"]:
         raise RuntimeError(f"direct {driver} unexpectedly emitted simple-query SET batches")
@@ -176,9 +245,15 @@ def pgdog_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
     recorder_port, pgdog_port = free_port(), free_port()
     output = temp / f"pgdog-backend-{driver}.json"
     recorder = start_recorder(recorder_port, postgres_port, output)
-    config = pgdog_files(temp, pgdog_port, recorder_port)
-    try:
-        run("docker", "rm", "-f", PGDOG_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    state = {"complete": False}
+    cleanups = [("PgDog recorder", lambda: reap_recorder(recorder, state["complete"]))]
+
+    def operation() -> None:
+        config = pgdog_files(temp, pgdog_port, recorder_port)
+        remove_container(PGDOG_CONTAINER)
+        # Ownership begins before `docker run`: a timeout can occur after Docker
+        # creates the named container but before the client receives its id.
+        cleanups.append(("PgDog container", lambda: remove_container(PGDOG_CONTAINER)))
         run(
             "docker", "run", "-d", "--rm", "--network", "host", "--name", PGDOG_CONTAINER,
             "-v", f"{config}:/etc/pgdog:ro", PGDOG_IMAGE,
@@ -191,13 +266,9 @@ def pgdog_capture(driver: str, postgres_port: int, temp: pathlib.Path) -> dict:
             psycopg_driver(pgdog_port)
         else:
             rust_driver(driver, pgdog_port)
-    finally:
-        run("docker", "rm", "-f", PGDOG_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        try:
-            if recorder.wait(timeout=10) != 0:
-                raise RuntimeError(f"PgDog {driver} recorder failed")
-        finally:
-            stop_process(recorder)
+        state["complete"] = True
+
+    run_with_cleanup(operation, cleanups)
     return json.loads(output.read_text())
 
 
@@ -275,23 +346,30 @@ def verify_environment() -> dict:
 def capture() -> dict:
     provenance = verify_environment()
     postgres_port = free_port()
-    run("docker", "rm", "-f", POSTGRES_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-    run(
-        "docker", "run", "-d", "--rm", "--name", POSTGRES_CONTAINER,
-        "-e", f"POSTGRES_USER={CAPTURE_USER}", "-e", f"POSTGRES_PASSWORD={CAPTURE_PASSWORD}",
-        "-e", f"POSTGRES_DB={CAPTURE_DB}", "-p", f"127.0.0.1:{postgres_port}:5432",
-        POSTGRES_IMAGE,
-        stdout=subprocess.DEVNULL,
-    )
-    try:
+    remove_container(POSTGRES_CONTAINER)
+    cleanups = [
+        ("PostgreSQL container", lambda: remove_container(POSTGRES_CONTAINER)),
+        ("PgDog container", lambda: remove_container(PGDOG_CONTAINER)),
+    ]
+
+    def operation():
+        # PostgreSQL ownership also begins before the start attempt because the
+        # Docker client can time out after creating the named container.
+        run(
+            "docker", "run", "-d", "--rm", "--name", POSTGRES_CONTAINER,
+            "-e", f"POSTGRES_USER={CAPTURE_USER}", "-e", f"POSTGRES_PASSWORD={CAPTURE_PASSWORD}",
+            "-e", f"POSTGRES_DB={CAPTURE_DB}", "-p", f"127.0.0.1:{postgres_port}:5432",
+            POSTGRES_IMAGE,
+            stdout=subprocess.DEVNULL,
+        )
         wait_postgres()
         with tempfile.TemporaryDirectory(prefix="gres-driver-capture-") as raw_temp:
             temp = pathlib.Path(raw_temp)
             direct = {driver: direct_capture(driver, postgres_port, temp) for driver in ("tokio-postgres", "sqlx", "psycopg")}
             backend = {driver: pgdog_capture(driver, postgres_port, temp) for driver in ("tokio-postgres", "sqlx", "psycopg")}
-    finally:
-        run("docker", "rm", "-f", PGDOG_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        run("docker", "rm", "-f", POSTGRES_CONTAINER, check=False, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        return direct, backend
+
+    direct, backend = run_with_cleanup(operation, cleanups)
 
     versions = {"tokio-postgres": "0.7.18", "sqlx": "0.9.0", "psycopg": "3.2.9"}
     sources = {
