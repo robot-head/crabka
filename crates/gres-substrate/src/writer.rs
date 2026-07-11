@@ -172,7 +172,7 @@ impl PauseReservation {
 
     fn mark_paused(&self) {
         let mut current = self.state.lock().expect("writer pause state lock poisoned");
-        debug_assert!(*current == WriterPauseState::Pausing);
+        debug_assert_eq!(*current, WriterPauseState::Pausing);
         *current = WriterPauseState::Paused;
     }
 
@@ -198,6 +198,46 @@ pub struct ProducerWalWriter {
     fenced: AtomicBool,
     commit_gate: Arc<Semaphore>,
     pause_state: Arc<Mutex<WriterPauseState>>,
+    indeterminate_handler: Arc<dyn Fn(&ProducerError) + Send + Sync>,
+    fault_injector: Option<Arc<dyn WalWriterFaultInjector>>,
+}
+
+/// Deterministic fault points in the production producer-backed state machine.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WalWriterFaultStage {
+    /// Before the first record is sent, while a broker transaction is open.
+    BeforeFirstSend,
+    /// After every produce acknowledgement and before `EndTxn(commit)`.
+    AfterSendAcks,
+    /// Immediately before aborting a transaction after a send failure.
+    BeforeAbort,
+    /// After a successful broker commit but before acknowledging its caller.
+    AfterCommit,
+}
+
+/// Test-only-style seam used by deterministic live fault gates.
+#[doc(hidden)]
+pub trait WalWriterFaultInjector: Send + Sync {
+    /// Return an injected producer failure for this exact stage.
+    fn inject(&self, stage: WalWriterFaultStage) -> Option<ProducerError>;
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommitFailure {
+    Rejected,
+    RejectedNeedsAbort,
+    Indeterminate,
+}
+
+fn classify_commit_failure(error: &ProducerError) -> CommitFailure {
+    match error {
+        ProducerError::ConcurrentTransactions => CommitFailure::RejectedNeedsAbort,
+        ProducerError::FencedProducer
+        | ProducerError::TransactionAborted
+        | ProducerError::Server(_) => CommitFailure::Rejected,
+        _ => CommitFailure::Indeterminate,
+    }
 }
 
 impl ProducerWalWriter {
@@ -210,7 +250,35 @@ impl ProducerWalWriter {
             fenced: AtomicBool::new(false),
             commit_gate: Arc::new(Semaphore::new(1)),
             pause_state: Arc::new(Mutex::new(WriterPauseState::Idle)),
+            indeterminate_handler: Arc::new(|error| {
+                tracing::error!(%error, "indeterminate WAL EndTxn outcome; terminating compute");
+                std::process::abort();
+            }),
+            fault_injector: None,
         }
+    }
+
+    /// Override the fatal indeterminate-outcome action.
+    ///
+    /// Production uses process abort so no SQL client can receive a false
+    /// failure acknowledgement. Tests install a notifier and assert that the
+    /// commit future never resolves.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_indeterminate_handler(
+        mut self,
+        handler: Arc<dyn Fn(&ProducerError) + Send + Sync>,
+    ) -> Self {
+        self.indeterminate_handler = handler;
+        self
+    }
+
+    /// Install deterministic faults for live acceptance tests.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn with_fault_injector(mut self, injector: Arc<dyn WalWriterFaultInjector>) -> Self {
+        self.fault_injector = Some(injector);
+        self
     }
 
     fn mark_fenced(&self) {
@@ -264,6 +332,9 @@ impl ProducerWalWriter {
             .begin_transaction_owned()
             .await
             .map_err(|error| self.map_producer_error(&error))?;
+        if let Some(error) = self.inject_fault(WalWriterFaultStage::BeforeFirstSend) {
+            return self.abort_after_send_error(transaction, error).await;
+        }
         let mut sent = Vec::with_capacity(request.frames.len());
         for frame in &request.frames {
             let pending = self
@@ -298,10 +369,30 @@ impl ProducerWalWriter {
                 journal_seq,
             });
         }
-        transaction
-            .commit()
-            .await
-            .map_err(|error| self.map_producer_error(&error.source))?;
+        if let Some(error) = self.inject_fault(WalWriterFaultStage::AfterSendAcks) {
+            return self.abort_after_send_error(transaction, error).await;
+        }
+        if let Err(error) = transaction.commit().await {
+            let substrate_error = self.map_producer_error(&error.source);
+            match classify_commit_failure(&error.source) {
+                CommitFailure::RejectedNeedsAbort => {
+                    return self
+                        .abort_with_error(error.transaction, substrate_error)
+                        .await;
+                }
+                CommitFailure::Rejected => return Err(substrate_error),
+                CommitFailure::Indeterminate => {
+                    (self.indeterminate_handler)(&error.source);
+                    std::future::pending::<()>().await;
+                    unreachable!("indeterminate WAL handler must terminate the compute");
+                }
+            }
+        }
+        if let Some(error) = self.inject_fault(WalWriterFaultStage::AfterCommit) {
+            (self.indeterminate_handler)(&error);
+            std::future::pending::<()>().await;
+            unreachable!("indeterminate WAL handler must terminate the compute");
+        }
         Ok(GroupCommitAck { frames })
     }
 }
@@ -366,6 +457,12 @@ impl TransactionalWalWriter for ProducerWalWriter {
 }
 
 impl ProducerWalWriter {
+    fn inject_fault(&self, stage: WalWriterFaultStage) -> Option<ProducerError> {
+        self.fault_injector
+            .as_ref()
+            .and_then(|injector| injector.inject(stage))
+    }
+
     fn is_pause_reserved(&self) -> bool {
         *self
             .pause_state
@@ -380,6 +477,16 @@ impl ProducerWalWriter {
         error: ProducerError,
     ) -> Result<GroupCommitAck, SubstrateError> {
         let substrate_error = self.map_producer_error(&error);
+        if matches!(
+            error,
+            ProducerError::FencedProducer | ProducerError::TransactionAborted
+        ) {
+            // The broker has proved this epoch cannot commit. The returned
+            // guard cannot be cleanly aborted once the producer is fenced,
+            // but this is not ambiguous: no record from it can become durable.
+            drop(transaction);
+            return Err(substrate_error);
+        }
         self.abort_with_error(transaction, substrate_error).await
     }
 
@@ -388,13 +495,19 @@ impl ProducerWalWriter {
         transaction: OwnedTransaction,
         substrate_error: SubstrateError,
     ) -> Result<GroupCommitAck, SubstrateError> {
-        transaction.abort().await.map_err(|error| {
-            SubstrateError::Unavailable(format!(
-                "abort after WAL send failure failed: {}",
-                error.source
-            ))
-        })?;
-        Err(substrate_error)
+        if let Some(error) = self.inject_fault(WalWriterFaultStage::BeforeAbort) {
+            (self.indeterminate_handler)(&error);
+            std::future::pending::<()>().await;
+            unreachable!("indeterminate WAL handler must terminate the compute");
+        }
+        match transaction.abort().await {
+            Ok(()) => Err(substrate_error),
+            Err(error) => {
+                (self.indeterminate_handler)(&error.source);
+                std::future::pending::<()>().await;
+                unreachable!("indeterminate WAL handler must terminate the compute");
+            }
+        }
     }
 
     fn map_producer_error(&self, error: &ProducerError) -> SubstrateError {
@@ -753,6 +866,30 @@ mod tests {
 
     use super::*;
     use crate::recovery::RecoveryFencer;
+
+    #[test]
+    fn end_txn_classification_only_calls_proven_broker_rejections_definite() {
+        assert!(matches!(
+            classify_commit_failure(&ProducerError::FencedProducer),
+            CommitFailure::Rejected
+        ));
+        assert!(matches!(
+            classify_commit_failure(&ProducerError::ConcurrentTransactions),
+            CommitFailure::RejectedNeedsAbort
+        ));
+        assert!(matches!(
+            classify_commit_failure(&ProducerError::Server(42)),
+            CommitFailure::Rejected
+        ));
+        assert!(matches!(
+            classify_commit_failure(&ProducerError::FlushTimeout),
+            CommitFailure::Indeterminate
+        ));
+        assert!(matches!(
+            classify_commit_failure(&ProducerError::RecoveryRequired),
+            CommitFailure::Indeterminate
+        ));
+    }
 
     #[derive(Default)]
     struct FakeWalWriter {
