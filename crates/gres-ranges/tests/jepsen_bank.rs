@@ -4,7 +4,7 @@ use std::{num::NonZeroU64, sync::Arc};
 
 use crabka_gres_ranges::{MemoryTsoHorizon, TsoError, TsoOracle};
 use crabka_pgkv::MemKv;
-use harness::{SystemHarness, TableAccount};
+use harness::{SystemHarness, TableAccount, process::ProcessHarness};
 
 #[tokio::test]
 async fn jepsen_bank_deterministic_transfers_preserve_total_balance() {
@@ -23,6 +23,100 @@ async fn jepsen_bank_deterministic_transfers_preserve_total_balance() {
     );
 
     assert_eq!(system.bank_total().await, 200);
+}
+
+#[tokio::test]
+async fn real_process_bank_history_preserves_exact_balances_across_writer_kill() {
+    let mut system = ProcessHarness::start("tenant-real-jepsen-bank").await;
+    system
+        .create_table_on_all(
+            "CREATE TABLE bank50 (id int4, balance int4); \
+             CREATE TABLE bank150 (id int4, balance int4)",
+        )
+        .await;
+    system
+        .sql(0)
+        .await
+        .simple_query(
+            "INSERT INTO bank50 VALUES (1, 100); \
+             INSERT INTO bank150 VALUES (1, 100)",
+        )
+        .await
+        .expect("seed bank");
+
+    let a = real_transfer(system.sql(0).await, true, 7);
+    let b = real_transfer(system.sql(0).await, false, 3);
+    let c = real_transfer(system.sql(0).await, true, 5);
+    let d = real_transfer(system.sql(0).await, false, 11);
+    let (a, b, c, d) = tokio::join!(a, b, c, d);
+    for result in [a, b, c, d] {
+        result.expect("concurrent transfer");
+    }
+
+    system.kill(1).await;
+    assert!(real_transfer(system.sql(0).await, true, 13).await.is_err());
+    system.restart(1).await;
+
+    let e = real_transfer(system.sql(0).await, true, 2);
+    let f = real_transfer(system.sql(0).await, false, 4);
+    let (e, f) = tokio::join!(e, f);
+    e.expect("post-recovery debit");
+    f.expect("post-recovery credit");
+
+    let client = system.sql(0).await;
+    let left: i32 = client
+        .query_one("SELECT balance FROM bank50 WHERE id = 1", &[])
+        .await
+        .expect("read left")
+        .get(0);
+    let right: i32 = client
+        .query_one("SELECT balance FROM bank150 WHERE id = 1", &[])
+        .await
+        .expect("read right")
+        .get(0);
+    assert_eq!((left, right, left + right), (104, 96, 200));
+}
+
+async fn real_transfer(
+    client: tokio_postgres::Client,
+    from_left: bool,
+    amount: i32,
+) -> Result<(), tokio_postgres::Error> {
+    client.simple_query("BEGIN").await?;
+    let transfer = async {
+        let left: i32 = client
+            .query_one("SELECT balance FROM bank50 WHERE id = 1", &[])
+            .await?
+            .get(0);
+        let right: i32 = client
+            .query_one("SELECT balance FROM bank150 WHERE id = 1", &[])
+            .await?
+            .get(0);
+        let (new_left, new_right) = if from_left {
+            (left - amount, right + amount)
+        } else {
+            (left + amount, right - amount)
+        };
+        client
+            .simple_query(&format!(
+                "UPDATE bank50 SET balance = {new_left} WHERE id = 1"
+            ))
+            .await?;
+        client
+            .simple_query(&format!(
+                "UPDATE bank150 SET balance = {new_right} WHERE id = 1"
+            ))
+            .await?;
+        Ok::<(), tokio_postgres::Error>(())
+    }
+    .await;
+    match transfer {
+        Ok(()) => client.simple_query("COMMIT").await.map(|_| ()),
+        Err(error) => {
+            let _ = client.simple_query("ROLLBACK").await;
+            Err(error)
+        }
+    }
 }
 
 #[tokio::test]
