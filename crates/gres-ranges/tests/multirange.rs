@@ -2,7 +2,65 @@ use crabka_gres_ranges::{
     HashShardSpec, MultiRangeTenant, MultiRangeTenantConfig, RangeId, StatementKind, TableId,
     TenantName,
 };
-use crabka_pgwire::engine::{BoundParam, Engine, QueryResult, Session};
+use crabka_pgwire::engine::{
+    BoundParam, CloseTarget, Engine, ExecuteOutcome, QueryResult, Session,
+};
+
+#[tokio::test]
+async fn gateway_owns_multiple_portals_cursor_close_and_sync_lifetimes() {
+    let (gateway, _handles) = MultiRangeTenant::start(tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4); INSERT INTO t150 VALUES (1), (2), (3)")
+        .await
+        .expect("seed");
+
+    session
+        .parse("statement", "SELECT id FROM t150 ORDER BY id", &[])
+        .await
+        .expect("parse");
+    session
+        .bind("first", "statement", &[], &[0])
+        .await
+        .expect("bind first");
+    session
+        .bind("second", "statement", &[], &[1])
+        .await
+        .expect("bind second");
+
+    let ExecuteOutcome::Rows { rows, completion } =
+        session.execute("first", 1).await.expect("first page")
+    else {
+        panic!("expected rows");
+    };
+    assert_eq!(rows.len(), 1);
+    assert!(completion.is_none());
+    let ExecuteOutcome::Rows { rows, completion } =
+        session.execute("first", 0).await.expect("resume")
+    else {
+        panic!("expected rows");
+    };
+    assert_eq!(rows.len(), 2);
+    assert_eq!(completion.as_deref(), Some("SELECT 3"));
+
+    session
+        .close(CloseTarget::Portal("first"))
+        .await
+        .expect("close portal");
+    assert_eq!(
+        session.execute("first", 0).await.expect_err("closed").code,
+        "34000"
+    );
+    session.sync().await.expect("sync");
+    assert_eq!(
+        session.execute("second", 0).await.expect_err("synced").code,
+        "34000"
+    );
+    session
+        .describe_statement("statement")
+        .await
+        .expect("prepared survives sync");
+}
 
 fn tenant_config() -> MultiRangeTenantConfig {
     MultiRangeTenantConfig::from_boundaries(
@@ -349,7 +407,7 @@ async fn parameterized_row_insert_is_rejected_before_binding() {
     let params = [text_param("20")];
 
     let error = session
-        .extended_query("INSERT INTO t150 VALUES ($1, 7)", &params)
+        .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
         .await
         .expect_err("parameterized row insert rejected");
 
@@ -450,7 +508,7 @@ async fn parameterized_hash_insert_is_rejected_before_binding() {
     let params = [text_param("42")];
 
     let error = session
-        .extended_query("INSERT INTO t150 VALUES ($1, 7)", &params)
+        .extended_query_v2("INSERT INTO t150 VALUES ($1, 7)", &params)
         .await
         .expect_err("parameterized insert rejected");
 
@@ -468,7 +526,7 @@ async fn parameterized_hash_select_is_rejected_before_binding() {
     let params = [text_param("42")];
 
     let error = session
-        .extended_query("SELECT value FROM t150 WHERE id = $1", &params)
+        .extended_query_v2("SELECT value FROM t150 WHERE id = $1", &params)
         .await
         .expect_err("parameterized select rejected");
 
@@ -572,3 +630,6 @@ async fn select_scalar(
     let cell = row[0].as_ref().expect("non-null cell");
     std::str::from_utf8(&cell.text).expect("utf8").to_string()
 }
+mod support;
+
+use support::ExtendedQueryV2 as _;
