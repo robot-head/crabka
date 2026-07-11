@@ -3829,8 +3829,10 @@ impl Session for SqlSession {
                         .await?;
                         continue;
                     }
-                    let mut pages = into_row_pages(rows, page_rows).peekable();
+                    let mut pages =
+                        into_bounded_row_pages(rows, page_rows, RESULT_PAGE_MAX_BYTES).peekable();
                     while let Some(rows) = pages.next() {
+                        let rows = rows?;
                         let final_page = pages.peek().is_none();
                         sink.send(ResultPage::Rows {
                             result_index,
@@ -4199,12 +4201,56 @@ impl Session for SqlSession {
     }
 }
 
-fn into_row_pages<T>(rows: Vec<T>, page_rows: usize) -> impl Iterator<Item = Vec<T>> {
+const RESULT_PAGE_MAX_BYTES: usize = 1 << 20;
+
+fn into_bounded_row_pages(
+    rows: Vec<Vec<Option<crabka_pgwire::engine::Cell>>>,
+    page_rows: usize,
+    page_bytes: usize,
+) -> impl Iterator<Item = Result<Vec<Vec<Option<crabka_pgwire::engine::Cell>>>, PgError>> {
     debug_assert!(page_rows > 0);
-    let mut rows = rows.into_iter();
+    debug_assert!(page_bytes > 0);
+    let mut rows = rows.into_iter().peekable();
     std::iter::from_fn(move || {
-        let page: Vec<_> = rows.by_ref().take(page_rows).collect();
-        (!page.is_empty()).then_some(page)
+        let first_bytes = match row_result_bytes(rows.peek()?) {
+            Ok(bytes) => bytes,
+            Err(error) => return Some(Err(error)),
+        };
+        if first_bytes > page_bytes {
+            rows.next();
+            return Some(Err(PgError::error(
+                "54000",
+                format!(
+                    "one result row requires {first_bytes} bytes, exceeding the {page_bytes}-byte page limit"
+                ),
+            )));
+        }
+        let mut bytes = 0usize;
+        let mut page = Vec::with_capacity(page_rows);
+        while page.len() < page_rows {
+            let Some(row) = rows.peek() else { break };
+            let row_bytes = match row_result_bytes(row) {
+                Ok(row_bytes) => row_bytes,
+                Err(error) => return Some(Err(error)),
+            };
+            if !page.is_empty() && bytes.saturating_add(row_bytes) > page_bytes {
+                break;
+            }
+            bytes = bytes.saturating_add(row_bytes);
+            page.push(rows.next().expect("peeked row exists"));
+        }
+        Some(Ok(page))
+    })
+}
+
+fn row_result_bytes(row: &[Option<crabka_pgwire::engine::Cell>]) -> Result<usize, PgError> {
+    row.iter().try_fold(0usize, |bytes, cell| {
+        let cell_bytes = cell
+            .as_ref()
+            .map_or(0, |cell| cell.text.len().saturating_add(cell.binary.len()));
+        bytes.checked_add(cell_bytes).ok_or_else(|| {
+            PgError::error("54000", "result row byte size exceeds addressable memory")
+        })
     })
 }
 
@@ -4326,14 +4372,45 @@ mod tests {
     #[test]
     fn row_pages_consume_many_page_input_once_in_order() {
         let rows: Vec<_> = (0..10_003).collect();
-        let pages: Vec<_> = super::into_row_pages(rows, 17).collect();
+        let rows = rows
+            .into_iter()
+            .map(|value| {
+                vec![Some(crabka_pgwire::engine::Cell {
+                    text: bytes::Bytes::from(value.to_string()),
+                    binary: bytes::Bytes::copy_from_slice(&i32::to_be_bytes(value)),
+                })]
+            })
+            .collect();
+        let pages: Vec<_> = super::into_bounded_row_pages(rows, 17, usize::MAX)
+            .collect::<Result<_, _>>()
+            .expect("bounded pages");
 
         assert_eq!(pages.len(), 589);
         assert!(pages.iter().all(|page| page.len() <= 17));
-        assert_eq!(
-            pages.into_iter().flatten().collect::<Vec<_>>(),
-            (0..10_003).collect::<Vec<_>>()
-        );
+        let values: Vec<_> = pages
+            .into_iter()
+            .flatten()
+            .map(|row| row[0].as_ref().expect("cell").text.clone())
+            .collect();
+        assert_eq!(values.first().expect("first"), "0");
+        assert_eq!(values.last().expect("last"), "10002");
+    }
+
+    #[test]
+    fn row_pages_reject_a_single_oversized_row() {
+        use bytes::Bytes;
+        use crabka_pgwire::engine::Cell;
+
+        let rows = vec![vec![Some(Cell {
+            text: Bytes::from_static(b"12345"),
+            binary: Bytes::new(),
+        })]];
+        let error = super::into_bounded_row_pages(rows, 10, 4)
+            .next()
+            .expect("one result")
+            .expect_err("row exceeds byte limit");
+
+        assert_eq!(error.code, "54000");
     }
 
     #[tokio::test]
