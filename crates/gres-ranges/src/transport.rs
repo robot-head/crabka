@@ -5,6 +5,7 @@ use std::net::SocketAddr;
 use std::{collections::BTreeSet, future::Future, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
+use crabka_pgwire::engine::{ResultPage, ResultSink};
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 use tokio::{
@@ -410,6 +411,9 @@ pub enum TransportError {
         kind: WireErrorKind,
         message: String,
     },
+    /// The remote SQL engine returned a PostgreSQL error.
+    #[error("remote SQL error {code}: {message}")]
+    Sql { code: String, message: String },
     /// The peer returned the wrong response variant.
     #[error("range endpoint returned an unexpected response")]
     UnexpectedResponse,
@@ -584,6 +588,110 @@ impl FramedTcpClient {
             #[cfg(test)]
             RangeClientMode::Plaintext => call_stream(stream, request, self.timeout).await,
         }
+    }
+
+    /// Send one SQL request and forward bounded result pages as they arrive.
+    pub async fn call_sql_into(
+        &self,
+        endpoint: &str,
+        request: &RangeRequest,
+        sink: &mut dyn ResultSink,
+    ) -> Result<(), TransportError> {
+        let stream = timeout(self.timeout, TcpStream::connect(endpoint)).await??;
+        match &self.mode {
+            RangeClientMode::Tls(config) => {
+                let connector = config.build_connector()?;
+                let server_name =
+                    rustls::pki_types::ServerName::try_from(config.server_name.as_str())
+                        .map_err(|error| {
+                            TransportError::Tls(format!("invalid range server name: {error}"))
+                        })?
+                        .to_owned();
+                let stream = timeout(self.timeout, connector.connect(server_name, stream))
+                    .await
+                    .map_err(|_| TransportError::Timeout(self.timeout))?
+                    .map_err(|error| TransportError::Tls(error.to_string()))?;
+                call_sql_stream_into(stream, request, self.timeout, sink).await
+            }
+            #[cfg(test)]
+            RangeClientMode::Plaintext => {
+                call_sql_stream_into(stream, request, self.timeout, sink).await
+            }
+        }
+    }
+}
+
+async fn call_sql_stream_into<S>(
+    mut stream: S,
+    request: &RangeRequest,
+    wait: Duration,
+    sink: &mut dyn ResultSink,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    timeout(wait, write_frame(&mut stream, request)).await??;
+    timeout(wait, stream.flush()).await??;
+    loop {
+        match timeout(wait, read_frame(&mut stream)).await?? {
+            RangeResponse::SqlResultsChunk { chunk } => {
+                sink.send(wire_chunk_to_result_page(chunk)?)
+                    .await
+                    .map_err(|error| TransportError::Remote {
+                        kind: WireErrorKind::Failed,
+                        message: error.message,
+                    })?;
+            }
+            RangeResponse::SqlResultsDone => return Ok(()),
+            RangeResponse::SqlError { code, message } => {
+                return Err(TransportError::Sql { code, message });
+            }
+            RangeResponse::Error { error, message } => {
+                return Err(TransportError::Remote {
+                    kind: error,
+                    message,
+                });
+            }
+            _ => {
+                return Err(TransportError::Protocol(
+                    "unexpected SQL result stream frame".into(),
+                ));
+            }
+        }
+    }
+}
+
+fn wire_chunk_to_result_page(chunk: WireSqlResultChunk) -> Result<ResultPage, TransportError> {
+    match chunk {
+        WireSqlResultChunk::Complete {
+            result_index,
+            result,
+        } => match result {
+            WireQueryResult::Command { tag } => Ok(ResultPage::Command {
+                result_index: result_index as usize,
+                tag,
+            }),
+            WireQueryResult::Empty => Ok(ResultPage::Empty {
+                result_index: result_index as usize,
+            }),
+            WireQueryResult::Rows { .. } => Err(TransportError::Protocol(
+                "complete SQL chunk contained row result".into(),
+            )),
+        },
+        WireSqlResultChunk::Rows {
+            result_index,
+            fields,
+            rows,
+            tag,
+        } => Ok(ResultPage::Rows {
+            result_index: result_index as usize,
+            fields: fields.map(|fields| fields.into_iter().map(Into::into).collect()),
+            rows: rows
+                .into_iter()
+                .map(|row| row.into_iter().map(|cell| cell.map(Into::into)).collect())
+                .collect(),
+            tag,
+        }),
     }
 }
 

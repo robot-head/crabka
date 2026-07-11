@@ -1679,6 +1679,68 @@ impl Session for GatewaySession {
         Ok(all_results)
     }
 
+    async fn simple_query_into<S: crabka_pgwire::engine::ResultSink>(
+        &mut self,
+        sql: &str,
+        page_rows: usize,
+        sink: &mut S,
+    ) -> Result<(), PgError> {
+        if page_rows == 0 {
+            return Err(PgError::protocol(
+                "result page size must be greater than zero",
+            ));
+        }
+        let statements = split_statements(sql).collect::<Vec<_>>();
+        if statements.is_empty() {
+            return sink
+                .send(crabka_pgwire::engine::ResultPage::Empty { result_index: 0 })
+                .await;
+        }
+        let mut result_index = 0usize;
+        for statement in statements {
+            self.current_serving()?;
+            self.reject_statement_in_failed_transaction(statement)?;
+            let route = self.route_statement(statement)?;
+            let remote_streamable = matches!(self.transaction, GatewayTransaction::Idle)
+                && route.kind == StatementKind::Query
+                && route.scatter_ranges.is_none()
+                && !self.sessions.contains_key(&route.range_id);
+            if remote_streamable {
+                self.inner.route_log.lock().await.push(RouteRecord {
+                    kind: route.kind,
+                    range_id: route.range_id,
+                    table_id: route.table_id,
+                });
+                let forward = self.inner.remote_forward.clone().ok_or_else(|| {
+                    PgError::error(
+                        sqlstate::FEATURE_NOT_SUPPORTED,
+                        format!(
+                            "range r{} is not hosted by tenant {}",
+                            route.range_id, self.inner.tenant
+                        ),
+                    )
+                })?;
+                let mut offset = OffsetResultSink {
+                    inner: sink,
+                    offset: result_index,
+                    completed: 0,
+                };
+                forward
+                    .forward_query_into(route.range_id, statement.to_owned(), &mut offset)
+                    .await
+                    .map_err(ForwardError::into_pg)?;
+                result_index = result_index.saturating_add(offset.completed);
+                continue;
+            }
+
+            for result in self.execute_one(statement).await? {
+                send_gateway_result(sink, result_index, page_rows, result).await?;
+                result_index = result_index.saturating_add(1);
+            }
+        }
+        Ok(())
+    }
+
     async fn parse(
         &mut self,
         name: &str,
@@ -1753,6 +1815,71 @@ impl Session for GatewaySession {
 
     fn tx_status(&self) -> TxStatus {
         self.status
+    }
+}
+
+struct OffsetResultSink<'a, S> {
+    inner: &'a mut S,
+    offset: usize,
+    completed: usize,
+}
+
+#[async_trait::async_trait]
+impl<S: crabka_pgwire::engine::ResultSink> crabka_pgwire::engine::ResultSink
+    for OffsetResultSink<'_, S>
+{
+    async fn send(&mut self, mut page: crabka_pgwire::engine::ResultPage) -> Result<(), PgError> {
+        let (index, terminal) = match &mut page {
+            crabka_pgwire::engine::ResultPage::Rows {
+                result_index, tag, ..
+            } => (result_index, tag.is_some()),
+            crabka_pgwire::engine::ResultPage::Command { result_index, .. }
+            | crabka_pgwire::engine::ResultPage::Empty { result_index } => (result_index, true),
+        };
+        *index = index
+            .checked_add(self.offset)
+            .ok_or_else(|| PgError::error("54000", "remote result index exceeds capacity"))?;
+        if terminal {
+            self.completed = self.completed.saturating_add(1);
+        }
+        self.inner.send(page).await
+    }
+}
+
+async fn send_gateway_result<S: crabka_pgwire::engine::ResultSink>(
+    sink: &mut S,
+    result_index: usize,
+    page_rows: usize,
+    result: QueryResult,
+) -> Result<(), PgError> {
+    use crabka_pgwire::engine::ResultPage;
+    match result {
+        QueryResult::Rows { fields, rows, tag } => {
+            if rows.is_empty() {
+                return sink
+                    .send(ResultPage::Rows {
+                        result_index,
+                        fields: Some(fields),
+                        rows,
+                        tag: Some(tag),
+                    })
+                    .await;
+            }
+            let chunks = rows.len().div_ceil(page_rows);
+            let mut fields = Some(fields);
+            for (index, rows) in rows.chunks(page_rows).enumerate() {
+                sink.send(ResultPage::Rows {
+                    result_index,
+                    fields: fields.take(),
+                    rows: rows.to_vec(),
+                    tag: (index + 1 == chunks).then(|| tag.clone()),
+                })
+                .await?;
+            }
+            Ok(())
+        }
+        QueryResult::Command { tag } => sink.send(ResultPage::Command { result_index, tag }).await,
+        QueryResult::Empty => sink.send(ResultPage::Empty { result_index }).await,
     }
 }
 
