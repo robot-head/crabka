@@ -36,3 +36,19 @@ Reviewed the complete diff for ownership, transaction phase, routing epoch valid
 ## Concerns
 
 The mandatory clippy and live E2E gates are not green for the out-of-scope failures recorded above. The full affected nextest suite also retains the unrelated runtime transfer assertion failure. These were not modified because the bounded task is Session-v2 consumer integration.
+
+## Review repair wave
+
+Commit follow-up verification on 2026-07-11:
+
+- Added cached gateway execution outcomes for Begin/Commit/Rollback/DDL portals. Focused repeated-DDL Execute proves the second Execute returns the cached completion without repeating the side effect.
+- Unnamed Parse and Bind now remove/take the old gateway entry before closing it and attempting replacement. `failed_unnamed_replacements_remove_old_gateway_resources` proves failed replacements leave neither stale statement nor stale portal metadata.
+- The test-only `extended_query_v2` helper now always uses Parse/Bind/Execute, including zero-parameter transaction, refusal, failed-state, and cleanup cases. Unsupported `COMMIT WORK`/`ROLLBACK WORK` parser spellings remain covered only by simple-protocol tests; supported extended spellings exercise the actual v2 lifecycle.
+- Added `runtime_session_forwards_v2_for_single_and_multi`, covering both variants, max_rows suspension, Close, Sync, and prepared survival. Exact focused result: `1 test run: 1 passed, 51 skipped`.
+- Added stale-map epoch validation to both gateway describe methods and assertions in the existing split/reconnect test.
+- Focused gateway result: `53 tests run: 53 passed, 0 skipped`.
+- Full affected result: `251 tests run: 250 passed, 1 failed, 0 skipped`. The sole failure remained `crabka-gres::runtime live_multirange_transfer_stages_populated_successor_without_publishing_it` at the unchanged `crates/gres/tests/runtime.rs:432` assertion.
+- `cargo check -p crabka-gres-ranges -p crabka-gres --all-targets`: passed (`Finished dev profile`).
+- `cargo clippy -p crabka-gres-ranges -p crabka-gres --all-targets -- -D warnings`: still blocked solely by `crates/gres-substrate/src/writer.rs:175:9`, `clippy::manual_assert_eq`, suggesting `debug_assert_eq!(*current, WriterPauseState::Pausing)`. `git diff 8f72f2f3 -- crates/gres-substrate/src/writer.rs` produced no output, confirming the blocker is unchanged from the task baseline.
+- `cargo +nightly fmt --all -- --check`: passed with no output.
+- `git diff --check`: passed with no output.

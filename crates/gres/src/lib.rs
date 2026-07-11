@@ -3965,4 +3965,49 @@ mod tests {
 
         assert_eq!(error.kind(), clap::error::ErrorKind::UnknownArgument);
     }
+
+    async fn assert_runtime_session_v2(mut session: RuntimeSession) {
+        session
+            .simple_query("CREATE TABLE t150 (id int4); INSERT INTO t150 VALUES (1), (2)")
+            .await
+            .expect("seed");
+        session
+            .parse("statement", "SELECT id FROM t150 ORDER BY id", &[])
+            .await
+            .expect("parse");
+        session
+            .bind("portal", "statement", &[], &[])
+            .await
+            .expect("bind");
+        let ExecuteOutcome::Rows { rows, completion } =
+            session.execute("portal", 1).await.expect("page")
+        else {
+            panic!("expected rows");
+        };
+        assert_eq!(rows.len(), 1);
+        assert!(completion.is_none());
+        session
+            .close(CloseTarget::Portal("portal"))
+            .await
+            .expect("close");
+        session.sync().await.expect("sync");
+        session
+            .describe_statement("statement")
+            .await
+            .expect("prepared survives sync");
+    }
+
+    #[tokio::test]
+    async fn runtime_session_forwards_v2_for_single_and_multi() {
+        let single = RuntimeEngine::Single(Box::new(SqlEngine::new())).connect();
+        assert_runtime_session_v2(single).await;
+
+        let config = crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(
+            crabka_gres_ranges::TenantName::parse("runtime_v2").expect("tenant"),
+            "0,100,200",
+        )
+        .expect("config");
+        let (multi, _handles) = crabka_gres_ranges::MultiRangeTenant::start(config).expect("multi");
+        assert_runtime_session_v2(RuntimeEngine::Multi(Box::new(multi)).connect()).await;
+    }
 }

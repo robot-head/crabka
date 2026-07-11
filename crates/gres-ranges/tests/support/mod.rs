@@ -18,19 +18,13 @@ impl ExtendedQueryV2 for GatewaySession {
         sql: &str,
         params: &[BoundParam],
     ) -> Result<Vec<QueryResult>, PgError> {
-        if params.is_empty() {
-            return self.simple_query(sql).await;
-        }
-        let description = self.parse("test_statement", sql, &[]).await?;
-        self.bind("test_portal", "test_statement", params, &[])
+        let description = self.parse("", sql, &[]).await?;
+        self.bind("", "", params, &[]).await?;
+        let outcome = self.execute("", 0).await?;
+        self.close(crabka_pgwire::engine::CloseTarget::Portal(""))
             .await?;
-        let outcome = self.execute("test_portal", 0).await?;
-        self.close(crabka_pgwire::engine::CloseTarget::Portal("test_portal"))
+        self.close(crabka_pgwire::engine::CloseTarget::Statement(""))
             .await?;
-        self.close(crabka_pgwire::engine::CloseTarget::Statement(
-            "test_statement",
-        ))
-        .await?;
         Ok(vec![match outcome {
             ExecuteOutcome::Rows { rows, completion } => QueryResult::Rows {
                 fields: description.fields,
