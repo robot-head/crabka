@@ -805,7 +805,21 @@ where
     let mut page = Vec::new();
     let mut page_bytes = 0usize;
     for row in rows {
-        let row_bytes = serde_json::to_vec(&row)?.len().saturating_add(1);
+        let row_bytes = match serialize_json_bounded(&row, SQL_CHUNK_TARGET_BYTES) {
+            Ok(bytes) => bytes.len().saturating_add(1),
+            Err(TransportError::FrameTooLarge { .. }) => {
+                write_frame(
+                    writer,
+                    &RangeResponse::SqlError {
+                        code: "54000".into(),
+                        message: "one remote SQL row exceeds the transport frame limit".into(),
+                    },
+                )
+                .await?;
+                return Ok(());
+            }
+            Err(error) => return Err(error),
+        };
         let overhead = if page.is_empty() {
             let probe = RangeResponse::SqlResultsChunk {
                 chunk: WireSqlResultChunk::Rows {
@@ -815,7 +829,7 @@ where
                     tag: None,
                 },
             };
-            serde_json::to_vec(&probe)?.len()
+            serialize_json_bounded(&probe, SQL_CHUNK_TARGET_BYTES)?.len()
         } else {
             0
         };
@@ -888,13 +902,7 @@ where
     W: AsyncWrite + Unpin,
     T: Serialize,
 {
-    let bytes = serde_json::to_vec(value)?;
-    if bytes.len() > MAX_FRAME_BYTES {
-        return Err(TransportError::FrameTooLarge {
-            actual: bytes.len(),
-            limit: MAX_FRAME_BYTES,
-        });
-    }
+    let bytes = serialize_json_bounded(value, MAX_FRAME_BYTES)?;
     let len = u32::try_from(bytes.len()).map_err(|_| TransportError::FrameTooLarge {
         actual: bytes.len(),
         limit: MAX_FRAME_BYTES,
@@ -902,6 +910,48 @@ where
     writer.write_u32(len).await?;
     writer.write_all(&bytes).await?;
     Ok(())
+}
+
+fn serialize_json_bounded<T>(value: &T, limit: usize) -> Result<Vec<u8>, TransportError>
+where
+    T: Serialize,
+{
+    struct BoundedWriter {
+        bytes: Vec<u8>,
+        limit: usize,
+        attempted: usize,
+    }
+
+    impl std::io::Write for BoundedWriter {
+        fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+            self.attempted = self.bytes.len().saturating_add(buf.len());
+            if self.attempted > self.limit {
+                return Err(std::io::Error::other("bounded JSON output exceeded limit"));
+            }
+            self.bytes.extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    let mut writer = BoundedWriter {
+        bytes: Vec::new(),
+        limit,
+        attempted: 0,
+    };
+    if let Err(error) = serde_json::to_writer(&mut writer, value) {
+        if writer.attempted > limit {
+            return Err(TransportError::FrameTooLarge {
+                actual: writer.attempted,
+                limit,
+            });
+        }
+        return Err(TransportError::Json(error));
+    }
+    Ok(writer.bytes)
 }
 
 async fn read_frame<R, T>(reader: &mut R) -> Result<T, TransportError>
@@ -938,6 +988,18 @@ mod tests {
         path::PathBuf,
         sync::atomic::{AtomicUsize, Ordering},
     };
+
+    #[test]
+    fn bounded_json_serialization_rejects_before_allocating_an_oversized_candidate() {
+        let oversized = "x".repeat(4 * MAX_FRAME_BYTES);
+
+        let error = serialize_json_bounded(&oversized, MAX_FRAME_BYTES)
+            .expect_err("oversized JSON candidate is rejected at the limit");
+
+        assert!(
+            matches!(error, TransportError::FrameTooLarge { limit, .. } if limit == MAX_FRAME_BYTES)
+        );
+    }
 
     use super::*;
 
