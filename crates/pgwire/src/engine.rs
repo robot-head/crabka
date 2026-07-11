@@ -55,6 +55,59 @@ pub struct CopyInResponse {
     pub column_formats: Vec<i16>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PreparedDescription {
+    pub parameter_types: Vec<u32>,
+    pub fields: Vec<FieldDescription>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PortalDescription {
+    pub fields: Vec<FieldDescription>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CloseTarget<'a> {
+    Statement(&'a str),
+    Portal(&'a str),
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CopyOutResponse {
+    pub overall_format: i16,
+    pub column_formats: Vec<i16>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Notification {
+    pub process_id: i32,
+    pub channel: String,
+    pub payload: String,
+}
+
+#[non_exhaustive]
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ExecuteOutcome {
+    /// Values are already encoded in the portal's negotiated result formats.
+    Rows {
+        rows: Vec<Vec<Option<Bytes>>>,
+        completion: Option<String>,
+    },
+    CommandComplete {
+        tag: String,
+    },
+    EmptyQuery,
+    CopyIn {
+        response: CopyInResponse,
+    },
+    CopyOut {
+        response: CopyOutResponse,
+    },
+    Notification {
+        notification: Notification,
+    },
+}
+
 pub use crate::messages::backend::TxStatus;
 
 /// A database engine: a factory for per-connection sessions. Shared across all
@@ -83,36 +136,37 @@ pub trait Session: Send {
         sql: &str,
     ) -> impl Future<Output = Result<Vec<QueryResult>, PgError>> + Send;
 
-    /// Execute one extended-protocol portal with already-bound parameters.
-    fn extended_query(
+    fn parse(
         &mut self,
+        name: &str,
         sql: &str,
+        parameter_types: &[u32],
+    ) -> impl Future<Output = Result<PreparedDescription, PgError>> + Send;
+    fn bind(
+        &mut self,
+        portal: &str,
+        statement: &str,
         params: &[BoundParam],
-    ) -> impl Future<Output = Result<Vec<QueryResult>, PgError>> + Send {
-        let _ = params;
-        self.simple_query(sql)
-    }
-
-    /// Row description for a statement without executing it (extended-protocol
-    /// Describe). Empty vec = statement returns no rows.
-    fn describe(
+        result_formats: &[i16],
+    ) -> impl Future<Output = Result<PortalDescription, PgError>> + Send;
+    fn describe_statement(
         &mut self,
-        sql: &str,
-    ) -> impl Future<Output = Result<Vec<FieldDescription>, PgError>> + Send;
-
-    /// Row description for a parsed statement, including client-supplied
-    /// parameter type OIDs when the engine cannot infer them from SQL alone.
-    fn describe_prepared(
+        name: &str,
+    ) -> impl Future<Output = Result<PreparedDescription, PgError>> + Send;
+    fn describe_portal(
         &mut self,
-        sql: &str,
-        param_types: &[u32],
-    ) -> impl Future<Output = Result<(Vec<FieldDescription>, Vec<u32>), PgError>> + Send {
-        async move {
-            self.describe(sql)
-                .await
-                .map(|fields| (fields, param_types.to_vec()))
-        }
-    }
+        name: &str,
+    ) -> impl Future<Output = Result<PortalDescription, PgError>> + Send;
+    fn execute(
+        &mut self,
+        portal: &str,
+        max_rows: u32,
+    ) -> impl Future<Output = Result<ExecuteOutcome, PgError>> + Send;
+    fn close(
+        &mut self,
+        target: CloseTarget<'_>,
+    ) -> impl Future<Output = Result<(), PgError>> + Send;
+    fn sync(&mut self) -> impl Future<Output = Result<(), PgError>> + Send;
 
     /// Return `Some` when `sql` is a supported simple-query COPY FROM STDIN
     /// command. The wire layer enters copy-in mode and later calls `copy_in` with
@@ -168,6 +222,115 @@ pub struct FieldDescription {
 mod tests {
     use super::*;
     use crate::stub::StubEngine;
+
+    struct RecordingSession;
+
+    impl Session for RecordingSession {
+        async fn simple_query(&mut self, _: &str) -> Result<Vec<QueryResult>, PgError> {
+            Ok(vec![])
+        }
+        async fn parse(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[u32],
+        ) -> Result<PreparedDescription, PgError> {
+            todo!()
+        }
+        async fn bind(
+            &mut self,
+            _: &str,
+            _: &str,
+            _: &[BoundParam],
+            _: &[i16],
+        ) -> Result<PortalDescription, PgError> {
+            todo!()
+        }
+        async fn describe_statement(&mut self, _: &str) -> Result<PreparedDescription, PgError> {
+            todo!()
+        }
+        async fn describe_portal(&mut self, _: &str) -> Result<PortalDescription, PgError> {
+            todo!()
+        }
+        async fn execute(&mut self, _: &str, _: u32) -> Result<ExecuteOutcome, PgError> {
+            todo!()
+        }
+        async fn close(&mut self, _: CloseTarget<'_>) -> Result<(), PgError> {
+            Ok(())
+        }
+        async fn sync(&mut self) -> Result<(), PgError> {
+            Ok(())
+        }
+        fn tx_status(&self) -> TxStatus {
+            TxStatus::Idle
+        }
+    }
+
+    fn assert_native_session_is_send<T: Session + Send>() {}
+
+    #[test]
+    fn session_v2_supports_native_async_implementations() {
+        assert_native_session_is_send::<RecordingSession>();
+    }
+
+    #[tokio::test]
+    async fn engine_owns_replacement_close_and_sync_lifetimes() {
+        let mut session = StubEngine::new().connect();
+        session
+            .parse("", "SELECT 1", &[])
+            .await
+            .expect("unnamed parse");
+        session.bind("old", "", &[], &[]).await.expect("old portal");
+        session
+            .parse("", "SELECT version()", &[])
+            .await
+            .expect("replace unnamed statement");
+        let ExecuteOutcome::Rows { completion, .. } = session
+            .execute("old", 0)
+            .await
+            .expect("bound portal remains independent")
+        else {
+            panic!("rows")
+        };
+        assert_eq!(completion.as_deref(), Some("SELECT 1"));
+        session
+            .bind("", "", &[], &[])
+            .await
+            .expect("unnamed portal");
+        session
+            .bind("", "", &[], &[])
+            .await
+            .expect("replace unnamed portal");
+        session
+            .close(CloseTarget::Statement(""))
+            .await
+            .expect("close statement");
+        session
+            .execute("", 0)
+            .await
+            .expect("closing statement preserves portal");
+        session
+            .parse("survivor", "SELECT 1", &[])
+            .await
+            .expect("named parse");
+        session.sync().await.expect("sync");
+        assert_eq!(
+            session
+                .execute("", 0)
+                .await
+                .expect_err("sync removes portals")
+                .code,
+            crate::error::sqlstate::INVALID_CURSOR_NAME
+        );
+        session
+            .bind("after-sync", "survivor", &[], &[])
+            .await
+            .expect("prepared survives sync");
+        session
+            .close(CloseTarget::Portal("missing"))
+            .await
+            .expect("nonexistent close succeeds");
+    }
 
     #[tokio::test]
     async fn stub_answers_select_1() {
@@ -232,16 +395,18 @@ mod tests {
             format: 0,
             value: Some(Bytes::from_static(b"hello")),
         }];
-        let results = s
-            .extended_query("SELECT $1", &params)
+        let prepared = s
+            .parse("s", "SELECT $1", &[oids::TEXT])
             .await
-            .expect("parameterized query works");
-        let [QueryResult::Rows { fields, rows, tag }] = &results[..] else {
-            panic!("expected one Rows result, got {results:?}");
+            .expect("parse");
+        assert_eq!(prepared.fields[0].type_oid, oids::TEXT);
+        s.bind("p", "s", &params, &[0]).await.expect("bind");
+        let ExecuteOutcome::Rows { rows, completion } = s.execute("p", 0).await.expect("execute")
+        else {
+            panic!("rows")
         };
-        assert_eq!(fields[0].type_oid, oids::TEXT);
-        assert_eq!(tag, "SELECT 1");
-        assert_eq!(rows[0][0].as_ref().expect("not null").text, "hello");
+        assert_eq!(completion.as_deref(), Some("SELECT 1"));
+        assert_eq!(rows[0][0].as_deref(), Some(&b"hello"[..]));
     }
 
     #[tokio::test]
@@ -253,12 +418,12 @@ mod tests {
             format: 1,
             value: None,
         }];
-        let results = s
-            .extended_query("SELECT $1", &params)
+        s.parse("s", "SELECT $1", &[oids::TEXT])
             .await
-            .expect("null parameter works");
-        let [QueryResult::Rows { rows, .. }] = &results[..] else {
-            panic!("expected one Rows result, got {results:?}");
+            .expect("parse");
+        s.bind("p", "s", &params, &[1]).await.expect("bind");
+        let ExecuteOutcome::Rows { rows, .. } = s.execute("p", 0).await.expect("execute") else {
+            panic!("rows")
         };
         assert_eq!(rows[0][0], None);
     }
@@ -267,9 +432,9 @@ mod tests {
     async fn stub_describe_returns_fields_without_executing() {
         let engine = StubEngine::new();
         let mut s = engine.connect();
-        let described = s.describe("SELECT 1").await.expect("ok");
-        assert_eq!(described.len(), 1);
-        assert_eq!(described[0].type_oid, oids::INT4);
+        let described = s.parse("s", "SELECT 1", &[]).await.expect("ok");
+        assert_eq!(described.fields.len(), 1);
+        assert_eq!(described.fields[0].type_oid, oids::INT4);
     }
 
     #[tokio::test]

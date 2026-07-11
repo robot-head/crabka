@@ -1,10 +1,15 @@
 //! Canned-response engine: enough surface for psql, driver integration
 //! tests, and the conformance harness to exercise the wire protocol.
 
+use std::collections::HashMap;
+
 use bytes::Bytes;
 
 use crate::{
-    engine::{BoundParam, Cell, Engine, FieldDescription, QueryResult, Session, TxStatus, oids},
+    engine::{
+        BoundParam, Cell, CloseTarget, Engine, ExecuteOutcome, FieldDescription, PortalDescription,
+        PreparedDescription, QueryResult, Session, TxStatus, oids,
+    },
     error::{PgError, sqlstate},
 };
 
@@ -25,13 +30,44 @@ impl Engine for StubEngine {
     type Session = StubSession;
 
     fn connect(&self) -> StubSession {
-        StubSession
+        StubSession::default()
     }
 }
 
 /// Per-connection session for the canned stub engine. Holds no state; the
 /// transaction status is always `Idle`.
-pub struct StubSession;
+#[derive(Clone)]
+struct StubPrepared {
+    sql: String,
+    description: PreparedDescription,
+}
+
+#[derive(Clone)]
+struct StubPortal {
+    sql: String,
+    params: Vec<BoundParam>,
+    description: PortalDescription,
+    formats: Vec<i16>,
+    execution: StubExecution,
+}
+
+#[derive(Clone)]
+enum StubExecution {
+    NotStarted,
+    Rows {
+        rows: Vec<Vec<Option<Cell>>>,
+        tag: String,
+        position: usize,
+    },
+    Command(String),
+    Empty,
+}
+
+#[derive(Default)]
+pub struct StubSession {
+    prepared: HashMap<String, StubPrepared>,
+    portals: HashMap<String, StubPortal>,
+}
 
 impl StubSession {
     fn canned(sql: &str) -> Result<Vec<QueryResult>, PgError> {
@@ -95,65 +131,248 @@ impl Session for StubSession {
         Self::canned(sql)
     }
 
-    async fn extended_query(
+    async fn parse(
         &mut self,
+        name: &str,
         sql: &str,
-        params: &[BoundParam],
-    ) -> Result<Vec<QueryResult>, PgError> {
-        if normalize(sql) != "select $1" {
-            return Self::canned(sql);
-        }
-
-        let Some(param) = params.first() else {
+        parameter_types: &[u32],
+    ) -> Result<PreparedDescription, PgError> {
+        if !name.is_empty() && self.prepared.contains_key(name) {
             return Err(PgError::error(
-                sqlstate::UNDEFINED_PARAMETER,
-                "there is no parameter $1",
+                sqlstate::DUPLICATE_PREPARED_STATEMENT,
+                format!("prepared statement \"{name}\" already exists"),
             ));
-        };
-
-        let rows = vec![vec![param_to_cell(param)?]];
-        let tag = select_tag(&rows);
-        Ok(vec![QueryResult::Rows {
-            fields: vec![field_for_param(param, "?column?")],
-            rows,
-            tag,
-        }])
-    }
-
-    // Returns 0A000 for any unrecognized SQL — acceptable for the stub; a real engine reports proper codes (e.g. 26000) per statement state.
-    async fn describe(&mut self, sql: &str) -> Result<Vec<FieldDescription>, PgError> {
-        if normalize(sql) == "select $1" {
-            return Ok(vec![text_field("?column?")]);
         }
-
-        match Self::canned(sql)?.first() {
-            Some(QueryResult::Rows { fields, .. }) => Ok(fields.clone()),
-            _ => Ok(Vec::new()),
-        }
-    }
-
-    async fn describe_prepared(
-        &mut self,
-        sql: &str,
-        param_types: &[u32],
-    ) -> Result<(Vec<FieldDescription>, Vec<u32>), PgError> {
-        if normalize(sql) != "select $1" {
-            return self
-                .describe(sql)
-                .await
-                .map(|fields| (fields, param_types.to_vec()));
-        }
-
-        let field = if param_types.first() == Some(&oids::INT4) {
-            int4_field("?column?")
+        let count = positional_parameter_count(sql).max(parameter_types.len());
+        let mut types = vec![0; count];
+        types[..parameter_types.len()].copy_from_slice(parameter_types);
+        let fields = if normalize(sql) == "select $1" {
+            vec![if types.first() == Some(&oids::INT4) {
+                int4_field("?column?")
+            } else {
+                text_field("?column?")
+            }]
         } else {
-            text_field("?column?")
+            match Self::canned(sql)?.first() {
+                Some(QueryResult::Rows { fields, .. }) => fields.clone(),
+                _ => vec![],
+            }
         };
-        Ok((vec![field], param_types.to_vec()))
+        let description = PreparedDescription {
+            parameter_types: types,
+            fields,
+        };
+        self.prepared.insert(
+            name.to_owned(),
+            StubPrepared {
+                sql: sql.to_owned(),
+                description: description.clone(),
+            },
+        );
+        Ok(description)
+    }
+
+    async fn bind(
+        &mut self,
+        portal: &str,
+        statement: &str,
+        params: &[BoundParam],
+        result_formats: &[i16],
+    ) -> Result<PortalDescription, PgError> {
+        if !portal.is_empty() && self.portals.contains_key(portal) {
+            return Err(PgError::error(
+                sqlstate::DUPLICATE_CURSOR,
+                format!("cursor \"{portal}\" already exists"),
+            ));
+        }
+        let prepared = self.prepared.get(statement).ok_or_else(|| {
+            PgError::error(
+                sqlstate::INVALID_SQL_STATEMENT_NAME,
+                format!("prepared statement \"{statement}\" does not exist"),
+            )
+        })?;
+        if params.len() != prepared.description.parameter_types.len() {
+            return Err(PgError::protocol(format!(
+                "bind message supplies {} parameters, but prepared statement requires {}",
+                params.len(),
+                prepared.description.parameter_types.len()
+            )));
+        }
+        let formats = resolve_formats(result_formats, prepared.description.fields.len())?;
+        let fields = prepared
+            .description
+            .fields
+            .iter()
+            .zip(&formats)
+            .map(|(f, &format)| FieldDescription {
+                format,
+                ..f.clone()
+            })
+            .collect();
+        let description = PortalDescription { fields };
+        let params = params
+            .iter()
+            .zip(&prepared.description.parameter_types)
+            .map(|(param, oid)| BoundParam {
+                type_oid: Some(*oid).filter(|value| *value != 0).or(param.type_oid),
+                ..param.clone()
+            })
+            .collect();
+        self.portals.insert(
+            portal.to_owned(),
+            StubPortal {
+                sql: prepared.sql.clone(),
+                params,
+                description: description.clone(),
+                formats,
+                execution: StubExecution::NotStarted,
+            },
+        );
+        Ok(description)
+    }
+
+    async fn describe_statement(&mut self, name: &str) -> Result<PreparedDescription, PgError> {
+        self.prepared
+            .get(name)
+            .map(|p| p.description.clone())
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_SQL_STATEMENT_NAME,
+                    format!("prepared statement \"{name}\" does not exist"),
+                )
+            })
+    }
+
+    async fn describe_portal(&mut self, name: &str) -> Result<PortalDescription, PgError> {
+        self.portals
+            .get(name)
+            .map(|p| p.description.clone())
+            .ok_or_else(|| {
+                PgError::error(
+                    sqlstate::INVALID_CURSOR_NAME,
+                    format!("portal \"{name}\" does not exist"),
+                )
+            })
+    }
+
+    async fn execute(&mut self, portal: &str, max_rows: u32) -> Result<ExecuteOutcome, PgError> {
+        let p = self.portals.get_mut(portal).ok_or_else(|| {
+            PgError::error(
+                sqlstate::INVALID_CURSOR_NAME,
+                format!("portal \"{portal}\" does not exist"),
+            )
+        })?;
+        if matches!(p.execution, StubExecution::NotStarted) {
+            let results = if normalize(&p.sql) == "select $1" {
+                let param = p.params.first().ok_or_else(|| {
+                    PgError::error(sqlstate::UNDEFINED_PARAMETER, "there is no parameter $1")
+                })?;
+                let rows = vec![vec![param_to_cell(param)?]];
+                vec![QueryResult::Rows {
+                    fields: vec![],
+                    tag: select_tag(&rows),
+                    rows,
+                }]
+            } else {
+                Self::canned(&p.sql)?
+            };
+            p.execution = match results.into_iter().next() {
+                Some(QueryResult::Rows { rows, tag, .. }) => StubExecution::Rows {
+                    rows,
+                    tag,
+                    position: 0,
+                },
+                Some(QueryResult::Command { tag }) => StubExecution::Command(tag),
+                _ => StubExecution::Empty,
+            };
+        }
+        match &mut p.execution {
+            StubExecution::Rows {
+                rows,
+                tag,
+                position,
+            } => {
+                let remaining = rows.len() - *position;
+                let take = if max_rows == 0 {
+                    remaining
+                } else {
+                    remaining.min(max_rows as usize)
+                };
+                let batch = rows[*position..*position + take]
+                    .iter()
+                    .map(|row| {
+                        row.iter()
+                            .zip(&p.formats)
+                            .map(|(cell, format)| {
+                                cell.as_ref().map(|cell| {
+                                    if *format == 1 {
+                                        cell.binary.clone()
+                                    } else {
+                                        cell.text.clone()
+                                    }
+                                })
+                            })
+                            .collect()
+                    })
+                    .collect();
+                *position += take;
+                Ok(ExecuteOutcome::Rows {
+                    rows: batch,
+                    completion: (*position == rows.len()).then(|| tag.clone()),
+                })
+            }
+            StubExecution::Command(tag) => Ok(ExecuteOutcome::CommandComplete { tag: tag.clone() }),
+            StubExecution::Empty => Ok(ExecuteOutcome::EmptyQuery),
+            StubExecution::NotStarted => unreachable!(),
+        }
+    }
+
+    async fn close(&mut self, target: CloseTarget<'_>) -> Result<(), PgError> {
+        match target {
+            CloseTarget::Statement(name) => {
+                self.prepared.remove(name);
+            }
+            CloseTarget::Portal(name) => {
+                self.portals.remove(name);
+            }
+        }
+        Ok(())
+    }
+
+    async fn sync(&mut self) -> Result<(), PgError> {
+        self.portals.clear();
+        Ok(())
     }
 
     fn tx_status(&self) -> TxStatus {
         TxStatus::Idle
+    }
+}
+
+fn positional_parameter_count(sql: &str) -> usize {
+    sql.as_bytes()
+        .windows(2)
+        .filter(|w| w[0] == b'$' && w[1].is_ascii_digit())
+        .map(|w| (w[1] - b'0') as usize)
+        .max()
+        .unwrap_or(0)
+}
+
+fn resolve_formats(requested: &[i16], count: usize) -> Result<Vec<i16>, PgError> {
+    let validate = |v| {
+        if matches!(v, 0 | 1) {
+            Ok(v)
+        } else {
+            Err(PgError::protocol(format!("invalid format code {v}")))
+        }
+    };
+    match requested.len() {
+        0 => Ok(vec![0; count]),
+        1 => Ok(vec![validate(requested[0])?; count]),
+        n if n == count => requested.iter().copied().map(validate).collect(),
+        n => Err(PgError::protocol(format!(
+            "bind message has {n} result formats but query has {count} columns"
+        ))),
     }
 }
 
@@ -241,14 +460,4 @@ fn param_to_cell(param: &BoundParam) -> Result<Option<Cell>, PgError> {
             "invalid parameter format code {code}"
         ))),
     }
-}
-
-fn field_for_param(param: &BoundParam, name: &str) -> FieldDescription {
-    let mut field = if param.type_oid == Some(oids::INT4) {
-        int4_field(name)
-    } else {
-        text_field(name)
-    };
-    field.format = param.format;
-    field
 }

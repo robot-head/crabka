@@ -6004,7 +6004,7 @@ mod tests {
         run(&engine, "CREATE TABLE t (id int4, name text)").await;
         let fields = engine
             .connect()
-            .describe("SELECT id, name FROM t")
+            .test_describe("SELECT id, name FROM t")
             .await
             .expect("describe");
         assert_eq!(
@@ -6018,7 +6018,7 @@ mod tests {
         let engine = SqlEngine::new();
         let fields = engine
             .connect()
-            .describe("CREATE TABLE t (id int4)")
+            .test_describe("CREATE TABLE t (id int4)")
             .await
             .expect("describe");
         assert!(fields.is_empty());
@@ -6031,7 +6031,7 @@ mod tests {
         let engine = SqlEngine::new();
         let fields = engine
             .connect()
-            .describe("SELECT 1 AS x UNION SELECT 2")
+            .test_describe("SELECT 1 AS x UNION SELECT 2")
             .await
             .expect("describe");
         assert_eq!(fields.len(), 1);
@@ -6044,7 +6044,7 @@ mod tests {
         let engine = SqlEngine::new();
         let fields = engine
             .connect()
-            .describe("SELECT 1 AS x UNION SELECT 2::int8")
+            .test_describe("SELECT 1 AS x UNION SELECT 2::int8")
             .await
             .expect("describe");
         assert_eq!(fields.len(), 1);

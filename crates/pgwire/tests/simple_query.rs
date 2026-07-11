@@ -100,11 +100,50 @@ impl crabka_pgwire::engine::Session for CopySession {
         ))
     }
 
-    async fn describe(
+    async fn parse(
         &mut self,
-        _sql: &str,
-    ) -> Result<Vec<crabka_pgwire::engine::FieldDescription>, crabka_pgwire::error::PgError> {
-        Ok(Vec::new())
+        _: &str,
+        _: &str,
+        _: &[u32],
+    ) -> Result<crabka_pgwire::engine::PreparedDescription, crabka_pgwire::error::PgError> {
+        Err(crabka_pgwire::error::PgError::error("0A000", "unsupported"))
+    }
+    async fn bind(
+        &mut self,
+        _: &str,
+        _: &str,
+        _: &[crabka_pgwire::engine::BoundParam],
+        _: &[i16],
+    ) -> Result<crabka_pgwire::engine::PortalDescription, crabka_pgwire::error::PgError> {
+        Err(crabka_pgwire::error::PgError::error("0A000", "unsupported"))
+    }
+    async fn describe_statement(
+        &mut self,
+        _: &str,
+    ) -> Result<crabka_pgwire::engine::PreparedDescription, crabka_pgwire::error::PgError> {
+        Err(crabka_pgwire::error::PgError::error("0A000", "unsupported"))
+    }
+    async fn describe_portal(
+        &mut self,
+        _: &str,
+    ) -> Result<crabka_pgwire::engine::PortalDescription, crabka_pgwire::error::PgError> {
+        Err(crabka_pgwire::error::PgError::error("0A000", "unsupported"))
+    }
+    async fn execute(
+        &mut self,
+        _: &str,
+        _: u32,
+    ) -> Result<crabka_pgwire::engine::ExecuteOutcome, crabka_pgwire::error::PgError> {
+        Err(crabka_pgwire::error::PgError::error("0A000", "unsupported"))
+    }
+    async fn close(
+        &mut self,
+        _: crabka_pgwire::engine::CloseTarget<'_>,
+    ) -> Result<(), crabka_pgwire::error::PgError> {
+        Ok(())
+    }
+    async fn sync(&mut self) -> Result<(), crabka_pgwire::error::PgError> {
+        Ok(())
     }
 
     async fn begin_copy_in(
