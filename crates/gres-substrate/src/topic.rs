@@ -29,6 +29,23 @@ pub fn wal_topic_for_range(tenant: &TenantName, range: RangeId) -> String {
     range_wal_topic(tenant, range).to_string()
 }
 
+/// Return the immutable physical WAL topic for one lifecycle generation.
+/// Generation zero preserves the original name; recreated generations get a
+/// distinct topic so a zombie admin request can only prune its old log.
+#[must_use]
+pub fn wal_topic_for_generation(
+    tenant: &TenantName,
+    range: RangeId,
+    wal_generation: u64,
+) -> String {
+    let base = wal_topic_for_range(tenant, range);
+    if wal_generation == 0 {
+        base
+    } else {
+        format!("{base}.g{wal_generation:010}")
+    }
+}
+
 /// Return the G-7 transactional producer id for a tenant range.
 #[must_use]
 pub fn transactional_id_for_range(tenant: &TenantName, range: RangeId) -> String {
@@ -119,6 +136,17 @@ pub async fn ensure_wal_topic_for_range(
     Ok(topic)
 }
 
+/// Ensure an already-derived immutable physical WAL topic exists.
+pub async fn ensure_wal_topic_name(
+    admin: &mut dyn TopicAdmin,
+    topic: &str,
+) -> Result<String, SubstrateError> {
+    if !admin.topic_exists(topic).await? {
+        admin.create_wal_topic(topic).await?;
+    }
+    Ok(topic.to_owned())
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -164,6 +192,13 @@ mod tests {
         assert!(
             transactional_id_for_range(&tenant, RangeId::COORDINATOR)
                 != transactional_id_for_range(&tenant, RangeId::new(7))
+        );
+        assert!(
+            wal_topic_for_generation(&tenant, RangeId::COORDINATOR, 0) == "__gres_wal.tenant-a.r0"
+        );
+        assert!(
+            wal_topic_for_generation(&tenant, RangeId::COORDINATOR, 7)
+                == "__gres_wal.tenant-a.r0.g0000000007"
         );
     }
 

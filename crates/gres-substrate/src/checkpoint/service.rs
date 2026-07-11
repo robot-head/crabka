@@ -29,6 +29,8 @@ pub enum CheckpointServiceStep {
     PartsUploaded,
     /// The manifest is durable, before `DeleteRecords`.
     ManifestWritten,
+    /// Writer ownership was validated immediately before generation-scoped pruning.
+    LeaseValidated,
     /// `DeleteRecords` completed, before object pruning.
     Truncated,
     /// Object pruning completed.
@@ -434,6 +436,8 @@ where
             }
         };
         source.assert_current().await?;
+        #[cfg(feature = "checkpoint-test-hooks")]
+        self.fail_at(CheckpointServiceStep::LeaseValidated)?;
         self.finish_manifest(manifest, trigger, checkpointed_stats)
             .await
     }
