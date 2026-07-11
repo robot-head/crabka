@@ -1,4 +1,4 @@
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use sqlx::{Connection as _, PgConnection};
 use tokio_postgres::NoTls;
 
@@ -6,6 +6,15 @@ use tokio_postgres::NoTls;
 struct Args {
     #[arg(long)]
     database_url: Option<String>,
+    #[arg(long, value_enum, default_value_t = Driver::All)]
+    driver: Driver,
+}
+
+#[derive(Clone, Copy, Debug, ValueEnum)]
+enum Driver {
+    All,
+    TokioPostgres,
+    Sqlx,
 }
 
 #[tokio::main]
@@ -15,9 +24,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .database_url
         .or_else(|| std::env::var("DATABASE_URL").ok())
         .ok_or("DATABASE_URL or --database-url is required")?;
-    tokio_postgres_smoke(&database_url).await?;
-    sqlx_smoke(&database_url).await?;
-    println!("PASS: tokio-postgres and sqlx parameterized transaction-pooling smoke");
+    if matches!(args.driver, Driver::All | Driver::TokioPostgres) {
+        tokio_postgres_smoke(&database_url).await?;
+    }
+    if matches!(args.driver, Driver::All | Driver::Sqlx) {
+        sqlx_smoke(&database_url).await?;
+    }
+    println!("PASS: selected Rust parameterized transaction-pooling smoke");
     Ok(())
 }
 

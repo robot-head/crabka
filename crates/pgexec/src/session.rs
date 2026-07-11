@@ -244,6 +244,7 @@ fn guc_names() -> &'static [&'static str] {
         "application_name",
         "client_encoding",
         "datestyle",
+        "extra_float_digits",
         "intervalstyle",
         "search_path",
         "standard_conforming_strings",
@@ -257,6 +258,7 @@ fn guc_default(name: &str) -> &'static str {
         "application_name" => "",
         "client_encoding" => "UTF8",
         "datestyle" => "ISO, MDY",
+        "extra_float_digits" => "1",
         "intervalstyle" => "postgres",
         "search_path" => "\"$user\", public",
         "standard_conforming_strings" => "on",
@@ -291,7 +293,7 @@ pub(crate) fn guc_settings_runtime() -> Result<Vec<GucSettingRow>, ExecError> {
 fn guc_vartype(name: &str) -> &'static str {
     match name {
         "standard_conforming_strings" => "bool",
-        "statement_timeout" => "integer",
+        "extra_float_digits" | "statement_timeout" => "integer",
         _ => "string",
     }
 }
@@ -323,6 +325,12 @@ fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
             }
         }
         "standard_conforming_strings" => canonical_bool(value),
+        "extra_float_digits" => value
+            .parse::<i8>()
+            .ok()
+            .filter(|digits| (-15..=3).contains(digits))
+            .map(|digits| digits.to_string())
+            .ok_or_else(|| ExecError::InvalidParameterValue(value.to_string())),
         "statement_timeout" => canonical_timeout(value),
         "datestyle" => Ok(value.to_string()),
         "intervalstyle" => {
@@ -4919,6 +4927,26 @@ mod tests {
         assert_eq!(
             single_text(&s.simple_query("SHOW application_name").await.expect("show")),
             ""
+        );
+    }
+
+    #[tokio::test]
+    async fn sqlx_extra_float_digits_preamble_is_accepted() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        session
+            .simple_query("SET extra_float_digits = 2")
+            .await
+            .expect("sqlx startup setting");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW extra_float_digits")
+                    .await
+                    .expect("show")
+            ),
+            "2"
         );
     }
 

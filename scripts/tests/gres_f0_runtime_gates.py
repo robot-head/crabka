@@ -83,6 +83,9 @@ assert re.search(r'^DATABASE_URL=.* timeout 30s python3 - <<\'PY\'', e2e, re.MUL
 assert e2e.count("connect_timeout=5") >= 2, "both driver URLs need connect_timeout"
 
 rust = rust_without_comments("crates/gres-conformance/src/bin/driver_smoke.rs")
+assert "enum Driver" in rust and "value_enum" in rust, (
+    "Rust smoke must independently select tokio-postgres or sqlx for protocol diagnosis"
+)
 for function, query, transaction, values in (
     ("tokio_postgres_smoke", 'query_one("SELECT $1::int4"', "client.transaction()", "[41_i32, 42_i32]"),
     ("sqlx_smoke", 'query_scalar("SELECT $1::int4")', "connection.begin()", "[51_i32, 52_i32]"),
