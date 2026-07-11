@@ -241,6 +241,21 @@ async fn renders_pgdog_config_secret_and_status_hash() {
     let secret_body: serde_json::Value = serde_json::from_slice(secret_patch.body()).unwrap();
     assert!(secret_body["data"]["pgdog.toml"].is_string());
     assert!(secret_body["data"]["users.toml"].is_string());
+    let users_toml = {
+        use base64::Engine as _;
+        let encoded = secret_body["data"]["users.toml"]
+            .as_str()
+            .expect("users.toml base64");
+        String::from_utf8(
+            base64::engine::general_purpose::STANDARD
+                .decode(encoded)
+                .expect("decode users.toml"),
+        )
+        .expect("users.toml UTF-8")
+    };
+    assert!(users_toml.contains("name = \"alice\""));
+    assert!(users_toml.contains("database = \"tenant-a\""));
+    assert!(!users_toml.contains("password"));
 
     let deployment_patch = observed
         .iter()
@@ -255,7 +270,19 @@ async fn renders_pgdog_config_secret_and_status_hash() {
         serde_json::from_slice(deployment_patch.body()).unwrap();
     assert!(
         deployment_body["spec"]["template"]["spec"]["containers"][0]["image"]
-            == "ghcr.io/pgdogdev/pgdog:v0.1.0"
+            == "ghcr.io/pgdogdev/pgdog:0.1.47"
+    );
+    assert!(
+        deployment_body["spec"]["template"]["spec"]["containers"][0]["env"][0]
+            == serde_json::json!({
+                "name": "PGDOG_ADMIN_PASSWORD",
+                "valueFrom": {
+                    "secretKeyRef": {
+                        "name": "admin",
+                        "key": "password"
+                    }
+                }
+            })
     );
     assert!(observed.iter().any(|request| {
         request
@@ -295,6 +322,8 @@ async fn renders_pgdog_config_secret_and_status_hash() {
     let admin_requests = admin.requests();
     assert!(admin_requests.len() == 2);
     assert!(admin_requests[0].expected_databases == vec!["tenant-a"]);
+    assert!(!admin_requests[0].maintenance_mode);
+    assert!(admin_requests[0].tls_ca_pem.is_none());
     assert!(status_body["status"]["balancer"]["dryRunOnly"] == true);
     assert!(status_body["status"]["balancer"]["plannedOperations"] == 0);
     assert!(status_body["status"]["balancer"]["executableOperations"] == 0);
@@ -320,6 +349,21 @@ async fn renders_pgdog_config_secret_and_status_hash() {
             .as_str()
             .is_some_and(|message| message.contains("no dry-run planner snapshot"))
     );
+}
+
+#[tokio::test]
+async fn multi_replica_reload_requests_maintenance_mode() {
+    let admin = FakePgdogAdmin::new(vec![true]);
+    let state = MockState::new(reconcile_rules(true));
+    let ctx = Arc::new(
+        fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
+    );
+    let mut obj = gres();
+    obj.spec.pgdog.replicas = 2;
+
+    reconcile(Arc::new(obj), ctx).await.unwrap();
+
+    assert!(admin.requests()[0].maintenance_mode);
 }
 
 #[tokio::test]

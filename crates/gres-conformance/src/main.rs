@@ -3,7 +3,7 @@ use std::path::Path;
 use clap::Parser;
 use crabka_gres_conformance::{
     Baseline, CaseResult, RegressBaseline, Report, corpus_file_name, diff, discover_sql_files,
-    load_extended_case_files, run_extended_one, run_one, split_statements,
+    load_extended_case_files, run_extended_one, run_one, split_statements, tls,
 };
 use tokio_postgres::NoTls;
 
@@ -16,6 +16,9 @@ struct Args {
     /// e.g. "host=127.0.0.1 port=5433 user=crab dbname=crab"
     #[arg(long)]
     subject_url: String,
+    /// Reconnect the subject between SQL files to isolate pooler logical-session state.
+    #[arg(long)]
+    subject_reconnect_per_file: bool,
     /// Directory of .sql corpus files.
     #[arg(long, default_value = "crates/gres-conformance/corpus")]
     corpus: std::path::PathBuf,
@@ -58,10 +61,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     let (mut oracle, oracle_conn) = tokio_postgres::connect(&args.oracle_url, NoTls).await?;
     tokio::spawn(oracle_conn);
-    let (mut subject, subject_conn) = tokio_postgres::connect(&args.subject_url, NoTls).await?;
-    tokio::spawn(subject_conn);
+    let mut subject = connect_subject(&args.subject_url).await?;
 
-    let report = run_corpus(&oracle, &subject, &args.corpus, false).await?;
+    let report = run_primary_corpus(&oracle, &mut subject, &args).await?;
     std::fs::write(&args.out, serde_json::to_string_pretty(&report)?)?;
     std::fs::write(&args.summary, report.markdown_summary())?;
     println!(
@@ -87,7 +89,15 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(corpus_regress) = &args.corpus_regress {
-        let regress_report = run_corpus(&oracle, &subject, corpus_regress, true).await?;
+        let regress_report = run_corpus(
+            &oracle,
+            &mut subject,
+            &args.subject_url,
+            corpus_regress,
+            true,
+            args.subject_reconnect_per_file,
+        )
+        .await?;
         std::fs::write(
             &args.regress_out,
             serde_json::to_string_pretty(&regress_report)?,
@@ -150,11 +160,37 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
+async fn connect_subject(
+    subject_url: &str,
+) -> Result<tokio_postgres::Client, Box<dyn std::error::Error>> {
+    tls::connect(subject_url)
+        .await
+        .map_err(|error| error.to_string().into())
+}
+
+async fn run_primary_corpus(
+    oracle: &tokio_postgres::Client,
+    subject: &mut tokio_postgres::Client,
+    args: &Args,
+) -> Result<Report, Box<dyn std::error::Error>> {
+    run_corpus(
+        oracle,
+        subject,
+        &args.subject_url,
+        &args.corpus,
+        false,
+        args.subject_reconnect_per_file,
+    )
+    .await
+}
+
 async fn run_corpus(
     oracle: &tokio_postgres::Client,
-    subject: &tokio_postgres::Client,
+    subject: &mut tokio_postgres::Client,
+    subject_url: &str,
     corpus: &Path,
     recursive: bool,
+    reconnect_per_file: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut cases = Vec::new();
     for path in discover_sql_files(corpus, recursive)? {
@@ -170,6 +206,11 @@ async fn run_corpus(
                 matched: d.matched,
                 detail: d.detail,
             });
+        }
+        if reconnect_per_file {
+            *subject = tls::connect(subject_url)
+                .await
+                .map_err(|error| error.to_string())?;
         }
     }
     Ok(Report::new(cases))

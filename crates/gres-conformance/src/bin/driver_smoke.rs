@@ -1,6 +1,6 @@
 use clap::{Parser, ValueEnum};
+use crabka_gres_conformance::tls;
 use sqlx::{Connection as _, PgConnection};
-use tokio_postgres::NoTls;
 
 #[derive(Debug, Parser)]
 struct Args {
@@ -35,8 +35,9 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 async fn tokio_postgres_smoke(database_url: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let (mut client, connection) = tokio_postgres::connect(database_url, NoTls).await?;
-    let connection_task = tokio::spawn(connection);
+    let mut client = tls::connect(database_url)
+        .await
+        .map_err(|error| error.to_string())?;
 
     for expected in [41_i32, 42_i32] {
         let transaction = client.transaction().await?;
@@ -50,8 +51,6 @@ async fn tokio_postgres_smoke(database_url: &str) -> Result<(), Box<dyn std::err
         transaction.commit().await?;
     }
 
-    drop(client);
-    connection_task.await??;
     Ok(())
 }
 

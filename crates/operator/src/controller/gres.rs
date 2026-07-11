@@ -3,8 +3,8 @@
 use std::{collections::BTreeMap, fmt::Write as _, sync::Arc, time::Duration};
 
 use crabka_gres_control::{
-    PgdogGeneral, PgdogRenderInput, TenantEndpoint, TenantName, TenantState, render_pgdog_toml,
-    render_users_toml,
+    PgdogGeneral, PgdogRenderInput, PgdogUser, TenantEndpoint, TenantName, TenantState,
+    render_pgdog_toml, render_users_toml,
 };
 use futures::StreamExt as _;
 use k8s_openapi::{
@@ -33,7 +33,7 @@ use crate::{
 };
 
 const APP_NAME: &str = "crabka-pgdog";
-const DEFAULT_IMAGE: &str = "ghcr.io/pgdogdev/pgdog:v0.1.0";
+const DEFAULT_IMAGE: &str = "ghcr.io/pgdogdev/pgdog:0.1.47";
 const ACTIVATOR_APP_NAME: &str = "crabka-gres-activator";
 const DEFAULT_ACTIVATOR_IMAGE: &str = concat!(
     "ghcr.io/robot-head/crabka-gres-activator:",
@@ -85,13 +85,26 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
         .filter(|tenant| tenant.spec.gres == name)
         .filter_map(tenant_endpoint)
         .collect();
+    let users = endpoints
+        .iter()
+        .filter_map(|endpoint| {
+            tenants
+                .items
+                .iter()
+                .find(|tenant| tenant.name_any() == endpoint.name)
+                .map(|tenant| PgdogUser {
+                    name: tenant.spec.user.clone(),
+                    database: endpoint.name.clone(),
+                    password: None,
+                })
+        })
+        .collect();
 
     let render_input = PgdogRenderInput {
         tenants: &endpoints,
         activator: Some((activator_service_host(&name, &ns), ACTIVATOR_PORT_U16)),
         general: PgdogGeneral {
             listen_port: u16::try_from(obj.spec.pgdog.listen_port).unwrap_or(6_432),
-            admin_password_secret_ref: Some(obj.spec.pgdog.admin_secret_ref.name.clone()),
             tls_cert_path: obj
                 .spec
                 .pgdog
@@ -104,6 +117,7 @@ async fn reconcile_inner(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, Re
                 .tls_secret_ref
                 .as_ref()
                 .map(|_| "/etc/pgdog/tls/tls.key".into()),
+            users,
             ..Default::default()
         },
     };
@@ -192,6 +206,7 @@ async fn verify_pgdog_reload(
 ) -> Result<bool, ReconcileError> {
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let password = pgdog_admin_password(obj, ctx, &ns).await?;
+    let tls_ca_pem = pgdog_tls_ca(obj, ctx, &ns).await?;
     let request = PgdogReloadRequest {
         host: format!("{}.{}.svc.cluster.local", service_name(&obj.name_any()), ns),
         port: u16::try_from(obj.spec.pgdog.listen_port).map_err(|err| {
@@ -202,6 +217,8 @@ async fn verify_pgdog_reload(
             .iter()
             .map(|endpoint| endpoint.name.clone())
             .collect(),
+        maintenance_mode: obj.spec.pgdog.replicas > 1,
+        tls_ca_pem,
     };
 
     for attempt in 1..=RELOAD_RETRY_LIMIT {
@@ -217,6 +234,34 @@ async fn verify_pgdog_reload(
         }
     }
     Ok(false)
+}
+
+async fn pgdog_tls_ca(
+    obj: &Gres,
+    ctx: &Context,
+    namespace: &str,
+) -> Result<Option<Vec<u8>>, ReconcileError> {
+    let Some(secret_ref) = &obj.spec.pgdog.tls_secret_ref else {
+        return Ok(None);
+    };
+    let secret_api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
+    let secret = secret_api.get(&secret_ref.name).await?;
+    let data = secret.data.ok_or_else(|| {
+        ReconcileError::MalformedSecret(format!(
+            "PgDog TLS Secret {:?} has no data",
+            secret_ref.name
+        ))
+    })?;
+    let certificate = data
+        .get("ca.crt")
+        .or_else(|| data.get("tls.crt"))
+        .ok_or_else(|| {
+            ReconcileError::MalformedSecret(format!(
+                "PgDog TLS Secret {:?} must contain ca.crt or tls.crt",
+                secret_ref.name
+            ))
+        })?;
+    Ok(Some(certificate.0.clone()))
 }
 
 async fn pgdog_admin_password(
@@ -416,6 +461,13 @@ fn render_deployment(obj: &Gres, image: &str, hash: &str) -> Result<Deployment, 
                         "name": "pgdog",
                         "image": image,
                         "args": ["--config", "/etc/pgdog/pgdog.toml", "--users", "/etc/pgdog/users.toml"],
+                        "env": [{
+                            "name": "PGDOG_ADMIN_PASSWORD",
+                            "valueFrom": { "secretKeyRef": {
+                                "name": obj.spec.pgdog.admin_secret_ref.name,
+                                "key": obj.spec.pgdog.admin_secret_ref.key
+                            }}
+                        }],
                         "ports": [{ "name": "postgres", "containerPort": obj.spec.pgdog.listen_port, "protocol": "TCP" }],
                         "volumeMounts": mounts,
                         "readinessProbe": { "tcpSocket": { "port": obj.spec.pgdog.listen_port }, "periodSeconds": 5 }

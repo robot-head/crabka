@@ -2788,6 +2788,8 @@ dependencies = [
  "crabka-pgparser",
  "crabka-pgtypes",
  "crabka-pgwire",
+ "native-tls",
+ "postgres-native-tls",
  "serde",
  "serde_json",
  "sqlx",
@@ -3305,7 +3307,9 @@ dependencies = [
  "k8s-openapi",
  "kube",
  "mutants",
+ "native-tls",
  "object_store",
+ "postgres-native-tls",
  "prometheus-client",
  "reqwest 0.13.4",
  "ring",
@@ -10664,6 +10668,18 @@ dependencies = [
 ]
 
 [[package]]
+name = "postgres-native-tls"
+version = "0.5.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fef4de47bb81477e0c3deaf153a1b10ae176484713ff1640969f4cb96b653ebc"
+dependencies = [
+ "native-tls",
+ "tokio",
+ "tokio-native-tls",
+ "tokio-postgres",
+]
+
+[[package]]
 name = "postgres-protocol"
 version = "0.6.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -12932,6 +12948,7 @@ dependencies = [
  "log",
  "memchr",
  "percent-encoding",
+ "rustls",
  "serde",
  "serde_json",
  "sha2 0.10.9",
@@ -12941,6 +12958,7 @@ dependencies = [
  "tokio-stream",
  "tracing",
  "url",
+ "webpki-roots",
 ]
 
 [[package]]

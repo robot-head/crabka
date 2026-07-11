@@ -77,4 +77,19 @@ mod tests {
 
         assert!(parsed.is_err());
     }
+
+    #[test]
+    fn gres_render_pgdog_exposes_frontend_tls_and_listen_settings() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("gres")
+            .and_then(|gres| gres.find_subcommand_mut("render-pgdog"))
+            .expect("gres render-pgdog command")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("--listen-port"));
+        assert!(help.contains("--tls-certificate"));
+        assert!(help.contains("--tls-private-key"));
+    }
 }
