@@ -26,13 +26,20 @@ The later prepared query sequence matched PostgreSQL's expected shape:
 `P,D,S -> 1,t,T,Z`, followed by `B,E,C,S -> 2,D,C,3,Z`. Upstream PgDog PR #913
 was not used.
 
+The redacted commands, exit statuses, code/length sequences, PostgreSQL 18
+integer-GUC oracle results, and top-level final-PASS output are retained in
+`.superpowers/sdd/pgdog-sqlx-protocol-debug-evidence.md`.
+
 ## RED / GREEN
 
 RED: `sqlx_extra_float_digits_preamble_is_accepted` failed with SQLSTATE 42704.
 
 GREEN: Gres now registers `extra_float_digits`, uses PostgreSQL 18's default of
 `1`, reports it as an integer GUC, and accepts PostgreSQL's `-15..=3` range.
-The focused regression passed after this single repair.
+The typed integer-GUC parser matches the PostgreSQL 18 oracle for whitespace,
+signs, rounded fractional inputs, hexadecimal and `0o` octal forms. Invalid and
+out-of-range inputs return SQLSTATE 22023. SET, SET LOCAL, commit, and rollback
+behavior is covered by SQL-level tests.
 
 ## Live evidence
 

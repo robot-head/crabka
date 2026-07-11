@@ -325,12 +325,7 @@ fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
             }
         }
         "standard_conforming_strings" => canonical_bool(value),
-        "extra_float_digits" => value
-            .parse::<i8>()
-            .ok()
-            .filter(|digits| (-15..=3).contains(digits))
-            .map(|digits| digits.to_string())
-            .ok_or_else(|| ExecError::InvalidParameterValue(value.to_string())),
+        "extra_float_digits" => canonical_integer_guc(value, -15, 3),
         "statement_timeout" => canonical_timeout(value),
         "datestyle" => Ok(value.to_string()),
         "intervalstyle" => {
@@ -355,6 +350,48 @@ fn canonical_bool(value: &str) -> Result<String, ExecError> {
         "off" | "false" | "no" | "0" => Ok("off".into()),
         _ => Err(ExecError::InvalidParameterValue(value.to_string())),
     }
+}
+
+/// Parse PostgreSQL integer-GUC input, including rounded decimal input and the
+/// `0x`/`0o` forms accepted by PostgreSQL's configuration parser.
+fn canonical_integer_guc(value: &str, min: i64, max: i64) -> Result<String, ExecError> {
+    let trimmed = value.trim();
+    let (negative, unsigned) = match trimmed.as_bytes().first() {
+        Some(b'-') => (true, &trimmed[1..]),
+        Some(b'+') => (false, &trimmed[1..]),
+        _ => (false, trimmed),
+    };
+    let radix_value = unsigned
+        .strip_prefix("0x")
+        .or_else(|| unsigned.strip_prefix("0X"))
+        .map(|digits| (16, digits))
+        .or_else(|| {
+            unsigned
+                .strip_prefix("0o")
+                .or_else(|| unsigned.strip_prefix("0O"))
+                .map(|digits| (8, digits))
+        });
+    let parsed = if let Some((radix, digits)) = radix_value {
+        i64::from_str_radix(digits, radix).ok().and_then(|number| {
+            if negative {
+                number.checked_neg()
+            } else {
+                Some(number)
+            }
+        })
+    } else {
+        trimmed.parse::<f64>().ok().and_then(|number| {
+            let rounded = number.round();
+            rounded
+                .is_finite()
+                .then(|| format!("{rounded:.0}").parse::<i64>().ok())
+                .flatten()
+        })
+    };
+    parsed
+        .filter(|number| (min..=max).contains(number))
+        .map(|number| number.to_string())
+        .ok_or_else(|| ExecError::InvalidParameterValue(value.to_string()))
 }
 
 fn canonical_timeout(value: &str) -> Result<String, ExecError> {
@@ -3775,7 +3812,9 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
     use crabka_pgwire::engine::{Engine, Session, TxStatus};
 
-    use super::{ColumnType, SqlSession, decode_bound_param};
+    use super::{
+        ColumnType, SqlSession, canonical_guc_value, decode_bound_param, guc_default, guc_vartype,
+    };
     use crate::{ExecError, SqlEngine};
 
     struct FailOnCommitter {
@@ -4948,6 +4987,108 @@ mod tests {
             ),
             "2"
         );
+    }
+
+    #[test]
+    fn extra_float_digits_matches_postgres_integer_guc_input() {
+        assert_eq!(guc_default("extra_float_digits"), "1");
+        assert_eq!(guc_vartype("extra_float_digits"), "integer");
+
+        for (input, expected) in [
+            ("-15", "-15"),
+            ("3", "3"),
+            ("  +2  ", "2"),
+            ("1.4", "1"),
+            ("1.6", "2"),
+            ("1.5", "2"),
+            ("-1.5", "-2"),
+            ("0x2", "2"),
+            ("+0x2", "2"),
+            ("0o2", "2"),
+        ] {
+            assert_eq!(
+                canonical_guc_value("extra_float_digits", input)
+                    .expect("accepted by PostgreSQL 18"),
+                expected
+            );
+        }
+        for input in ["-16", "4", "010", "nope"] {
+            assert!(matches!(
+                canonical_guc_value("extra_float_digits", input),
+                Err(ExecError::InvalidParameterValue(_))
+            ));
+        }
+    }
+
+    #[tokio::test]
+    async fn extra_float_digits_obeys_set_and_set_local_transactions() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("SET extra_float_digits = 2")
+            .await
+            .expect("set");
+        session.simple_query("COMMIT").await.expect("commit");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW extra_float_digits")
+                    .await
+                    .expect("show")
+            ),
+            "2"
+        );
+
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("SET extra_float_digits = 3")
+            .await
+            .expect("set");
+        session.simple_query("ROLLBACK").await.expect("rollback");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW extra_float_digits")
+                    .await
+                    .expect("show")
+            ),
+            "2"
+        );
+
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("SET LOCAL extra_float_digits = '-15'")
+            .await
+            .expect("set local");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW extra_float_digits")
+                    .await
+                    .expect("show")
+            ),
+            "-15"
+        );
+        session.simple_query("COMMIT").await.expect("commit");
+        assert_eq!(
+            single_text(
+                &session
+                    .simple_query("SHOW extra_float_digits")
+                    .await
+                    .expect("show")
+            ),
+            "2"
+        );
+
+        for input in ["-16", "4"] {
+            let error = session
+                .simple_query(&format!("SET extra_float_digits = '{input}'"))
+                .await
+                .expect_err("out of range");
+            assert_eq!(error.code, "22023");
+        }
     }
 
     #[tokio::test]
