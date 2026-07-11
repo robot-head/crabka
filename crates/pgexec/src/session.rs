@@ -160,6 +160,8 @@ enum GucValue {
     Bool(bool),
     Integer(i64),
     DurationMillis(u64),
+    DateStyle(DateStyle),
+    IntervalStyle(IntervalStyle),
     Text(String),
 }
 
@@ -170,18 +172,71 @@ impl GucValue {
             Self::Bool(false) => "off".into(),
             Self::Integer(value) => value.to_string(),
             Self::DurationMillis(0) => "0".into(),
+            Self::DurationMillis(value) if value % 60_000 == 0 => format!("{}min", value / 60_000),
+            Self::DurationMillis(value) if value % 1_000 == 0 => format!("{}s", value / 1_000),
             Self::DurationMillis(value) => format!("{value}ms"),
+            Self::DateStyle(value) => value.render(),
+            Self::IntervalStyle(value) => value.render().into(),
             Self::Text(value) => value.clone(),
         }
     }
 }
 
-#[derive(Clone, Copy)]
-enum GucKind {
-    Bool,
-    Integer { min: i64, max: i64 },
-    Duration,
-    Text,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateOutputStyle {
+    Iso,
+    Sql,
+    Postgres,
+    German,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DateOrder {
+    Mdy,
+    Dmy,
+    Ymd,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct DateStyle {
+    output: DateOutputStyle,
+    order: DateOrder,
+}
+
+impl DateStyle {
+    fn render(self) -> String {
+        let output = match self.output {
+            DateOutputStyle::Iso => "ISO",
+            DateOutputStyle::Sql => "SQL",
+            DateOutputStyle::Postgres => "Postgres",
+            DateOutputStyle::German => "German",
+        };
+        let order = match self.order {
+            DateOrder::Mdy => "MDY",
+            DateOrder::Dmy => "DMY",
+            DateOrder::Ymd => "YMD",
+        };
+        format!("{output}, {order}")
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum IntervalStyle {
+    Postgres,
+    PostgresVerbose,
+    SqlStandard,
+    Iso8601,
+}
+
+impl IntervalStyle {
+    fn render(self) -> &'static str {
+        match self {
+            Self::Postgres => "postgres",
+            Self::PostgresVerbose => "postgres_verbose",
+            Self::SqlStandard => "sql_standard",
+            Self::Iso8601 => "iso_8601",
+        }
+    }
 }
 
 struct GucDefinition {
@@ -189,7 +244,7 @@ struct GucDefinition {
     aliases: &'static [&'static str],
     vartype: &'static str,
     boot_default: &'static str,
-    kind: GucKind,
+    parse: fn(&str) -> Result<GucValue, ExecError>,
 }
 
 static GUC_DEFINITIONS: &[GucDefinition] = &[
@@ -198,63 +253,63 @@ static GUC_DEFINITIONS: &[GucDefinition] = &[
         aliases: &[],
         vartype: "string",
         boot_default: "",
-        kind: GucKind::Text,
+        parse: |value| Ok(GucValue::Text(value.to_string())),
     },
     GucDefinition {
         name: "client_encoding",
         aliases: &[],
         vartype: "string",
         boot_default: "UTF8",
-        kind: GucKind::Text,
+        parse: parse_client_encoding,
     },
     GucDefinition {
         name: "datestyle",
         aliases: &["DateStyle"],
         vartype: "string",
         boot_default: "ISO, MDY",
-        kind: GucKind::Text,
+        parse: parse_date_style,
     },
     GucDefinition {
         name: "extra_float_digits",
         aliases: &[],
         vartype: "integer",
         boot_default: "1",
-        kind: GucKind::Integer { min: -15, max: 3 },
+        parse: parse_extra_float_digits,
     },
     GucDefinition {
         name: "intervalstyle",
         aliases: &["IntervalStyle"],
         vartype: "string",
         boot_default: "postgres",
-        kind: GucKind::Text,
+        parse: parse_interval_style,
     },
     GucDefinition {
         name: "search_path",
         aliases: &[],
         vartype: "string",
         boot_default: "\"$user\", public",
-        kind: GucKind::Text,
+        parse: |value| Ok(GucValue::Text(value.to_string())),
     },
     GucDefinition {
         name: "standard_conforming_strings",
         aliases: &[],
         vartype: "bool",
         boot_default: "on",
-        kind: GucKind::Bool,
+        parse: parse_bool,
     },
     GucDefinition {
         name: "statement_timeout",
         aliases: &[],
         vartype: "integer",
         boot_default: "0",
-        kind: GucKind::Duration,
+        parse: parse_statement_timeout,
     },
     GucDefinition {
         name: "timezone",
         aliases: &["TimeZone", "time zone"],
         vartype: "string",
         boot_default: "UTC",
-        kind: GucKind::Text,
+        parse: parse_timezone,
     },
 ];
 
@@ -281,6 +336,8 @@ pub(crate) struct GucSettingRow {
     pub(crate) name: String,
     pub(crate) value: String,
     pub(crate) vartype: String,
+    pub(crate) boot_val: String,
+    pub(crate) reset_val: String,
 }
 
 impl Default for GucState {
@@ -341,6 +398,16 @@ impl GucState {
         Ok(())
     }
 
+    fn set_default(&mut self, name: &str, local: bool) -> Result<(), ExecError> {
+        let key = normalize_guc_name(name);
+        let slot = self
+            .slots
+            .get_mut(&key)
+            .ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
+        slot.set(slot.source.clone(), local);
+        Ok(())
+    }
+
     pub(crate) fn reset(&mut self, name: &str) -> Result<(), ExecError> {
         let key = normalize_guc_name(name);
         let slot = self
@@ -368,14 +435,35 @@ impl GucState {
             slot.rollback();
         }
     }
+
+    fn discard_all(&mut self) {
+        for slot in self.slots.values_mut() {
+            slot.committed.clone_from(&slot.source);
+            slot.txn_current = None;
+            slot.txn_session = None;
+        }
+    }
+
+    fn settings(&self) -> Vec<GucSettingRow> {
+        self.slots
+            .iter()
+            .map(|(name, slot)| {
+                let definition = guc_definition(name).expect("registered GUC slot");
+                GucSettingRow {
+                    name: name.clone(),
+                    value: slot.effective().render(),
+                    vartype: definition.vartype.into(),
+                    boot_val: definition.boot_default.into(),
+                    reset_val: slot.source.render(),
+                }
+            })
+            .collect()
+    }
 }
 
+#[cfg(test)]
 fn guc_default(name: &str) -> &'static str {
     guc_definition(name).map_or("", |definition| definition.boot_default)
-}
-
-pub(crate) fn guc_default_value(name: &str) -> &'static str {
-    guc_default(&normalize_guc_name(name))
 }
 
 pub(crate) fn guc_settings_runtime() -> Result<Vec<GucSettingRow>, ExecError> {
@@ -384,18 +472,11 @@ pub(crate) fn guc_settings_runtime() -> Result<Vec<GucSettingRow>, ExecError> {
         let values = runtime
             .as_ref()
             .ok_or_else(|| ExecError::UnrecognizedParameter("pg_settings".into()))?;
-        Ok(values
-            .values
-            .iter()
-            .map(|(name, value)| GucSettingRow {
-                name: name.clone(),
-                value: value.clone(),
-                vartype: guc_vartype(name).to_string(),
-            })
-            .collect())
+        Ok(values.settings.clone())
     })
 }
 
+#[cfg(test)]
 fn guc_vartype(name: &str) -> &'static str {
     guc_definition(name).map_or("string", |definition| definition.vartype)
 }
@@ -408,76 +489,111 @@ fn normalize_guc_name(name: &str) -> String {
 }
 
 fn parse_guc_value(definition: &GucDefinition, value: &str) -> Result<GucValue, ExecError> {
-    let canonical = canonical_guc_value(definition.name, value)?;
-    match definition.kind {
-        GucKind::Bool => Ok(GucValue::Bool(canonical == "on")),
-        GucKind::Integer { .. } => canonical
-            .parse()
-            .map(GucValue::Integer)
-            .map_err(|_| ExecError::InvalidParameterValue(value.into())),
-        GucKind::Duration => canonical
-            .parse()
-            .map(GucValue::DurationMillis)
-            .map_err(|_| ExecError::InvalidParameterValue(value.into())),
-        GucKind::Text => Ok(GucValue::Text(canonical)),
-    }
+    (definition.parse)(value)
 }
 
 fn canonical_guc_value(name: &str, value: &str) -> Result<String, ExecError> {
-    match name {
-        "timezone" => {
-            if value.eq_ignore_ascii_case("UTC") || jiff::tz::TimeZone::get(value).is_ok() {
-                Ok(value.to_string())
-            } else {
-                Err(ExecError::InvalidParameterValue(value.to_string()))
-            }
-        }
-        "client_encoding" => {
-            if matches!(
-                value.to_ascii_uppercase().as_str(),
-                "UTF8" | "UTF-8" | "UNICODE"
-            ) {
-                Ok("UTF8".into())
-            } else {
-                Err(ExecError::InvalidParameterValue(value.to_string()))
-            }
-        }
-        "standard_conforming_strings" => canonical_bool(value),
-        "extra_float_digits" => {
-            let definition = guc_definition(name).expect("known integer GUC");
-            let GucKind::Integer { min, max } = definition.kind else {
-                unreachable!()
-            };
-            canonical_integer_guc(value, min, max)
-        }
-        "statement_timeout" => value
-            .trim()
-            .parse::<u64>()
-            .map(|number| number.to_string())
-            .map_err(|_| ExecError::InvalidParameterValue(value.to_string())),
-        "datestyle" => Ok(value.to_string()),
-        "intervalstyle" => {
-            let lower = value.to_ascii_lowercase();
-            if matches!(
-                lower.as_str(),
-                "postgres" | "postgres_verbose" | "sql_standard" | "iso_8601"
-            ) {
-                Ok(lower)
-            } else {
-                Err(ExecError::InvalidParameterValue(value.to_string()))
-            }
-        }
-        "application_name" | "search_path" => Ok(value.to_string()),
-        _ => Err(ExecError::UnrecognizedParameter(name.to_string())),
+    let definition =
+        guc_definition(name).ok_or_else(|| ExecError::UnrecognizedParameter(name.to_string()))?;
+    parse_guc_value(definition, value).map(|parsed| parsed.render())
+}
+
+fn parse_timezone(value: &str) -> Result<GucValue, ExecError> {
+    if value.eq_ignore_ascii_case("UTC") || jiff::tz::TimeZone::get(value).is_ok() {
+        Ok(GucValue::Text(value.to_string()))
+    } else {
+        Err(ExecError::InvalidParameterValue(value.to_string()))
     }
 }
 
-fn canonical_bool(value: &str) -> Result<String, ExecError> {
+fn parse_client_encoding(value: &str) -> Result<GucValue, ExecError> {
+    if matches!(
+        value.to_ascii_uppercase().as_str(),
+        "UTF8" | "UTF-8" | "UNICODE"
+    ) {
+        Ok(GucValue::Text("UTF8".into()))
+    } else {
+        Err(ExecError::InvalidParameterValue(value.to_string()))
+    }
+}
+
+fn parse_bool(value: &str) -> Result<GucValue, ExecError> {
     match value.to_ascii_lowercase().as_str() {
-        "on" | "true" | "yes" | "1" => Ok("on".into()),
-        "off" | "false" | "no" | "0" => Ok("off".into()),
+        "on" | "true" | "yes" | "1" => Ok(GucValue::Bool(true)),
+        "off" | "false" | "no" | "0" => Ok(GucValue::Bool(false)),
         _ => Err(ExecError::InvalidParameterValue(value.to_string())),
     }
+}
+
+fn parse_extra_float_digits(value: &str) -> Result<GucValue, ExecError> {
+    canonical_integer_guc(value, -15, 3)?
+        .parse()
+        .map(GucValue::Integer)
+        .map_err(|_| ExecError::InvalidParameterValue(value.into()))
+}
+
+fn parse_date_style(value: &str) -> Result<GucValue, ExecError> {
+    let mut output = None;
+    let mut order = None;
+    for part in value.split(',').map(str::trim) {
+        let lower = part.to_ascii_lowercase();
+        match lower.as_str() {
+            "iso" => output = Some(DateOutputStyle::Iso),
+            "sql" => output = Some(DateOutputStyle::Sql),
+            "postgres" | "postgresql" => output = Some(DateOutputStyle::Postgres),
+            "german" => output = Some(DateOutputStyle::German),
+            "mdy" | "us" | "noneuro" | "noneuropean" => order = Some(DateOrder::Mdy),
+            "dmy" | "euro" | "european" => order = Some(DateOrder::Dmy),
+            "ymd" => order = Some(DateOrder::Ymd),
+            _ => return Err(ExecError::InvalidParameterValue(value.to_string())),
+        }
+    }
+    let current = DateStyle {
+        output: DateOutputStyle::Iso,
+        order: DateOrder::Mdy,
+    };
+    Ok(GucValue::DateStyle(DateStyle {
+        output: output.unwrap_or(current.output),
+        order: order.unwrap_or(current.order),
+    }))
+}
+
+fn parse_interval_style(value: &str) -> Result<GucValue, ExecError> {
+    let style = match value.to_ascii_lowercase().as_str() {
+        "postgres" => IntervalStyle::Postgres,
+        "postgres_verbose" => IntervalStyle::PostgresVerbose,
+        "sql_standard" => IntervalStyle::SqlStandard,
+        "iso_8601" => IntervalStyle::Iso8601,
+        _ => return Err(ExecError::InvalidParameterValue(value.to_string())),
+    };
+    Ok(GucValue::IntervalStyle(style))
+}
+
+fn parse_statement_timeout(value: &str) -> Result<GucValue, ExecError> {
+    let trimmed = value.trim();
+    let split = trimmed
+        .find(|character: char| !(character.is_ascii_digit() || character == '.'))
+        .unwrap_or(trimmed.len());
+    let (number, unit) = trimmed.split_at(split);
+    let number = number
+        .parse::<f64>()
+        .map_err(|_| ExecError::InvalidParameterValue(value.to_string()))?;
+    let multiplier = match unit.trim().to_ascii_lowercase().as_str() {
+        "" | "ms" => 1.0,
+        "s" => 1_000.0,
+        "min" => 60_000.0,
+        "h" => 3_600_000.0,
+        "d" => 86_400_000.0,
+        _ => return Err(ExecError::InvalidParameterValue(value.to_string())),
+    };
+    let millis = number * multiplier;
+    if !millis.is_finite() || millis < 0.0 || millis > f64::from(i32::MAX) {
+        return Err(ExecError::InvalidParameterValue(value.to_string()));
+    }
+    let millis = format!("{millis:.0}")
+        .parse()
+        .map_err(|_| ExecError::InvalidParameterValue(value.to_string()))?;
+    Ok(GucValue::DurationMillis(millis))
 }
 
 /// Parse PostgreSQL integer-GUC input, including rounded decimal input and the
@@ -532,6 +648,7 @@ struct GucMutation {
 #[derive(Debug, Clone)]
 struct GucRuntime {
     values: BTreeMap<String, String>,
+    settings: Vec<GucSettingRow>,
     mutations: Vec<GucMutation>,
 }
 
@@ -584,11 +701,13 @@ pub(crate) fn set_config_runtime(
 
 fn with_guc_runtime<T>(
     values: BTreeMap<String, String>,
+    settings: Vec<GucSettingRow>,
     f: impl FnOnce() -> T,
 ) -> (T, Vec<GucMutation>) {
     GUC_RUNTIME.with(|cell| {
         let previous = cell.replace(Some(GucRuntime {
             values,
+            settings,
             mutations: Vec::new(),
         }));
         let result = f();
@@ -807,19 +926,23 @@ impl SqlSession {
         value: &crabka_pgparser::ast::SetValue,
     ) -> Result<QueryResult, ExecError> {
         let zone = match value {
-            crabka_pgparser::ast::SetValue::Default => {
-                guc_default(&normalize_guc_name(name)).to_string()
-            }
+            crabka_pgparser::ast::SetValue::Default => String::new(),
             crabka_pgparser::ast::SetValue::Value(v) => v.clone(),
         };
         // Apply with the right transactional scope.
         let in_txn = matches!(self.state, TxnState::InTransaction(_));
         if in_txn {
-            self.guc.set(name, &zone, local)?;
+            match value {
+                crabka_pgparser::ast::SetValue::Default => self.guc.set_default(name, local)?,
+                crabka_pgparser::ast::SetValue::Value(_) => self.guc.set(name, &zone, local)?,
+            }
         } else {
             // Autocommit: this SET is its own transaction. A plain SET persists
             // (set_session + commit); a SET LOCAL is committed too, which drops it.
-            self.guc.set(name, &zone, local)?;
+            match value {
+                crabka_pgparser::ast::SetValue::Default => self.guc.set_default(name, local)?,
+                crabka_pgparser::ast::SetValue::Value(_) => self.guc.set(name, &zone, local)?,
+            }
             self.guc.commit();
         }
         Ok(QueryResult::Command { tag: "SET".into() })
@@ -970,7 +1093,7 @@ impl SqlSession {
                 "DISCARD ALL cannot run inside a transaction block".into(),
             ));
         }
-        self.guc = GucState::default();
+        self.guc.discard_all();
         self.current_role.clone_from(&self.session_user);
         self.prepared.clear();
         self.portals.clear();
@@ -1417,20 +1540,21 @@ impl SqlSession {
             scanner: self.foreign_scanner.as_ref(),
             current_user: &self.current_role,
         };
-        let (result, mutations) = with_guc_runtime(self.guc.effective_map(), || {
-            crate::exec::execute_read(
-                &*self.catalog_kv,
-                &*self.kv,
-                &*self.catalog_kv,
-                &gsnap,
-                &snapshot,
-                own,
-                stmt,
-                &ctx,
-                fctx,
-                &statement_scanner,
-            )
-        });
+        let (result, mutations) =
+            with_guc_runtime(self.guc.effective_map(), self.guc.settings(), || {
+                crate::exec::execute_read(
+                    &*self.catalog_kv,
+                    &*self.kv,
+                    &*self.catalog_kv,
+                    &gsnap,
+                    &snapshot,
+                    own,
+                    stmt,
+                    &ctx,
+                    fctx,
+                    &statement_scanner,
+                )
+            });
         if result.is_ok() {
             self.apply_guc_mutations(mutations)?;
         }
@@ -3939,7 +4063,7 @@ mod tests {
     };
 
     use crabka_pgkv::{Kv, MemKv};
-    use crabka_pgwire::engine::{Engine, Session, TxStatus};
+    use crabka_pgwire::engine::{Engine, QueryResult, Session, TxStatus};
 
     use super::{
         ColumnType, GucState, SqlSession, canonical_guc_value, decode_bound_param, guc_default,
@@ -5242,6 +5366,23 @@ mod tests {
         assert_eq!(gucs.effective("application_name").unwrap(), "from-source");
     }
 
+    #[test]
+    fn typed_guc_parsers_match_postgres_18_canonical_forms() {
+        let mut gucs = GucState::default();
+        gucs.set("DateStyle", "SQL, European", false).unwrap();
+        assert_eq!(gucs.effective("DateStyle").unwrap(), "SQL, DMY");
+        gucs.set("IntervalStyle", "POSTGRES_VERBOSE", false)
+            .unwrap();
+        assert_eq!(gucs.effective("IntervalStyle").unwrap(), "postgres_verbose");
+        gucs.set("statement_timeout", "1.5s", false).unwrap();
+        assert_eq!(gucs.effective("statement_timeout").unwrap(), "1500ms");
+        gucs.set("statement_timeout", "1 min", false).unwrap();
+        assert_eq!(gucs.effective("statement_timeout").unwrap(), "1min");
+        assert!(gucs.set("DateStyle", "nonsense", false).is_err());
+        assert!(gucs.set("IntervalStyle", "nonsense", false).is_err());
+        assert!(gucs.set("statement_timeout", "-1", false).is_err());
+    }
+
     #[tokio::test]
     async fn current_setting_and_set_config_follow_transaction_scope() {
         let engine = SqlEngine::new();
@@ -5371,6 +5512,106 @@ mod tests {
 
         assert!(session.describe_statement("gone").await.is_err());
         assert!(session.describe_portal("gone_portal").await.is_err());
+        assert_eq!(
+            single_text(&session.simple_query("SELECT 1").await.unwrap()),
+            "1"
+        );
+    }
+
+    #[tokio::test]
+    async fn source_values_drive_default_reset_all_discard_and_pg_settings() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        let mut source = BTreeMap::new();
+        source.insert(
+            "application_name".to_string(),
+            "configured-source".to_string(),
+        );
+        session.guc = GucState::with_source_values(source).unwrap();
+
+        session
+            .simple_query("SET application_name = 'changed'; SET application_name = DEFAULT")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "configured-source"
+        );
+        session.simple_query("BEGIN").await.unwrap();
+        session
+            .simple_query("SET application_name = 'transaction-session'")
+            .await
+            .unwrap();
+        session
+            .simple_query("SET LOCAL application_name = DEFAULT")
+            .await
+            .unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "configured-source"
+        );
+        session.simple_query("COMMIT").await.unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "transaction-session"
+        );
+        session
+            .simple_query("SELECT set_config('application_name', 'function-change', false)")
+            .await
+            .unwrap();
+        session.simple_query("RESET ALL").await.unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "configured-source"
+        );
+        let settings = session
+            .simple_query(
+                "SELECT boot_val, reset_val FROM pg_catalog.pg_settings \
+                 WHERE name = 'application_name'",
+            )
+            .await
+            .unwrap();
+        let [QueryResult::Rows { rows, .. }] = settings.as_slice() else {
+            panic!("expected pg_settings row: {settings:?}");
+        };
+        assert_eq!(rows[0][0].as_ref().unwrap().text.as_ref(), b"");
+        assert_eq!(
+            rows[0][1].as_ref().unwrap().text.as_ref(),
+            b"configured-source"
+        );
+
+        session
+            .simple_query("SET application_name = 'before-discard'")
+            .await
+            .unwrap();
+        session.simple_query("DISCARD ALL").await.unwrap();
+        assert_eq!(
+            single_text(&session.simple_query("SHOW application_name").await.unwrap()),
+            "configured-source"
+        );
+    }
+
+    #[tokio::test]
+    async fn rejected_discard_preserves_role_gucs_and_extended_resources() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session.parse("kept", "SELECT 1", &[]).await.unwrap();
+        session.bind("kept_portal", "kept", &[], &[]).await.unwrap();
+        session
+            .simple_query("SET application_name = 'kept'; BEGIN")
+            .await
+            .unwrap();
+        session.current_role = "role-before-discard".into();
+
+        let error = session.simple_query("DISCARD ALL").await.unwrap_err();
+        assert_eq!(error.code, "25001");
+        assert_eq!(session.current_role, "role-before-discard");
+        assert_eq!(session.guc.effective("application_name").unwrap(), "kept");
+        assert!(session.describe_statement("kept").await.is_ok());
+        assert!(session.describe_portal("kept_portal").await.is_ok());
+
+        session.simple_query("ROLLBACK; DISCARD ALL").await.unwrap();
+        assert_eq!(session.current_role, session.session_user);
         assert_eq!(
             single_text(&session.simple_query("SELECT 1").await.unwrap()),
             "1"

@@ -1188,6 +1188,10 @@ impl Parser {
             }
             return self.set_transaction_tail();
         }
+        // `SESSION` is the explicit spelling of the default SET scope.
+        if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("session")) {
+            self.bump();
+        }
         // `LOCAL` is the flag only when it leads and is followed by a parameter
         // name (an ident or `TIME ZONE`). It is NEVER a flag after `TIME ZONE`
         // (there it is the value `LOCAL`), and the `set_stmt` entry is before any
@@ -1235,6 +1239,20 @@ impl Parser {
         let mut parts = Vec::new();
         loop {
             let part = match self.peek().clone() {
+                Token::Plus | Token::Minus => {
+                    let sign = if self.bump() == Token::Minus {
+                        "-"
+                    } else {
+                        "+"
+                    };
+                    let Token::IntLit(number) = self.bump() else {
+                        return Err(ParseError::new(
+                            "expected a number after SET value sign",
+                            self.peek_pos(),
+                        ));
+                    };
+                    format!("{sign}{number}")
+                }
                 Token::StringLit(s) | Token::IntLit(s) => {
                     self.bump();
                     s
@@ -1344,6 +1362,9 @@ impl Parser {
     fn show_stmt(&mut self) -> Result<crate::ast::Statement, ParseError> {
         use crate::ast::Statement;
         self.bump(); // show
+        if self.eat_keyword(Keyword::All) {
+            return Ok(Statement::Show { name: "all".into() });
+        }
         // `SHOW TIME ZONE` → name `"timezone"`.
         if matches!(self.peek(), Token::Ident(w) if w.eq_ignore_ascii_case("time"))
             && matches!(self.peek2(), Token::Ident(w) if w.eq_ignore_ascii_case("zone"))
@@ -4706,6 +4727,52 @@ mod tests {
                 value: crate::ast::SetValue::Value("read committed".into())
             }
         );
+    }
+
+    #[test]
+    fn parses_f1_guc_command_surface() {
+        use crate::ast::{ResetTarget, SetValue};
+
+        for sql in [
+            "SET SESSION application_name TO 'session-app'",
+            "SET application_name = 'session-app'",
+        ] {
+            assert_eq!(
+                one(sql),
+                Statement::Set {
+                    local: false,
+                    name: "application_name".into(),
+                    value: SetValue::Value("session-app".into()),
+                }
+            );
+        }
+        assert_eq!(
+            one("SET extra_float_digits = -15"),
+            Statement::Set {
+                local: false,
+                name: "extra_float_digits".into(),
+                value: SetValue::Value("-15".into()),
+            }
+        );
+        assert_eq!(
+            one("SET DateStyle TO ISO, MDY"),
+            Statement::Set {
+                local: false,
+                name: "datestyle".into(),
+                value: SetValue::Value("iso, mdy".into()),
+            }
+        );
+        assert_eq!(one("SHOW ALL"), Statement::Show { name: "all".into() });
+        assert_eq!(
+            one("RESET ALL"),
+            Statement::Reset {
+                target: ResetTarget::All,
+            }
+        );
+        for unsupported in ["DISCARD PLANS", "DISCARD SEQUENCES", "DISCARD TEMP"] {
+            let error = crate::parser::parse(unsupported).expect_err("unsupported DISCARD");
+            assert!(error.to_string().contains("All"));
+        }
     }
 
     #[test]

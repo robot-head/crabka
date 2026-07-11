@@ -110,12 +110,20 @@ const ACCEPTED: &[&str] = &[
     "SET timezone TO 'UTC'",
     "SET TIME ZONE 'America/New_York'",
     "SET LOCAL timezone = 'UTC'",
+    "SET SESSION application_name TO 'session-app'",
+    "SET extra_float_digits = -15",
+    "SET DateStyle TO ISO, MDY",
     "SET TIME ZONE LOCAL",
     "SET TIME ZONE DEFAULT",
     "SET timezone = DEFAULT",
     "SHOW timezone",
     "SHOW TIME ZONE",
     "RESET timezone",
+    "RESET ALL",
+    "SHOW ALL",
+    "DISCARD ALL",
+    "SET TRANSACTION ISOLATION LEVEL READ COMMITTED",
+    "SET TRANSACTION ISOLATION LEVEL REPEATABLE READ",
     // SP40: FDW DDL
     "CREATE SERVER s FOREIGN DATA WRAPPER w OPTIONS (a 'b')",
     "CREATE FOREIGN TABLE t (id int4) SERVER s OPTIONS (topic 't')",
@@ -168,5 +176,16 @@ fn agreement_on_rejected() {
     for &sql in REJECTED {
         assert!(!pg_accepts(sql), "libpg_query should reject: {sql}");
         assert!(!we_accept(sql), "pgparser should reject (PG does): {sql}");
+    }
+}
+
+#[test]
+fn unsupported_discard_variants_are_explicitly_bounded() {
+    for sql in ["DISCARD PLANS", "DISCARD SEQUENCES", "DISCARD TEMP"] {
+        assert!(pg_accepts(sql), "PostgreSQL grammar should accept: {sql}");
+        assert!(
+            !we_accept(sql),
+            "pgparser must reject the unsupported non-ALL variant: {sql}"
+        );
     }
 }

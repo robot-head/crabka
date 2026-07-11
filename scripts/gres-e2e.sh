@@ -348,6 +348,18 @@ port = sys.argv[1]
 path = pathlib.Path(sys.argv[2])
 text = path.read_text()
 text = text.replace("listen_port = 6432", f"listen_port = {port}", 1)
+text = text.replace(
+    "pooler_mode = \"transaction\"",
+    'pooler_mode = "transaction"\ndefault_pool_size = 10',
+    1,
+)
+tenant_b = 'name = "tenant-b"\nhost = "tenant-b.gres.svc"'
+text = text.replace(tenant_b, tenant_b + "\npool_size = 1", 1)
+if (
+    "default_pool_size = 10" not in text
+    or "pool_size = 1" not in text
+):
+    raise SystemExit("failed to configure tenant-b's one-backend PgDog pool")
 path.write_text(text)
 PY
 }
@@ -518,28 +530,62 @@ timeout 30s python3 - <<'F1PY' >"${ARTIFACT_DIR}/f1-pooler-guc.log" 2>&1 || fail
 import os
 import psycopg
 
-with psycopg.connect(os.environ["DATABASE_URL"]) as connection:
-    with connection.cursor() as cursor:
-        cursor.execute("BEGIN")
+with (
+    # PgDog 0.1.6 tracks session-control statements on its simple-query path.
+    # ClientCursor keeps the gate on that documented transaction-pooler path.
+    psycopg.connect(
+        os.environ["DATABASE_URL"],
+        application_name="f1-client-one",
+        cursor_factory=psycopg.ClientCursor,
+    ) as first_connection,
+    psycopg.connect(
+        os.environ["DATABASE_URL"],
+        cursor_factory=psycopg.ClientCursor,
+    ) as second_connection,
+):
+    first_connection.autocommit = True
+    second_connection.autocommit = True
+
+    with first_connection.transaction(), first_connection.cursor() as cursor:
+        # The pinned pooler tracks this value from startup; SET exercises Gres
+        # without changing it to a value PgDog 0.1.6 cannot track inside BEGIN.
         cursor.execute("SET application_name = 'f1-client-one'")
         cursor.execute("SELECT current_setting('application_name')")
         assert cursor.fetchone()[0] == "f1-client-one"
+
+    # Both logical clients remain connected while PgDog has exactly one backend.
+    # Client two must receive a reset backend, not client one's committed value.
+    with second_connection.cursor() as cursor:
+        cursor.execute("BEGIN")
+        cursor.execute("SHOW application_name")
+        second_name = cursor.fetchone()[0]
+        assert second_name == "", f"client two inherited application_name={second_name!r}"
         cursor.execute("SET LOCAL statement_timeout = 17")
         cursor.execute("SHOW statement_timeout")
-        assert cursor.fetchone()[0] == "17ms"
-        connection.rollback()
-    with connection.transaction():
-        with connection.cursor() as cursor:
-            cursor.execute("RESET application_name")
-            cursor.execute("SHOW application_name")
-            assert cursor.fetchone()[0] == ""
+        local_timeout = cursor.fetchone()[0]
+        assert local_timeout == "17", f"pinned PgDog SET LOCAL baseline changed: {local_timeout!r}"
+        second_connection.rollback()
 
-with psycopg.connect(os.environ["DATABASE_URL"]) as second_connection:
-    with second_connection.transaction():
-        with second_connection.cursor() as cursor:
-            cursor.execute("SET application_name = 'f1-client-two'")
-            cursor.execute("SHOW application_name")
-            assert cursor.fetchone()[0] == "f1-client-two"
+    with second_connection.transaction(), second_connection.cursor() as cursor:
+        cursor.execute("SHOW statement_timeout")
+        assert cursor.fetchone()[0] == "0"
+
+    # Returning to client one proves PgDog replays that logical client's state
+    # onto the same single backend rather than leaking or losing it.
+    with first_connection.transaction(), first_connection.cursor() as cursor:
+        cursor.execute("SHOW application_name")
+        assert cursor.fetchone()[0] == "f1-client-one"
+
+    # Keep RESET and its observation in one simple-query checkout. PgDog 0.1.6
+    # does not retain RESET in its logical parameter map (pinned baseline).
+    with first_connection.cursor() as cursor:
+        cursor.execute("RESET application_name; SHOW application_name")
+        assert cursor.nextset()
+        assert cursor.fetchone()[0] == ""
+
+    with second_connection.transaction(), second_connection.cursor() as cursor:
+        cursor.execute("SHOW application_name")
+        assert cursor.fetchone()[0] == ""
 print("PASS: F-1 PgDog GUC transaction-pooler gate")
 F1PY
 
