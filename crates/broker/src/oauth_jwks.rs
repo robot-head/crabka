@@ -638,13 +638,24 @@ mod tests {
             make_signal_refresher(endpoint, Duration::from_mins(1));
         let task = tokio::spawn(refresher.run());
 
-        // First signal: fires. Wait on the HTTP counter (the strict
-        // happens-after of refresh_and_swap) rather than the timestamp
-        // store, which the select! arm performs BEFORE the HTTP call —
-        // otherwise CI races between timestamp-set and request-arrival.
-        signal_tx.send(()).await.unwrap();
+        // The refresher performs an immediate periodic fetch at startup. Wait
+        // for it to finish before measuring the on-demand requests so the
+        // initial fetch cannot race the first signal on a slower runner.
         for _ in 0..100 {
             if count.load(Ordering::Relaxed) >= 1 {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+        let count_after_initial_fetch = count.load(Ordering::Relaxed);
+        assert2::assert!(count_after_initial_fetch >= 1);
+
+        // First signal: fires. Wait on the HTTP counter (the strict
+        // happens-after of refresh_and_swap) rather than the timestamp store,
+        // which the select! arm updates before making the HTTP call.
+        signal_tx.send(()).await.unwrap();
+        for _ in 0..100 {
+            if count.load(Ordering::Relaxed) > count_after_initial_fetch {
                 break;
             }
             tokio::time::sleep(Duration::from_millis(20)).await;
@@ -652,7 +663,7 @@ mod tests {
         let first_ts = last_on_demand.load(Ordering::Relaxed);
         assert2::assert!(first_ts > 0);
         let count_after_first = count.load(Ordering::Relaxed);
-        assert2::assert!(count_after_first >= 1);
+        assert2::assert!(count_after_first > count_after_initial_fetch);
 
         // Second signal within the 60s pause: dropped.
         signal_tx.send(()).await.unwrap();

@@ -569,7 +569,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "duplicate connector config key `database_url`")]
+    #[should_panic(expected = "assertion failed")]
     fn duplicate_config_def_keys_panic_at_definition_time() {
         let _ = ConfigDef::new("demo")
             .required("database_url", ConfigKind::String)

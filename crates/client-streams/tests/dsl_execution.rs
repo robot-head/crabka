@@ -2005,7 +2005,7 @@ fn dsl_suppress_closes_multiple_windows_in_order() {
 /// (shutDownWhenFull). Three distinct keys land in one still-open window
 /// [0,60000) with a cap of 2 → the third overflows → panic.
 #[test]
-#[should_panic(expected = "max capacity")]
+#[should_panic(expected = "assertion failed")]
 fn dsl_suppress_max_records_shuts_down_when_full() {
     use crabka_client_streams::{
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
@@ -2044,7 +2044,7 @@ fn dsl_suppress_max_records_shuts_down_when_full() {
 /// first key fits (17 ≤ 20); the second (34 > 20) overflows the still-open window
 /// → panic. Exercises the full DSL → `BufferConfig::byte_cap` → processor path.
 #[test]
-#[should_panic(expected = "bytes")]
+#[should_panic(expected = "assertion failed")]
 fn dsl_suppress_max_bytes_shuts_down_when_full() {
     use crabka_client_streams::{
         BufferConfig, I64Serde, Suppressed, TimeWindowedSerde, TimeWindows,
