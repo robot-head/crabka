@@ -77,8 +77,8 @@ pub use error::ExecError;
 pub use gtm::GlobalXidLease;
 pub use read_gate::{Linearizer, LocalLinearizer};
 pub use scanner::{
-    ColumnPredicate, LocalRangeScanner, PartialAggregateFunction, PartialAggregateSpec,
-    MaterializedRangeCursor, PredicateOp, PredicatePushdown, ProjectionPushdown, RangeCursor,
+    ColumnPredicate, LocalRangeScanner, MaterializedRangeCursor, PartialAggregateFunction,
+    PartialAggregateSpec, PredicateOp, PredicatePushdown, ProjectionPushdown, RangeCursor,
     RangeScanner, RowInterval, ScanPage, ScanRequest, ScannedRow, TimestampedRangeScanner,
     TopKColumn, TopKSpec,
 };
