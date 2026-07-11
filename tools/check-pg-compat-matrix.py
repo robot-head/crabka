@@ -39,7 +39,7 @@ VALID_DISPOSITION = re.compile(
     r"^(Implemented|Wave-assigned\([^)]+\)|Mapped\([^)]+\)|"
     r"Error-with-notice\([0-9A-Z]{5}\)|Non-goal\([^)]+\))$"
 )
-RESOLVED_PARSER_PREFIXES = ("Mapped(", "Error-with-notice(")
+RESOLVED_PARSER_PREFIXES = ("Mapped(", "Error-with-notice(", "Non-goal(")
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)

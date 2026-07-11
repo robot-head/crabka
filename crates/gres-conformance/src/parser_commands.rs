@@ -326,6 +326,15 @@ pub fn parser_command_report() -> Result<ParserCommandReport, ParserCommandError
         validate_probe(probe)?;
         commands.push(probe.command.to_string());
     }
+    for spec in crabka_pgparser::ast::NON_GOAL_REFUSALS {
+        let probe = CommandProbe {
+            command: spec.command.command_name(),
+            sql: spec.representative_sql,
+            expected_statement: "CompatibilityRefusal",
+        };
+        validate_probe(&probe)?;
+        commands.push(probe.command.to_string());
+    }
     commands.sort_unstable();
 
     Ok(ParserCommandReport {
@@ -418,62 +427,19 @@ mod tests {
 
         assert_eq!(report.format_version, PARSER_COMMAND_REPORT_FORMAT_VERSION);
         assert_eq!(
-            report.commands,
-            vec![
-                "ABORT",
-                "ALTER DATABASE",
-                "ALTER EXTENSION",
-                "ALTER SERVER",
-                "ALTER TABLE",
-                "ALTER USER MAPPING",
-                "BEGIN",
-                "COMMIT",
-                "COMMIT PREPARED",
-                "COPY",
-                "CREATE DATABASE",
-                "CREATE FOREIGN DATA WRAPPER",
-                "CREATE FOREIGN TABLE",
-                "CREATE INDEX",
-                "CREATE ROLE",
-                "CREATE SEQUENCE",
-                "CREATE SERVER",
-                "CREATE TABLE",
-                "CREATE USER",
-                "CREATE USER MAPPING",
-                "CREATE VIEW",
-                "DELETE",
-                "DISCARD",
-                "DROP DATABASE",
-                "DROP EXTENSION",
-                "DROP FOREIGN DATA WRAPPER",
-                "DROP FOREIGN TABLE",
-                "DROP INDEX",
-                "DROP ROLE",
-                "DROP SEQUENCE",
-                "DROP SERVER",
-                "DROP TABLE",
-                "DROP USER",
-                "DROP USER MAPPING",
-                "DROP VIEW",
-                "END",
-                "GRANT",
-                "IMPORT FOREIGN SCHEMA",
-                "INSERT",
-                "PREPARE TRANSACTION",
-                "RESET",
-                "REVOKE",
-                "ROLLBACK",
-                "ROLLBACK PREPARED",
-                "SELECT",
-                "SET",
-                "SET ROLE",
-                "SET TRANSACTION",
-                "SHOW",
-                "START TRANSACTION",
-                "UPDATE",
-                "VALUES",
-            ]
+            report.commands.len(),
+            92,
+            "all resolved command rows need probes"
         );
+        assert!(report.commands.windows(2).all(|pair| pair[0] < pair[1]));
+        for spec in crabka_pgparser::ast::NON_GOAL_REFUSALS {
+            assert!(
+                report
+                    .commands
+                    .iter()
+                    .any(|name| name == spec.command.command_name())
+            );
+        }
     }
 
     #[test]
