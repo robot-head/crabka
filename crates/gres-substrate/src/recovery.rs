@@ -418,6 +418,11 @@ impl CommittedWalReader for KafkaCommittedWalReader {
             let fetched = self.fetch_partition(&conn, next_offset).await?;
 
             if fetched.records.is_empty() {
+                if fetched.next_offset > next_offset {
+                    next_offset = fetched.next_offset;
+                    empty_fetches = 0;
+                    continue;
+                }
                 empty_fetches += 1;
                 if empty_fetches > EMPTY_FETCH_RETRIES {
                     return Err(SubstrateError::Unavailable(
@@ -451,6 +456,7 @@ impl CommittedWalReader for KafkaCommittedWalReader {
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct FetchedWalPartition {
     log_start_offset: i64,
+    next_offset: i64,
     records: Vec<ReplayItem>,
 }
 
@@ -534,6 +540,7 @@ fn decode_fetch_response(
                 {
                     return Ok(FetchedWalPartition {
                         log_start_offset: partition.log_start_offset,
+                        next_offset: partition.log_start_offset,
                         records: Vec::new(),
                     });
                 }
@@ -542,9 +549,11 @@ fn decode_fetch_response(
                     partition.error_code
                 )));
             }
+            let (records, next_offset) = decode_replay_items(partition);
             return Ok(FetchedWalPartition {
                 log_start_offset: partition.log_start_offset,
-                records: decode_replay_items(partition),
+                next_offset,
+                records,
             });
         }
     }
@@ -555,12 +564,12 @@ fn decode_fetch_response(
 
 fn decode_replay_items(
     partition: &crabka_protocol::owned::fetch_response::PartitionData,
-) -> Vec<ReplayItem> {
+) -> (Vec<ReplayItem>, i64) {
     let Some(payload) = &partition.records else {
-        return Vec::new();
+        return (Vec::new(), partition.high_watermark);
     };
     let Some(batches) = payload.as_v2() else {
-        return Vec::new();
+        return (Vec::new(), partition.high_watermark);
     };
     let mut aborted: std::collections::VecDeque<(i64, i64)> = partition
         .aborted_transactions
@@ -573,7 +582,14 @@ fn decode_replay_items(
     aborted.make_contiguous().sort_unstable();
     let mut aborted_producers = std::collections::HashSet::new();
     let mut records = Vec::new();
+    let mut next_offset = partition.log_start_offset.max(0);
     for batch in batches {
+        next_offset = next_offset.max(
+            batch
+                .base_offset
+                .saturating_add(i64::from(batch.last_offset_delta))
+                .saturating_add(1),
+        );
         while let Some(&(first_offset, producer_id)) = aborted.front() {
             if first_offset > batch.base_offset {
                 break;
@@ -596,7 +612,7 @@ fn decode_replay_items(
         }));
     }
     records.sort_by_key(|record| record.offset);
-    records
+    (records, next_offset)
 }
 
 /// Result of fencing predecessors with a committed recovery barrier.
