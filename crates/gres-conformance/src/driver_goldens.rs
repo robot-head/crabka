@@ -84,7 +84,7 @@ fn validate_fixture(
 ) -> Result<(), FixtureError> {
     validate_provenance(fixture)?;
     validate_driver_captures(fixture)?;
-    validate_dependency_pins(cargo_lock, python_requirements)?;
+    validate_dependency_pins(fixture, cargo_lock, python_requirements)?;
     validate_payload_safety(source)
 }
 
@@ -160,9 +160,19 @@ fn validate_driver_captures(fixture: &Fixture) -> Result<(), FixtureError> {
             )?;
         }
         for batch in &capture.pgdog_backend_set_batches {
-            let normalized = batch.trim_start().to_ascii_uppercase();
             require(
-                normalized.starts_with("SET ") || normalized.starts_with("SET\n"),
+                !batch.trim().is_empty(),
+                "backend SQL batch must not be empty",
+            )?;
+            let statements = batch
+                .split(';')
+                .map(str::trim)
+                .filter(|statement| !statement.is_empty());
+            require(
+                statements.into_iter().all(|statement| {
+                    let normalized = statement.to_ascii_uppercase();
+                    normalized.starts_with("SET ") || normalized.starts_with("SET\n")
+                }),
                 "backend SQL batch must contain only SET statements",
             )?;
             require(!batch.contains('\0'), "backend SQL batch contains a NUL")?;
@@ -177,6 +187,7 @@ fn validate_driver_captures(fixture: &Fixture) -> Result<(), FixtureError> {
 }
 
 fn validate_dependency_pins(
+    fixture: &Fixture,
     cargo_lock: &str,
     python_requirements: &str,
 ) -> Result<(), FixtureError> {
@@ -185,6 +196,21 @@ fn validate_dependency_pins(
         require(
             cargo_lock.contains(&package),
             "Rust driver pin differs from Cargo.lock",
+        )?;
+        let checksum = package_checksum(cargo_lock, &package).ok_or_else(|| {
+            invariant(format!(
+                "Cargo.lock package {name} {version} has no checksum"
+            ))
+        })?;
+        let expected_source = format!("Cargo.lock registry checksum {checksum}");
+        let capture = fixture
+            .drivers
+            .iter()
+            .find(|capture| capture.driver == name)
+            .ok_or_else(|| invariant(format!("missing {name} capture")))?;
+        require(
+            capture.lock_source == expected_source,
+            "Rust fixture checksum differs from Cargo.lock",
         )?;
     }
     require(
@@ -195,6 +221,12 @@ fn validate_dependency_pins(
     )?;
 
     Ok(())
+}
+
+fn package_checksum<'a>(cargo_lock: &'a str, package: &str) -> Option<&'a str> {
+    let block = cargo_lock.get(cargo_lock.find(package)?..)?;
+    let value = block.get(block.find("checksum = \"")? + "checksum = \"".len()..)?;
+    value.get(..value.find('"')?)
 }
 
 fn validate_payload_safety(source: &str) -> Result<(), FixtureError> {
@@ -354,6 +386,30 @@ mod tests {
         assert!(
             parse_and_validate(
                 &drifted,
+                include_str!("../../../Cargo.lock"),
+                include_str!("../requirements-driver-smoke.txt")
+            )
+            .is_err()
+        );
+        let false_provenance = safe.replace(
+            "a528f7d280f6d5b9cd149635c8705b0dd049754bc67d81d31fa25169a93809d3",
+            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+        );
+        assert!(
+            parse_and_validate(
+                &false_provenance,
+                include_str!("../../../Cargo.lock"),
+                include_str!("../requirements-driver-smoke.txt")
+            )
+            .is_err()
+        );
+        let mixed_batch = safe.replace(
+            "SET \\\"datestyle\\\" TO 'ISO, MDY'",
+            "SET \\\"datestyle\\\" TO 'ISO, MDY'; SELECT 1",
+        );
+        assert!(
+            parse_and_validate(
+                &mixed_batch,
                 include_str!("../../../Cargo.lock"),
                 include_str!("../requirements-driver-smoke.txt")
             )
