@@ -4,7 +4,9 @@ use std::{collections::BTreeMap, num::NonZeroU64, sync::Arc};
 
 use async_trait::async_trait;
 use crabka_pgwire::{
-    engine::{Cell, Engine as _, FieldDescription, QueryResult, Session as _},
+    engine::{
+        Cell, Engine as _, FieldDescription, QueryResult, ResultPage, ResultSink, Session as _,
+    },
     error::PgError,
 };
 
@@ -16,7 +18,8 @@ use crate::{
         ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow, TransportError,
         WireColumnPredicate, WireDatum, WireErrorKind, WirePartialAggregateFunction,
         WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
-        WireQueryResult, WireRowInterval, WireSnapshot, WireTopKColumn, WireTopKSpec,
+        WireQueryResult, WireRowInterval, WireSnapshot, WireSqlResultChunk, WireTopKColumn,
+        WireTopKSpec, write_frame,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -150,6 +153,126 @@ impl RangeService for HostedRangeService {
                 message: "remote transaction participants require a stateful participant RPC"
                     .to_string(),
             },
+        }
+    }
+
+    async fn handle_connection(
+        &self,
+        request: RangeRequest,
+        writer: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<Option<RangeResponse>, TransportError> {
+        let RangeRequest::Sql { range_id, sql } = request else {
+            return Ok(Some(self.handle(request).await));
+        };
+        let engine = match self.hosted_engine(range_id) {
+            Ok(engine) => engine,
+            Err(response) => return Ok(Some(response)),
+        };
+        let mut sink = RangeFrameSink {
+            writer,
+            transport_error: None,
+            terminal_error_sent: false,
+        };
+        let result = engine
+            .connect()
+            .simple_query_into(&sql, 256, &mut sink)
+            .await;
+        if let Some(error) = sink.transport_error {
+            return Err(error);
+        }
+        if let Err(error) = result {
+            if !sink.terminal_error_sent {
+                let message = if error.code == "54000" {
+                    "one remote SQL row exceeds the transport frame limit".to_string()
+                } else {
+                    error.message
+                };
+                write_frame(
+                    sink.writer,
+                    &RangeResponse::SqlError {
+                        code: error.code,
+                        message,
+                    },
+                )
+                .await?;
+            }
+            return Ok(None);
+        }
+        write_frame(sink.writer, &RangeResponse::SqlResultsDone).await?;
+        Ok(None)
+    }
+}
+
+struct RangeFrameSink<'a> {
+    writer: &'a mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    transport_error: Option<TransportError>,
+    terminal_error_sent: bool,
+}
+
+#[async_trait]
+impl ResultSink for RangeFrameSink<'_> {
+    async fn send(&mut self, page: ResultPage) -> Result<(), PgError> {
+        let response = match page {
+            ResultPage::Rows {
+                result_index,
+                fields,
+                rows,
+                tag,
+            } => RangeResponse::SqlResultsChunk {
+                chunk: WireSqlResultChunk::Rows {
+                    result_index: u32::try_from(result_index).map_err(|_| {
+                        PgError::error("54000", "remote SQL result index exceeds wire capacity")
+                    })?,
+                    fields: fields.map(|fields| fields.into_iter().map(Into::into).collect()),
+                    rows: rows
+                        .into_iter()
+                        .map(|row| row.into_iter().map(|cell| cell.map(Into::into)).collect())
+                        .collect(),
+                    tag,
+                },
+            },
+            ResultPage::Command { result_index, tag } => RangeResponse::SqlResultsChunk {
+                chunk: WireSqlResultChunk::Complete {
+                    result_index: u32::try_from(result_index).map_err(|_| {
+                        PgError::error("54000", "remote SQL result index exceeds wire capacity")
+                    })?,
+                    result: WireQueryResult::Command { tag },
+                },
+            },
+            ResultPage::Empty { result_index } => RangeResponse::SqlResultsChunk {
+                chunk: WireSqlResultChunk::Complete {
+                    result_index: u32::try_from(result_index).map_err(|_| {
+                        PgError::error("54000", "remote SQL result index exceeds wire capacity")
+                    })?,
+                    result: WireQueryResult::Empty,
+                },
+            },
+        };
+        match write_frame(self.writer, &response).await {
+            Ok(()) => Ok(()),
+            Err(TransportError::FrameTooLarge { .. }) => {
+                write_frame(
+                    self.writer,
+                    &RangeResponse::SqlError {
+                        code: "54000".into(),
+                        message: "one remote SQL row exceeds the transport frame limit".into(),
+                    },
+                )
+                .await
+                .map_err(|error| {
+                    self.transport_error = Some(error);
+                    PgError::error("08006", "remote result transport failed")
+                })?;
+                self.terminal_error_sent = true;
+                Err(PgError::error(
+                    "54000",
+                    "one remote SQL row exceeds the transport frame limit",
+                ))
+            }
+            Err(error) => {
+                self.transport_error = Some(error);
+                Err(PgError::error("08006", "remote result transport failed"))
+            }
         }
     }
 }

@@ -499,6 +499,15 @@ impl RangeTlsServerConfig {
 pub trait RangeService: Send + Sync + 'static {
     /// Handle one decoded request.
     async fn handle(&self, request: RangeRequest) -> RangeResponse;
+
+    /// Optionally consume a request while owning the live response writer.
+    async fn handle_connection(
+        &self,
+        request: RangeRequest,
+        _writer: &mut (dyn AsyncWrite + Unpin + Send),
+    ) -> Result<Option<RangeResponse>, TransportError> {
+        Ok(Some(self.handle(request).await))
+    }
 }
 
 /// Authenticated client for framed TLS range RPC.
@@ -665,7 +674,7 @@ async fn call_stream<S>(
     wait: Duration,
 ) -> Result<RangeResponse, TransportError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     timeout(wait, write_frame(&mut stream, request)).await??;
     timeout(wait, stream.flush()).await??;
@@ -755,14 +764,15 @@ async fn handle_stream<S>(
     service: Arc<dyn RangeService>,
 ) -> Result<(), TransportError>
 where
-    S: AsyncRead + AsyncWrite + Unpin,
+    S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let request = read_frame(&mut stream).await?;
-    let response = service.handle(request).await;
-    if let RangeResponse::SqlResults { results } = response {
-        write_sql_results(&mut stream, results).await?;
-    } else {
-        write_frame(&mut stream, &response).await?;
+    if let Some(response) = service.handle_connection(request, &mut stream).await? {
+        if let RangeResponse::SqlResults { results } = response {
+            write_sql_results(&mut stream, results).await?;
+        } else {
+            write_frame(&mut stream, &response).await?;
+        }
     }
     stream.flush().await?;
     Ok(())
@@ -919,9 +929,9 @@ where
     }
 }
 
-async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<(), TransportError>
+pub(crate) async fn write_frame<W, T>(writer: &mut W, value: &T) -> Result<(), TransportError>
 where
-    W: AsyncWrite + Unpin,
+    W: AsyncWrite + Unpin + ?Sized,
     T: Serialize,
 {
     let bytes = serialize_json_bounded(value, MAX_FRAME_BYTES)?;
