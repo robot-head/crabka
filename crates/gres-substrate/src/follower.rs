@@ -22,6 +22,26 @@ pub trait CommittedEndSampler: Send + Sync {
 /// Adapter that makes a committed-end sampler usable by range-0 read barriers.
 pub struct BrokerRange0EndSampler(pub Arc<dyn CommittedEndSampler>);
 
+/// Broker-backed committed-end sampler for a live range-zero follower.
+#[derive(Clone)]
+pub struct LiveCommittedEndSampler {
+    config: LiveRecoveryConfig,
+}
+
+impl LiveCommittedEndSampler {
+    #[must_use]
+    pub const fn new(config: LiveRecoveryConfig) -> Self {
+        Self { config }
+    }
+}
+
+#[async_trait::async_trait]
+impl CommittedEndSampler for LiveCommittedEndSampler {
+    async fn committed_end_after_call_begins(&self) -> Result<i64, SubstrateError> {
+        crate::recovery::live_committed_end(&self.config).await
+    }
+}
+
 #[async_trait::async_trait]
 impl Range0EndSampler for BrokerRange0EndSampler {
     async fn sample_end_after_call_begins(&self) -> Result<i64, crabka_gres_ranges::BarrierError> {
