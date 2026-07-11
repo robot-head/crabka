@@ -4261,6 +4261,7 @@ fn project_rows_ordered(
     // the select-list output (ordinal, alias/name, or the exact select expression).
     if s.distinct {
         let mut projected = project_rows(out_exprs, scope, &kept, ctx)?;
+        ensure_blocking_rows_fit(&projected)?;
         let mut seen: std::collections::HashSet<Vec<Datum>> = std::collections::HashSet::new();
         projected.retain(|r| seen.insert(r.clone()));
         if !s.order_by.is_empty() {
@@ -4291,6 +4292,7 @@ fn project_rows_ordered(
     // corresponding projection expression for each source row.
     if !s.order_by.is_empty() {
         let mut keyed: Vec<(Vec<Datum>, Vec<Datum>)> = Vec::with_capacity(kept.len());
+        let mut keyed_bytes = 0usize;
         for row in kept {
             let mut keys = Vec::with_capacity(order_keys.len());
             for key in &order_keys {
@@ -4301,6 +4303,12 @@ fn project_rows_ordered(
                     SelectOrderKey::SourceExpr(expr) => crate::eval::eval(expr, scope, &row, ctx)?,
                 });
             }
+            let bytes = crate::scanner::datum_row_bytes(&keys)
+                .saturating_add(crate::scanner::datum_row_bytes(&row));
+            if keyed_bytes.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+                return Err(crate::scanner::memory_budget_exceeded());
+            }
+            keyed_bytes += bytes;
             keyed.push((keys, row));
         }
         keyed.sort_by(|a, b| order_cmp(&a.0, &b.0, &s.order_by));
@@ -4308,6 +4316,16 @@ fn project_rows_ordered(
     }
     apply_offset_limit(&mut kept, s.offset, s.limit);
     project_rows(out_exprs, scope, &kept, ctx)
+}
+
+fn ensure_blocking_rows_fit(rows: &[Vec<Datum>]) -> Result<(), ExecError> {
+    let bytes = rows.iter().fold(0usize, |bytes, row| {
+        bytes.saturating_add(crate::scanner::datum_row_bytes(row))
+    });
+    if bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+        return Err(crate::scanner::memory_budget_exceeded());
+    }
+    Ok(())
 }
 
 /// Apply ORDER BY, LIMIT, and projection to a set of already-filtered source

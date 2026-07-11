@@ -875,6 +875,7 @@ pub(crate) fn aggregate_rows(
     let mut keys: Vec<Vec<Datum>> = Vec::new();
     let mut accs: Vec<Vec<Acc>> = Vec::new();
     let mut index: HashMap<Vec<Datum>, usize> = HashMap::new();
+    let mut group_bytes = 0usize;
     for row in &rows {
         let mut key = Vec::with_capacity(s.group_by.len());
         for g in &s.group_by {
@@ -883,6 +884,13 @@ pub(crate) fn aggregate_rows(
         let gi = match index.get(&key) {
             Some(&i) => i,
             None => {
+                let bytes = crate::scanner::datum_row_bytes(&key)
+                    .saturating_mul(2)
+                    .saturating_add(specs.len().saturating_mul(std::mem::size_of::<Acc>()));
+                if group_bytes.saturating_add(bytes) > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+                    return Err(crate::scanner::memory_budget_exceeded());
+                }
+                group_bytes += bytes;
                 let i = keys.len();
                 index.insert(key.clone(), i);
                 keys.push(key);

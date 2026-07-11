@@ -376,6 +376,12 @@ fn fold(
                 range_scanner,
                 depth + 1,
             )?;
+            let combined_bytes = lrows.iter().chain(&rrows).fold(0usize, |bytes, row| {
+                bytes.saturating_add(crate::scanner::datum_row_bytes(row))
+            });
+            if combined_bytes > crate::scanner::BLOCKING_QUERY_MEMORY_BYTES {
+                return Err(crate::scanner::memory_budget_exceeded());
+            }
             Ok(combine_rows(*op, *all, lrows, rrows))
         }
     }
