@@ -3608,7 +3608,7 @@ mod tests {
 
         let store = build_checkpoint_store(&config).expect("checkpoint store");
 
-        assert!(Arc::strong_count(&store) == 1);
+        assert_eq!(Arc::strong_count(&store), 1);
     }
 
     #[tokio::test]
