@@ -51,6 +51,8 @@ const FINALIZER: &str = "crabka.io/gres-tenant-finalizer";
 const APP_NAME: &str = "crabka-gres";
 const DEFAULT_IMAGE: &str = concat!("ghcr.io/robot-head/crabka-gres:", env!("CARGO_PKG_VERSION"));
 const COMPUTE_PORT: i32 = 5432;
+const RANGE_PORT: i32 = 7432;
+const RANGE_TLS_DIR: &str = "/etc/crabka/range-tls";
 const LIFECYCLE_REQUEUE: Duration = Duration::from_secs(5);
 
 /// Run the controller forever.
@@ -1127,7 +1129,7 @@ fn range_layout_for_ranges(
             range_id: range.range_id,
             end_key: range.end_key.map(boundary_from_range_key),
             endpoint: format!(
-                "{}.{}.svc.cluster.local:{COMPUTE_PORT}",
+                "{}.{}.svc.cluster.local:{RANGE_PORT}",
                 range_service_name(&obj.name_any(), range.range_id),
                 obj.namespace().unwrap_or_else(|| "default".into())
             ),
@@ -1157,7 +1159,7 @@ fn render_range_service(obj: &GresTenant, range_id: u32) -> Result<Service, Reco
     let name = obj.name_any();
     Ok(serde_json::from_value(json!({
         "metadata": { "name": range_service_name(&name, range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
-        "spec": { "type": "ClusterIP", "selector": range_labels(obj, range_id), "ports": [{ "name": "range", "port": COMPUTE_PORT, "targetPort": COMPUTE_PORT, "protocol": "TCP" }] }
+        "spec": { "type": "ClusterIP", "selector": range_labels(obj, range_id), "ports": [{ "name": "range", "port": RANGE_PORT, "targetPort": RANGE_PORT, "protocol": "TCP" }] }
     }))?)
 }
 
@@ -1192,6 +1194,18 @@ fn render_deployment(
             ranges.clone(),
             "--host-ranges".to_owned(),
             host_ranges.clone(),
+            "--range-listen".to_owned(),
+            format!("0.0.0.0:{RANGE_PORT}"),
+            "--range-tls-cert".to_owned(),
+            format!("{RANGE_TLS_DIR}/tls.crt"),
+            "--range-tls-key".to_owned(),
+            format!("{RANGE_TLS_DIR}/tls.key"),
+            "--range-tls-ca".to_owned(),
+            format!("{RANGE_TLS_DIR}/ca.crt"),
+            "--range-tls-server-name".to_owned(),
+            format!("{name}.range.internal"),
+            "--range-allowed-principal".to_owned(),
+            format!("CN={name}-range"),
         ]);
     }
     args.extend(checkpoint_runtime_args(operator_config)?);
@@ -1213,6 +1227,19 @@ fn render_deployment(
     if let Some(secret_key) = &operator_config.gres_checkpoint_secret_access_key {
         env.push(json!({ "name": "AWS_SECRET_ACCESS_KEY", "value": secret_key }));
     }
+    let mut ports =
+        vec![json!({ "name": "postgres", "containerPort": COMPUTE_PORT, "protocol": "TCP" })];
+    let (range_tls_mounts, range_tls_volumes) = if all_ranges.len() > 1 {
+        ports.push(json!({ "name": "range", "containerPort": RANGE_PORT, "protocol": "TCP" }));
+        (
+            vec![json!({ "name": "range-tls", "mountPath": RANGE_TLS_DIR, "readOnly": true })],
+            vec![
+                json!({ "name": "range-tls", "secret": { "secretName": format!("{name}-gres-range-tls") } }),
+            ],
+        )
+    } else {
+        (Vec::new(), Vec::new())
+    };
     Ok(serde_json::from_value(json!({
         "metadata": { "name": deployment_name(&name, range.range_id), "namespace": obj.namespace(), "labels": meta_labels(obj), "ownerReferences": [owner_ref::<GresTenant>(obj)?] },
         "spec": {
@@ -1227,10 +1254,12 @@ fn render_deployment(
                         "image": image,
                         "args": args,
                         "env": env,
-                        "ports": [{ "name": "postgres", "containerPort": COMPUTE_PORT, "protocol": "TCP" }],
+                        "ports": ports,
+                        "volumeMounts": range_tls_mounts,
                         "readinessProbe": { "tcpSocket": { "port": COMPUTE_PORT }, "periodSeconds": 5 },
                         "resources": obj.spec.resources.clone().unwrap_or_default()
-                    }]
+                    }],
+                    "volumes": range_tls_volumes
                 }
             }
         }
@@ -1329,18 +1358,27 @@ fn render_range_compute_network_policy(obj: &GresTenant) -> Result<NetworkPolicy
         spec: Some(NetworkPolicySpec {
             pod_selector: Some(pod_selector),
             policy_types: Some(vec!["Ingress".into()]),
-            ingress: Some(vec![NetworkPolicyIngressRule {
-                from: Some(vec![
-                    same_tenant_peer,
-                    fleet_peer("pgdog", "crabka-pgdog"),
-                    fleet_peer("gres-activator", "crabka-gres-activator"),
-                ]),
-                ports: Some(vec![NetworkPolicyPort {
-                    protocol: Some("TCP".into()),
-                    port: Some(IntOrString::Int(COMPUTE_PORT)),
-                    end_port: None,
-                }]),
-            }]),
+            ingress: Some(vec![
+                NetworkPolicyIngressRule {
+                    from: Some(vec![same_tenant_peer]),
+                    ports: Some(vec![NetworkPolicyPort {
+                        protocol: Some("TCP".into()),
+                        port: Some(IntOrString::Int(RANGE_PORT)),
+                        end_port: None,
+                    }]),
+                },
+                NetworkPolicyIngressRule {
+                    from: Some(vec![
+                        fleet_peer("pgdog", "crabka-pgdog"),
+                        fleet_peer("gres-activator", "crabka-gres-activator"),
+                    ]),
+                    ports: Some(vec![NetworkPolicyPort {
+                        protocol: Some("TCP".into()),
+                        port: Some(IntOrString::Int(COMPUTE_PORT)),
+                        end_port: None,
+                    }]),
+                },
+            ]),
             egress: None,
         }),
     })
@@ -1671,6 +1709,14 @@ mod tests {
             .expect("args");
         assert!(args.windows(2).any(|pair| pair == ["--host-ranges", "r1"]));
         assert!(!args.windows(2).any(|pair| pair == ["--host-ranges", "r0"]));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--range-listen", "0.0.0.0:7432"])
+        );
+        assert!(
+            args.windows(2)
+                .any(|pair| { pair == ["--range-allowed-principal", "CN=tenant-a-range"] })
+        );
     }
 
     #[test]
@@ -1690,7 +1736,9 @@ mod tests {
                 .map(String::as_str),
             Some("r1")
         );
-        assert_eq!(spec.ports.expect("ports")[0].name.as_deref(), Some("range"));
+        let port = &spec.ports.expect("ports")[0];
+        assert_eq!(port.name.as_deref(), Some("range"));
+        assert_eq!(port.port, RANGE_PORT);
     }
 
     #[test]
