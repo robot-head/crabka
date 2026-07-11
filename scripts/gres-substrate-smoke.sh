@@ -52,15 +52,16 @@ CLUSTER_ID="00000000-0000-0000-0000-000000000001"
 DATA_ROOT="$(mktemp -d)"
 BROKER_PID=""
 GRES_PID=""
+CLIENT_PID=""
 
 cleanup() {
-    kill "${GRES_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
-    wait "${GRES_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
+    kill "${CLIENT_PID:-}" "${GRES_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
+    wait "${CLIENT_PID:-}" "${GRES_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
     rm -rf "$DATA_ROOT"
 }
 trap cleanup EXIT
 
-CONNINFO="host=127.0.0.1 port=${GRES_PORT} user=crab dbname=crab sslmode=prefer"
+CONNINFO="host=127.0.0.1 port=${GRES_PORT} user=crab password=crab dbname=crab sslmode=prefer"
 
 wait_for_tcp_port() {
     local label="$1"
@@ -114,16 +115,30 @@ stop_gres() {
     GRES_PID=""
 }
 
+kill_gres_abruptly() {
+    kill -KILL "$GRES_PID"
+    wait "$GRES_PID" 2>/dev/null || true
+    GRES_PID=""
+}
+
 start_gres() {
     local label="$1"
-
-    ./target/debug/crabka-gres \
-        --listen "127.0.0.1:${GRES_PORT}" \
-        --substrate-bootstrap "127.0.0.1:${BROKER_PORT}" \
-        --tenant "$TENANT" \
-        >"${DATA_ROOT}/${label}.log" 2>&1 &
-    GRES_PID=$!
-    wait_for_sql "$label"
+    local deadline=$((SECONDS + 30))
+    while [ "$SECONDS" -lt "$deadline" ]; do
+        ./target/debug/crabka-gres \
+            --listen "127.0.0.1:${GRES_PORT}" \
+            --substrate-bootstrap "127.0.0.1:${BROKER_PORT}" \
+            --tenant "$TENANT" \
+            >"${DATA_ROOT}/${label}.log" 2>&1 &
+        GRES_PID=$!
+        if wait_for_sql "$label"; then
+            return 0
+        fi
+        wait "$GRES_PID" 2>/dev/null || true
+        GRES_PID=""
+    done
+    echo "FAIL: ${label} did not become ready before restart deadline" >&2
+    return 1
 }
 
 if [ "${CRABKA_GRES_SKIP_BUILD:-}" != "1" ]; then
@@ -146,17 +161,51 @@ fi
 BROKER_PID=$!
 wait_for_tcp_port broker "$BROKER_PORT"
 
+printf '%s\n' crab | ./target/debug/crabka gres create-tenant \
+    --bootstrap "127.0.0.1:${BROKER_PORT}" \
+    --name "$TENANT" \
+    --user crab \
+    --password-stdin
+
 start_gres first-compute
 psql "$CONNINFO" -v ON_ERROR_STOP=1 -c \
-    "CREATE TABLE t (id int4, name text); INSERT INTO t VALUES (1, 'substrate');"
-stop_gres
+    "CREATE TABLE t (id int4, name text); INSERT INTO t VALUES (1, 'substrate'); CREATE TABLE payloads (id int4, body text); INSERT INTO payloads VALUES (1, repeat('x', 1400000));"
+
+# Keep a real SQL transaction open and kill the compute after the INSERT has
+# executed but before COMMIT. The marker is a protocol response, not a settle
+# delay, so the kill point is deterministic.
+coproc INFLIGHT_CLIENT { stdbuf -oL psql "$CONNINFO" -Atq; }
+CLIENT_PID=$INFLIGHT_CLIENT_PID
+printf '%s\n' "BEGIN;" "INSERT INTO t VALUES (99, 'unacked');" "SELECT 'inflight-ready';" >&"${INFLIGHT_CLIENT[1]}"
+deadline=$((SECONDS + 10))
+inflight_ready=""
+while [ "$SECONDS" -lt "$deadline" ]; do
+    if IFS= read -r -t 1 line <&"${INFLIGHT_CLIENT[0]}"; then
+        if [ "$line" = "inflight-ready" ]; then
+            inflight_ready=1
+            break
+        fi
+    fi
+done
+if [ -z "$inflight_ready" ]; then
+    echo "FAIL: in-flight SQL transaction did not reach deterministic kill point" >&2
+    exit 1
+fi
+kill_gres_abruptly
+kill "$CLIENT_PID" 2>/dev/null || true
+wait "$CLIENT_PID" 2>/dev/null || true
+CLIENT_PID=""
 
 start_gres successor-compute
 out=$(psql "$CONNINFO" -tAc "SELECT name FROM t WHERE id = 1")
-if [ "$out" = "substrate" ]; then
-    echo "PASS: substrate WAL replayed disposable compute state -> ${out}"
+unacked=$(psql "$CONNINFO" -tAc "SELECT count(*) FROM t WHERE id = 99")
+payload_len=$(psql "$CONNINFO" -tAc "SELECT length(body) FROM payloads WHERE id = 1")
+psql "$CONNINFO" -v ON_ERROR_STOP=1 -c "INSERT INTO t VALUES (2, 'successor');" >/dev/null
+successor=$(psql "$CONNINFO" -tAc "SELECT count(*) FROM t WHERE id = 2")
+if [ "$out" = "substrate" ] && [ "$unacked" = "0" ] && [ "$payload_len" = "1400000" ] && [ "$successor" = "1" ]; then
+    echo "PASS: abrupt-loss replay preserved acked+oversized state, rejected unacked state, and accepted successor writes"
     exit 0
 fi
 
-echo "FAIL: expected 'substrate', got '${out}'" >&2
+echo "FAIL: replay result name=${out} unacked=${unacked} payload_len=${payload_len} successor=${successor}" >&2
 exit 1
