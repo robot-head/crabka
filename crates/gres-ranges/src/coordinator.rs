@@ -333,6 +333,8 @@ impl TxnRpc {
             }),
             RangeResponse::Sql { .. }
             | RangeResponse::SqlResults { .. }
+            | RangeResponse::SqlResultsChunk { .. }
+            | RangeResponse::SqlResultsDone
             | RangeResponse::SqlError { .. }
             | RangeResponse::ScanRange(_)
             | RangeResponse::ScanRangeError { .. }
