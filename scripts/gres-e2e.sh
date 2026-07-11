@@ -23,6 +23,7 @@ Environment:
   CRABKA_GRES_E2E_KEEP_ARTIFACTS=1      Keep logs and generated configs.
   CRABKA_GRES_PGDOG_IMAGE=<image>       Override the pinned PgDog image.
   CRABKA_GRES_POSTGRES_IMAGE=<image>    Override the pinned Postgres oracle.
+  CRABKA_GRES_KAFKA_IMAGE=<image>       Override the pinned Kafka CLI image.
   CRABKA_GRES_EXPECT_KAFKA_ACL=0        Disable mandatory Kafka ACL assertions.
 EOF
 }
@@ -37,6 +38,7 @@ esac
 
 PGDOG_IMAGE="${CRABKA_GRES_PGDOG_IMAGE:-ghcr.io/pgdogdev/pgdog:0.1.6}"
 POSTGRES_IMAGE="${CRABKA_GRES_POSTGRES_IMAGE:-postgres:18}"
+KAFKA_IMAGE="${CRABKA_GRES_KAFKA_IMAGE:-mirror.gcr.io/apache/kafka:4.0.0}"
 CLUSTER_ID="00000000-0000-0000-0000-000000000001"
 ARTIFACT_DIR="${CRABKA_GRES_E2E_ARTIFACT_DIR:-target/gres-e2e-artifacts}"
 BROKER_PID=""
@@ -56,6 +58,28 @@ fail() {
     dump_diagnostics
     exit 1
 }
+
+is_kafka_authorization_denial() {
+    local status="$1"
+    local output_file="$2"
+
+    [ "$status" -ne 0 ] &&
+        grep -Eqi 'TopicAuthorizationException|not authorized|TOPIC_AUTHORIZATION_FAILED|UNKNOWN \(29\)' "$output_file"
+}
+
+# Shell-level contract test hook: keep denial classification deterministic and
+# prove that an empty/successful fetch cannot satisfy the ACL assertion.
+if [ -n "${CRABKA_GRES_E2E_TEST_CLASSIFY_STATUS:-}" ]; then
+    classifier_output=$(mktemp)
+    trap 'rm -f "$classifier_output"' EXIT
+    printf '%s\n' "${CRABKA_GRES_E2E_TEST_CLASSIFY_OUTPUT:-}" >"$classifier_output"
+    if is_kafka_authorization_denial "$CRABKA_GRES_E2E_TEST_CLASSIFY_STATUS" "$classifier_output"; then
+        echo denied
+        exit 0
+    fi
+    echo not-denied
+    exit 1
+fi
 
 dump_diagnostics() {
     echo "---- gres-e2e artifacts: ${ARTIFACT_DIR} ----" >&2
@@ -195,13 +219,53 @@ expect_compute_denied() {
     fail "${label}: failed, but not with a recognizable Kafka authorization denial"
 }
 
+expect_kafka_topic_read_denied() {
+    local label="$1"
+    local topic="$2"
+    local username="$3"
+    local password="$4"
+    local client_properties="${ARTIFACT_DIR}/${label}.properties"
+    local output="${ARTIFACT_DIR}/${label}.log"
+    local status
+
+    cat >"$client_properties" <<EOF
+security.protocol=SASL_PLAINTEXT
+sasl.mechanism=SCRAM-SHA-512
+sasl.jaas.config=org.apache.kafka.common.security.scram.ScramLoginModule required username="${username}" password="${password}";
+EOF
+
+    set +e
+    timeout 20s docker run --rm --network host \
+        -v "${PWD}/${client_properties}:/tmp/client.properties:ro" \
+        "$KAFKA_IMAGE" \
+        /opt/kafka/bin/kafka-console-consumer.sh \
+        --bootstrap-server "127.0.0.1:${SASL_PORT}" \
+        --consumer.config /tmp/client.properties \
+        --topic "$topic" --partition 0 --offset earliest --max-messages 1 --timeout-ms 5000 \
+        >"$output" 2>&1
+    status=$?
+    set -e
+
+    if is_kafka_authorization_denial "$status" "$output"; then
+        log "PASS: ${label} denied by Kafka ACL"
+        return 0
+    fi
+    if [ "$status" -eq 0 ]; then
+        fail "${label}: unauthorized topic read unexpectedly succeeded"
+    fi
+    fail "${label}: topic read failed without an explicit Kafka authorization denial"
+}
+
 assert_kafka_acl_enforcement() {
     if [ "$EXPECT_KAFKA_ACL" != "1" ]; then
         log "SKIP: Kafka ACL assertions disabled by CRABKA_GRES_EXPECT_KAFKA_ACL=0"
         return 0
     fi
+    docker_is_available || fail "Docker/Kafka CLI runtime unavailable for mandatory Kafka ACL assertions"
+    docker pull "$KAFKA_IMAGE" >"${ARTIFACT_DIR}/pull-kafka.log" 2>&1
     expect_compute_denied tenant-a-cannot-read-tenant-b tenant-b gres-tenant-a alice-secret
     expect_compute_denied tenant-b-cannot-read-tenant-a tenant-a gres-tenant-b bob-secret
+    expect_kafka_topic_read_denied tenant-a-cannot-read-global-registry __gres_tenants gres-tenant-a alice-secret
 }
 
 start_broker() {
