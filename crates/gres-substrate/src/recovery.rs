@@ -227,7 +227,30 @@ pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, Subs
     );
     let conn = reader.open_connection().await?;
     let fetched = reader.fetch_partition_log_start(&conn).await?;
-    Ok(fetched.last_stable_offset.saturating_sub(1))
+    let mut next = fetched.log_start_offset.max(0);
+    let mut last_visible = None;
+    while next < fetched.last_stable_offset {
+        let page = fetch_partition_with_isolation_progress(
+            &conn,
+            &reader.topic,
+            reader.topic_uuid,
+            PARTITION,
+            next,
+            FETCH_MAX_WAIT_MS,
+            FETCH_MAX_BYTES,
+            READ_COMMITTED,
+        )
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("committed-end fetch: {error}")))?;
+        if let Some(record) = page.records.last() {
+            last_visible = Some(record.offset);
+        }
+        let Some(progress) = page.next_offset.filter(|progress| *progress > next) else {
+            break;
+        };
+        next = progress;
+    }
+    Ok(last_visible.unwrap_or(-1))
 }
 
 /// Restore and catch up a read-only range-zero follower without fencing a writer.
