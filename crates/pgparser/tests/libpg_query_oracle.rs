@@ -173,6 +173,34 @@ fn agreement_on_accepted() {
 }
 
 #[test]
+fn compatibility_refusal_representatives_are_postgresql_syntax() {
+    let explicit = [
+        "ALTER DATABASE postgres RENAME TO other",
+        "CREATE DATABASE other",
+        "DROP DATABASE other",
+        "ALTER EXTENSION plpgsql UPDATE",
+        "DROP EXTENSION plpgsql",
+        "PREPARE TRANSACTION 'xid-1'",
+        "COMMIT PREPARED 'xid-1'",
+        "ROLLBACK PREPARED 'xid-1'",
+    ];
+    for sql in explicit.into_iter().chain(
+        crabka_pgparser::ast::NON_GOAL_REFUSALS
+            .iter()
+            .map(|spec| spec.representative_sql),
+    ) {
+        assert!(
+            pg_accepts(sql),
+            "libpg_query rejected refusal representative: {sql}"
+        );
+        assert!(
+            we_accept(sql),
+            "pgparser rejected refusal representative: {sql}"
+        );
+    }
+}
+
+#[test]
 fn agreement_on_rejected() {
     for &sql in REJECTED {
         assert!(!pg_accepts(sql), "libpg_query should reject: {sql}");
