@@ -24,4 +24,7 @@ if run_classifier 1 'TimeoutException: Timeout expired while fetching records'; 
     exit 1
 fi
 
-echo 'PASS: named-topic probe only accepts explicit authorization denial'
+grep -Fq 'timeout 10s docker info' scripts/gres-e2e.sh
+grep -Fq 'timeout 120s docker pull "$KAFKA_IMAGE"' scripts/gres-e2e.sh
+
+echo 'PASS: named-topic denial classification and Docker timeout bounds'

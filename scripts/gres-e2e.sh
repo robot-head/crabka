@@ -195,7 +195,7 @@ expect_sql_fails() {
 }
 
 docker_is_available() {
-    command -v docker >/dev/null 2>&1 && docker info >/dev/null 2>&1
+    command -v docker >/dev/null 2>&1 && timeout 10s docker info >/dev/null 2>&1
 }
 
 expect_compute_denied() {
@@ -262,7 +262,8 @@ assert_kafka_acl_enforcement() {
         return 0
     fi
     docker_is_available || fail "Docker/Kafka CLI runtime unavailable for mandatory Kafka ACL assertions"
-    docker pull "$KAFKA_IMAGE" >"${ARTIFACT_DIR}/pull-kafka.log" 2>&1
+    timeout 120s docker pull "$KAFKA_IMAGE" >"${ARTIFACT_DIR}/pull-kafka.log" 2>&1 ||
+        fail "Kafka CLI image pull failed or did not complete within 120 seconds"
     expect_compute_denied tenant-a-cannot-read-tenant-b tenant-b gres-tenant-a alice-secret
     expect_compute_denied tenant-b-cannot-read-tenant-a tenant-a gres-tenant-b bob-secret
     expect_kafka_topic_read_denied tenant-a-cannot-read-global-registry __gres_tenants gres-tenant-a alice-secret
