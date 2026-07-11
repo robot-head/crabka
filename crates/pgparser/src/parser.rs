@@ -844,15 +844,7 @@ impl Parser {
         })
     }
 
-    pub(crate) fn program(&mut self) -> Result<Vec<crate::ast::Statement>, ParseError> {
-        Ok(self
-            .program_spanned()?
-            .into_iter()
-            .map(|(s, _)| s)
-            .collect())
-    }
-
-    /// Like `program`, but pairs each statement with the byte range of its source in
+    /// Pairs each statement with the byte range of its source in
     /// the original input — from its first token's offset up to the trailing `;`
     /// (or end of input). Powers [`parse_with_source`].
     pub(crate) fn program_spanned(
@@ -3161,10 +3153,38 @@ pub fn parse_expr_for_test(sql: &str) -> Result<Expr, ParseError> {
 /// Public statement entry — implemented in Task 12.
 pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
     if let Some(statement) = bounded_non_goal_refusal(sql) {
+        require_command_identity(&statement, sql)?;
         return Ok(vec![statement]);
     }
     let mut p = Parser::new(lex(sql)?, sql.to_string());
-    p.program()
+    let statements = p.program_spanned()?;
+    for (statement, range) in &statements {
+        require_command_identity(statement, &sql[range.clone()])?;
+    }
+    Ok(statements
+        .into_iter()
+        .map(|(statement, _)| statement)
+        .collect())
+}
+
+/// Parse statements and return the parser-owned accepted command identity for
+/// each one. Identity classification is the same mandatory gate used by [`parse`].
+pub fn parse_with_command_identities(
+    sql: &str,
+) -> Result<Vec<(crate::ast::Statement, crate::command::CommandIdentity)>, ParseError> {
+    if let Some(statement) = bounded_non_goal_refusal(sql) {
+        let identity = require_command_identity(&statement, sql)?;
+        return Ok(vec![(statement, identity)]);
+    }
+    let mut parser = Parser::new(lex(sql)?, sql.to_string());
+    parser
+        .program_spanned()?
+        .into_iter()
+        .map(|(statement, range)| {
+            let identity = require_command_identity(&statement, &sql[range])?;
+            Ok((statement, identity))
+        })
+        .collect()
 }
 
 /// Parse `sql` into statements, each paired with its EXACT source text — the byte
@@ -3180,10 +3200,25 @@ pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String
         )]);
     }
     let mut p = Parser::new(lex(sql)?, sql.to_string());
-    Ok(p.program_spanned()?
+    p.program_spanned()?
         .into_iter()
-        .map(|(s, r)| (s, sql[r].trim().to_string()))
-        .collect())
+        .map(|(statement, range)| {
+            require_command_identity(&statement, &sql[range.clone()])?;
+            Ok((statement, sql[range].trim().to_string()))
+        })
+        .collect()
+}
+
+fn require_command_identity(
+    statement: &crate::ast::Statement,
+    sql: &str,
+) -> Result<crate::command::CommandIdentity, ParseError> {
+    crate::command::CommandIdentity::classify(statement, sql).ok_or_else(|| {
+        ParseError::new(
+            "accepted statement is missing parser command-dispatch registry identity",
+            0,
+        )
+    })
 }
 
 fn bounded_non_goal_refusal(sql: &str) -> Option<crate::ast::Statement> {
