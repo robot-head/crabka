@@ -94,9 +94,8 @@ dump_diagnostics() {
 
 cleanup() {
     local status=$?
-    docker rm -f "${PGDOG_CONTAINER:-}" "${ORACLE_CONTAINER:-}" >/dev/null 2>&1 || true
-    kill "${TENANT_A_PID:-}" "${TENANT_B_PID:-}" "${TENANT_C_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
-    wait "${TENANT_A_PID:-}" "${TENANT_B_PID:-}" "${TENANT_C_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
+    timeout 15s docker rm -f "${PGDOG_CONTAINER:-}" "${ORACLE_CONTAINER:-}" >/dev/null 2>&1 || true
+    terminate_pids "${TENANT_A_PID:-}" "${TENANT_B_PID:-}" "${TENANT_C_PID:-}" "${BROKER_PID:-}"
     if [ "$status" -ne 0 ]; then
         dump_diagnostics
     fi
@@ -105,6 +104,25 @@ cleanup() {
     else
         log "kept artifacts in ${ARTIFACT_DIR}"
     fi
+}
+
+terminate_pids() {
+    local pid
+    for pid in "$@"; do
+        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    for _ in $(seq 40); do
+        local alive=0
+        for pid in "$@"; do
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
+        done
+        [ "$alive" -eq 0 ] && break
+        sleep 0.1
+    done
+    for pid in "$@"; do
+        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
 }
 trap cleanup EXIT
 
@@ -210,13 +228,19 @@ expect_tls_negotiated() {
 assert_pgdog_admin_reload() {
     local admin_conn="$1"
     local output="${ARTIFACT_DIR}/pgdog-admin-show-pools.log"
+    sed -i 's/host = "tenant-c.gres.svc"/host = "tenant-c-reloaded.gres.svc"/' \
+        "${ARTIFACT_DIR}/pgdog/pgdog.toml"
+    grep -Fq 'host = "tenant-c-reloaded.gres.svc"' "${ARTIFACT_DIR}/pgdog/pgdog.toml" ||
+        fail "failed to mutate the tenant-c route before RELOAD"
     PGAPPNAME= PGPASSWORD="$PGDOG_ADMIN_PASSWORD" psql "$admin_conn" -v ON_ERROR_STOP=1 \
         -c 'RELOAD' -c 'SHOW POOLS' >"$output" 2>&1 ||
         fail "PgDog admin RELOAD/SHOW POOLS failed"
     for tenant in tenant-a tenant-b tenant-c; do
         grep -Fq "$tenant" "$output" || fail "PgDog admin view omitted $tenant after RELOAD"
     done
-    log "PASS: real PgDog RELOAD confirmed three rendered database routes"
+    grep -Fq 'tenant-c-reloaded.gres.svc' "$output" ||
+        fail "PgDog admin view retained the stale tenant-c endpoint after RELOAD"
+    log "PASS: real PgDog RELOAD confirmed the mutated tenant-c endpoint"
 }
 
 docker_is_available() {
@@ -411,6 +435,7 @@ start_pgdog() {
         --add-host "tenant-a.gres.svc:127.0.0.2"
         --add-host "tenant-b.gres.svc:127.0.0.3"
         --add-host "tenant-c.gres.svc:127.0.0.4"
+        --add-host "tenant-c-reloaded.gres.svc:127.0.0.4"
         -e PGDOG_ADMIN_PASSWORD="$PGDOG_ADMIN_PASSWORD"
         -v "${PWD}/${ARTIFACT_DIR}/pgdog:/etc/pgdog:ro"
         "$PGDOG_IMAGE"
@@ -516,8 +541,10 @@ fi
 python3 -c 'import psycopg' >/dev/null 2>&1 || fail "Python psycopg is required for PgDog driver smoke tests"
 docker_is_available || fail "Docker/PgDog runtime unavailable; pass --skip-pgdog only for local development"
 
-docker pull "$PGDOG_IMAGE" >"${ARTIFACT_DIR}/pull-pgdog.log" 2>&1
-docker pull "$POSTGRES_IMAGE" >"${ARTIFACT_DIR}/pull-postgres.log" 2>&1
+timeout 120s docker pull "$PGDOG_IMAGE" >"${ARTIFACT_DIR}/pull-pgdog.log" 2>&1 ||
+    fail "PgDog image pull failed or timed out"
+timeout 120s docker pull "$POSTGRES_IMAGE" >"${ARTIFACT_DIR}/pull-postgres.log" 2>&1 ||
+    fail "Postgres image pull failed or timed out"
 assert_pgdog_config_loads
 start_pgdog
 
@@ -539,6 +566,17 @@ expect_sql_fails "plaintext-client" "host=localhost port=${PGDOG_PORT} dbname=te
 expect_sql_fails "incorrect-tls-trust" "host=localhost port=${PGDOG_PORT} dbname=tenant-a user=alice sslmode=verify-full sslrootcert=${PWD}/crates/security/tests/fixtures/dev_client_ca.pem" alice-secret 'SELECT 1'
 expect_sql_fails "wrong-password" "$TENANT_A_CONN" wrong-secret 'SELECT 1'
 expect_sql_fails "wrong-tenant-credentials" "$WRONG_TENANT_CONN" alice-secret 'SELECT 1'
+for _ in $(seq 40); do
+    if grep -Fq 'auth: passthrough' "${ARTIFACT_DIR}/pgdog-container.log" &&
+        grep -Fq 'auth=scram' "${ARTIFACT_DIR}/pgdog-container.log"; then
+        break
+    fi
+    sleep 0.1
+done
+grep -Fq 'auth: passthrough' "${ARTIFACT_DIR}/pgdog-container.log" ||
+    fail "PgDog did not report frontend passthrough authentication"
+grep -Fq 'auth=scram' "${ARTIFACT_DIR}/pgdog-container.log" ||
+    fail "PgDog did not report backend SCRAM authentication"
 assert_pgdog_admin_reload "$PGDOG_ADMIN_CONN"
 
 PGAPPNAME= PGPASSWORD=alice-secret psql "$TENANT_A_CONN" -v ON_ERROR_STOP=1 -c \

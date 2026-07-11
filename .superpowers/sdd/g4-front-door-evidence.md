@@ -17,6 +17,9 @@ Scope is G-4 only. This evidence does not claim G-5 or later chapters.
   password-free `users.toml` and reported `config valid`. The gate also rejects
   error text because this PgDog command can report an invalid field while
   exiting zero.
+- The CLI has byte-exact assertions for both rendered files, so the
+  broker-driven render path is pinned to the shared renderer output rather than
+  merely checked for selected substrings.
 
 ## Complete live front-door gate
 
@@ -41,9 +44,10 @@ The run proved:
   B's `__gres_cfg.tenant-b`, `__gres_wal.tenant-b.r0`, and global
   `__gres_tenants`; successful/empty/timeout outcomes cannot satisfy the gate;
 - tenant data isolation and tenant-B continuity after tenant-A compute death;
-- real admin `RELOAD` and effective-route confirmation through PgDog 0.1.47's
-  supported `SHOW POOLS` view for all three databases. `SHOW DATABASES`, named
-  by the draft plan, does not exist in the pinned upstream release;
+- real admin `RELOAD` after mutating tenant C's configured host, followed by
+  database/host/port confirmation through PgDog 0.1.47's supported `SHOW POOLS`
+  view. `SHOW DATABASES`, named by the draft plan, does not exist in the pinned
+  upstream release;
 - standard SQL corpus through transaction-mode PgDog: 665/688, matching the
   checked-in pooler baseline; extended protocol: 6/6; concurrent/failure-safe
   extended lifecycle: 3/3;
@@ -68,6 +72,14 @@ from poisoning unrelated files.
 - G-4 focused control, CLI, security, operator, conformance, and Gres unit/test
   targets pass, except two independent later-chapter current-tree failures
   recorded below.
+- PgDog/Postgres image pulls and container/process cleanup are bounded in both
+  the primary and cold-start gates. Multi-replica operator reloads enumerate
+  every PgDog pod, enter maintenance on the complete fleet, compare full route
+  tuples exactly, and attempt maintenance rollback/cleanup on every failure
+  path. Service DNS remains the TLS identity while per-pod IPs are only TCP
+  destinations. A fake admin-command seam proves ON/RELOAD/SHOW/OFF failures,
+  all-replica rollback, and dual-error preservation. SHOW POOLS rows decode
+  fail-closed; malformed rows cannot disappear into an empty observed set.
 
 Current-tree failures outside this G-4 diff were reported to the coordinating
 agent rather than hidden: the G-8 runtime test

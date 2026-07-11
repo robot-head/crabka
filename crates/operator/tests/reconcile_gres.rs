@@ -8,6 +8,7 @@ use crabka_operator::{
         Gres, GresBalancerGoal, GresBalancerGoals, GresBalancerOperationKind,
         GresBalancerPlanSnapshot, GresBalancerRegistryLayout, GresBalancerSpec,
         GresBalancerThresholds, GresSpec, GresTenant, GresTenantSpec, PgdogSpec, SecretKeyRef,
+        SecretRef,
     },
 };
 use http::Method;
@@ -20,7 +21,7 @@ use shared::{MockRule, MockState, fixture_ctx, json_response, mock_client};
 #[derive(Debug)]
 struct FakePgdogAdmin {
     outcomes: Mutex<Vec<bool>>,
-    requests: Mutex<Vec<PgdogReloadRequest>>,
+    requests: Mutex<Vec<Vec<PgdogReloadRequest>>>,
 }
 
 impl FakePgdogAdmin {
@@ -31,18 +32,18 @@ impl FakePgdogAdmin {
         })
     }
 
-    fn requests(&self) -> Vec<PgdogReloadRequest> {
+    fn requests(&self) -> Vec<Vec<PgdogReloadRequest>> {
         self.requests.lock().unwrap().clone()
     }
 }
 
 #[async_trait::async_trait]
 impl PgdogAdminLike for FakePgdogAdmin {
-    async fn reload_and_database_view_matches(
+    async fn reload_and_database_views_match(
         &self,
-        request: &PgdogReloadRequest,
+        requests: &[PgdogReloadRequest],
     ) -> Result<bool, PgdogAdminError> {
-        self.requests.lock().unwrap().push(request.clone());
+        self.requests.lock().unwrap().push(requests.to_vec());
         Ok(self.outcomes.lock().unwrap().remove(0))
     }
 }
@@ -321,9 +322,11 @@ async fn renders_pgdog_config_secret_and_status_hash() {
     );
     let admin_requests = admin.requests();
     assert!(admin_requests.len() == 2);
-    assert!(admin_requests[0].expected_databases == vec!["tenant-a"]);
-    assert!(!admin_requests[0].maintenance_mode);
-    assert!(admin_requests[0].tls_ca_pem.is_none());
+    assert!(admin_requests[0][0].expected_routes[0].database == "tenant-a");
+    assert!(admin_requests[0][0].expected_routes[0].host == "tenant-a-gres.ns.svc.cluster.local");
+    assert!(!admin_requests[0][0].maintenance_mode);
+    assert!(admin_requests[0][0].tls_ca_pem.is_none());
+    assert!(admin_requests[0][0].connect_addr.is_none());
     assert!(status_body["status"]["balancer"]["dryRunOnly"] == true);
     assert!(status_body["status"]["balancer"]["plannedOperations"] == 0);
     assert!(status_body["status"]["balancer"]["executableOperations"] == 0);
@@ -354,16 +357,60 @@ async fn renders_pgdog_config_secret_and_status_hash() {
 #[tokio::test]
 async fn multi_replica_reload_requests_maintenance_mode() {
     let admin = FakePgdogAdmin::new(vec![true]);
-    let state = MockState::new(reconcile_rules(true));
+    let mut rules = reconcile_rules(true);
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/namespaces/ns/pods".into(),
+        response: json_response(
+            200,
+            &serde_json::json!({
+                "apiVersion": "v1", "kind": "PodList", "items": [
+                    {"metadata":{"name":"pgdog-0"},"status":{"podIP":"10.0.0.10"}},
+                    {"metadata":{"name":"pgdog-1"},"status":{"podIP":"10.0.0.11"}}
+                ]
+            }),
+        ),
+    });
+    rules.push(MockRule {
+        method: Method::GET,
+        path_substr: "/secrets/pgdog-tls".into(),
+        response: json_response(200, &serde_json::json!({
+            "apiVersion":"v1", "kind":"Secret", "metadata":{"name":"pgdog-tls","namespace":"ns"},
+            "data":{"ca.crt":"dGVzdC1jYQ==","tls.crt":"dGVzdC1jZXJ0","tls.key":"dGVzdC1rZXk="}
+        })),
+    });
+    let state = MockState::new(rules);
     let ctx = Arc::new(
         fixture_ctx(mock_client(&state, "ns"), "ns").with_pgdog_admin_for_test(admin.clone()),
     );
     let mut obj = gres();
     obj.spec.pgdog.replicas = 2;
+    obj.spec.pgdog.tls_secret_ref = Some(SecretRef {
+        name: "pgdog-tls".into(),
+    });
 
     reconcile(Arc::new(obj), ctx).await.unwrap();
 
-    assert!(admin.requests()[0].maintenance_mode);
+    let requests = admin.requests();
+    assert!(requests[0].len() == 2);
+    assert!(requests[0].iter().all(|request| request.maintenance_mode));
+    assert!(
+        requests[0]
+            .iter()
+            .all(|request| request.host == "fleet-pgdog.ns.svc.cluster.local")
+    );
+    assert!(
+        requests[0]
+            .iter()
+            .all(|request| request.tls_ca_pem.as_deref() == Some(b"test-ca"))
+    );
+    assert!(
+        requests[0]
+            .iter()
+            .map(|request| request.connect_addr.unwrap().to_string())
+            .collect::<Vec<_>>()
+            == vec!["10.0.0.10", "10.0.0.11"]
+    );
 }
 
 #[tokio::test]
@@ -501,7 +548,7 @@ async fn fleet_reconcile_excludes_unsupported_multi_range_tenants_from_pgdog_con
 
     reconcile(Arc::new(gres()), ctx).await.unwrap();
 
-    assert!(admin.requests()[0].expected_databases == vec!["tenant-a"]);
+    assert!(admin.requests()[0][0].expected_routes[0].database == "tenant-a");
     let observed = state.take_observed();
     let secret_patch = observed
         .iter()

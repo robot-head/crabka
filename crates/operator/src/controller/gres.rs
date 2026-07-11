@@ -11,7 +11,7 @@ use k8s_openapi::{
     ByteString,
     api::{
         apps::v1::Deployment,
-        core::v1::{Secret, Service},
+        core::v1::{Pod, Secret, Service},
     },
 };
 use kube::{
@@ -27,7 +27,7 @@ use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
 use crate::{
-    context::{Context, PgdogReloadRequest},
+    context::{Context, PgdogExpectedRoute, PgdogReloadRequest},
     controller::common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
     crd::{Gres, GresTenant},
 };
@@ -207,24 +207,71 @@ async fn verify_pgdog_reload(
     let ns = obj.namespace().unwrap_or_else(|| "default".into());
     let password = pgdog_admin_password(obj, ctx, &ns).await?;
     let tls_ca_pem = pgdog_tls_ca(obj, ctx, &ns).await?;
-    let request = PgdogReloadRequest {
-        host: format!("{}.{}.svc.cluster.local", service_name(&obj.name_any()), ns),
-        port: u16::try_from(obj.spec.pgdog.listen_port).map_err(|err| {
-            ReconcileError::Malformed(format!("PgDog listenPort is outside u16 range: {err}"))
-        })?,
-        password,
-        expected_databases: endpoints
-            .iter()
-            .map(|endpoint| endpoint.name.clone())
-            .collect(),
-        maintenance_mode: obj.spec.pgdog.replicas > 1,
-        tls_ca_pem,
+    let port = u16::try_from(obj.spec.pgdog.listen_port).map_err(|err| {
+        ReconcileError::Malformed(format!("PgDog listenPort is outside u16 range: {err}"))
+    })?;
+    let expected_routes = endpoints
+        .iter()
+        .map(|endpoint| {
+            let (host, port) = if endpoint.state == TenantState::Active {
+                (endpoint.backend_host.clone(), endpoint.backend_port)
+            } else {
+                (
+                    activator_service_host(&obj.name_any(), &ns),
+                    ACTIVATOR_PORT_U16,
+                )
+            };
+            PgdogExpectedRoute {
+                database: endpoint.name.clone(),
+                host,
+                port,
+            }
+        })
+        .collect::<Vec<_>>();
+    let service_host = format!("{}.{}.svc.cluster.local", service_name(&obj.name_any()), ns);
+    let connect_addrs = if obj.spec.pgdog.replicas > 1 {
+        let pods: Api<Pod> = Api::namespaced(ctx.client.clone(), &ns);
+        let selector = selector_labels(obj)
+            .into_iter()
+            .map(|(key, value)| format!("{key}={value}"))
+            .collect::<Vec<_>>()
+            .join(",");
+        let hosts = pods
+            .list(&ListParams::default().labels(&selector))
+            .await?
+            .items
+            .into_iter()
+            .filter_map(|pod| {
+                pod.status
+                    .and_then(|status| status.pod_ip)
+                    .and_then(|ip| ip.parse::<std::net::IpAddr>().ok())
+                    .map(Some)
+            })
+            .collect::<Vec<_>>();
+        if hosts.len() != obj.spec.pgdog.replicas as usize {
+            return Ok(false);
+        }
+        hosts
+    } else {
+        vec![None]
     };
+    let requests = connect_addrs
+        .into_iter()
+        .map(|connect_addr| PgdogReloadRequest {
+            host: service_host.clone(),
+            connect_addr,
+            port,
+            password: password.clone(),
+            expected_routes: expected_routes.clone(),
+            maintenance_mode: obj.spec.pgdog.replicas > 1,
+            tls_ca_pem: tls_ca_pem.clone(),
+        })
+        .collect::<Vec<_>>();
 
     for attempt in 1..=RELOAD_RETRY_LIMIT {
         if ctx
             .pgdog_admin
-            .reload_and_database_view_matches(&request)
+            .reload_and_database_views_match(&requests)
             .await?
         {
             return Ok(true);

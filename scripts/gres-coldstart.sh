@@ -68,15 +68,12 @@ fail() {
 
 cleanup() {
     local status=$?
-    docker rm -f "${PGDOG_CONTAINER:-}" >/dev/null 2>&1 || true
-    kill "${CONTROLLER_PID:-}" "${ACTIVATOR_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
+    timeout 15s docker rm -f "${PGDOG_CONTAINER:-}" >/dev/null 2>&1 || true
+    local compute_pid=""
     if [ -f "${ARTIFACT_DIR}/compute.pid" ]; then
-        kill "$(cat "${ARTIFACT_DIR}/compute.pid")" 2>/dev/null || true
+        compute_pid=$(cat "${ARTIFACT_DIR}/compute.pid")
     fi
-    wait "${CONTROLLER_PID:-}" "${ACTIVATOR_PID:-}" "${BROKER_PID:-}" 2>/dev/null || true
-    if [ -f "${ARTIFACT_DIR}/compute.pid" ]; then
-        wait "$(cat "${ARTIFACT_DIR}/compute.pid")" 2>/dev/null || true
-    fi
+    terminate_pids "${CONTROLLER_PID:-}" "${ACTIVATOR_PID:-}" "${BROKER_PID:-}" "$compute_pid"
     if [ "$status" -ne 0 ]; then
         dump_diagnostics
     fi
@@ -85,6 +82,25 @@ cleanup() {
     else
         log "kept artifacts in ${ARTIFACT_DIR}"
     fi
+}
+
+terminate_pids() {
+    local pid
+    for pid in "$@"; do
+        [ -n "$pid" ] && kill -TERM "$pid" 2>/dev/null || true
+    done
+    for _ in $(seq 40); do
+        local alive=0
+        for pid in "$@"; do
+            [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null && alive=1
+        done
+        [ "$alive" -eq 0 ] && break
+        sleep 0.1
+    done
+    for pid in "$@"; do
+        [ -n "$pid" ] && kill -KILL "$pid" 2>/dev/null || true
+        [ -n "$pid" ] && wait "$pid" 2>/dev/null || true
+    done
 }
 trap cleanup EXIT
 
@@ -291,7 +307,8 @@ start_activator() {
 }
 
 start_pgdog() {
-    docker pull "$PGDOG_IMAGE" >"${ARTIFACT_DIR}/pull-pgdog.log" 2>&1
+    timeout 120s docker pull "$PGDOG_IMAGE" >"${ARTIFACT_DIR}/pull-pgdog.log" 2>&1 ||
+        fail "PgDog image pull failed or timed out"
     PGDOG_CONTAINER=$(docker run -d --network host \
         --name "crabka-gres-coldstart-pgdog-${PGDOG_PORT}" \
         -v "${PWD}/${ARTIFACT_DIR}/pgdog:/etc/pgdog:ro" \
