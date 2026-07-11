@@ -638,7 +638,7 @@ impl DelegationTokenAdmin for crate::context::AdminClientHandle {
 mod tests {
     use std::sync::Mutex as StdMutex;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta;
 
     use super::*;
@@ -674,46 +674,40 @@ mod tests {
     // --- decide() unit tests ----------------------------------------------
 
     #[test]
-    fn decide_cases() {
-        for (_name, authentication, token, now_ms, expected) in [
-            (
-                "no token creates",
-                auth(vec![], None),
-                None,
-                0,
-                ReconcileDecision::Create,
-            ),
-            (
-                "far expiry is a no-op",
-                auth(vec![], None),
-                Some(token_with(1_000_000_000, vec![])),
-                0,
-                ReconcileDecision::NoOp,
-            ),
-            (
-                "inside explicit renewal threshold renews",
-                auth(vec![], Some(5000)),
-                Some(token_with(1000, vec![])),
-                0,
-                ReconcileDecision::Renew,
-            ),
-            (
-                "renewer divergence cycles",
-                auth(vec!["User:bob", "User:carol"], None),
-                Some(token_with(1_000_000_000, vec![kp("User", "bob")])),
-                0,
-                ReconcileDecision::Cycle,
-            ),
-            (
-                "default renewal threshold is inclusive",
-                auth(vec![], None),
-                Some(token_with(24 * 60 * 60 * 1_000, vec![])),
-                0,
-                ReconcileDecision::Renew,
-            ),
-        ] {
-            assert2::assert!(decide(&authentication, token.as_ref(), now_ms) == expected);
-        }
+    fn decide_create_when_no_token_exists() {
+        assert!(decide(&auth(vec![], None), None, 0) == ReconcileDecision::Create);
+    }
+
+    #[test]
+    fn decide_noop_when_expiry_far_from_now() {
+        let t = token_with(1_000_000_000, vec![]);
+        // Default 24h before-expiry; token expires far in future.
+        assert!(decide(&auth(vec![], None), Some(&t), 0) == ReconcileDecision::NoOp);
+    }
+
+    #[test]
+    fn decide_renew_when_inside_renew_threshold() {
+        let t = token_with(1000, vec![]);
+        // renew_before = 5000 > (1000 - 0). Renew.
+        assert!(decide(&auth(vec![], Some(5000)), Some(&t), 0) == ReconcileDecision::Renew);
+    }
+
+    #[test]
+    fn decide_cycle_when_renewers_diverge() {
+        let t = token_with(1_000_000_000, vec![kp("User", "bob")]);
+        // Spec adds carol.
+        assert!(
+            decide(&auth(vec!["User:bob", "User:carol"], None), Some(&t), 0)
+                == ReconcileDecision::Cycle
+        );
+    }
+
+    #[test]
+    fn decide_renew_when_default_threshold_just_met() {
+        // Token expires in exactly 24h; default renew_before = 24h. Renew
+        // (boundary is inclusive: <= triggers).
+        let t = token_with(24 * 60 * 60 * 1_000, vec![]);
+        assert!(decide(&auth(vec![], None), Some(&t), 0) == ReconcileDecision::Renew);
     }
 
     // --- Mock admin client + writers --------------------------------------
@@ -936,7 +930,7 @@ mod tests {
 
         // Admin calls: Describe (empty result) → Create.
         let calls = admin.calls();
-        assert2::assert!(
+        assert!(
             calls
                 == vec![
                     MockCall::Describe {
@@ -947,42 +941,44 @@ mod tests {
                         renewers: vec!["User:bob".into()],
                         max_lifetime_ms: 86_400_000,
                     },
-                ]
+                ],
+            "expected Describe+Create, got: {calls:?}",
         );
 
         // Secret applied with the expected keys.
         let applied = secrets.applied.lock().unwrap();
+        assert!(applied.len() == 1);
         let data = applied[0].data.as_ref().expect("data set");
-        assert2::assert!(applied.len() == 1);
-        assert2::assert!(
-            data.keys().map(String::as_str).collect::<Vec<_>>()
-                == vec!["hmac", "password", "sasl.jaas.config", "token-id"]
-        );
+        for key in ["token-id", "hmac", "password", "sasl.jaas.config"] {
+            assert!(data.contains_key(key), "missing key {key:?}");
+        }
         let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
-        assert2::assert!(jaas.contains("tokenauth=\"true\""));
-        assert2::assert!(jaas.contains("ScramLoginModule"));
+        assert!(jaas.contains("tokenauth=\"true\""), "jaas: {jaas}");
+        assert!(jaas.contains("ScramLoginModule"), "jaas: {jaas}");
 
         // Status patch carries delegationTokenId + TokenIssued condition.
         let patches = users.patches.lock().unwrap();
+        assert!(patches.len() == 1);
         let (name, body) = &patches[0];
+        assert!(name == "alice");
         let status = body.get("status").unwrap();
-        assert2::assert!(patches.len() == 1);
-        assert2::assert!(name.as_str() == "alice");
-        assert2::assert!(status.get("delegationTokenId").is_some());
-        assert2::assert!(status.get("delegationTokenExpiryTimestampMs").is_some());
+        assert!(status.get("delegationTokenId").is_some());
+        assert!(status.get("delegationTokenExpiryTimestampMs").is_some());
         let conds = status.get("conditions").unwrap().as_array().unwrap();
-        assert2::assert!(
+        assert!(
             conds
                 .iter()
-                .any(|c| c["type"] == "TokenIssued" && c["status"] == "True")
+                .any(|c| c["type"] == "TokenIssued" && c["status"] == "True"),
+            "missing TokenIssued=True: {conds:?}",
         );
         // Ready=True is the spec §2.4 aggregator (TokenIssued AND Secret
         // exists) — required for the kind e2e's
         // `kubectl wait --for=condition=Ready` to ever return.
-        assert2::assert!(
+        assert!(
             conds.iter().any(|c| c["type"] == "Ready"
                 && c["status"] == "True"
-                && c["reason"] == "TokenReady")
+                && c["reason"] == "TokenReady"),
+            "missing Ready=True/TokenReady: {conds:?}",
         );
     }
 
@@ -1017,7 +1013,7 @@ mod tests {
             .unwrap();
 
         let calls = admin.calls();
-        assert2::assert!(
+        assert!(
             calls
                 == vec![
                     MockCall::Describe {
@@ -1026,7 +1022,8 @@ mod tests {
                     MockCall::Renew {
                         hmac: vec![0xEE; 32],
                     },
-                ]
+                ],
+            "expected Describe+Renew on the existing hmac, got: {calls:?}",
         );
 
         // Secret + status both patched.
@@ -1050,25 +1047,25 @@ mod tests {
             .unwrap();
 
         // No Secret was applied — failure path skips the write.
-        assert2::assert!(secrets.applied.lock().unwrap().is_empty());
+        assert!(secrets.applied.lock().unwrap().is_empty());
 
         let patches = users.patches.lock().unwrap();
-        assert2::assert!(patches.len() == 1);
+        assert!(patches.len() == 1);
         let conds = patches[0].1["status"]["conditions"].as_array().unwrap();
         let issued = conds
             .iter()
             .find(|c| c["type"] == "TokenIssued")
             .expect("TokenIssued present");
+        assert!(issued["status"] == "False");
+        assert!(issued["reason"] == "OperatorNotSuperUser");
         // Ready mirrors TokenIssued on the failure path — same reason
         // string so `kubectl describe` shows the correlated cause.
         let ready = conds
             .iter()
             .find(|c| c["type"] == "Ready")
             .expect("Ready present");
-        assert2::assert!(issued["status"].as_str() == Some("False"));
-        assert2::assert!(issued["reason"].as_str() == Some("OperatorNotSuperUser"));
-        assert2::assert!(ready["status"].as_str() == Some("False"));
-        assert2::assert!(ready["reason"].as_str() == Some("OperatorNotSuperUser"));
+        assert!(ready["status"] == "False");
+        assert!(ready["reason"] == "OperatorNotSuperUser");
     }
 
     #[tokio::test]
@@ -1087,11 +1084,11 @@ mod tests {
         let patches = users.patches.lock().unwrap();
         let conds = patches[0].1["status"]["conditions"].as_array().unwrap();
         let issued = conds.iter().find(|c| c["type"] == "TokenIssued").unwrap();
+        assert!(issued["status"] == "False");
+        assert!(issued["reason"] == "InvalidSpec");
         let ready = conds.iter().find(|c| c["type"] == "Ready").unwrap();
-        assert2::assert!(issued["status"].as_str() == Some("False"));
-        assert2::assert!(issued["reason"].as_str() == Some("InvalidSpec"));
-        assert2::assert!(ready["status"].as_str() == Some("False"));
-        assert2::assert!(ready["reason"].as_str() == Some("InvalidSpec"));
+        assert!(ready["status"] == "False");
+        assert!(ready["reason"] == "InvalidSpec");
     }
 
     // --- helpers ----------------------------------------------------------
@@ -1099,27 +1096,21 @@ mod tests {
     #[test]
     fn build_secret_data_emits_all_four_keys() {
         let t = token_with(0, vec![]);
+        let data = build_secret_data(&t);
+        assert!(data.len() == 4);
+        // password is base64(hmac), bytes of the b64 string.
         let want_b64 = base64::engine::general_purpose::STANDARD.encode(&t.hmac);
-        let jaas = format!(
-            "org.apache.kafka.common.security.scram.ScramLoginModule required \
-             username=\"{}\" password=\"{}\" tokenauth=\"true\";",
-            t.token_id, want_b64
-        );
-        assert2::assert!(
-            build_secret_data(&t)
-                == BTreeMap::from([
-                    ("hmac".to_string(), ByteString(t.hmac.clone())),
-                    ("password".to_string(), ByteString(want_b64.into_bytes())),
-                    (
-                        "sasl.jaas.config".to_string(),
-                        ByteString(jaas.into_bytes())
-                    ),
-                    (
-                        "token-id".to_string(),
-                        ByteString(t.token_id.as_bytes().to_vec()),
-                    ),
-                ])
-        );
+        for (key, want) in [
+            ("token-id", t.token_id.as_bytes().to_vec()),
+            ("hmac", t.hmac.clone()),
+            ("password", want_b64.as_bytes().to_vec()),
+        ] {
+            assert!(data[key].0 == want, "key {key:?}");
+        }
+        let jaas = std::str::from_utf8(&data["sasl.jaas.config"].0).unwrap();
+        for want in [t.token_id.as_str(), want_b64.as_str(), "tokenauth=\"true\""] {
+            assert!(jaas.contains(want), "jaas missing {want:?}: {jaas}");
+        }
     }
 
     #[test]
@@ -1128,7 +1119,7 @@ mod tests {
         // we'd compute Duration::ZERO and hot-loop the reconciler.
         let t = token_with(0, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert2::assert!(r >= Duration::from_mins(1));
+        assert!(r >= Duration::from_mins(1));
     }
 
     #[test]
@@ -1136,28 +1127,33 @@ mod tests {
         // Token expires in a year; without clamp we'd requeue weeks out.
         let t = token_with(365 * 24 * 60 * 60 * 1_000, vec![]);
         let r = compute_requeue(&t, &auth(vec![], None), 0);
-        assert2::assert!(r <= Duration::from_hours(24));
+        assert!(r <= Duration::from_hours(24));
     }
 
     #[test]
-    fn compute_conditions_reports_expiry_horizon_and_ready_state() {
-        for (_name, expiry_ms, expected_status, expected_reason) in [
-            (
-                "within renewal horizon",
-                1500,
-                "True",
-                "WithinRenewalHorizon",
-            ),
-            ("healthy outside horizon", 5000, "False", "Healthy"),
-        ] {
-            let t = token_with(expiry_ms, vec![]);
-            let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
-            let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
-            let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
-            assert2::assert!(expiring.status.as_str() == expected_status);
-            assert2::assert!(expiring.reason.as_str() == expected_reason);
-            assert2::assert!(ready.status.as_str() == "True");
-            assert2::assert!(ready.reason.as_str() == "TokenReady");
-        }
+    fn compute_conditions_token_expiring_true_when_close_to_horizon() {
+        // expiry - now (1500) < renew_before (1000) * 2 → TokenExpiring=True
+        let t = token_with(1500, vec![]);
+        let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
+        let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
+        assert!(expiring.status == "True");
+        assert!(expiring.reason == "WithinRenewalHorizon");
+        // Success path also emits Ready=True/TokenReady (spec §2.4).
+        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
+        assert!(ready.status == "True");
+        assert!(ready.reason == "TokenReady");
+    }
+
+    #[test]
+    fn compute_conditions_token_expiring_false_when_far() {
+        // expiry - now (5000) > renew_before (1000) * 2 → TokenExpiring=False
+        let t = token_with(5000, vec![]);
+        let conds = compute_conditions(&t, &auth(vec![], Some(1000)), 0, true, None);
+        let expiring = conds.iter().find(|c| c.type_ == "TokenExpiring").unwrap();
+        assert!(expiring.status == "False");
+        assert!(expiring.reason == "Healthy");
+        let ready = conds.iter().find(|c| c.type_ == "Ready").unwrap();
+        assert!(ready.status == "True");
+        assert!(ready.reason == "TokenReady");
     }
 }

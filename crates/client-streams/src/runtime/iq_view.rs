@@ -78,6 +78,8 @@ pub struct ReadOnlyKeyValueStore<K, V> {
 
 impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     /// Value for `key`, or `None` if absent.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn get(&self, key: &K) -> Result<Option<V>, StreamsClientError> {
         let kb = self.key_serde.serialize(&self.store, key);
         match query(
@@ -95,6 +97,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     }
 
     /// Inclusive `[lo, hi]` range, ascending memcmp key order.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn range(&self, lo: &K, hi: &K) -> Result<Vec<(K, V)>, StreamsClientError> {
         let lo_b = self.key_serde.serialize(&self.store, lo);
         let hi_b = self.key_serde.serialize(&self.store, hi);
@@ -112,6 +116,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     }
 
     /// Every entry.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn all(&self) -> Result<Vec<(K, V)>, StreamsClientError> {
         match query(&self.tx, &self.store, StoreKind::KeyValue, IqOp::KvAll).await? {
             IqPayload::Entries(pairs) => self.decode_pairs(pairs),
@@ -120,6 +126,8 @@ impl<K: 'static, V: 'static> ReadOnlyKeyValueStore<K, V> {
     }
 
     /// Approximate entry count (exact for in-memory; summed across partitions).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn approximate_num_entries(&self) -> Result<u64, StreamsClientError> {
         match query(
             &self.tx,
@@ -157,6 +165,8 @@ pub struct ReadOnlyWindowStore<K, V> {
 
 impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
     /// Value of the window for `key` starting exactly at `window_start`, else `None`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn fetch_single(
         &self,
         key: &K,
@@ -182,6 +192,8 @@ impl<K: 'static, V: 'static> ReadOnlyWindowStore<K, V> {
 
     /// Windows for `key` with start in inclusive `[time_from, time_to]`,
     /// ascending by start. Each item is `(windowStart, value)`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn fetch(
         &self,
         key: &K,
@@ -221,6 +233,8 @@ pub struct ReadOnlySessionStore<K, V> {
 
 impl<K: 'static, V: 'static> ReadOnlySessionStore<K, V> {
     /// All sessions for `key`, in store order.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn fetch(&self, key: &K) -> Result<Vec<(Windowed<K>, V)>, StreamsClientError> {
         let kb = self.key_serde.serialize(&self.store, key);
         match query(
@@ -300,21 +314,15 @@ mod tests {
             key_serde: Box::new(StringSerde),
             value_serde: Box::new(I64Serde),
         };
-        let hits = (
-            view.get(&"b".to_string()).await.unwrap(),
-            view.get(&"z".to_string()).await.unwrap(),
-        );
+        assert_eq!(view.get(&"b".to_string()).await.unwrap(), Some(2));
+        assert_eq!(view.get(&"z".to_string()).await.unwrap(), None);
         let r = view
             .range(&"a".to_string(), &"b".to_string())
             .await
             .unwrap();
-        let counts = (
-            view.all().await.unwrap().len(),
-            view.approximate_num_entries().await.unwrap(),
-        );
-        assert2::assert!(hits == (Some(2), None));
-        assert2::assert!(r == vec![("a".to_string(), 1), ("b".to_string(), 2)]);
-        assert2::assert!(counts == (3, 3));
+        assert_eq!(r, vec![("a".to_string(), 1), ("b".to_string(), 2)]);
+        assert_eq!(view.all().await.unwrap().len(), 3);
+        assert_eq!(view.approximate_num_entries().await.unwrap(), 3);
     }
 
     async fn window_registry() -> StoreRegistry {
@@ -342,10 +350,13 @@ mod tests {
             key_serde: Box::new(StringSerde),
             value_serde: Box::new(I64Serde),
         };
-        assert2::assert!(view.fetch_single(&"k".to_string(), 0).await.unwrap() == Some(10));
-        assert2::assert!(view.fetch_single(&"k".to_string(), 5).await.unwrap() == None);
+        assert_eq!(
+            view.fetch_single(&"k".to_string(), 0).await.unwrap(),
+            Some(10)
+        );
+        assert_eq!(view.fetch_single(&"k".to_string(), 5).await.unwrap(), None);
         let r = view.fetch(&"k".to_string(), 0, 1000).await.unwrap();
-        assert2::assert!(r == vec![(0, 10), (1000, 20)]);
+        assert_eq!(r, vec![(0, 10), (1000, 20)]);
     }
 
     async fn session_registry() -> StoreRegistry {
@@ -374,13 +385,9 @@ mod tests {
             value_serde: Box::new(I64Serde),
         };
         let rows = view.fetch(&"k".to_string()).await.unwrap();
-        let mut got: Vec<(Window, i64)> = rows.into_iter().map(|(w, v)| (w.window, v)).collect();
-        got.sort_by_key(|(window, _)| window.start);
-        assert2::assert!(
-            got == vec![
-                (Window { start: 0, end: 10 }, 1),
-                (Window { start: 20, end: 30 }, 2),
-            ]
-        );
+        let got: Vec<(Window, i64)> = rows.into_iter().map(|(w, v)| (w.window, v)).collect();
+        assert!(got.contains(&(Window { start: 0, end: 10 }, 1)));
+        assert!(got.contains(&(Window { start: 20, end: 30 }, 2)));
+        assert_eq!(got.len(), 2);
     }
 }

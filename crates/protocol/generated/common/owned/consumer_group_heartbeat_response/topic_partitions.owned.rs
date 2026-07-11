@@ -37,8 +37,7 @@ impl Encode for TopicPartitions {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
                 let body: usize = (self.partitions).iter().map(|_| 4).sum();
                 prefix + body
             };

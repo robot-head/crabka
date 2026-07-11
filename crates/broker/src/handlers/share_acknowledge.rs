@@ -37,7 +37,6 @@ use crate::{
     handlers::share_fetch::apply_one_ack,
 };
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_share_acknowledge",
     level = "info",
@@ -73,11 +72,32 @@ pub(crate) async fn handle(
         return encode_error_response(version, code, lock_timeout_ms);
     }
 
-    let mgr = broker.share_partition_leaders.clone();
-    let image = broker.controller.current_image();
     let now = Instant::now();
+    let responses = process_topics(broker, &req, ctx, &cfg, &group, &member, now).await;
 
-    let mut responses: Vec<ShareAcknowledgeTopicResponse> = Vec::with_capacity(req.topics.len());
+    let resp = ShareAcknowledgeResponse {
+        throttle_time_ms: 0,
+        error_code: codes::NONE,
+        error_message: None,
+        acquisition_lock_timeout_ms: lock_timeout_ms,
+        responses,
+        ..Default::default()
+    };
+    crate::handlers::encode_response(&resp, version)
+}
+
+async fn process_topics(
+    broker: &Broker,
+    req: &ShareAcknowledgeRequest,
+    ctx: &crate::handlers::RequestContext<'_>,
+    cfg: &crate::coordinator::unified::share::config::ShareGroupConfig,
+    group: &str,
+    member: &str,
+    now: Instant,
+) -> Vec<ShareAcknowledgeTopicResponse> {
+    let mgr = &broker.share_partition_leaders;
+    let image = broker.controller.current_image();
+    let mut responses = Vec::with_capacity(req.topics.len());
     for topic in &req.topics {
         let topic_id = uuid::Uuid::from_bytes(topic.topic_id.0);
         let topic_name = mgr.topic_name_for(topic_id);
@@ -127,14 +147,14 @@ pub(crate) async fn handle(
                 continue;
             }
 
-            let cell = mgr.get_or_load(&group, topic_id, ap.partition_index).await;
+            let cell = mgr.get_or_load(group, topic_id, ap.partition_index).await;
             let mut st = cell.lock().await;
             let mut err = codes::NONE;
             for batch in &ap.acknowledgement_batches {
                 // A renew-ack RENEWs each batch's lock instead of acknowledging.
                 let res = if req.is_renew_ack {
                     st.renew(
-                        &member,
+                        member,
                         Offset(batch.first_offset),
                         Offset(batch.last_offset),
                         now,
@@ -143,7 +163,7 @@ pub(crate) async fn handle(
                 } else {
                     apply_one_ack(
                         &mut st,
-                        &member,
+                        member,
                         batch.first_offset,
                         batch.last_offset,
                         &batch.acknowledge_types,
@@ -155,7 +175,7 @@ pub(crate) async fn handle(
                 }
             }
             out.error_code = err;
-            mgr.persist_if_dirty(&group, topic_id, ap.partition_index, &mut st)
+            mgr.persist_if_dirty(group, topic_id, ap.partition_index, &mut st)
                 .await;
             parts.push(out);
         }
@@ -166,16 +186,7 @@ pub(crate) async fn handle(
             ..Default::default()
         });
     }
-
-    let resp = ShareAcknowledgeResponse {
-        throttle_time_ms: 0,
-        error_code: codes::NONE,
-        error_message: None,
-        acquisition_lock_timeout_ms: lock_timeout_ms,
-        responses,
-        ..Default::default()
-    };
-    crate::handlers::encode_response(&resp, version)
+    responses
 }
 
 /// Encode a top-level-error `ShareAcknowledgeResponse` (feature-gate or session
@@ -200,6 +211,7 @@ fn encode_error_response(
 mod tests {
     use std::net::SocketAddr;
 
+    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -269,7 +281,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -296,7 +308,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -352,7 +364,7 @@ mod tests {
             node_endpoints: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

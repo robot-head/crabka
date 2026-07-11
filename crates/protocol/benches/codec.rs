@@ -128,8 +128,7 @@ fn make_produce_request(num_topics: usize, partitions_per_topic: usize) -> Produ
             topic_id: Uuid([0u8; 16]),
             partition_data: (0..partitions_per_topic)
                 .map(|p| PartitionProduceData {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    index: p as i32,
+                    index: i32::try_from(p).expect("partition index must fit in i32"),
                     records: Some(make_record_batch(8, 64).into()),
                     unknown_tagged_fields: UnknownTaggedFields::default(),
                 })
@@ -176,8 +175,7 @@ fn make_fetch_request(num_topics: usize, partitions_per_topic: usize) -> FetchRe
             topic_id: Uuid([0u8; 16]),
             partitions: (0..partitions_per_topic)
                 .map(|p| FetchPartition {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    partition: p as i32,
+                    partition: i32::try_from(p).expect("partition index must fit in i32"),
                     current_leader_epoch: -1,
                     fetch_offset: 0,
                     last_fetched_epoch: -1,
@@ -207,8 +205,7 @@ fn make_fetch_request(num_topics: usize, partitions_per_topic: usize) -> FetchRe
 fn make_metadata_response(num_brokers: usize, num_topics: usize, parts: usize) -> MetadataResponse {
     let brokers = (0..num_brokers)
         .map(|i| MetadataResponseBroker {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-            node_id: i as i32,
+            node_id: i32::try_from(i).expect("broker index must fit in i32"),
             host: format!("broker-{i}.example.com"),
             port: 9092,
             rack: Some("us-east-1a".to_string()),
@@ -224,8 +221,7 @@ fn make_metadata_response(num_brokers: usize, num_topics: usize, parts: usize) -
             partitions: (0..parts)
                 .map(|p| MetadataResponsePartition {
                     error_code: 0,
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    partition_index: p as i32,
+                    partition_index: i32::try_from(p).expect("partition index must fit in i32"),
                     leader_id: 0,
                     leader_epoch: 0,
                     replica_nodes: vec![0, 1, 2],

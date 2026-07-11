@@ -27,6 +27,8 @@ use quote::{format_ident, quote};
 use crate::ir::{MessageSpec, MessageType};
 
 #[must_use]
+/// # Panics
+/// Panics if the validated schema model cannot be represented as the expected Rust syntax tree.
 pub fn emit(specs: &[MessageSpec], schemas_version: &str) -> String {
     // Identical selection logic to api_key_enum::emit.
     let mut by_key: BTreeMap<i16, &MessageSpec> = BTreeMap::new();

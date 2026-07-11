@@ -11,7 +11,7 @@ fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, 
     )
     .unwrap();
     let actual = serde_json::to_value(wire).unwrap();
-    assert2::assert!(actual == expected);
+    assert_eq!(actual, expected, "wire topology != JVM fixture {fixture}");
 }
 
 #[test]
@@ -116,5 +116,8 @@ fn cogroup_session_matches_jvm_behavior() {
         .into_iter()
         .filter(|r| r.value.is_some())
         .collect();
-    assert2::assert!(got == golden);
+    assert_eq!(
+        got, golden,
+        "cogroup-session output sequence != JVM behavioral golden (non-null rows)"
+    );
 }

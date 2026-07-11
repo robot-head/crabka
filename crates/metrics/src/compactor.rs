@@ -389,6 +389,8 @@ impl ObjectStoreCompactionIndexSink {
     }
 
     /// Read and decode a previously written compaction index manifest.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub async fn read_manifest(
         &self,
         index_key: &str,
@@ -424,6 +426,8 @@ impl CompactionIndexSink for ObjectStoreCompactionIndexSink {
 }
 
 /// Delete compacted metric blocks whose index manifest ends before the retention cutoff.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn enforce_compaction_retention(
     store: Arc<dyn ObjectStore>,
     now_ms: i64,
@@ -511,6 +515,8 @@ impl MetricsCompactorConfig {
         }
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn validate(&self) -> Result<(), MetricsCompactorConfigError> {
         validate_non_empty("bootstrap", &self.bootstrap)?;
         validate_non_empty("group_id", &self.group_id)?;
@@ -525,6 +531,8 @@ impl MetricsCompactorConfig {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn build_runtime(
         &self,
         store: Arc<dyn ObjectStore>,
@@ -542,6 +550,8 @@ impl MetricsCompactorConfig {
         })
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub async fn build_consumer(&self) -> Result<Consumer, MetricsCompactorBuildError> {
         self.validate()?;
         Consumer::builder()
@@ -705,12 +715,16 @@ impl CompactionIndexManifest {
     }
 
     /// Encode via `serde-wincode`, matching the WAL record codec.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn encode(&self) -> Result<Vec<u8>, CompactionIndexError> {
         <serde_wincode::SerdeCompat<CompactionIndexManifest> as wincode::Serialize>::serialize(self)
             .map_err(|error| CompactionIndexError::Encode(error.to_string()))
     }
 
     /// Decode a [`CompactionIndexManifest`] from its `serde-wincode` bytes.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn decode(bytes: &[u8]) -> Result<Self, CompactionIndexError> {
         <serde_wincode::SerdeCompat<CompactionIndexManifest> as wincode::Deserialize>::deserialize(
             bytes,
@@ -819,6 +833,8 @@ fn compaction_index_key(block_key: &str) -> String {
 }
 
 /// Convert polled consumer records from the metrics WAL topic into compactor inputs.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn compaction_wal_records_from_consumer_records(
     wal_topic: &str,
     records: &[ConsumerRecord],
@@ -867,6 +883,8 @@ pub fn compaction_object_plan_for_rows(
 /// The block object is written before the corresponding index sidecar, so a
 /// caller can safely commit WAL consumer offsets only after this function
 /// returns successfully.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn write_compacted_tenant_blocks<S>(
     block_writer: &BlockWriter,
     index_sink: &S,
@@ -889,6 +907,8 @@ where
 }
 
 /// Write all non-empty block kinds for a compacted tenant partition window.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn write_compacted_tenant_partition_blocks<S>(
     block_writer: &BlockWriter,
     index_sink: &S,
@@ -1002,6 +1022,8 @@ where
 }
 
 /// Process a polled compaction batch by partition, preserving per-partition commits.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn process_compaction_record_batch<S, C>(
     block_writer: &BlockWriter,
     index_sink: &S,
@@ -1054,6 +1076,8 @@ where
 }
 
 /// Poll the metrics WAL consumer once, compact returned records, and commit on success.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn poll_compactor_once<P, S, C>(
     poller: &mut P,
     block_writer: &BlockWriter,
@@ -1187,6 +1211,8 @@ where
 
 /// Run the compactor polling loop until `should_stop` returns true, using the
 /// real monotonic clock for flush-by-age.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_loop<P, S, C, Stop>(
     poller: &mut P,
     block_writer: &BlockWriter,
@@ -1223,6 +1249,8 @@ where
 /// `should_stop` reports this poll's `polled_records`/`compacted_records`; its
 /// `batch` reflects only the writes/commits that occurred this iteration (empty
 /// while buffering, populated on a flush).
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_loop_with_clock<P, S, C, Stop, Clock>(
     poller: &mut P,
     block_writer: &BlockWriter,
@@ -1284,6 +1312,8 @@ where
 
 /// Run the compactor polling loop using a single consumer handle for poll and
 /// commit, using the real monotonic clock for flush-by-age.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_consumer_loop<C, S, Stop>(
     consumer: &mut C,
     block_writer: &BlockWriter,
@@ -1343,6 +1373,8 @@ fn compaction_batch_span(records: &[ConsumerRecord], wal_records: usize) -> trac
 /// Mirrors [`run_compactor_loop_with_clock`] but polls and commits through one
 /// mutable consumer handle (`process_compaction_record_batch_with_consumer`),
 /// which likewise writes the block durably before committing offsets.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn run_compactor_consumer_loop_with_clock<C, S, Stop, Clock>(
     consumer: &mut C,
     block_writer: &BlockWriter,
@@ -1448,6 +1480,8 @@ where
 }
 
 /// Poll, compact, and commit once using a single mutable consumer handle.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn poll_compactor_consumer_once<C, S>(
     consumer: &mut C,
     block_writer: &BlockWriter,
@@ -1483,6 +1517,8 @@ where
 /// A successful return means all decoded records in the window are represented
 /// by durable block/index writes and the partition offset has been committed to
 /// the next offset. Empty windows are a no-op.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn process_compaction_partition_window<S, C>(
     block_writer: &BlockWriter,
     index_sink: &S,
@@ -1825,6 +1861,8 @@ fn series_labels_for_kind(
 }
 
 /// Encode one tenant's sorted rows into Arrow batches for the block writer.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn encode_tenant_batches(
     rows: &TenantCompactionRows,
 ) -> Result<TenantBatches, HistogramCodecError> {
@@ -1977,7 +2015,7 @@ mod tests {
         sync::{Arc, Mutex},
     };
 
-    use assert2::check;
+    use assert2::{assert, check};
     use async_trait::async_trait;
     use crabka_blockstore::Labels;
     use object_store::{ObjectStore, ObjectStoreExt, memory::InMemory};
@@ -2042,27 +2080,14 @@ mod tests {
 
         let compacted = compact_wal_records(&[a_late.clone(), b_row.clone(), a_early.clone()]);
 
-        check!(
-            (
-                compacted.len(),
-                compacted[0].tenant.as_str(),
-                compacted[1].tenant.as_str(),
-                compacted[0].float_rows.len(),
-                compacted[0].float_rows[0].timestamp_ms,
-                compacted[0].float_rows[1].timestamp_ms,
-                compacted[0].float_rows[0].fingerprint,
-                compacted[1].float_rows[0].fingerprint,
-            ) == (
-                2,
-                "tenant-a",
-                "tenant-b",
-                2,
-                10,
-                30,
-                a_early.series_fingerprint(),
-                b_row.series_fingerprint(),
-            )
-        );
+        check!(compacted.len() == 2);
+        check!(compacted[0].tenant == "tenant-a");
+        check!(compacted[1].tenant == "tenant-b");
+        check!(compacted[0].float_rows.len() == 2);
+        check!(compacted[0].float_rows[0].timestamp_ms == 10);
+        check!(compacted[0].float_rows[1].timestamp_ms == 30);
+        check!(compacted[0].float_rows[0].fingerprint == a_early.series_fingerprint());
+        check!(compacted[1].float_rows[0].fingerprint == b_row.series_fingerprint());
     }
 
     #[test]
@@ -2082,7 +2107,11 @@ mod tests {
             ),
         ];
         for (kind, expected) in cases {
-            assert2::assert!(super::compaction_object_key("tenant/a", kind, 42, 99) == expected);
+            assert_eq!(
+                super::compaction_object_key("tenant/a", kind, 42, 99),
+                expected,
+                "kind {kind:?}"
+            );
         }
     }
 
@@ -2090,32 +2119,25 @@ mod tests {
     fn tenant_dot_segments_cannot_form_path_traversal() {
         // Defense in depth: a tenant of exactly "." or ".." must not survive as
         // a relative-path component in the object key.
-        assert2::assert!(super::escape_object_path_segment(".") == "%2E");
-        assert2::assert!(super::escape_object_path_segment("..") == "%2E%2E");
+        assert!(super::escape_object_path_segment(".") == "%2E");
+        assert!(super::escape_object_path_segment("..") == "%2E%2E");
         let key = super::compaction_object_key("..", super::MetricBlockKind::Float, 42, 99);
-        assert2::assert!(
-            key == "metrics/%2E%2E/float/00000000000000000042-00000000000000000099.parquet"
-        );
+        assert!(key == "metrics/%2E%2E/float/00000000000000000042-00000000000000000099.parquet");
         // Interior dots in a legitimate tenant id are still allowed verbatim.
-        assert2::assert!(super::escape_object_path_segment("a.b") == "a.b");
+        assert!(super::escape_object_path_segment("a.b") == "a.b");
     }
 
     #[test]
     fn compaction_object_plan_pairs_block_and_index_keys() {
         let plan = super::compaction_object_plan("tenant/a", super::MetricBlockKind::Float, 42, 99);
 
-        assert2::assert!(
-            plan == super::CompactionObjectPlan {
-                block_key:
-                    "metrics/tenant%2Fa/float/00000000000000000042-00000000000000000099.parquet"
-                        .to_string(),
-                index_key:
-                    "metrics/tenant%2Fa/float/00000000000000000042-00000000000000000099.index"
-                        .to_string(),
-                first_offset: 42,
-                last_offset: 99,
-                row_count: 0,
-            }
+        assert!(
+            plan.block_key
+                == "metrics/tenant%2Fa/float/00000000000000000042-00000000000000000099.parquet"
+        );
+        assert!(
+            plan.index_key
+                == "metrics/tenant%2Fa/float/00000000000000000042-00000000000000000099.index"
         );
     }
 
@@ -2133,8 +2155,9 @@ mod tests {
             99,
         );
 
-        assert2::assert!(
-            plan == super::CompactionObjectPlan {
+        assert_eq!(
+            plan,
+            super::CompactionObjectPlan {
                 block_key:
                     "metrics/tenant-a/float/00000000000000000042-00000000000000000099.parquet"
                         .to_string(),
@@ -2179,29 +2202,28 @@ mod tests {
         let encoded = manifest.encode().expect("encode manifest");
         let decoded = super::CompactionIndexManifest::decode(&encoded).expect("decode manifest");
 
-        assert2::assert!(decoded == manifest);
-        assert2::assert!(
-            decoded
-                == super::CompactionIndexManifest {
-                    tenant: "tenant-a".to_string(),
-                    kind: super::MetricBlockKind::Float,
-                    block_key:
-                        "metrics/tenant-a/float/00000000000000000042-00000000000000000099.parquet"
-                            .to_string(),
-                    index_key:
-                        "metrics/tenant-a/float/00000000000000000042-00000000000000000099.index"
-                            .to_string(),
-                    first_offset: 42,
-                    last_offset: 99,
-                    row_count: 2,
-                    min_ts: 1_000,
-                    max_ts: 2_000,
-                    fingerprints: vec![7, 9],
-                    series: vec![super::CompactionSeriesLabels {
-                        fingerprint: 7,
-                        labels: labels(&[("__name__", "up")]),
-                    }],
-                }
+        assert_eq!(decoded, manifest);
+        assert_eq!(
+            decoded,
+            super::CompactionIndexManifest {
+                tenant: "tenant-a".to_string(),
+                kind: super::MetricBlockKind::Float,
+                block_key:
+                    "metrics/tenant-a/float/00000000000000000042-00000000000000000099.parquet"
+                        .to_string(),
+                index_key: "metrics/tenant-a/float/00000000000000000042-00000000000000000099.index"
+                    .to_string(),
+                first_offset: 42,
+                last_offset: 99,
+                row_count: 2,
+                min_ts: 1_000,
+                max_ts: 2_000,
+                fingerprints: vec![7, 9],
+                series: vec![super::CompactionSeriesLabels {
+                    fingerprint: 7,
+                    labels: labels(&[("__name__", "up")]),
+                }],
+            }
         );
     }
 
@@ -2237,7 +2259,7 @@ mod tests {
         let decoded =
             super::CompactionIndexManifest::decode(&bytes).expect("decode persisted manifest");
 
-        assert2::assert!(decoded == manifest);
+        assert!(decoded == manifest);
     }
 
     #[tokio::test]
@@ -2312,13 +2334,13 @@ mod tests {
         .await
         .expect("enforce retention");
 
-        assert2::assert!(
-            stats
-                == super::CompactionRetentionStats {
-                    manifests_scanned: 2,
-                    manifests_deleted: 1,
-                    blocks_deleted: 1,
-                }
+        assert_eq!(
+            stats,
+            super::CompactionRetentionStats {
+                manifests_scanned: 2,
+                manifests_deleted: 1,
+                blocks_deleted: 1,
+            }
         );
         check!(
             object_store
@@ -2348,8 +2370,8 @@ mod tests {
 
     #[test]
     fn duration_millis_converts_and_saturates() {
-        assert2::assert!(super::duration_millis(std::time::Duration::from_millis(1_234)) == 1_234);
-        assert2::assert!(
+        assert!(super::duration_millis(std::time::Duration::from_millis(1_234)) == 1_234);
+        assert!(
             super::duration_millis(std::time::Duration::from_millis(i64::MAX as u64 + 1))
                 == i64::MAX
         );
@@ -2389,12 +2411,12 @@ mod tests {
         .await
         .expect_err("mismatched manifest should fail");
 
-        assert2::assert!(matches!(
+        assert!(matches!(
             error,
             super::CompactionRetentionError::ManifestKeyMismatch { listed, manifest }
                 if listed == listed_index_key && manifest == manifest_index_key
         ));
-        assert2::assert!(
+        assert!(
             object_store
                 .head(&object_store::path::Path::from(listed_index_key))
                 .await
@@ -2416,7 +2438,7 @@ mod tests {
         };
 
         let err = cfg.validate().expect_err("empty bootstrap should fail");
-        assert2::assert!(format!("{err}").contains("bootstrap"));
+        assert!(format!("{err}").contains("bootstrap"));
     }
 
     #[tokio::test]
@@ -2436,14 +2458,14 @@ mod tests {
         let runtime = cfg
             .build_runtime(object_store.clone())
             .expect("build runtime");
-        assert2::assert!(
-            runtime.loop_config
-                == super::CompactionLoopConfig {
-                    wal_topic: crate::WAL_TOPIC.to_string(),
-                    poll_timeout: std::time::Duration::from_millis(250),
-                    flush_max_rows: 12_345,
-                    flush_max_age: std::time::Duration::from_secs(7),
-                }
+        assert_eq!(
+            runtime.loop_config,
+            super::CompactionLoopConfig {
+                wal_topic: crate::WAL_TOPIC.to_string(),
+                poll_timeout: std::time::Duration::from_millis(250),
+                flush_max_rows: 12_345,
+                flush_max_age: std::time::Duration::from_secs(7),
+            }
         );
 
         let manifest = super::CompactionIndexManifest::from_plan(
@@ -2467,9 +2489,7 @@ mod tests {
             .bytes()
             .await
             .expect("manifest bytes");
-        assert2::assert!(
-            super::CompactionIndexManifest::decode(&bytes).expect("decode") == manifest
-        );
+        assert!(super::CompactionIndexManifest::decode(&bytes).expect("decode") == manifest);
     }
 
     #[derive(Default)]
@@ -2520,34 +2540,22 @@ mod tests {
             .await
             .expect("write compacted blocks");
 
-        check!(
-            (writes.len(), writes[0].kind, writes[0].block_meta.row_count,)
-                == (1, super::MetricBlockKind::Float, 2)
-        );
+        check!(writes.len() == 1);
+        check!(writes[0].kind == super::MetricBlockKind::Float);
+        check!(writes[0].block_meta.row_count == 2);
         let persisted = crabka_blockstore::read_block(object_store, &writes[0].manifest.block_key)
             .await
             .expect("read persisted block");
-        assert2::assert!(persisted.len() == 1);
-        assert2::assert!(persisted[0].num_rows() == 2);
+        assert!(persisted.len() == 1);
+        assert!(persisted[0].num_rows() == 2);
 
         let manifests = sink.manifests.lock().expect("manifest lock");
-        check!(
-            (
-                manifests.as_slice(),
-                manifests[0].tenant.as_str(),
-                manifests[0].kind,
-                manifests[0].first_offset,
-                manifests[0].last_offset,
-                manifests[0].row_count,
-            ) == (
-                &[writes[0].manifest.clone()][..],
-                "tenant-a",
-                super::MetricBlockKind::Float,
-                42,
-                99,
-                2,
-            )
-        );
+        check!(manifests.as_slice() == [writes[0].manifest.clone()]);
+        check!(manifests[0].tenant == "tenant-a");
+        check!(manifests[0].kind == super::MetricBlockKind::Float);
+        check!(manifests[0].first_offset == 42);
+        check!(manifests[0].last_offset == 99);
+        check!(manifests[0].row_count == 2);
     }
 
     #[tokio::test]
@@ -2574,34 +2582,22 @@ mod tests {
             .await
             .expect("write compacted blocks");
 
-        check!(
-            (writes.len(), writes[0].kind, writes[0].block_meta.row_count,)
-                == (1, super::MetricBlockKind::Metadata, 1)
-        );
+        check!(writes.len() == 1);
+        check!(writes[0].kind == super::MetricBlockKind::Metadata);
+        check!(writes[0].block_meta.row_count == 1);
         let persisted = crabka_blockstore::read_block(object_store, &writes[0].manifest.block_key)
             .await
             .expect("read persisted metadata block");
-        assert2::assert!(persisted.len() == 1);
-        assert2::assert!(persisted[0].num_rows() == 1);
+        assert!(persisted.len() == 1);
+        assert!(persisted[0].num_rows() == 1);
 
         let manifests = sink.manifests.lock().expect("manifest lock");
-        check!(
-            (
-                manifests.as_slice(),
-                manifests[0].tenant.as_str(),
-                manifests[0].kind,
-                manifests[0].first_offset,
-                manifests[0].last_offset,
-                manifests[0].row_count,
-            ) == (
-                &[writes[0].manifest.clone()][..],
-                "tenant-a",
-                super::MetricBlockKind::Metadata,
-                42,
-                99,
-                1,
-            )
-        );
+        check!(manifests.as_slice() == [writes[0].manifest.clone()]);
+        check!(manifests[0].tenant == "tenant-a");
+        check!(manifests[0].kind == super::MetricBlockKind::Metadata);
+        check!(manifests[0].first_offset == 42);
+        check!(manifests[0].last_offset == 99);
+        check!(manifests[0].row_count == 1);
     }
 
     #[derive(Default)]
@@ -2649,17 +2645,21 @@ mod tests {
                 .await
                 .expect("process compaction window");
 
-        let committed_offset = super::CompactionPartitionOffset {
-            partition: super::PartitionIndex(3),
-            offset: super::Offset(44),
-        };
         check!(
-            (
-                result.committed_offset,
-                result.writes.len(),
-                sink.manifests.lock().expect("manifest lock").len(),
-                committer.commits.lock().expect("commit lock").clone(),
-            ) == (Some(committed_offset.clone()), 1, 1, vec![committed_offset],)
+            result.committed_offset
+                == Some(super::CompactionPartitionOffset {
+                    partition: super::PartitionIndex(3),
+                    offset: super::Offset(44),
+                })
+        );
+        check!(result.writes.len() == 1);
+        check!(sink.manifests.lock().expect("manifest lock").len() == 1);
+        check!(
+            committer.commits.lock().expect("commit lock").as_slice()
+                == [super::CompactionPartitionOffset {
+                    partition: super::PartitionIndex(3),
+                    offset: super::Offset(44),
+                }]
         );
     }
 
@@ -2734,8 +2734,8 @@ mod tests {
             super::process_compaction_record_batch(&block_writer, &sink, &committer, &records)
                 .await;
 
-        assert2::assert!(result.is_err());
-        assert2::assert!(committer.commits.lock().expect("commit lock").is_empty());
+        assert!(result.is_err());
+        assert!(committer.commits.lock().expect("commit lock").is_empty());
     }
 
     #[tokio::test]
@@ -2766,31 +2766,25 @@ mod tests {
                 .await
                 .expect("process compaction batch");
 
-        let expected_offsets = vec![
-            super::CompactionPartitionOffset {
-                partition: super::PartitionIndex(0),
-                offset: super::Offset(43),
-            },
-            super::CompactionPartitionOffset {
-                partition: super::PartitionIndex(1),
-                offset: super::Offset(43),
-            },
-        ];
-        let committed_offsets = committer.commits.lock().expect("commit lock").clone();
+        check!(result.partition_results.len() == 2);
+        check!(result.writes.len() == 2);
+        check!(result.writes[0].manifest.block_key != result.writes[1].manifest.block_key);
         check!(
-            (
-                result.partition_results.len(),
-                result.writes.len(),
-                result.writes[0].manifest.block_key != result.writes[1].manifest.block_key,
-                result.committed_offsets.as_slice(),
-                committed_offsets.as_slice(),
-            ) == (
-                2,
-                2,
-                true,
-                expected_offsets.as_slice(),
-                expected_offsets.as_slice(),
-            )
+            result.committed_offsets
+                == vec![
+                    super::CompactionPartitionOffset {
+                        partition: super::PartitionIndex(0),
+                        offset: super::Offset(43),
+                    },
+                    super::CompactionPartitionOffset {
+                        partition: super::PartitionIndex(1),
+                        offset: super::Offset(43),
+                    },
+                ]
+        );
+        check!(
+            committer.commits.lock().expect("commit lock").as_slice()
+                == result.committed_offsets.as_slice()
         );
     }
 
@@ -2824,7 +2818,7 @@ mod tests {
             super::compaction_wal_records_from_consumer_records(crate::WAL_TOPIC, &records)
                 .expect("convert consumer records");
 
-        assert2::assert!(
+        assert!(
             converted
                 == vec![super::CompactionWalRecord {
                     partition: super::PartitionIndex(2),
@@ -2846,7 +2840,7 @@ mod tests {
         let err =
             super::compaction_wal_records_from_consumer_records(crate::WAL_TOPIC, &missing_value)
                 .expect_err("missing value should fail");
-        assert2::assert!(matches!(
+        assert!(matches!(
             err,
             super::CompactionConsumerRecordError::MissingValue {
                 partition: super::PartitionIndex(3),
@@ -2883,7 +2877,7 @@ mod tests {
         .await
         .expect("commit offsets");
 
-        assert2::assert!(*sync.calls.lock().expect("commit calls lock") == 1);
+        assert!(*sync.calls.lock().expect("commit calls lock") == 1);
     }
 
     struct StaticPoller {
@@ -2933,26 +2927,18 @@ mod tests {
         .await
         .expect("poll compactor once");
 
+        check!(result.polled_records == 1);
+        check!(result.compacted_records == 1);
+        check!(result.batch.writes.len() == 1);
         check!(
-            (
-                result.polled_records,
-                result.compacted_records,
-                result.batch.writes.len(),
-                result.batch.committed_offsets,
-                *commit.calls.lock().expect("commit calls lock"),
-                sink.manifests.lock().expect("manifest lock").len(),
-            ) == (
-                1,
-                1,
-                1,
-                vec![super::CompactionPartitionOffset {
+            result.batch.committed_offsets
+                == vec![super::CompactionPartitionOffset {
                     partition: super::PartitionIndex(4),
                     offset: super::Offset(22),
-                }],
-                1,
-                1,
-            )
+                }]
         );
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
+        check!(sink.manifests.lock().expect("manifest lock").len() == 1);
     }
 
     struct QueuePoller {
@@ -3023,7 +3009,7 @@ mod tests {
 
         // ONE block written for the whole buffer, not one per poll; a single
         // commit at flush through the last buffered record (offset 11 -> commit 12).
-        assert2::assert!(
+        assert!(
             result
                 == super::CompactionLoopResult {
                     polls: 3,
@@ -3037,7 +3023,7 @@ mod tests {
                 }
         );
         check!(*commit.calls.lock().expect("commit calls lock") == 1);
-        assert2::assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
+        assert!(sink.manifests.lock().expect("manifest lock").len() == 1);
         // The single block spans the full buffered offset range [10, 11].
         let manifests = sink.manifests.lock().expect("manifest lock");
         check!(manifests[0].first_offset == 10);
@@ -3093,22 +3079,16 @@ mod tests {
 
         // One block flushed by the row threshold on the first poll; the empty
         // second poll triggers stop with an already-empty buffer (no extra write).
+        check!(result.writes == 1);
         check!(
-            (
-                result.writes,
-                result.committed_offsets,
-                *commit.calls.lock().expect("commit calls lock"),
-                sink.manifests.lock().expect("manifest lock").len(),
-            ) == (
-                1,
-                vec![super::CompactionPartitionOffset {
+            result.committed_offsets
+                == vec![super::CompactionPartitionOffset {
                     partition: super::PartitionIndex(0),
                     offset: super::Offset(12),
-                }],
-                1,
-                1,
-            )
+                }]
         );
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
+        check!(sink.manifests.lock().expect("manifest lock").len() == 1);
     }
 
     struct FixedClock {
@@ -3190,27 +3170,19 @@ mod tests {
         .expect("run compactor loop with clock");
 
         // Both records land in one age-triggered block; commit through offset 11 -> 12.
-        let manifests = sink.manifests.lock().expect("manifest lock");
+        check!(result.writes == 1);
         check!(
-            (
-                result.writes,
-                result.committed_offsets,
-                *commit.calls.lock().expect("commit calls lock"),
-                manifests.len(),
-                manifests[0].first_offset,
-                manifests[0].last_offset,
-            ) == (
-                1,
-                vec![super::CompactionPartitionOffset {
+            result.committed_offsets
+                == vec![super::CompactionPartitionOffset {
                     partition: super::PartitionIndex(0),
                     offset: super::Offset(12),
-                }],
-                1,
-                1,
-                10,
-                11,
-            )
+                }]
         );
+        check!(*commit.calls.lock().expect("commit calls lock") == 1);
+        let manifests = sink.manifests.lock().expect("manifest lock");
+        assert!(manifests.len() == 1);
+        check!(manifests[0].first_offset == 10);
+        check!(manifests[0].last_offset == 11);
     }
 
     #[tokio::test]
@@ -3252,15 +3224,11 @@ mod tests {
         .await
         .expect("run compactor consumer loop");
 
+        check!(result.polls == 2);
+        check!(result.polled_records == 1);
         // Buffered for one poll, then flushed once on the empty-poll shutdown.
-        check!(
-            (
-                result.polls,
-                result.polled_records,
-                result.writes,
-                consumer.commit_calls,
-            ) == (2, 1, 1, 1)
-        );
+        check!(result.writes == 1);
+        check!(consumer.commit_calls == 1);
     }
 
     #[tokio::test]
@@ -3303,20 +3271,16 @@ mod tests {
         .await
         .expect("run compactor consumer loop");
 
+        check!(result.polls == 3);
+        check!(result.polled_records == 2);
         // Single block + single commit for the whole two-poll buffer.
+        check!(result.writes == 1);
+        check!(consumer.commit_calls == 1);
         let manifests = sink.manifests.lock().expect("manifest lock");
-        check!(
-            (
-                result.polls,
-                result.polled_records,
-                result.writes,
-                consumer.commit_calls,
-                manifests.len(),
-                manifests[0].first_offset,
-                manifests[0].last_offset,
-                manifests[0].row_count,
-            ) == (3, 2, 1, 1, 1, 10, 11, 2)
-        );
+        assert!(manifests.len() == 1);
+        check!(manifests[0].first_offset == 10);
+        check!(manifests[0].last_offset == 11);
+        check!(manifests[0].row_count == 2);
     }
 
     /// Index sink that appends an ordered event marker shared with a committer,
@@ -3338,7 +3302,10 @@ mod tests {
                 .store
                 .head(&object_store::path::Path::from(manifest.block_key.clone()))
                 .await;
-            assert2::assert!(head.is_ok());
+            assert!(
+                head.is_ok(),
+                "block object must exist before index manifest"
+            );
             self.events
                 .lock()
                 .expect("events lock")
@@ -3366,7 +3333,7 @@ mod tests {
                 .store
                 .head(&object_store::path::Path::from(self.block_key.clone()))
                 .await;
-            assert2::assert!(head.is_ok());
+            assert!(head.is_ok(), "block must be durable before offset commit");
             for offset in offsets {
                 self.events
                     .lock()
@@ -3432,11 +3399,11 @@ mod tests {
         .await
         .expect("run compactor loop");
 
-        assert2::assert!(result.writes == 1);
+        assert!(result.writes == 1);
         // Index manifest write (which only runs after the durable block put) must
         // precede the offset commit in the recorded event order.
         let recorded = events.lock().expect("events lock").clone();
-        assert2::assert!(recorded == vec![format!("index:{block_key}"), "commit:12".to_string()]);
+        assert!(recorded == vec![format!("index:{block_key}"), "commit:12".to_string()]);
     }
 
     struct PollAndCommit {
@@ -3500,17 +3467,14 @@ mod tests {
 
         let compacted = compact_wal_records(&[record.clone(), hist_record]);
 
-        assert2::assert!(compacted.len() == 1);
-        assert2::assert!(compacted[0].histogram_rows.len() == 1);
-        assert2::assert!(compacted[0].histogram_rows[0].timestamp_ms == 21);
-        assert2::assert!(compacted[0].exemplar_rows.len() == 1);
-        assert2::assert!(compacted[0].exemplar_rows[0].fingerprint == record.series_fingerprint());
-        assert2::assert!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
-        assert2::assert!(compacted[0].exemplar_rows[0].span_id.as_deref() == Some("def"));
-        assert2::assert!(
-            compacted[0].exemplar_rows[0].labels.as_slice()
-                == &[("kind".into(), "slow".into())][..]
-        );
+        assert!(compacted.len() == 1);
+        assert!(compacted[0].histogram_rows.len() == 1);
+        check!(compacted[0].histogram_rows[0].timestamp_ms == 21);
+        assert!(compacted[0].exemplar_rows.len() == 1);
+        check!(compacted[0].exemplar_rows[0].fingerprint == record.series_fingerprint());
+        check!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
+        check!(compacted[0].exemplar_rows[0].span_id.as_deref() == Some("def"));
+        check!(compacted[0].exemplar_rows[0].labels == vec![("kind".into(), "slow".into())]);
     }
 
     #[test]
@@ -3538,11 +3502,11 @@ mod tests {
 
         let compacted = compact_wal_records(&records);
 
-        assert2::assert!(compacted.len() == 1);
-        assert2::assert!(compacted[0].float_rows.len() == 2);
-        assert2::assert!(compacted[0].exemplar_rows.len() == 1);
-        assert2::assert!(compacted[0].exemplar_rows[0].fingerprint == labels.fingerprint());
-        assert2::assert!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
+        assert!(compacted.len() == 1);
+        check!(compacted[0].float_rows.len() == 2);
+        assert!(compacted[0].exemplar_rows.len() == 1);
+        check!(compacted[0].exemplar_rows[0].fingerprint == labels.fingerprint());
+        check!(compacted[0].exemplar_rows[0].trace_id.as_deref() == Some("abc"));
     }
 
     #[test]
@@ -3561,16 +3525,16 @@ mod tests {
 
         let compacted = compact_wal_records(std::slice::from_ref(&record));
 
-        assert2::assert!(compacted.len() == 1);
-        assert2::assert!(
-            compacted[0].metadata_rows.as_slice()
-                == &[super::MetadataRow {
+        assert!(compacted.len() == 1);
+        assert!(
+            compacted[0].metadata_rows
+                == vec![super::MetadataRow {
                     fingerprint: record.series_fingerprint(),
                     metric_family_name: "http_requests_total".to_string(),
                     metric_type: "counter".to_string(),
                     help: "Total HTTP requests.".to_string(),
                     unit: "requests".to_string(),
-                }][..]
+                }]
         );
     }
 
@@ -3627,10 +3591,10 @@ mod tests {
         let tenant_a_all = index.metadata("tenant-a", None);
         let tenant_a_http = index.metadata("tenant-a", Some("http_requests_total"));
 
-        assert2::assert!(tenant_a_all.len() == 2);
+        assert!(tenant_a_all.len() == 2);
         check!(tenant_a_all[0].metric_family_name == "http_requests_total");
         check!(tenant_a_all[1].metric_family_name == "up");
-        assert2::assert!(tenant_a_http.len() == 1);
+        assert!(tenant_a_http.len() == 1);
         check!(tenant_a_http[0].metric_type == "counter");
         check!(tenant_a_http[0].help == "Total HTTP requests.");
         check!(index.metadata("tenant-b", Some("http_requests_total"))[0].metric_type == "gauge");
@@ -3653,8 +3617,8 @@ mod tests {
 
         let batches = encode_tenant_batches(&compacted[0]).unwrap();
 
-        assert2::assert!(batches.float.as_ref().unwrap().num_rows() == 1);
-        assert2::assert!(batches.native_histograms.as_ref().unwrap().num_rows() == 1);
+        assert!(batches.float.as_ref().unwrap().num_rows() == 1);
+        assert!(batches.native_histograms.as_ref().unwrap().num_rows() == 1);
     }
 
     #[test]
@@ -3674,8 +3638,8 @@ mod tests {
         let batches = encode_tenant_batches(&compacted[0]).unwrap();
 
         let batch = batches.exemplars.as_ref().expect("exemplar sidecar");
-        assert2::assert!(batch.num_rows() == 1);
-        assert2::assert!(batch.schema() == crate::exemplar_schema());
+        assert!(batch.num_rows() == 1);
+        assert!(batch.schema() == crate::exemplar_schema());
 
         let trace_ids = batch
             .column_by_name("trace_id")
@@ -3699,7 +3663,7 @@ mod tests {
 
         check!(trace_ids.value(0) == "abc");
         check!(span_ids.value(0) == "def");
-        assert2::assert!(label_entries.column(0).len() == 1);
+        assert!(label_entries.column(0).len() == 1);
         check!(
             label_entries
                 .column(0)

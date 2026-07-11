@@ -21,12 +21,12 @@ workspace = true
 heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 [dependencies]
-assert2 = { workspace = true }
 arrow = { workspace = true }
 datafusion = { workspace = true }
 object_store = { workspace = true }
 parquet = { workspace = true }
 prost = { workspace = true }
+num-traits = { workspace = true }
 pbjson = { workspace = true }
 prometheus-client = { workspace = true }
 connectrpc-axum = { workspace = true }
@@ -67,6 +67,7 @@ connectrpc-axum-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 proptest = { workspace = true }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

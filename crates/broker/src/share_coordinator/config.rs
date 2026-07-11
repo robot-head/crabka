@@ -21,6 +21,7 @@ impl Default for ShareCoordinatorConfig {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -32,6 +33,6 @@ mod tests {
             state_topic_min_isr: 1,
             snapshot_update_records_per_snapshot: 50,
         };
-        assert2::assert!(ShareCoordinatorConfig::default() == expected);
+        assert!(ShareCoordinatorConfig::default() == expected);
     }
 }

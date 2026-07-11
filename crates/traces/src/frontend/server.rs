@@ -220,9 +220,7 @@ where
         .metrics_query(
             &tenant,
             &query,
-            start_ns,
-            end_ns,
-            step_ns,
+            (start_ns, end_ns, step_ns),
             false,
             exemplar_limit,
         )
@@ -266,9 +264,7 @@ where
         .metrics_query(
             &tenant,
             &query,
-            start_ns,
-            end_ns,
-            step_ns,
+            (start_ns, end_ns, step_ns),
             true,
             exemplar_limit,
         )

@@ -1,5 +1,4 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
-#![allow(clippy::pedantic)]
 
 //! KIP-584 write-side surface — `ApiVersions` v3+ exposes the feature
 //! surface the JVM admin tooling consumes. `supported_features` advertises
@@ -9,7 +8,7 @@
 //! cluster: it finalizes every registered feature at its release default
 //! (`metadata.version = 25`, `group.version = 1`, `transaction.version = 2`)
 //! and surfaces a real
-//! (`>= 0`) `finalized_features_epoch`. `UpdateFeatures` (api_key 57) then
+//! (`>= 0`) `finalized_features_epoch`. `UpdateFeatures` (`api_key` 57) then
 //! moves those levels — that path is exercised in `tests/feature_finalization.rs`.
 //!
 //! Advertising a `supported_features` entry whose `max_version` is above a
@@ -22,6 +21,7 @@
 //! tracks Kafka's own `MetadataVersion` enum; this test guards the
 //! fresh-broker surface.
 
+use assert2::assert;
 mod support;
 
 use crabka_protocol::owned::api_versions_request::ApiVersionsRequest;
@@ -40,7 +40,7 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
         .await
         .expect("ApiVersions");
 
-    assert2::assert!(resp.error_code == 0);
+    assert!(resp.error_code == 0, "{resp:?}");
 
     // KIP-584 write-side: supported_features advertises metadata.version over
     // the supported range; the standalone broker self-bootstraps the release
@@ -52,7 +52,8 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version advertised in supported_features");
-    assert2::assert!((mv.min_version, mv.max_version) == (7, 25));
+    assert!(mv.min_version == 7, "{resp:?}");
+    assert!(mv.max_version == 25, "{resp:?}");
     let gv = resp
         .supported_features
         .iter()
@@ -61,34 +62,45 @@ async fn v3_response_advertises_supported_and_bootstrapped_finalized_features() 
     // Wire min is clamped to 1 (Kafka SupportedVersionRange requires >= 1),
     // even though the registry min is 0 (level 0 = "disabled", finalizable via
     // UpdateFeatures). Advertising min=0 here breaks pre-4.0 JVM admin clients.
-    assert2::assert!((gv.min_version, gv.max_version) == (1, 1));
+    assert!(gv.min_version == 1, "{resp:?}");
+    assert!(gv.max_version == 1, "{resp:?}");
     let tv = resp
         .supported_features
         .iter()
         .find(|f| f.name == "transaction.version")
         .expect("transaction.version advertised in supported_features");
-    assert2::assert!((tv.min_version, tv.max_version) == (1, 2));
+    assert!(tv.min_version == 1, "{resp:?}");
+    assert!(tv.max_version == 2, "{resp:?}");
 
     // A self-bootstrapped broker finalizes the release defaults.
-    let fin_mv = resp
+    let finalized_metadata_version = resp
         .finalized_features
         .iter()
         .find(|f| f.name == "metadata.version")
         .expect("metadata.version finalized at bootstrap");
-    assert2::assert!(fin_mv.max_version_level == 25);
-    let fin_gv = resp
+    assert!(
+        finalized_metadata_version.max_version_level == 25,
+        "{resp:?}"
+    );
+    let finalized_group_version = resp
         .finalized_features
         .iter()
         .find(|f| f.name == "group.version")
         .expect("group.version finalized at bootstrap");
-    assert2::assert!(fin_gv.max_version_level == 1);
-    let fin_tv = resp
+    assert!(finalized_group_version.max_version_level == 1, "{resp:?}");
+    let finalized_transaction_version = resp
         .finalized_features
         .iter()
         .find(|f| f.name == "transaction.version")
         .expect("transaction.version finalized at bootstrap");
-    assert2::assert!(fin_tv.max_version_level == 2);
-    assert2::assert!(resp.finalized_features_epoch >= 0);
+    assert!(
+        finalized_transaction_version.max_version_level == 2,
+        "{resp:?}"
+    );
+    assert!(
+        resp.finalized_features_epoch >= 0,
+        "self-bootstrapped broker finalizes defaults so epoch must be >= 0: {resp:?}"
+    );
 
     p.broker.shutdown().await;
 }

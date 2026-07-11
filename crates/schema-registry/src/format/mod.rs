@@ -53,6 +53,8 @@ pub struct ResolvedReference {
 /// Parse `schema` as `ty` with its resolved references available, returning a
 /// boxed parsed form or `SrError::InvalidSchema`.
 #[tracing::instrument(level = "debug", name = "format.parse", skip_all, fields(schema_type = ?ty, refs = refs.len()), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn parse(
     ty: SchemaType,
     schema: &str,
@@ -71,6 +73,8 @@ pub fn parse(
 /// For AVRO and JSON, the raw input is returned (cp-schema-registry echoes
 /// them verbatim). For Protobuf, a pretty-printed canonical text is returned
 /// matching the format cp-schema-registry produces.
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn normalized_storage_form(
     ty: SchemaType,
     schema: &str,
@@ -93,6 +97,8 @@ pub fn normalized_storage_form(
 /// written with `writer`, per format `ty`? `Err(messages)` on incompatibility.
 /// Avro is backed by `apache-avro`; Protobuf and JSON Schema are permissive.
 #[tracing::instrument(level = "debug", name = "format.check", skip_all, fields(schema_type = ?ty, reader_refs = reader_refs.len(), writer_refs = writer_refs.len()))]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn check(
     ty: SchemaType,
     reader: &str,

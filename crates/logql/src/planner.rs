@@ -37,6 +37,8 @@ pub enum PlanError {
     ),
     err
 )]
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn plan_stream_query(
     tenant: impl Into<String>,
     time_range: TimeRange,

@@ -25,8 +25,7 @@ use crate::{
     handlers::authorized_operations::authorized_operations_bits,
 };
 
-#[allow(clippy::too_many_lines)] // ACL preamble + asymmetric loop
-#[allow(clippy::unused_async)]
+// ACL preamble + asymmetric loop
 // Handler is wholly sync but we keep the
 // `async fn` shape so it mirrors the other inline-intercept handlers
 // (produce/fetch/etc) and lets future Metadata work (e.g. waiting on
@@ -38,7 +37,7 @@ use crate::{
     fields(api = "Metadata", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -71,7 +70,6 @@ pub(crate) async fn handle(
     // the *resolved* records (plus the requested name for the
     // name-only-miss case), so a topic requested by id is still
     // ACL-checked under its real name.
-    let named = req.topics.is_some();
     let resolved: Vec<(
         &crabka_protocol::owned::metadata_request::MetadataRequestTopic,
         Result<&crabka_metadata::TopicRecord, i16>,
@@ -124,129 +122,15 @@ pub(crate) async fn handle(
         .map(|b| project_broker(b, ctx.connection_listener_name, &inter_broker_name))
         .collect();
 
-    let allowed = |name: &str| {
-        acl_by_name
-            .get(name)
-            .copied()
-            .unwrap_or(AuthorizationResult::Deny)
-            == AuthorizationResult::Allow
-    };
-    // Build a fully-populated success row for a known topic by name.
-    let success_row = |name: &str, rec: &crabka_metadata::TopicRecord| {
-        // `partitions_of` yields ascending partition-index order, so clients
-        // (and tests) see a deterministic ordering.
-        let partitions: Vec<MetadataResponsePartition> = image
-            .partitions_of(name)
-            .map(|p| MetadataResponsePartition {
-                error_code: codes::NONE,
-                partition_index: p.partition,
-                leader_id: i32::try_from(p.leader.0).unwrap_or(i32::MAX),
-                leader_epoch: p.leader_epoch.0,
-                replica_nodes: p
-                    .replicas
-                    .iter()
-                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
-                    .collect(),
-                isr_nodes: p
-                    .isr
-                    .iter()
-                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
-                    .collect(),
-                ..Default::default()
-            })
-            .collect();
-        // KIP-430: per-topic bitfield, only when the client opted in.
-        // Schema gates the field on version (v8+) so the value is
-        // harmlessly dropped on the wire below v8.
-        let topic_authorized_operations = if req.include_topic_authorized_operations {
-            authorized_operations_bits(
-                broker.config.authorizer.as_ref(),
-                &image,
-                ctx.principal,
-                ctx.peer,
-                ResourceType::Topic,
-                name,
-            )
-        } else {
-            i32::MIN
-        };
-        MetadataResponseTopic {
-            error_code: codes::NONE,
-            name: Some(rec.name.clone()),
-            topic_id: WireUuid(rec.topic_id.into_bytes()),
-            partitions,
-            is_internal: false,
-            topic_authorized_operations,
-            ..Default::default()
-        }
-    };
-
-    let mut topics_out: Vec<MetadataResponseTopic> = Vec::with_capacity(candidate_topics.len());
-    if named {
-        // Named request: drive off the per-entry resolution outcome so
-        // KIP-516 topic-id errors echo the requested id rather than
-        // collapsing to an empty name.
-        for (t, outcome) in &resolved {
-            match outcome {
-                Ok(rec) => {
-                    if !allowed(&rec.name) {
-                        // Named-topic Deny: surface explicit auth-failed row.
-                        topics_out.push(MetadataResponseTopic {
-                            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                            name: Some(rec.name.clone()),
-                            topic_id: WireUuid::ZERO,
-                            ..Default::default()
-                        });
-                        continue;
-                    }
-                    topics_out.push(success_row(&rec.name, rec));
-                }
-                Err(code) if *code == codes::UNKNOWN_TOPIC_OR_PARTITION => {
-                    // Name-only miss. Preserve the existing behavior: a
-                    // Deny on the requested name yields an auth-failed row
-                    // (don't reveal whether the topic exists); otherwise
-                    // surface UNKNOWN_TOPIC_OR_PARTITION.
-                    let name_str = t.name.as_deref().unwrap_or("");
-                    if !name_str.is_empty() && !allowed(name_str) {
-                        topics_out.push(MetadataResponseTopic {
-                            error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                            name: t.name.clone(),
-                            topic_id: WireUuid::ZERO,
-                            ..Default::default()
-                        });
-                        continue;
-                    }
-                    topics_out.push(MetadataResponseTopic {
-                        error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
-                        name: t.name.clone(),
-                        topic_id: t.topic_id,
-                        ..Default::default()
-                    });
-                }
-                Err(code) => {
-                    // KIP-516: UNKNOWN_TOPIC_ID / INCONSISTENT_TOPIC_ID.
-                    // Echo the requested name (may be `None`) and id.
-                    topics_out.push(MetadataResponseTopic {
-                        error_code: *code,
-                        name: t.name.clone(),
-                        topic_id: t.topic_id,
-                        ..Default::default()
-                    });
-                }
-            }
-        }
-    } else {
-        // Fetch-all: only `Allow` topics appear; Deny topics are silently
-        // omitted so the broker doesn't leak their existence.
-        for name in &candidate_topics {
-            if !allowed(name) {
-                continue;
-            }
-            if let Some(rec) = image.topic(name) {
-                topics_out.push(success_row(name, rec));
-            }
-        }
-    }
+    let topics_out = build_topic_rows(
+        broker,
+        &image,
+        ctx,
+        &req,
+        &resolved,
+        &candidate_topics,
+        &acl_by_name,
+    );
 
     // controller_id: the current Raft leader, or -1 when unknown.
     let controller_id: i32 = controller
@@ -291,6 +175,124 @@ pub(crate) async fn handle(
         "metadata response"
     );
     crate::handlers::encode_response(&resp, version)
+}
+
+type ResolvedTopic<'a> = (
+    &'a crabka_protocol::owned::metadata_request::MetadataRequestTopic,
+    Result<&'a crabka_metadata::TopicRecord, i16>,
+);
+
+fn build_topic_rows(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    request: &MetadataRequest,
+    resolved: &[ResolvedTopic<'_>],
+    candidates: &[String],
+    authorization: &std::collections::HashMap<&str, AuthorizationResult>,
+) -> Vec<MetadataResponseTopic> {
+    let allowed = |name: &str| {
+        authorization
+            .get(name)
+            .copied()
+            .unwrap_or(AuthorizationResult::Deny)
+            == AuthorizationResult::Allow
+    };
+    if request.topics.is_none() {
+        return candidates
+            .iter()
+            .filter(|name| allowed(name))
+            .filter_map(|name| {
+                image
+                    .topic(name)
+                    .map(|record| success_topic_row(broker, image, context, request, name, record))
+            })
+            .collect();
+    }
+    resolved
+        .iter()
+        .map(|(topic, outcome)| match outcome {
+            Ok(record) if allowed(&record.name) => {
+                success_topic_row(broker, image, context, request, &record.name, record)
+            }
+            Ok(record) => MetadataResponseTopic {
+                error_code: codes::TOPIC_AUTHORIZATION_FAILED,
+                name: Some(record.name.clone()),
+                topic_id: WireUuid::ZERO,
+                ..Default::default()
+            },
+            Err(code) if *code == codes::UNKNOWN_TOPIC_OR_PARTITION => {
+                let name = topic.name.as_deref().unwrap_or("");
+                MetadataResponseTopic {
+                    error_code: if !name.is_empty() && !allowed(name) {
+                        codes::TOPIC_AUTHORIZATION_FAILED
+                    } else {
+                        codes::UNKNOWN_TOPIC_OR_PARTITION
+                    },
+                    name: topic.name.clone(),
+                    topic_id: topic.topic_id,
+                    ..Default::default()
+                }
+            }
+            Err(code) => MetadataResponseTopic {
+                error_code: *code,
+                name: topic.name.clone(),
+                topic_id: topic.topic_id,
+                ..Default::default()
+            },
+        })
+        .collect()
+}
+
+fn success_topic_row(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    request: &MetadataRequest,
+    name: &str,
+    record: &crabka_metadata::TopicRecord,
+) -> MetadataResponseTopic {
+    let partitions = image
+        .partitions_of(name)
+        .map(|partition| MetadataResponsePartition {
+            error_code: codes::NONE,
+            partition_index: partition.partition,
+            leader_id: i32::try_from(partition.leader.0).unwrap_or(i32::MAX),
+            leader_epoch: partition.leader_epoch.0,
+            replica_nodes: partition
+                .replicas
+                .iter()
+                .map(|replica| i32::try_from(replica.0).unwrap_or(i32::MAX))
+                .collect(),
+            isr_nodes: partition
+                .isr
+                .iter()
+                .map(|replica| i32::try_from(replica.0).unwrap_or(i32::MAX))
+                .collect(),
+            ..Default::default()
+        })
+        .collect();
+    let topic_authorized_operations = if request.include_topic_authorized_operations {
+        authorized_operations_bits(
+            broker.config.authorizer.as_ref(),
+            image,
+            context.principal,
+            context.peer,
+            ResourceType::Topic,
+            name,
+        )
+    } else {
+        i32::MIN
+    };
+    MetadataResponseTopic {
+        error_code: codes::NONE,
+        name: Some(record.name.clone()),
+        topic_id: WireUuid(record.topic_id.into_bytes()),
+        partitions,
+        is_internal: false,
+        topic_authorized_operations,
+        ..Default::default()
+    }
 }
 
 /// Project a stored [`crabka_metadata::BrokerRegistrationRecord`] into a
@@ -360,17 +362,18 @@ fn parse_host_port(addr: &str) -> (String, i32) {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn parse_host_port_ok() {
-        assert2::assert!(parse_host_port("foo:1234") == ("foo".into(), 1234));
+        assert!(parse_host_port("foo:1234") == ("foo".into(), 1234));
     }
 
     #[test]
     fn parse_host_port_falls_back() {
-        assert2::assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
+        assert!(parse_host_port("not-an-addr") == ("localhost".into(), 9092));
     }
 
     fn endpoint(name: &str, host: &str, port: u16) -> crabka_metadata::BrokerEndpoint {
@@ -396,16 +399,6 @@ mod tests {
         }
     }
 
-    fn expected_broker(host: &str, port: i32) -> MetadataResponseBroker {
-        MetadataResponseBroker {
-            node_id: 7,
-            host: host.into(),
-            port,
-            rack: Some("rack-a".into()),
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
-        }
-    }
-
     /// The connection-listener endpoint wins when present: a request that
     /// arrived on the `"tls"` listener gets the tls endpoint's host:port,
     /// even though `"plain"` is the inter-broker listener.
@@ -423,7 +416,7 @@ mod tests {
             rack: Some("rack-a".to_string()),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(out == expected);
+        assert!(out == expected);
     }
 
     /// A plaintext client on the `"plain"` listener gets the plain endpoint
@@ -435,7 +428,8 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "plain", "plain");
-        assert2::assert!(out == expected_broker("plain-host", 9092));
+        assert!(out.host == "plain-host");
+        assert!(out.port == 9092);
     }
 
     /// When the connection listener isn't registered on the broker, fall back
@@ -447,7 +441,8 @@ mod tests {
             endpoint("tls", "tls-host", 9094),
         ]);
         let out = project_broker(&rec, "external", "plain");
-        assert2::assert!(out == expected_broker("plain-host", 9092));
+        assert!(out.host == "plain-host");
+        assert!(out.port == 9092);
     }
 
     /// When neither the connection listener nor the inter-broker listener are
@@ -459,7 +454,8 @@ mod tests {
             endpoint("other-b", "host-b", 5001),
         ]);
         let out = project_broker(&rec, "tls", "plain");
-        assert2::assert!(out == expected_broker("host-a", 5000));
+        assert!(out.host == "host-a");
+        assert!(out.port == 5000);
     }
 
     /// With no endpoints at all, fall back to the legacy top-level host/port.
@@ -467,6 +463,7 @@ mod tests {
     fn project_broker_falls_back_to_legacy_host_port() {
         let rec = record(vec![]);
         let out = project_broker(&rec, "tls", "plain");
-        assert2::assert!(out == expected_broker("legacy-host", 1000));
+        assert!(out.host == "legacy-host");
+        assert!(out.port == 1000);
     }
 }

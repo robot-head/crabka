@@ -3,13 +3,15 @@ use crate::primitives::fixed::{get_i32, put_i32};
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct Voter {
     pub voter_id: i32,
     pub voter_directory_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Voter {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::common::leader_change_message::voter::Voter {
         crate::owned::common::leader_change_message::voter::Voter {
             voter_id: (self.voter_id),

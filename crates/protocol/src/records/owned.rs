@@ -63,6 +63,8 @@ impl Default for RecordBatch {
 
 impl Record {
     /// Encode a single record (varlong length prefix + fields) into `buf`.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         let body_len = self.body_len();
         put_varlong(
@@ -74,10 +76,11 @@ impl Record {
     }
 
     /// Predicted total length of this record on the wire (length-prefix + body).
+    /// # Panics
+    /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn encoded_len(&self) -> usize {
         let body = self.body_len();
-        #[allow(clippy::cast_possible_wrap, clippy::cast_possible_truncation)]
-        let body_i64 = body as i64;
+        let body_i64 = i64::try_from(body).expect("record body length must fit in i64");
         varlong_len(body_i64) + body
     }
 
@@ -164,6 +167,8 @@ impl Record {
 
     /// Decode a single record. `buf` must be positioned at the record's
     /// varlong length prefix.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
         let body_len = get_varlong(buf)
             .map_err(|e| RecordsError::RecordParse(format!("record length: {e}")))?;
@@ -209,8 +214,8 @@ impl Record {
                 "negative header count {header_count}"
             )));
         }
-        #[allow(clippy::cast_sign_loss)] // checked < 0 above
-        let header_count_usize = header_count as usize;
+        let header_count_usize =
+            usize::try_from(header_count).expect("non-negative header count must fit in usize");
         // Bound pre-allocation: a record header is at least 1 byte on the wire,
         // so an honest `header_count` can never exceed the bytes left in the
         // record body. Clamp the capacity hint to reject huge declared counts
@@ -240,8 +245,7 @@ fn decode_nullable_bytes<B: Buf>(buf: &mut B, label: &str) -> Result<Option<Byte
     if len < 0 {
         Ok(None)
     } else {
-        #[allow(clippy::cast_sign_loss)] // checked < 0 above
-        let n = len as usize;
+        let n = usize::try_from(len).expect("non-negative value length must fit in usize");
         if buf.remaining() < n {
             return Err(RecordsError::BodyTooShort {
                 needed: n - buf.remaining(),
@@ -258,8 +262,7 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
     if key_len < 0 {
         return Err(format!("non-nullable key has negative length {key_len}"));
     }
-    #[allow(clippy::cast_sign_loss)] // checked < 0 above
-    let n = key_len as usize;
+    let n = usize::try_from(key_len).expect("non-negative key length must fit in usize");
     if buf.remaining() < n {
         return Err(format!("key truncated (need {} more)", n - buf.remaining()));
     }
@@ -271,8 +274,7 @@ fn decode_record_header<B: Buf>(buf: &mut B) -> Result<RecordHeader, String> {
     let value = if value_len < 0 {
         None
     } else {
-        #[allow(clippy::cast_sign_loss)] // checked < 0 above
-        let n = value_len as usize;
+        let n = usize::try_from(value_len).expect("non-negative value length must fit in usize");
         if buf.remaining() < n {
             return Err(format!(
                 "value truncated (need {} more)",
@@ -434,6 +436,10 @@ impl RecordBatch {
 
     /// Decode a complete v2 record batch from `buf`. Reads from the start of
     /// the header.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+    /// # Panics
+    /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn decode<B: Buf>(buf: &mut B) -> Result<Self, RecordsError> {
         // batch_length field semantics: bytes after itself.
         // Header tail = partition_leader_epoch(4) + magic(1) + crc(4) +
@@ -519,8 +525,10 @@ impl RecordBatch {
         // Bound pre-allocation: each record is at least 1 byte in the
         // decompressed body, so an honest `records_count` can never exceed the
         // body length. Clamp the capacity hint to reject huge declared counts.
-        #[allow(clippy::cast_sign_loss)] // checked < 0 above
-        let mut records = Vec::with_capacity((count as usize).min(body_for_records.len()));
+        let record_capacity = usize::try_from(count)
+            .expect("non-negative record count must fit in usize")
+            .min(body_for_records.len());
+        let mut records = Vec::with_capacity(record_capacity);
         for i in 0..count {
             // Parse the record into borrowed slices, then materialise its
             // key / value / header-values as zero-copy `Bytes` views into
@@ -568,6 +576,8 @@ impl RecordBatch {
     }
 
     /// Encode this batch into `buf`.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         const HEADER_TAIL_LEN: i32 = 49;
 

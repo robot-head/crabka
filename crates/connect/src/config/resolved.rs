@@ -35,6 +35,8 @@ impl ResolvedConfig {
     }
 
     /// Read a string field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_string(&self, key: &str) -> ConfigResult<String> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(Value::String(value))) => Ok(value.clone()),
@@ -50,6 +52,8 @@ impl ResolvedConfig {
     }
 
     /// Read a boolean field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_bool(&self, key: &str) -> ConfigResult<bool> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(Value::Bool(value))) => Ok(*value),
@@ -61,6 +65,8 @@ impl ResolvedConfig {
     }
 
     /// Read a signed integer field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_i64(&self, key: &str) -> ConfigResult<i64> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(Value::Number(value))) => {
@@ -77,6 +83,8 @@ impl ResolvedConfig {
     }
 
     /// Read an unsigned integer field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_u64(&self, key: &str) -> ConfigResult<u64> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(Value::Number(value))) => {
@@ -93,6 +101,8 @@ impl ResolvedConfig {
     }
 
     /// Read a floating-point field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_f64(&self, key: &str) -> ConfigResult<f64> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(Value::Number(value))) => {
@@ -109,6 +119,8 @@ impl ResolvedConfig {
     }
 
     /// Read a string-list field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_string_list(&self, key: &str) -> ConfigResult<Vec<String>> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(Value::Array(values))) => values
@@ -129,6 +141,8 @@ impl ResolvedConfig {
     }
 
     /// Read a JSON value field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_json(&self, key: &str) -> ConfigResult<Value> {
         match self.values.get(key) {
             Some(ResolvedValue::Plain(value)) => Ok(value.clone()),
@@ -141,6 +155,8 @@ impl ResolvedConfig {
     }
 
     /// Read a secret field.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn get_secret(&self, key: &str) -> ConfigResult<SecretString> {
         match self.values.get(key) {
             Some(ResolvedValue::Secret(value)) => Ok(value.clone()),

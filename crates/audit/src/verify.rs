@@ -237,6 +237,8 @@ fn check_chained(rec: &Record, offset: i64, state: &mut WalkState) -> Result<(),
     fields(dir = %dir.display(), records = tracing::field::Empty, checkpoints = tracing::field::Empty, ok = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn verify_partition_dir(dir: &Path, trusted: &TrustedKeys) -> Result<VerifyReport, AuditError> {
     let mut segments: Vec<std::path::PathBuf> = std::fs::read_dir(dir)
         .map_err(|e| AuditError::Sink(format!("read dir {}: {e}", dir.display())))?

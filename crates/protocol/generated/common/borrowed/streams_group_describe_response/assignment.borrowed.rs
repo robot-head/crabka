@@ -2,7 +2,8 @@
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct Assignment<'a> {
     pub active_tasks: Vec<super::task_ids::TaskIds<'a>>,
     pub standby_tasks: Vec<super::task_ids::TaskIds<'a>>,
@@ -10,22 +11,12 @@ pub struct Assignment<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Assignment<'_> {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::common::streams_group_describe_response::assignment::Assignment {
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::common::streams_group_describe_response::assignment::Assignment {
         crate::owned::common::streams_group_describe_response::assignment::Assignment {
-            active_tasks: (self.active_tasks)
-                .iter()
-                .map(super::task_ids::TaskIds::to_owned)
-                .collect(),
-            standby_tasks: (self.standby_tasks)
-                .iter()
-                .map(super::task_ids::TaskIds::to_owned)
-                .collect(),
-            warmup_tasks: (self.warmup_tasks)
-                .iter()
-                .map(super::task_ids::TaskIds::to_owned)
-                .collect(),
+            active_tasks: (self.active_tasks).iter().map(super::task_ids::TaskIds::to_owned).collect(),
+            standby_tasks: (self.standby_tasks).iter().map(super::task_ids::TaskIds::to_owned).collect(),
+            warmup_tasks: (self.warmup_tasks).iter().map(super::task_ids::TaskIds::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -68,36 +59,22 @@ impl Encode for Assignment<'_> {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.active_tasks).len(), flex);
-                let body: usize = (self.active_tasks)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.active_tasks).len(), flex);
+                let body: usize = (self.active_tasks).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.standby_tasks).len(),
-                    flex,
-                );
-                let body: usize = (self.standby_tasks)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.standby_tasks).len(), flex);
+                let body: usize = (self.standby_tasks).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.warmup_tasks).len(), flex);
-                let body: usize = (self.warmup_tasks)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.warmup_tasks).len(), flex);
+                let body: usize = (self.warmup_tasks).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }

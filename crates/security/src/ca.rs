@@ -69,6 +69,8 @@ fn validity_window(validity_days: u32) -> Result<(OffsetDateTime, OffsetDateTime
 // out of span fields; only the non-sensitive CN + validity are recorded.
 // `err` surfaces rcgen / time failures (Debug).
 #[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn generate_clients_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, CaError> {
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
@@ -102,6 +104,8 @@ pub fn generate_clients_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
 // out of span fields; only the non-sensitive CN + validity are recorded.
 // `err` surfaces rcgen / time failures (Debug).
 #[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, CaError> {
     let key = KeyPair::generate_for(&PKCS_ECDSA_P256_SHA256)?;
 
@@ -140,6 +144,8 @@ pub fn generate_cluster_ca(cn: &str, validity_days: u32) -> Result<CaMaterial, C
 // fields; only the non-sensitive CN + validity are recorded. `err` surfaces
 // rcgen / time failures (Debug).
 #[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn renew_cluster_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<String, CaError> {
     renew_ca(key_pem, cn, validity_days, true)
 }
@@ -151,6 +157,8 @@ pub fn renew_cluster_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<S
 // fields; only the non-sensitive CN + validity are recorded. `err` surfaces
 // rcgen / time failures (Debug).
 #[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn renew_clients_ca(key_pem: &str, cn: &str, validity_days: u32) -> Result<String, CaError> {
     renew_ca(key_pem, cn, validity_days, false)
 }
@@ -190,6 +198,10 @@ fn renew_ca(key_pem: &str, cn: &str, validity_days: u32, cluster: bool) -> Resul
 // the generated leaf key (a local) out of span fields; only the non-sensitive
 // CN + validity are recorded. `err` surfaces rcgen / time failures (Debug).
 #[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn issue_broker_cert(
     ca_cert_pem: &str,
     ca_key_pem: &str,
@@ -254,6 +266,8 @@ pub fn issue_broker_cert(
 // generated leaf key (a local) out of span fields; only the non-sensitive CN +
 // validity are recorded. `err` surfaces rcgen / time failures (Debug).
 #[tracing::instrument(level = "info", skip_all, fields(cn = %cn, validity_days), err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn issue_user_cert(
     ca_cert_pem: &str,
     ca_key_pem: &str,

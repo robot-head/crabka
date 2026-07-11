@@ -383,6 +383,8 @@ impl ConnectorHandle {
     /// Returns the error the loop failed with, or [`ConnectError::Backend`] if
     /// the loop task panicked.
     #[tracing::instrument(level = "info", skip_all, err)]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub async fn shutdown(mut self) -> Result<(), ConnectError> {
         let _ = self.control.send(Control::Shutdown);
         let join = self.join.take().expect("join handle taken once");
@@ -657,8 +659,8 @@ mod tests {
                 return None;
             }
             let mut position = OffsetMap::new();
-            #[allow(clippy::cast_possible_wrap)]
-            position.insert("index".into(), OffsetValue::Long(self.pos as i64));
+            let index = i64::try_from(self.pos).expect("test source position fits in i64");
+            position.insert("index".into(), OffsetValue::Long(index));
             Some(SourceOffset::new(OffsetMap::new().into(), position.into()))
         }
 

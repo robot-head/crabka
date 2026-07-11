@@ -8,10 +8,12 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct RenewDelegationTokenResponse {
     pub error_code: i16,
     pub expiry_timestamp_ms: i64,
@@ -19,9 +21,8 @@ pub struct RenewDelegationTokenResponse {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl RenewDelegationTokenResponse {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::renew_delegation_token_response::RenewDelegationTokenResponse {
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::renew_delegation_token_response::RenewDelegationTokenResponse {
         crate::owned::renew_delegation_token_response::RenewDelegationTokenResponse {
             error_code: (self.error_code),
             expiry_timestamp_ms: (self.expiry_timestamp_ms),
@@ -33,10 +34,7 @@ impl RenewDelegationTokenResponse {
 impl Encode for RenewDelegationTokenResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -76,10 +74,7 @@ impl Encode for RenewDelegationTokenResponse {
 impl<'de> DecodeBorrow<'de> for RenewDelegationTokenResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

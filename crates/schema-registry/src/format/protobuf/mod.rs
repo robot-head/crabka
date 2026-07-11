@@ -195,6 +195,8 @@ fn proto_ref_name(name: &str, package: &str) -> String {
     name.trim_start_matches('.').to_string()
 }
 
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn parse(schema: &str, refs: &[super::ResolvedReference]) -> Result<ProtobufSchema, SrError> {
     let descriptor = protox_parse::parse("schema.proto", schema)
         .map_err(|e| SrError::InvalidSchema(format!("Protobuf: {e}")))?;
@@ -237,6 +239,8 @@ impl ProtobufSchema {
 /// written with `writer`? Computes the structural diff (original = writer,
 /// update = reader) and rejects if any difference is backward-incompatible.
 #[tracing::instrument(level = "debug", name = "protobuf.check", skip_all, fields(reader_refs = reader_refs.len(), writer_refs = writer_refs.len(), diffs = tracing::field::Empty))]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn check(
     reader: &str,
     writer: &str,

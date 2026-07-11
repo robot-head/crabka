@@ -254,7 +254,7 @@ fn max_option(left: Option<i64>, right: Option<i64>) -> Option<i64> {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use datafusion::arrow::{array::AsArray, datatypes::UInt64Type};
 
     use crate::{
@@ -292,11 +292,9 @@ mod tests {
         });
         let stacktrace = store.symbols_mut().intern_stacktrace(0, &[location]);
         store.push_sample(
-            "tenant-a",
-            PT,
+            ("tenant-a", PT),
             vec![("service_name".to_string(), "api".to_string())],
-            partition,
-            stacktrace,
+            (partition, stacktrace),
             value,
             timestamp_ms,
         );
@@ -315,24 +313,18 @@ mod tests {
             .await
             .unwrap();
 
-        check!(
-            (
-                flamegraph.total,
-                flamegraph.names.iter().any(|name| name == "hot"),
-                flamegraph.names.iter().any(|name| name == "cold"),
-            ) == (12, true, true)
-        );
+        check!(flamegraph.total == 12);
+        check!(flamegraph.names.iter().any(|name| name == "hot"));
+        check!(flamegraph.names.iter().any(|name| name == "cold"));
     }
 
     #[tokio::test]
     async fn hot_cold_union_merges_metadata_and_stats() {
         let mut hot = store_with_frame("hot", 7, 20);
         hot.push_sample(
-            "tenant-a",
-            "memory:alloc_space:bytes:space:bytes",
+            ("tenant-a", "memory:alloc_space:bytes:space:bytes"),
             vec![("service_name".to_string(), "worker".to_string())],
-            0,
-            1,
+            (0, 1),
             3,
             40,
         );
@@ -379,7 +371,7 @@ mod tests {
 
         let stats = union.stats("tenant-a", 0, 100).await.unwrap();
 
-        assert2::assert!(
+        assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -408,6 +400,6 @@ mod tests {
         let out = df.collect().await.unwrap();
         let partitions = out[0].column(0).as_primitive::<UInt64Type>();
 
-        assert2::assert!(partitions.value(0) == partition);
+        assert!(partitions.value(0) == partition);
     }
 }

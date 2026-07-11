@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_i64, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -32,17 +32,14 @@ impl Default for ListTransactionsRequest {
             producer_id_filters: Vec::new(),
             duration_filter: -1i64,
             transactional_id_pattern: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl Encode for ListTransactionsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -59,11 +56,7 @@ impl Encode for ListTransactionsRequest {
         }
         if version >= 0 {
             {
-                crate::primitives::array::put_array_len(
-                    buf,
-                    (self.producer_id_filters).len(),
-                    flex,
-                );
+                crate::primitives::array::put_array_len(buf, (self.producer_id_filters).len(), flex);
                 for it in &self.producer_id_filters {
                     put_i64(buf, *it);
                 }
@@ -90,29 +83,14 @@ impl Encode for ListTransactionsRequest {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.state_filters).len(),
-                    flex,
-                );
-                let body: usize = (self.state_filters)
-                    .iter()
-                    .map(|it| {
-                        if flex {
-                            compact_string_len(it)
-                        } else {
-                            string_len(it)
-                        }
-                    })
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.state_filters).len(), flex);
+                let body: usize = (self.state_filters).iter().map(|it| if flex { compact_string_len(it) } else { string_len(it) }).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.producer_id_filters).len(),
-                    flex,
-                );
+                let prefix = crate::primitives::array::array_len_prefix_len((self.producer_id_filters).len(), flex);
                 let body: usize = (self.producer_id_filters).iter().map(|_| 8).sum();
                 prefix + body
             };
@@ -137,10 +115,7 @@ impl Encode for ListTransactionsRequest {
 impl Decode<'_> for ListTransactionsRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -149,11 +124,7 @@ impl Decode<'_> for ListTransactionsRequest {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(if flex {
-                        get_compact_string_owned(buf)?
-                    } else {
-                        get_string_owned(buf)?
-                    });
+                    v.push(if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? });
                 }
                 v
             };
@@ -172,11 +143,7 @@ impl Decode<'_> for ListTransactionsRequest {
             out.duration_filter = get_i64(buf)?;
         }
         if version >= 2 {
-            out.transactional_id_pattern = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.transactional_id_pattern = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -210,22 +177,13 @@ impl ListTransactionsRequest {
 #[allow(unused_comparisons)]
 pub fn default_json(version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
-    obj.insert(
-        "stateFilters".to_string(),
-        ::serde_json::Value::Array(vec![]),
-    );
-    obj.insert(
-        "producerIdFilters".to_string(),
-        ::serde_json::Value::Array(vec![]),
-    );
+    obj.insert("stateFilters".to_string(), ::serde_json::Value::Array(vec![]));
+    obj.insert("producerIdFilters".to_string(), ::serde_json::Value::Array(vec![]));
     if version >= 1 {
         obj.insert("durationFilter".to_string(), ::serde_json::json!(-1));
     }
     if version >= 2 {
-        obj.insert(
-            "transactionalIdPattern".to_string(),
-            ::serde_json::Value::Null,
-        );
+        obj.insert("transactionalIdPattern".to_string(), ::serde_json::Value::Null);
     }
     ::serde_json::Value::Object(obj)
 }

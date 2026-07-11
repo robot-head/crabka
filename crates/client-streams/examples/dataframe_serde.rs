@@ -10,5 +10,5 @@ fn main() {
     println!("encoded {} bytes", bytes.len());
     let back = PolarsIpcSerde.deserialize("orders", &bytes).unwrap();
     println!("{back}");
-    assert2::assert!(back.equals(&df));
+    assert!(back.equals(&df));
 }

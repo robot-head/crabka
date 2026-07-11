@@ -167,16 +167,16 @@ pub fn start_move(
     std::fs::create_dir_all(&future_path)?;
     let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
 
-    spawn_move(
-        partitions,
-        future_logs,
-        &target_log_dir,
+    spawn_move(MoveTask {
+        partitions: partitions.clone(),
+        future_logs: future_logs.clone(),
+        target_log_dir,
         future_path,
         future_log,
-        topic,
+        topic: topic.to_string(),
         partition,
-        &part,
-    );
+        part,
+    });
     Ok(())
 }
 
@@ -198,61 +198,62 @@ pub fn resume_move(
         .ok_or(MoveError::ReplicaNotAvailable)?;
     let future_path = log_dir::future_partition_dir(target_log_dir, topic, partition.get());
     let future_log = Arc::new(Mutex::new(Log::open(&future_path, log_config.clone())?));
-    spawn_move(
-        partitions,
-        future_logs,
-        target_log_dir,
+    spawn_move(MoveTask {
+        partitions: partitions.clone(),
+        future_logs: future_logs.clone(),
+        target_log_dir: target_log_dir.to_path_buf(),
         future_path,
         future_log,
-        topic,
+        topic: topic.to_string(),
         partition,
-        &part,
-    );
+        part,
+    });
     Ok(())
 }
 
 /// Shared between [`start_move`] and [`resume_move`]: build the
 /// `FutureLogState`, insert it into the registry, and spawn the
 /// per-move replicator task.
-#[allow(clippy::too_many_arguments)]
-fn spawn_move(
-    partitions: &Arc<PartitionRegistry>,
-    future_logs: &Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
-    target_log_dir: &Path,
+struct MoveTask {
+    partitions: Arc<PartitionRegistry>,
+    future_logs: Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
+    target_log_dir: PathBuf,
     future_path: PathBuf,
     future_log: Arc<Mutex<Log>>,
-    topic: &str,
+    topic: String,
     partition: PartitionIndex,
-    part: &Arc<Partition>,
-) {
+    part: Arc<Partition>,
+}
+
+fn spawn_move(task: MoveTask) {
     let cancel = CancellationToken::new();
-    let target_partition_path = log_dir::partition_dir(target_log_dir, topic, partition.get());
-    let task = tokio::spawn(replicator_loop(
-        part.clone(),
-        future_log.clone(),
-        future_path.clone(),
+    let target_partition_path =
+        log_dir::partition_dir(&task.target_log_dir, &task.topic, task.partition.get());
+    let replicator = tokio::spawn(replicator_loop(ReplicatorTask {
+        part: task.part,
+        future_log: task.future_log.clone(),
+        future_path: task.future_path.clone(),
         target_partition_path,
-        target_log_dir.to_path_buf(),
-        cancel.clone(),
-        partitions.clone(),
-        future_logs.clone(),
-        topic.to_string(),
-        partition,
-    ));
+        target_log_dir: task.target_log_dir.clone(),
+        cancel: cancel.clone(),
+        _partitions: task.partitions,
+        future_logs: task.future_logs.clone(),
+        topic: task.topic.clone(),
+        partition: task.partition,
+    }));
     let state = Arc::new(FutureLogState {
-        target_log_dir: target_log_dir.to_path_buf(),
-        future_path,
-        future_log,
+        target_log_dir: task.target_log_dir,
+        future_path: task.future_path,
+        future_log: task.future_log,
         cancel,
-        task: std::sync::Mutex::new(Some(task)),
+        task: std::sync::Mutex::new(Some(replicator)),
     });
-    future_logs.insert((topic.to_string(), partition), state);
+    task.future_logs.insert((task.topic, task.partition), state);
 }
 
 /// Replicator task body: incrementally copy batches from
 /// `part.log` to `future_log`, then ask the partition writer to swap.
-#[allow(clippy::too_many_arguments)]
-async fn replicator_loop(
+struct ReplicatorTask {
     part: Arc<Partition>,
     future_log: Arc<Mutex<Log>>,
     future_path: PathBuf,
@@ -263,7 +264,21 @@ async fn replicator_loop(
     future_logs: Arc<DashMap<(String, PartitionIndex), Arc<FutureLogState>>>,
     topic: String,
     partition: PartitionIndex,
-) {
+}
+
+async fn replicator_loop(task: ReplicatorTask) {
+    let ReplicatorTask {
+        part,
+        future_log,
+        future_path,
+        target_partition_path,
+        target_log_dir,
+        cancel,
+        _partitions,
+        future_logs,
+        topic,
+        partition,
+    } = task;
     debug!(
         topic = %topic, partition = partition.get(),
         target = %target_log_dir.display(),
@@ -414,14 +429,14 @@ fn canonicalize_or_self(p: &Path) -> PathBuf {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use tempfile::tempdir;
 
     use super::*;
 
     #[test]
     fn move_read_chunk_size_is_one_mib() {
-        assert2::assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
+        assert!(MOVE_READ_CHUNK_BYTES == 1024 * 1024);
     }
 
     #[test]
@@ -443,7 +458,7 @@ mod tests {
             bogus.path(),
         )
         .expect_err("expected LogDirNotFound");
-        assert2::assert!(matches!(err, MoveError::LogDirNotFound));
+        assert!(matches!(err, MoveError::LogDirNotFound));
     }
 
     #[test]
@@ -461,7 +476,7 @@ mod tests {
             dir.path(),
         )
         .expect_err("expected ReplicaNotAvailable");
-        assert2::assert!(matches!(err, MoveError::ReplicaNotAvailable));
+        assert!(matches!(err, MoveError::ReplicaNotAvailable));
     }
 
     /// Build a `Partition` rooted at `<log_dir>/<topic>-<partition>`
@@ -565,7 +580,10 @@ mod tests {
             primary.path(),
         )
         .expect("noop should succeed");
-        assert2::assert!(future_logs.is_empty());
+        assert!(
+            future_logs.is_empty(),
+            "noop must not register a future log"
+        );
     }
 
     #[test]
@@ -584,8 +602,8 @@ mod tests {
         )
         .expect_err("missing partition must reject resume");
 
-        assert2::assert!(matches!(err, MoveError::ReplicaNotAvailable));
-        assert2::assert!(future_logs.is_empty());
+        assert!(matches!(err, MoveError::ReplicaNotAvailable));
+        assert!(future_logs.is_empty());
     }
 
     #[tokio::test]
@@ -624,11 +642,9 @@ mod tests {
         .await
         .expect("future log should catch up and swap");
 
-        assert2::assert!(
-            (
-                part.log_end_offset(),
-                canonicalize_or_self(&part.log_dir.load_full()),
-            ) == (Offset(3), canonicalize_or_self(target.path()))
+        assert!(part.log_end_offset() == 3);
+        assert!(
+            canonicalize_or_self(&part.log_dir.load_full()) == canonicalize_or_self(target.path())
         );
     }
 
@@ -670,7 +686,7 @@ mod tests {
         .await
         .expect("future log should keep copying after a partial catch-up pass");
 
-        assert2::assert!(part.log_end_offset() == 4);
+        assert!(part.log_end_offset() == 4);
     }
 
     #[tokio::test]
@@ -715,7 +731,7 @@ mod tests {
             extra.path(),
         )
         .expect("same-target alter must be idempotent");
-        assert2::assert!(future_logs.len() == 1);
+        assert!(future_logs.len() == 1);
     }
 
     #[tokio::test]
@@ -762,6 +778,6 @@ mod tests {
             third.path(),
         )
         .expect_err("conflicting-target alter must reject");
-        assert2::assert!(matches!(err, MoveError::AlreadyMoving));
+        assert!(matches!(err, MoveError::AlreadyMoving));
     }
 }

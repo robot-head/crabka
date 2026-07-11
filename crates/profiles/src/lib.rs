@@ -3,29 +3,6 @@
 //! WAL, and the block-builder consumer group (samples fact table + dedup
 //! per-block `SymbolDb` + `ProfileIndex`).
 #![forbid(unsafe_code)]
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    clippy::cast_sign_loss,
-    clippy::cloned_ref_to_slice_refs,
-    clippy::default_trait_access,
-    clippy::derivable_impls,
-    clippy::float_cmp,
-    clippy::format_push_string,
-    clippy::map_unwrap_or,
-    clippy::match_same_arms,
-    clippy::needless_pass_by_value,
-    clippy::needless_question_mark,
-    clippy::needless_raw_string_hashes,
-    clippy::needless_update,
-    clippy::similar_names,
-    clippy::too_many_lines,
-    clippy::trivially_copy_pass_by_ref,
-    clippy::type_complexity,
-    clippy::unnecessary_wraps,
-    clippy::unreadable_literal,
-    clippy::unused_async
-)]
 
 pub mod blockbuilder;
 pub mod cold_store;
@@ -64,13 +41,13 @@ pub fn crate_smoke() -> bool {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn smoke() {
-        assert2::assert!(crate_smoke());
+        assert!(crate_smoke());
     }
 
     #[test]

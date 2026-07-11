@@ -90,6 +90,26 @@ pub struct Consumer {
     pub(crate) auto_offset_reset: AutoOffsetReset,
 }
 
+#[derive(Clone)]
+struct StartConfig {
+    bootstrap: String,
+    client_id: String,
+    group_id: String,
+    session_timeout: Duration,
+    rebalance_timeout: Duration,
+    heartbeat_interval: Duration,
+    subscribe: Vec<String>,
+    group_instance_id: Option<String>,
+    auto_offset_reset: AutoOffsetReset,
+    isolation_level: IsolationLevel,
+    assignor: Assignor,
+    fetch_max_bytes: i32,
+    fetch_partition_max_bytes: i32,
+    request_timeout: Duration,
+    client_rack: Option<String>,
+    security: Option<crabka_client_core::security::ClientSecurity>,
+}
+
 impl Drop for Consumer {
     fn drop(&mut self) {
         self.coordinator_shutdown.cancel();
@@ -260,13 +280,12 @@ impl Consumer {
     /// Build a [`Consumer`] subscribed to the given topics.
     ///
     /// Validates configuration eagerly (fail-fast before any network I/O),
-    /// then calls [`Self::start_once`] with a per-attempt timeout.  If an
+    /// then calls the internal `start_once` operation with a per-attempt timeout. If an
     /// attempt stalls (lost-wakeup during cold-boot group-join contention) or
     /// returns a transient error, the timed-out future is dropped — cancelling
     /// its in-flight connections — and a fresh attempt is started.  A genuine
     /// misconfiguration or persistent error surfaces immediately.
     #[builder(start_fn = builder, finish_fn = build)]
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         name = "consumer.start",
         level = "info",
@@ -274,6 +293,8 @@ impl Consumer {
         fields(group_id = %group_id, client_id = %client_id),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-consumer".to_string())] client_id: String,
@@ -320,29 +341,31 @@ impl Consumer {
             ));
         }
 
+        let config = StartConfig {
+            bootstrap,
+            client_id,
+            group_id,
+            session_timeout,
+            rebalance_timeout,
+            heartbeat_interval,
+            subscribe,
+            group_instance_id,
+            auto_offset_reset,
+            isolation_level,
+            assignor,
+            fetch_max_bytes,
+            fetch_partition_max_bytes,
+            request_timeout,
+            client_rack,
+            security,
+        };
+
         let started = tokio::time::Instant::now();
         let mut backoff = Duration::from_millis(500);
         loop {
             match tokio::time::timeout(
                 CONSUMER_START_ATTEMPT_TIMEOUT,
-                Self::start_once(
-                    bootstrap.clone(),
-                    client_id.clone(),
-                    group_id.clone(),
-                    session_timeout,
-                    rebalance_timeout,
-                    heartbeat_interval,
-                    subscribe.clone(),
-                    group_instance_id.clone(),
-                    auto_offset_reset,
-                    isolation_level,
-                    assignor,
-                    fetch_max_bytes,
-                    fetch_partition_max_bytes,
-                    request_timeout,
-                    client_rack.clone(),
-                    security.clone(),
-                ),
+                Self::start_once(config.clone()),
             )
             .await
             {
@@ -352,10 +375,10 @@ impl Consumer {
                         && is_retriable_consumer_start_error(&error)
                     {
                         tracing::warn!(
-                            group = %group_id,
-                            %error,
-                            "consumer startup failed transiently; retrying with a fresh connection"
-                        );
+                        group = %config.group_id,
+                                %error,
+                                "consumer startup failed transiently; retrying with a fresh connection"
+                            );
                     } else {
                         return Err(error);
                     }
@@ -369,7 +392,7 @@ impl Consumer {
                         ));
                     }
                     tracing::warn!(
-                        group = %group_id,
+                        group = %config.group_id,
                         timeout = ?CONSUMER_START_ATTEMPT_TIMEOUT,
                         "consumer startup exceeded attempt timeout \
                          (likely a cold-boot group-join stall); \
@@ -391,13 +414,12 @@ impl Consumer {
     /// all in-flight connections cleanly.  The coordinator task is only spawned
     /// at the very end of this function (no `.await` follows it), so a
     /// timed-out attempt can never orphan a coordinator task.
-    #[allow(clippy::too_many_arguments, clippy::too_many_lines)]
     #[tracing::instrument(
         name = "consumer.start_once",
         level = "info",
         skip_all,
         fields(
-            group_id = %group_id,
+            group_id = %config.group_id,
             coordinator_id = tracing::field::Empty,
             member_id = tracing::field::Empty,
             generation = tracing::field::Empty,
@@ -406,24 +428,22 @@ impl Consumer {
         ),
         err
     )]
-    async fn start_once(
-        bootstrap: String,
-        client_id: String,
-        group_id: String,
-        session_timeout: std::time::Duration,
-        rebalance_timeout: std::time::Duration,
-        heartbeat_interval: std::time::Duration,
-        subscribe: Vec<String>,
-        group_instance_id: Option<String>,
-        auto_offset_reset: AutoOffsetReset,
-        isolation_level: IsolationLevel,
-        assignor: Assignor,
-        fetch_max_bytes: i32,
-        fetch_partition_max_bytes: i32,
-        request_timeout: std::time::Duration,
-        client_rack: Option<String>,
-        security: Option<crabka_client_core::security::ClientSecurity>,
-    ) -> Result<Self, ConsumerError> {
+    async fn start_once(config: StartConfig) -> Result<Self, ConsumerError> {
+        let finish_config = config.clone();
+        let StartConfig {
+            bootstrap,
+            client_id,
+            group_id,
+            session_timeout,
+            rebalance_timeout,
+            subscribe,
+            group_instance_id,
+            assignor,
+            request_timeout,
+            client_rack,
+            security,
+            ..
+        } = config;
         let client = Client::builder()
             .bootstrap(&bootstrap)
             .client_id(client_id.clone())
@@ -495,255 +515,15 @@ impl Consumer {
         let cleanup_group_id = group_id.clone();
         let cleanup_member_id = member_id.clone();
         let cleanup_group_instance_id = group_instance_id.clone();
-        let start_result = async {
-            // 2. Second JoinGroup with the assigned member_id, on the coordinator.
-            let r2 = with_coordinator_refind(
-                &client,
-                &group_id,
-                &coordinator_id,
-                COORDINATOR_RETRY_TIMEOUT,
-                |r: &JoinGroupResponse| r.error_code,
-                || {
-                    let group_id = group_id.clone();
-                    let protocol_name = protocol_name.clone();
-                    let subscription_bytes = subscription_bytes.clone();
-                    let member_id = member_id.clone();
-                    let group_instance_id = group_instance_id.clone();
-                    let client = &client;
-                    let target = coordinator_id.load(Ordering::Relaxed);
-                    async move {
-                        client
-                            .broker(target)
-                            .send(build_join_request(
-                                group_id,
-                                member_id,
-                                group_instance_id.clone(),
-                                protocol_name,
-                                subscription_bytes,
-                                session_timeout_ms,
-                                rebalance_timeout_ms,
-                            ))
-                            .await
-                            .map_err(ConsumerError::from)
-                    }
-                },
-            )
-            .await?;
-            if r2.error_code != 0 {
-                return Err(ConsumerError::Server(r2.error_code));
-            }
-
-            // 3. Always issue a Metadata to resolve topic_ids (needed for
-            //    Fetch v ≥ 13). If we are the leader, also use the partition
-            //    counts to compute the assignment.
-            //    `refresh_metadata` (not a bare `send`) so the main client's
-            //    BrokerPool learns each broker's (id → addr) mapping up front,
-            //    letting `poll`/`validate` route to partition leaders immediately
-            //    rather than waiting for the first `refresh_leader_epochs` pass.
-            let md = client.refresh_metadata().await?;
-            let mut topic_ids: HashMap<String, WireUuid> = HashMap::new();
-            let mut topic_partitions: HashMap<String, i32> = HashMap::new();
-            for t in &md.topics {
-                let Some(name) = &t.name else { continue };
-                if is_subscribed_topic(&subscribe, name) {
-                    let count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
-                    topic_partitions.insert(name.clone(), count);
-                    topic_ids.insert(name.clone(), t.topic_id);
-                }
-            }
-
-            let is_leader = is_group_leader(&r2.leader, &member_id);
-            tracing::Span::current().record("generation", r2.generation_id);
-            tracing::Span::current().record("is_leader", is_leader);
-            let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
-                let assignments = match assignor {
-                    Assignor::Range => {
-                        let inputs: Vec<(String, Vec<String>)> = r2
-                            .members
-                            .iter()
-                            .map(|m| {
-                                let ds = decode_subscription(&m.metadata);
-                                (m.member_id.clone(), ds.topics)
-                            })
-                            .collect();
-                        crate::assignor::range::assign(inputs, &topic_partitions)
-                    }
-                    Assignor::CooperativeSticky => {
-                        let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = r2
-                            .members
-                            .iter()
-                            .map(|m| {
-                                let ds = decode_subscription(&m.metadata);
-                                (m.member_id.clone(), ds.topics, ds.owned, ds.generation_id)
-                            })
-                            .collect();
-                        crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
-                    }
-                };
-                assignments
-                    .into_iter()
-                    .map(|(m, partitions)| build_sync_assignment(m, &partitions))
-                    .collect()
-            } else {
-                Vec::new()
-            };
-
-            // 4. SyncGroup — leader installs assignments; everyone receives their
-            //    own assignment in the response. On the coordinator broker, with
-            //    re-discovery on a cold/relocating-coordinator code.
-            let r3 = with_coordinator_refind(
-                &client,
-                &group_id,
-                &coordinator_id,
-                COORDINATOR_RETRY_TIMEOUT,
-                |r: &SyncGroupResponse| r.error_code,
-                || {
-                    let group_id = group_id.clone();
-                    let protocol_name = protocol_name.clone();
-                    let member_id = member_id.clone();
-                    let assignments_for_sync = assignments_for_sync.clone();
-                    let generation_id = r2.generation_id;
-                    let group_instance_id = group_instance_id.clone();
-                    let client = &client;
-                    let target = coordinator_id.load(Ordering::Relaxed);
-                    async move {
-                        client
-                            .broker(target)
-                            .send(build_sync_request(
-                                group_id,
-                                generation_id,
-                                member_id,
-                                group_instance_id.clone(),
-                                protocol_name,
-                                assignments_for_sync,
-                            ))
-                            .await
-                            .map_err(ConsumerError::from)
-                    }
-                },
-            )
-            .await?;
-            if r3.error_code != 0 {
-                return Err(ConsumerError::Server(r3.error_code));
-            }
-            let assigned_partitions = decode_assignment(&r3.assignment);
-            tracing::Span::current().record("assigned_partitions", assigned_partitions.len());
-
-            // 5. Fetch existing committed offsets so poll() resumes correctly.
-            let mut next_offsets: HashMap<(String, i32), i64> = HashMap::new();
-            let mut positions: HashMap<(String, i32), crate::position::PartitionPosition> =
-                HashMap::new();
-            if has_assigned_partitions(&assigned_partitions) {
-                let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
-                for (t, p) in &assigned_partitions {
-                    by_topic.entry(t.clone()).or_default().push(*p);
-                }
-                // OffsetFetch is a coordinator RPC — route it to the coordinator
-                // broker (its id is fresh from the join/sync above).
-                let of = client
-                    .broker(coordinator_id.load(Ordering::Relaxed))
-                    .send(crate::offset_wire::build_offset_fetch(
-                        &group_id, &by_topic, &topic_ids,
-                    ))
-                    .await?;
-                let id_to_name = crate::offset_wire::id_to_name(&topic_ids);
-                for (name, partition_index, committed, committed_epoch) in
-                    crate::offset_wire::parse_offset_fetch(&of, &id_to_name)
-                {
-                    let starting = starting_offset(committed, auto_offset_reset);
-                    next_offsets.insert((name.clone(), partition_index), starting);
-                    positions.insert((name, partition_index), primed_position(committed_epoch));
-                }
-            }
-
-            // 6. Spawn the coordinator task (heartbeat + rebalance loop) on its
-            //    own connection.
-            //
-            //    The broker processes requests serially per TCP connection: a
-            //    JoinGroup parked in the rebalance-join purgatory (up to
-            //    INITIAL_REBALANCE_DELAY per round, and cooperative rounds
-            //    cascade) blocks every later request on that same socket. If the
-            //    coordinator shared `poll()`'s connection, a `Fetch` issued
-            //    mid-rebalance would head-of-line-block behind the parked
-            //    JoinGroup and stall until the client request timeout. A dedicated
-            //    coordinator connection keeps the data path (`poll`/commit)
-            //    independent of the group-protocol path. (The JVM client never
-            //    hits this because real brokers serve a connection's requests
-            //    concurrently.)
-            let coordinator_client = Client::builder()
-                .bootstrap(&bootstrap)
-                .client_id(client_id.clone())
-                .connect_timeout(request_timeout)
-                .request_timeout(request_timeout)
-                .maybe_security(security.clone())
-                .build()
-                .await?;
-
-            let assigned = Arc::new(Mutex::new(assigned_partitions));
-            let next_offsets = Arc::new(Mutex::new(next_offsets));
-            let positions = Arc::new(Mutex::new(positions));
-            let pending_seeks = Arc::new(Mutex::new(HashMap::new()));
-            let topic_ids = Arc::new(Mutex::new(topic_ids));
-            // Shared with the coordinator task so the commit path always stamps the
-            // current generation; the coordinator publishes to it on every (re)join.
-            let current_generation = Arc::new(AtomicI32::new(r2.generation_id));
-
-            let shutdown = CancellationToken::new();
-            let state = CoordinatorState {
-                client: coordinator_client,
-                group_id: group_id.clone(),
-                coordinator_id: Arc::clone(&coordinator_id),
-                member_id: member_id.clone(),
-                group_instance_id: group_instance_id.clone(),
-                generation_id: r2.generation_id,
-                current_generation: Arc::clone(&current_generation),
-                assignor,
-                subscribed_topics: subscribe.clone(),
-                assigned: Arc::clone(&assigned),
-                next_offsets: Arc::clone(&next_offsets),
-                positions: Arc::clone(&positions),
-                topic_ids: Arc::clone(&topic_ids),
-                session_timeout,
-                rebalance_timeout,
-                heartbeat_interval,
-                auto_offset_reset,
-                client_rack: client_rack.clone(),
-                // The metadata snapshot this initial assignment was computed against,
-                // threaded to the coordinator so its rejoin baseline starts from
-                // exactly what we saw here — not a fresh fetch that could already
-                // include a topic created during start-up (which would strand a
-                // cold-start empty assignment permanently).
-                initial_subscribed_counts: topic_partitions,
-            };
-            // IMPORTANT: `tokio::spawn` is the very last operation — no `.await`
-            // follows it.  Dropping a timed-out `start_once` future before this
-            // point cancels all in-flight connections without spawning anything.
-            let coord_handle = tokio::spawn(crate::coordinator::run(state, shutdown.clone()));
-
-            Ok(Consumer {
-                client,
-                group_id,
-                coordinator_id,
-                member_id,
-                group_instance_id: group_instance_id.clone(),
-                current_generation,
-                subscribed_topics: subscribe,
-                assigned,
-                next_offsets,
-                positions,
-                pending_seeks,
-                topic_ids,
-                session_timeout,
-                heartbeat_interval,
-                assignor,
-                coordinator_shutdown: shutdown,
-                coordinator_handle: Some(coord_handle),
-                isolation_level,
-                fetch_max_bytes,
-                fetch_partition_max_bytes,
-                auto_offset_reset,
-            })
-        }
+        let start_result = finish_startup(
+            finish_config,
+            client,
+            coordinator_id,
+            member_id,
+            subscription_bytes,
+            protocol_name,
+            (session_timeout_ms, rebalance_timeout_ms),
+        )
         .await;
         match start_result {
             Ok(consumer) => Ok(consumer),
@@ -760,6 +540,368 @@ impl Consumer {
             }
         }
     }
+}
+
+async fn finish_startup(
+    config: StartConfig,
+    client: Client,
+    coordinator_id: Arc<AtomicI32>,
+    member_id: String,
+    subscription_bytes: bytes::Bytes,
+    protocol_name: String,
+    timeouts_ms: (i32, i32),
+) -> Result<Consumer, ConsumerError> {
+    let spawn_config = config.clone();
+    let StartConfig {
+        group_id,
+        group_instance_id,
+        auto_offset_reset,
+        ..
+    } = config;
+    let (session_timeout_ms, rebalance_timeout_ms) = timeouts_ms;
+    // 2. Second JoinGroup with the assigned member_id, on the coordinator.
+    let r2 = with_coordinator_refind(
+        &client,
+        &group_id,
+        &coordinator_id,
+        COORDINATOR_RETRY_TIMEOUT,
+        |r: &JoinGroupResponse| r.error_code,
+        || {
+            let group_id = group_id.clone();
+            let protocol_name = protocol_name.clone();
+            let subscription_bytes = subscription_bytes.clone();
+            let member_id = member_id.clone();
+            let group_instance_id = group_instance_id.clone();
+            let client = &client;
+            let target = coordinator_id.load(Ordering::Relaxed);
+            async move {
+                client
+                    .broker(target)
+                    .send(build_join_request(
+                        group_id,
+                        member_id,
+                        group_instance_id.clone(),
+                        protocol_name,
+                        subscription_bytes,
+                        session_timeout_ms,
+                        rebalance_timeout_ms,
+                    ))
+                    .await
+                    .map_err(ConsumerError::from)
+            }
+        },
+    )
+    .await?;
+    if r2.error_code != 0 {
+        return Err(ConsumerError::Server(r2.error_code));
+    }
+
+    let InitialAssignment {
+        assigned_partitions,
+        topic_ids,
+        topic_partitions,
+    } = resolve_initial_assignment(
+        &spawn_config,
+        &client,
+        &coordinator_id,
+        &member_id,
+        &protocol_name,
+        &r2,
+    )
+    .await?;
+
+    // 5. Fetch existing committed offsets so poll() resumes correctly.
+    let mut next_offsets: HashMap<(String, i32), i64> = HashMap::new();
+    let mut positions: HashMap<(String, i32), crate::position::PartitionPosition> = HashMap::new();
+    if has_assigned_partitions(&assigned_partitions) {
+        let mut by_topic: HashMap<String, Vec<i32>> = HashMap::new();
+        for (t, p) in &assigned_partitions {
+            by_topic.entry(t.clone()).or_default().push(*p);
+        }
+        // OffsetFetch is a coordinator RPC — route it to the coordinator
+        // broker (its id is fresh from the join/sync above).
+        let of = client
+            .broker(coordinator_id.load(Ordering::Relaxed))
+            .send(crate::offset_wire::build_offset_fetch(
+                &group_id, &by_topic, &topic_ids,
+            ))
+            .await?;
+        let id_to_name = crate::offset_wire::id_to_name(&topic_ids);
+        for (name, partition_index, committed, committed_epoch) in
+            crate::offset_wire::parse_offset_fetch(&of, &id_to_name)
+        {
+            let starting = starting_offset(committed, auto_offset_reset);
+            next_offsets.insert((name.clone(), partition_index), starting);
+            positions.insert((name, partition_index), primed_position(committed_epoch));
+        }
+    }
+
+    spawn_consumer(
+        spawn_config,
+        client,
+        coordinator_id,
+        member_id,
+        StartupState {
+            generation_id: r2.generation_id,
+            assigned_partitions,
+            next_offsets,
+            positions,
+            topic_ids,
+            topic_partitions,
+        },
+    )
+    .await
+}
+
+struct InitialAssignment {
+    assigned_partitions: Vec<(String, i32)>,
+    topic_ids: HashMap<String, WireUuid>,
+    topic_partitions: HashMap<String, i32>,
+}
+
+async fn resolve_initial_assignment(
+    config: &StartConfig,
+    client: &Client,
+    coordinator_id: &Arc<AtomicI32>,
+    member_id: &str,
+    protocol_name: &str,
+    r2: &JoinGroupResponse,
+) -> Result<InitialAssignment, ConsumerError> {
+    let group_id = &config.group_id;
+    let subscribe = &config.subscribe;
+    let group_instance_id = &config.group_instance_id;
+    let assignor = config.assignor;
+    // 3. Always issue a Metadata to resolve topic_ids (needed for
+    //    Fetch v ≥ 13). If we are the leader, also use the partition
+    //    counts to compute the assignment.
+    //    `refresh_metadata` (not a bare `send`) so the main client's
+    //    BrokerPool learns each broker's (id → addr) mapping up front,
+    //    letting `poll`/`validate` route to partition leaders immediately
+    //    rather than waiting for the first `refresh_leader_epochs` pass.
+    let md = client.refresh_metadata().await?;
+    let mut topic_ids: HashMap<String, WireUuid> = HashMap::new();
+    let mut topic_partitions: HashMap<String, i32> = HashMap::new();
+    for t in &md.topics {
+        let Some(name) = &t.name else { continue };
+        if is_subscribed_topic(subscribe, name) {
+            let count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
+            topic_partitions.insert(name.clone(), count);
+            topic_ids.insert(name.clone(), t.topic_id);
+        }
+    }
+
+    let is_leader = is_group_leader(&r2.leader, member_id);
+    tracing::Span::current().record("generation", r2.generation_id);
+    tracing::Span::current().record("is_leader", is_leader);
+    let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
+        let assignments = match assignor {
+            Assignor::Range => {
+                let inputs: Vec<(String, Vec<String>)> = r2
+                    .members
+                    .iter()
+                    .map(|m| {
+                        let ds = decode_subscription(&m.metadata);
+                        (m.member_id.clone(), ds.topics)
+                    })
+                    .collect();
+                crate::assignor::range::assign(inputs, &topic_partitions)
+            }
+            Assignor::CooperativeSticky => {
+                let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = r2
+                    .members
+                    .iter()
+                    .map(|m| {
+                        let ds = decode_subscription(&m.metadata);
+                        (m.member_id.clone(), ds.topics, ds.owned, ds.generation_id)
+                    })
+                    .collect();
+                crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
+            }
+        };
+        assignments
+            .into_iter()
+            .map(|(m, partitions)| build_sync_assignment(m, &partitions))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // 4. SyncGroup — leader installs assignments; everyone receives their
+    //    own assignment in the response. On the coordinator broker, with
+    //    re-discovery on a cold/relocating-coordinator code.
+    let r3 = with_coordinator_refind(
+        client,
+        group_id,
+        coordinator_id,
+        COORDINATOR_RETRY_TIMEOUT,
+        |r: &SyncGroupResponse| r.error_code,
+        || {
+            let group_id = group_id.clone();
+            let protocol_name = protocol_name.to_string();
+            let member_id = member_id.to_string();
+            let assignments_for_sync = assignments_for_sync.clone();
+            let generation_id = r2.generation_id;
+            let group_instance_id = group_instance_id.clone();
+            let target = coordinator_id.load(Ordering::Relaxed);
+            async move {
+                client
+                    .broker(target)
+                    .send(build_sync_request(
+                        group_id,
+                        generation_id,
+                        member_id,
+                        group_instance_id.clone(),
+                        protocol_name,
+                        assignments_for_sync,
+                    ))
+                    .await
+                    .map_err(ConsumerError::from)
+            }
+        },
+    )
+    .await?;
+    if r3.error_code != 0 {
+        return Err(ConsumerError::Server(r3.error_code));
+    }
+    let assigned_partitions = decode_assignment(&r3.assignment);
+    tracing::Span::current().record("assigned_partitions", assigned_partitions.len());
+
+    Ok(InitialAssignment {
+        assigned_partitions,
+        topic_ids,
+        topic_partitions,
+    })
+}
+
+struct StartupState {
+    generation_id: i32,
+    assigned_partitions: Vec<(String, i32)>,
+    next_offsets: HashMap<(String, i32), i64>,
+    positions: HashMap<(String, i32), crate::position::PartitionPosition>,
+    topic_ids: HashMap<String, WireUuid>,
+    topic_partitions: HashMap<String, i32>,
+}
+
+async fn spawn_consumer(
+    config: StartConfig,
+    client: Client,
+    coordinator_id: Arc<AtomicI32>,
+    member_id: String,
+    startup: StartupState,
+) -> Result<Consumer, ConsumerError> {
+    let StartConfig {
+        bootstrap,
+        client_id,
+        group_id,
+        session_timeout,
+        rebalance_timeout,
+        heartbeat_interval,
+        subscribe,
+        group_instance_id,
+        auto_offset_reset,
+        isolation_level,
+        assignor,
+        fetch_max_bytes,
+        fetch_partition_max_bytes,
+        request_timeout,
+        client_rack,
+        security,
+    } = config;
+    let StartupState {
+        generation_id,
+        assigned_partitions,
+        next_offsets,
+        positions,
+        topic_ids,
+        topic_partitions,
+    } = startup;
+    // 6. Spawn the coordinator task (heartbeat + rebalance loop) on its
+    //    own connection.
+    //
+    //    The broker processes requests serially per TCP connection: a
+    //    JoinGroup parked in the rebalance-join purgatory (up to
+    //    INITIAL_REBALANCE_DELAY per round, and cooperative rounds
+    //    cascade) blocks every later request on that same socket. If the
+    //    coordinator shared `poll()`'s connection, a `Fetch` issued
+    //    mid-rebalance would head-of-line-block behind the parked
+    //    JoinGroup and stall until the client request timeout. A dedicated
+    //    coordinator connection keeps the data path (`poll`/commit)
+    //    independent of the group-protocol path. (The JVM client never
+    //    hits this because real brokers serve a connection's requests
+    //    concurrently.)
+    let coordinator_client = Client::builder()
+        .bootstrap(&bootstrap)
+        .client_id(client_id.clone())
+        .connect_timeout(request_timeout)
+        .request_timeout(request_timeout)
+        .maybe_security(security.clone())
+        .build()
+        .await?;
+
+    let assigned = Arc::new(Mutex::new(assigned_partitions));
+    let next_offsets = Arc::new(Mutex::new(next_offsets));
+    let positions = Arc::new(Mutex::new(positions));
+    let pending_seeks = Arc::new(Mutex::new(HashMap::new()));
+    let topic_ids = Arc::new(Mutex::new(topic_ids));
+    // Shared with the coordinator task so the commit path always stamps the
+    // current generation; the coordinator publishes to it on every (re)join.
+    let current_generation = Arc::new(AtomicI32::new(generation_id));
+
+    let shutdown = CancellationToken::new();
+    let state = CoordinatorState {
+        client: coordinator_client,
+        group_id: group_id.clone(),
+        coordinator_id: Arc::clone(&coordinator_id),
+        member_id: member_id.clone(),
+        group_instance_id: group_instance_id.clone(),
+        generation_id,
+        current_generation: Arc::clone(&current_generation),
+        assignor,
+        subscribed_topics: subscribe.clone(),
+        assigned: Arc::clone(&assigned),
+        next_offsets: Arc::clone(&next_offsets),
+        positions: Arc::clone(&positions),
+        topic_ids: Arc::clone(&topic_ids),
+        session_timeout,
+        rebalance_timeout,
+        heartbeat_interval,
+        auto_offset_reset,
+        client_rack: client_rack.clone(),
+        // The metadata snapshot this initial assignment was computed against,
+        // threaded to the coordinator so its rejoin baseline starts from
+        // exactly what we saw here — not a fresh fetch that could already
+        // include a topic created during start-up (which would strand a
+        // cold-start empty assignment permanently).
+        initial_subscribed_counts: topic_partitions,
+    };
+    // IMPORTANT: `tokio::spawn` is the very last operation — no `.await`
+    // follows it.  Dropping a timed-out `start_once` future before this
+    // point cancels all in-flight connections without spawning anything.
+    let coord_handle = tokio::spawn(crate::coordinator::run(state, shutdown.clone()));
+
+    Ok(Consumer {
+        client,
+        group_id,
+        coordinator_id,
+        member_id,
+        group_instance_id: group_instance_id.clone(),
+        current_generation,
+        subscribed_topics: subscribe,
+        assigned,
+        next_offsets,
+        positions,
+        pending_seeks,
+        topic_ids,
+        session_timeout,
+        heartbeat_interval,
+        assignor,
+        coordinator_shutdown: shutdown,
+        coordinator_handle: Some(coord_handle),
+        isolation_level,
+        fetch_max_bytes,
+        fetch_partition_max_bytes,
+        auto_offset_reset,
+    })
 }
 
 /// Returns `true` for transient startup errors where dropping the half-built
@@ -858,6 +1000,8 @@ impl Consumer {
         fields(group_id = %self.group_id, member_id = %self.member_id),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn close(mut self) -> Result<(), ConsumerError> {
         self.coordinator_shutdown.cancel();
         if let Some(h) = self.coordinator_handle.take() {

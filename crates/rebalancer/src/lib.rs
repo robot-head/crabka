@@ -66,7 +66,6 @@
 /// Pedantic lints are silenced here because the include is verbatim
 /// codegen output; we cannot retrofit `#[must_use]` annotations or
 /// shorter helper functions without forking the upstream codegen.
-#[allow(clippy::pedantic, clippy::style, clippy::useless_borrows_in_formatting)]
 pub mod pb {
     include!(concat!(env!("OUT_DIR"), "/crabka.rebalancer.v1.rs"));
 }

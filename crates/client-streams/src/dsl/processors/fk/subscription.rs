@@ -157,9 +157,8 @@ mod tests {
         for e in v["instruction_ordinals"].as_array().unwrap() {
             let name = e["name"].as_str().unwrap();
             let byte = u8::try_from(e["byte"].as_u64().unwrap()).unwrap();
-            let instruction = Instruction::from_byte(byte).unwrap();
-            assert2::assert!(instruction.name() == name);
-            assert2::assert!(instruction.to_byte() == byte);
+            assert_eq!(Instruction::from_byte(byte).unwrap().name(), name);
+            assert_eq!(Instruction::from_byte(byte).unwrap().to_byte(), byte);
         }
     }
 
@@ -180,8 +179,12 @@ mod tests {
                 primary_key: Bytes::copy_from_slice(pk),
                 primary_partition: pp,
             };
-            assert2::assert!(w.serialize() == Bytes::from(hex(e["bytes_hex"].as_str().unwrap())));
-            assert2::assert!(SubscriptionWrapper::deserialize(&w.serialize()) == w.clone());
+            assert_eq!(
+                w.serialize(),
+                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                "subscription wrapper bytes mismatch: {e}"
+            );
+            assert_eq!(SubscriptionWrapper::deserialize(&w.serialize()), w);
         }
     }
 
@@ -195,8 +198,12 @@ mod tests {
                 hash: hash.clone(),
                 foreign_value: fv.clone(),
             };
-            assert2::assert!(w.serialize() == Bytes::from(hex(e["bytes_hex"].as_str().unwrap())));
-            assert2::assert!(SubscriptionResponseWrapper::deserialize(&w.serialize()) == w.clone());
+            assert_eq!(
+                w.serialize(),
+                Bytes::from(hex(e["bytes_hex"].as_str().unwrap())),
+                "response wrapper bytes mismatch: {e}"
+            );
+            assert_eq!(SubscriptionResponseWrapper::deserialize(&w.serialize()), w);
         }
     }
 

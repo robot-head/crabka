@@ -207,56 +207,86 @@ impl MockQuerier {
     }
 
     /// Enqueue a canned search-job response (FIFO).
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn stub_search(&self, p: SearchPartial) {
         self.search_stubs.lock().unwrap().push(p);
     }
 
     /// Enqueue a canned by-id-job response (FIFO).
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn stub_trace(&self, p: TracePartial) {
         self.trace_stubs.lock().unwrap().push(p);
     }
 
     /// Enqueue a canned tag-names-job response (FIFO).
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn stub_tag_names(&self, p: TagNamesPartial) {
         self.tag_names_stubs.lock().unwrap().push(p);
     }
 
     /// Enqueue a canned tag-values-job response (FIFO).
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn stub_tag_values(&self, p: TagValuesPartial) {
         self.tag_values_stubs.lock().unwrap().push(p);
     }
 
     /// Enqueue a canned metrics-job response (FIFO).
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn stub_metrics(&self, p: MetricsPartial) {
         self.metrics_stubs.lock().unwrap().push(p);
     }
 
     /// All recorded search-job requests, in dispatch order.
     #[must_use]
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn search_calls(&self) -> Vec<SearchJobRequest> {
         self.search_calls.lock().unwrap().clone()
     }
 
     /// All recorded by-id-job requests, in dispatch order.
     #[must_use]
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn trace_calls(&self) -> Vec<TraceByIdJobRequest> {
         self.trace_calls.lock().unwrap().clone()
     }
 
     /// All recorded tag-names-job requests, in dispatch order.
     #[must_use]
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn tag_names_calls(&self) -> Vec<TagNamesJobRequest> {
         self.tag_names_calls.lock().unwrap().clone()
     }
 
     /// All recorded tag-values-job requests, in dispatch order.
     #[must_use]
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn tag_values_calls(&self) -> Vec<TagValuesJobRequest> {
         self.tag_values_calls.lock().unwrap().clone()
     }
 
     /// All recorded metrics-job requests, in dispatch order.
     #[must_use]
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn metrics_calls(&self) -> Vec<MetricsJobRequest> {
         self.metrics_calls.lock().unwrap().clone()
     }

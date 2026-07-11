@@ -271,6 +271,7 @@ pub(crate) async fn reconcile_metrics(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::crd::KafkaSpec;
@@ -305,7 +306,7 @@ mod tests {
     #[test]
     fn render_pod_monitor_minimal_defaults() {
         let pm = render_pod_monitor(&test_kafka(), &PodMonitorSpec::default()).unwrap();
-        assert2::assert!(
+        assert!(
             pm == json!({
                 "apiVersion": "monitoring.coreos.com/v1",
                 "kind": "PodMonitor",
@@ -354,7 +355,7 @@ mod tests {
             labels: [("team".to_string(), "platform".to_string())].into(),
         };
         let pm = render_pod_monitor(&test_kafka(), &pm_spec).unwrap();
-        assert2::assert!(
+        assert!(
             pm == json!({
                 "apiVersion": "monitoring.coreos.com/v1",
                 "kind": "PodMonitor",
@@ -399,7 +400,7 @@ mod tests {
     #[test]
     fn render_service_monitor_kind_and_endpoints_key() {
         let sm = render_service_monitor(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
-        assert2::assert!(
+        assert!(
             sm == json!({
                 "apiVersion": "monitoring.coreos.com/v1",
                 "kind": "ServiceMonitor",
@@ -444,8 +445,8 @@ mod tests {
     fn render_metrics_service_is_headless_with_named_port() {
         let svc = render_metrics_service(&test_kafka(), &ServiceMonitorSpec::default()).unwrap();
         let spec = svc.spec.unwrap();
-        assert2::assert!(spec.cluster_ip.as_deref() == Some("None"));
-        assert2::assert!(
+        assert!(spec.cluster_ip.as_deref() == Some("None"));
+        assert!(
             spec.ports
                 == Some(vec![k8s_openapi::api::core::v1::ServicePort {
                     app_protocol: None,

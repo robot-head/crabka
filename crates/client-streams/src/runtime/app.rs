@@ -43,7 +43,6 @@ pub struct KafkaStreams {
 #[bon::bon]
 impl KafkaStreams {
     #[builder(start_fn = builder, finish_fn = build)]
-    #[allow(clippy::too_many_lines)]
     // one-shot constructor: broker I/O setup,
     // membership join, and the supervisor select-loop (now two IQ channels).
     #[tracing::instrument(
@@ -57,6 +56,8 @@ impl KafkaStreams {
         ),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into)] application_id: String,
@@ -205,6 +206,8 @@ impl KafkaStreams {
     /// A read-only view of the local `KeyValue` state store `name` for
     /// interactive queries. Errors if the store is not assigned here, or it is
     /// a different store kind.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn key_value_store<K, V>(
         &self,
         name: impl Into<String>,
@@ -222,6 +225,8 @@ impl KafkaStreams {
     }
 
     /// A read-only view of the local `Window` state store `name`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn window_store<K, V>(
         &self,
         name: impl Into<String>,
@@ -239,6 +244,8 @@ impl KafkaStreams {
     }
 
     /// A read-only view of the local `Session` state store `name`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn session_store<K, V>(
         &self,
         name: impl Into<String>,
@@ -289,6 +296,8 @@ impl KafkaStreams {
         fields(member_id = %self.member_id),
         err,
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn close(self) -> Result<(), StreamsClientError> {
         self.shutdown.cancel();
         let _ = self.handle.await;

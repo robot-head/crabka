@@ -16,6 +16,7 @@
 
 use std::process::Command;
 
+use assert2::assert;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_log::LogConfig;
 
@@ -108,7 +109,7 @@ async fn kafka_features_describe_and_round_trip() {
 
     // 1. describe — Crabka advertises + finalizes the feature surface.
     let desc = kafka_features(&["describe"]);
-    assert2::assert!(desc.status.success());
+    assert!(desc.status.success(), "describe failed");
     let out = String::from_utf8_lossy(&desc.stdout);
     // (feature, pinned starting finalized level; None = only presence is pinned)
     let features = [
@@ -117,9 +118,15 @@ async fn kafka_features_describe_and_round_trip() {
         ("transaction.version", Some(2)),
     ];
     for (feature, want_level) in features {
-        assert2::assert!(out.contains(feature));
+        assert!(
+            out.contains(feature),
+            "describe must list {feature}:\n{out}"
+        );
         if let Some(want) = want_level {
-            assert2::assert!(finalized_level(&out, feature) == Some(want));
+            assert!(
+                finalized_level(&out, feature) == Some(want),
+                "{feature} must start finalized at {want}:\n{out}"
+            );
         }
     }
 
@@ -131,10 +138,17 @@ async fn kafka_features_describe_and_round_trip() {
     ];
     for (verb, spec, want) in round_trip {
         let out = kafka_features(&[verb, "--feature", spec]);
-        assert2::assert!(out.status.success());
+        assert!(
+            out.status.success(),
+            "{verb} {spec} failed: {}",
+            String::from_utf8_lossy(&out.stderr)
+        );
         let desc = kafka_features(&["describe"]);
         let text = String::from_utf8_lossy(&desc.stdout);
-        assert2::assert!(finalized_level(&text, "transaction.version") == Some(want));
+        assert!(
+            finalized_level(&text, "transaction.version") == Some(want),
+            "transaction.version should be {want} after {verb}:\n{text}"
+        );
     }
 
     handle.shutdown().await;

@@ -1,4 +1,3 @@
-#![allow(clippy::doc_markdown, clippy::doc_lazy_continuation)]
 //! Integration tests for operator-managed
 //! oauth-jwks-trust Secret lifecycle. Verifies the full reconcile path:
 //! source Secret reads, PEM concatenation, managed Secret upsert,
@@ -11,6 +10,7 @@
 
 use std::sync::Arc;
 
+use assert2::assert;
 use base64::Engine as _;
 use crabka_operator::{
     controller::{
@@ -77,7 +77,7 @@ fn kafka_with_oauth_trust(name: &str, ns: &str, trust_certs: Vec<(&str, &str)>) 
         port: 9095,
         type_: ListenerType::Internal,
         tls: true,
-        authentication: Some(ListenerAuthentication::OAuth(cfg)),
+        authentication: Some(ListenerAuthentication::OAuth(Box::new(cfg))),
         configuration: None,
         network_policy_peers: None,
     };
@@ -227,7 +227,10 @@ async fn oauth_trust_creates_managed_secret_from_concatenated_pems() {
     expected.extend_from_slice(FAKE_PEM_1);
     expected.push(b'\n');
     expected.extend_from_slice(FAKE_PEM_2);
-    assert2::assert!(bundle == expected);
+    assert!(
+        bundle == expected,
+        "managed ca.crt must be PEM1 + '\\n' + PEM2"
+    );
 }
 
 // ── test 2: missing source Secret → MissingOauthTrustSecret ────────────────
@@ -248,41 +251,49 @@ async fn oauth_trust_missing_source_secret_rejects_with_missing_oauth_trust_secr
     assert_ready_false_with_reason(&observed, "c2", "MissingOauthTrustSecret");
 
     // No managed-Secret PATCH on a failure path.
-    assert2::assert!(!observed.iter().any(|r| r.method() == Method::PATCH
-        && r.uri().to_string().contains("/secrets/c2-oauth-jwks-trust")));
+    assert!(
+        !observed.iter().any(|r| r.method() == Method::PATCH
+            && r.uri().to_string().contains("/secrets/c2-oauth-jwks-trust")),
+        "managed Secret must not be PATCHed on MissingOauthTrustSecret",
+    );
 }
 
 // ── test 3: Secret present but key absent → MissingOauthTrustKey ───────────
 
 /// Secret exists but lacks the named key. Reason: `MissingOauthTrustKey`.
 #[tokio::test]
-async fn oauth_trust_invalid_secret_value_cases() {
-    for (name, cluster, namespace, secret_name, secret, reason) in [
-        (
-            "missing key",
-            "c3",
-            "n3",
-            "idp-ca-keyless",
-            source_secret_body_no_data("idp-ca-keyless", "n3"),
-            "MissingOauthTrustKey",
-        ),
-        (
-            "empty value",
-            "c4",
-            "n4",
-            "idp-ca-empty",
-            source_secret_body("idp-ca-empty", "n4", "ca.crt", b""),
-            "EmptyOauthTrustValue",
-        ),
-    ] {
-        let mut rules = rules_for_failure_path(cluster, namespace);
-        rules.push(rule_get_secret(secret_name, &secret));
-        let (ctx, state) = build_ctx(namespace, rules);
-        let kafka = kafka_with_oauth_trust(cluster, namespace, vec![(secret_name, "ca.crt")]);
-        reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
-        assert_ready_false_with_reason(&state.take_observed(), cluster, reason);
-        let _ = name;
-    }
+async fn oauth_trust_missing_key_in_source_secret_rejects_with_missing_oauth_trust_key() {
+    let mut rules = rules_for_failure_path("c3", "n3");
+    rules.push(rule_get_secret(
+        "idp-ca-keyless",
+        &source_secret_body_no_data("idp-ca-keyless", "n3"),
+    ));
+
+    let (ctx, state) = build_ctx("n3", rules);
+    let kafka = kafka_with_oauth_trust("c3", "n3", vec![("idp-ca-keyless", "ca.crt")]);
+    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_ready_false_with_reason(&observed, "c3", "MissingOauthTrustKey");
+}
+
+// ── test 4: Secret + key present but value zero bytes → EmptyOauthTrustValue ─
+
+/// Secret + key exist; value is zero bytes. Reason: `EmptyOauthTrustValue`.
+#[tokio::test]
+async fn oauth_trust_empty_key_value_rejects_with_empty_oauth_trust_value() {
+    let mut rules = rules_for_failure_path("c4", "n4");
+    rules.push(rule_get_secret(
+        "idp-ca-empty",
+        &source_secret_body("idp-ca-empty", "n4", "ca.crt", b""),
+    ));
+
+    let (ctx, state) = build_ctx("n4", rules);
+    let kafka = kafka_with_oauth_trust("c4", "n4", vec![("idp-ca-empty", "ca.crt")]);
+    reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
+
+    let observed = state.take_observed();
+    assert_ready_false_with_reason(&observed, "c4", "EmptyOauthTrustValue");
 }
 
 // ── test 5: empty tls_trusted_certificates → no managed Secret ─────────────
@@ -301,10 +312,15 @@ async fn oauth_trust_no_trust_certs_does_not_create_managed_secret() {
     reconcile_kafka(Arc::new(kafka), ctx).await.unwrap();
 
     let observed = state.take_observed();
-    assert2::assert!(
+    assert!(
         !observed
             .iter()
-            .any(|r| r.uri().to_string().contains("/secrets/c5-oauth-jwks-trust"))
+            .any(|r| r.uri().to_string().contains("/secrets/c5-oauth-jwks-trust")),
+        "no trust certs → no managed Secret traffic; observed: {:?}",
+        observed
+            .iter()
+            .map(|r| format!("{} {}", r.method(), r.uri()))
+            .collect::<Vec<_>>(),
     );
 }
 
@@ -334,7 +350,7 @@ async fn oauth_trust_managed_secret_updates_when_source_changes() {
     reconcile_kafka(Arc::new(kafka_a), ctx_a).await.unwrap();
     let observed_a = state_a.take_observed();
     let bundle_a = extract_managed_ca_crt(&observed_a, "c6-oauth-jwks-trust");
-    assert2::assert!(bundle_a == PEM_A);
+    assert!(bundle_a == PEM_A);
 
     // ── pass 2: source value B (fresh mock, rotated source) ───────────
     let items = vec![fake_pool_list_item("brokers", "n6", "c6", 1, 1)];
@@ -350,9 +366,12 @@ async fn oauth_trust_managed_secret_updates_when_source_changes() {
     reconcile_kafka(Arc::new(kafka_b), ctx_b).await.unwrap();
     let observed_b = state_b.take_observed();
     let bundle_b = extract_managed_ca_crt(&observed_b, "c6-oauth-jwks-trust");
-    assert2::assert!(bundle_b == PEM_B);
+    assert!(bundle_b == PEM_B);
 
-    assert2::assert!(bundle_a != bundle_b);
+    assert!(
+        bundle_a != bundle_b,
+        "rotated source must produce a rotated managed bundle"
+    );
 }
 
 // ── pool-reconcile fixtures (tests 7 + 8) ──────────────────────────────────
@@ -420,7 +439,7 @@ fn cleared_version_status() -> serde_json::Value {
 // ── test 7: StatefulSet mounts the managed trust Secret when present ───────
 
 /// Full pool reconcile with a parent Kafka CR that carries an OAuth
-/// listener + `tls_trusted_certificates`. Capture the StatefulSet
+/// listener + `tls_trusted_certificates`. Capture the `StatefulSet`
 /// PATCH body and assert it contains both the `oauth-jwks-trust`
 /// pod volume (sourcing `<parent>-oauth-jwks-trust`) and the matching
 /// `volumeMount` at `/etc/crabka/oauth-jwks-trust` (readOnly).
@@ -455,7 +474,10 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .iter()
         .find(|v| v["name"] == "oauth-jwks-trust")
         .unwrap_or_else(|| panic!("oauth-jwks-trust volume present; body = {body}"));
-    assert2::assert!(trust_vol["secret"]["secretName"] == "c7-oauth-jwks-trust");
+    assert!(
+        trust_vol["secret"]["secretName"] == "c7-oauth-jwks-trust",
+        "managed Secret name; body = {body}"
+    );
 
     // VolumeMount on the broker container.
     let containers = pod_spec["containers"]
@@ -472,14 +494,20 @@ async fn statefulset_mounts_oauth_jwks_trust_secret_when_trust_certs_present() {
         .iter()
         .find(|m| m["name"] == "oauth-jwks-trust")
         .unwrap_or_else(|| panic!("oauth-jwks-trust mount present; body = {body}"));
-    assert2::assert!(trust_mount["mountPath"].as_str() == Some("/etc/crabka/oauth-jwks-trust"));
-    assert2::assert!(trust_mount["readOnly"].as_bool() == Some(true));
+    assert!(
+        trust_mount["mountPath"] == "/etc/crabka/oauth-jwks-trust",
+        "mount path contract; body = {body}"
+    );
+    assert!(
+        trust_mount["readOnly"] == true,
+        "trust mount must be readOnly; body = {body}"
+    );
 }
 
 // ── test 8: StatefulSet omits the trust volume/mount when no trust certs ──
 
 /// Same pool fixture, but the parent Kafka CR carries no listeners
-/// (and therefore no OAuth trust certs). The StatefulSet PATCH body
+/// (and therefore no OAuth trust certs). The `StatefulSet` PATCH body
 /// must NOT carry the `oauth-jwks-trust` volume or mount.
 #[tokio::test]
 async fn statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs() {
@@ -507,7 +535,10 @@ async fn statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs() {
     let volumes = pod_spec["volumes"]
         .as_array()
         .expect("volumes array present");
-    assert2::assert!(volumes.iter().all(|v| v["name"] != "oauth-jwks-trust"));
+    assert!(
+        volumes.iter().all(|v| v["name"] != "oauth-jwks-trust"),
+        "no OAuth listener → no oauth-jwks-trust pod volume; body = {body}",
+    );
 
     let containers = pod_spec["containers"]
         .as_array()
@@ -519,5 +550,8 @@ async fn statefulset_omits_oauth_jwks_trust_volume_when_no_trust_certs() {
     let mounts = broker["volumeMounts"]
         .as_array()
         .expect("volumeMounts array present");
-    assert2::assert!(mounts.iter().all(|m| m["name"] != "oauth-jwks-trust"));
+    assert!(
+        mounts.iter().all(|m| m["name"] != "oauth-jwks-trust"),
+        "no OAuth listener → no oauth-jwks-trust mount; body = {body}",
+    );
 }

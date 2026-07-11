@@ -17,7 +17,6 @@ categories = ["api-bindings", "network-programming"]
 workspace = true
 
 [dependencies]
-assert2 = { workspace = true }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 # Schema-registry serdes (Avro/Protobuf/JSON) are a first-class, always-on part
 # of the streams client — no feature gate.
@@ -35,7 +34,7 @@ tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time",
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
 turso = "0.6"
-pollster = "1.0"
+pollster = "0.4"
 
 # Columnar / dataframe support (opt-in via the `arrow`, `columnar`, and
 # `polars` cargo features).
@@ -73,6 +72,7 @@ name = "format_pipeline"
 required-features = ["polars", "arrow"]
 
 [dev-dependencies]
+assert2 = { workspace = true }
 apache-avro = { workspace = true, features = ["derive"] }
 crabka-broker = { version = "0.3", path = "../broker", features = ["test-helpers"] }
 # Dev-only path dependency. Keep the crates.io requirement on the released

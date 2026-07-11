@@ -6,14 +6,17 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct NoOpRecord {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl NoOpRecord {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::no_op_record::NoOpRecord {
         crate::owned::no_op_record::NoOpRecord {
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
@@ -23,9 +26,7 @@ impl NoOpRecord {
 impl Encode for NoOpRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "NoOpRecord version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("NoOpRecord version out of range"));
         }
         let flex = is_flexible(version);
         if flex {
@@ -47,9 +48,7 @@ impl Encode for NoOpRecord {
 impl<'de> DecodeBorrow<'de> for NoOpRecord {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "NoOpRecord version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("NoOpRecord version out of range"));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -62,7 +61,7 @@ impl<'de> DecodeBorrow<'de> for NoOpRecord {
 #[cfg(test)]
 impl NoOpRecord {
     #[must_use]
-    pub fn populated(version: i16) -> Self {
+    pub fn populated(_version: i16) -> Self {
         Self::default()
     }
 }

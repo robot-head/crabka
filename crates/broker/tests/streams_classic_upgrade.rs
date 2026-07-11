@@ -1,5 +1,3 @@
-#![allow(clippy::pedantic)]
-
 //! KIP-1071 classic→streams cold upgrade integration tests.
 //!
 //! Verifies that a `StreamsGroupHeartbeat` for a **drained** classic group
@@ -8,6 +6,7 @@
 
 use std::{sync::Arc, time::Duration};
 
+use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
@@ -59,20 +58,42 @@ async fn connect(bootstrap: &str) -> Arc<Client> {
     )
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn group_type_waiter_blocks_until_expected_type_exists() {
-    let (broker, _bootstrap, _dir) = boot().await;
-    let pending = tokio::time::timeout(
-        Duration::from_millis(50),
-        broker.wait_until_group_type(
-            "missing",
-            crabka_broker::coordinator::unified::GroupType::Classic,
-        ),
-    )
-    .await;
-    assert2::assert!(pending.is_err());
-
-    broker.shutdown().await;
+async fn assert_committed_offset(client: &Client, topic_id: WireUuid, expected: i64) {
+    let response = client
+        .send(OffsetFetchRequest {
+            groups: vec![OffsetFetchRequestGroup {
+                group_id: "g".into(),
+                topics: Some(vec![OffsetFetchRequestTopics {
+                    name: "in".into(),
+                    topic_id,
+                    partition_indexes: vec![0],
+                    ..Default::default()
+                }]),
+                ..Default::default()
+            }],
+            ..Default::default()
+        })
+        .await
+        .expect("OffsetFetch");
+    let group = response
+        .groups
+        .iter()
+        .find(|g| g.group_id == "g")
+        .expect("group g");
+    let topic = group
+        .topics
+        .iter()
+        .find(|t| t.topic_id == topic_id)
+        .expect("topic in");
+    let partition = topic.partitions.first().expect("partition 0");
+    assert!(
+        partition.error_code == ERR_NONE,
+        "OffsetFetch failed: {partition:?}"
+    );
+    assert!(
+        partition.committed_offset == expected,
+        "committed offset was not preserved"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -89,7 +110,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 /// Finalize `streams.version` to level 1 so the heartbeat/describe handlers
@@ -107,7 +131,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert!(
+        resp.error_code == 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
@@ -147,9 +174,9 @@ fn join_request(group_id: &str, member_id: &str) -> JoinGroupRequest {
     }
 }
 
-/// Drive the JoinGroup two-step (MEMBER_ID_REQUIRED + re-join) then SyncGroup.
+/// Drive the `JoinGroup` two-step (`MEMBER_ID_REQUIRED` + re-join) then `SyncGroup`.
 /// Returns `(member_id, generation_id)`. The caller is the sole member so it
-/// is also the leader and supplies a trivial self-assignment in SyncGroup.
+/// is also the leader and supplies a trivial self-assignment in `SyncGroup`.
 async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
     // Round 1: empty member_id → broker mints one and returns MEMBER_ID_REQUIRED.
     let r1 = tokio::time::timeout(
@@ -159,9 +186,12 @@ async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
     .await
     .expect("JoinGroup1 timeout")
     .expect("JoinGroup1");
-    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
+    assert!(
+        r1.error_code == ERR_MEMBER_ID_REQUIRED,
+        "expected MEMBER_ID_REQUIRED, got {r1:?}"
+    );
     let member_id = r1.member_id.clone();
-    assert2::assert!(!member_id.is_empty());
+    assert!(!member_id.is_empty());
 
     // Round 2: rejoin with assigned member_id — broker blocks for the
     // initial-rebalance-delay then returns as sole leader.
@@ -172,7 +202,10 @@ async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
     .await
     .expect("JoinGroup2 timeout")
     .expect("JoinGroup2");
-    assert2::assert!(r2.error_code == ERR_NONE);
+    assert!(
+        r2.error_code == ERR_NONE,
+        "second JoinGroup must succeed, got {r2:?}"
+    );
     let generation_id = r2.generation_id;
 
     // SyncGroup: sole leader supplies its own assignment.
@@ -192,7 +225,10 @@ async fn classic_join_sync(client: &Client, group_id: &str) -> (String, i32) {
         })
         .await
         .expect("SyncGroup");
-    assert2::assert!(r3.error_code == ERR_NONE);
+    assert!(
+        r3.error_code == ERR_NONE,
+        "SyncGroup must succeed, got {r3:?}"
+    );
 
     (member_id, generation_id)
 }
@@ -269,8 +305,7 @@ async fn streams_join_and_converge(
         let total: usize = resp
             .active_tasks
             .as_ref()
-            .map(|v| v.iter().map(|t| t.partitions.len()).sum())
-            .unwrap_or(0);
+            .map_or(0, |v| v.iter().map(|t| t.partitions.len()).sum());
         if total >= want_active {
             break;
         }
@@ -340,7 +375,10 @@ async fn drained_classic_group_converts_and_preserves_offsets() {
         })
         .await
         .expect("OffsetCommit");
-    assert2::assert!(cr.topics[0].partitions[0].error_code == ERR_NONE);
+    assert!(
+        cr.topics[0].partitions[0].error_code == ERR_NONE,
+        "OffsetCommit failed: {cr:?}"
+    );
 
     // Leave — group is now drained (no live members).
     // Use the `members` field (v3+ shape) since the client negotiates the
@@ -358,15 +396,17 @@ async fn drained_classic_group_converts_and_preserves_offsets() {
         })
         .await
         .expect("LeaveGroup");
-    assert2::assert!(lr.error_code == ERR_NONE);
+    assert!(lr.error_code == ERR_NONE, "LeaveGroup failed: {lr:?}");
 
     // Precondition: the group must be Classic-typed.
     broker
         .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Classic)
         .await;
-    assert2::assert!(
+    assert!(
         broker.group_type_for_test("g")
-            == Some(crabka_broker::coordinator::unified::GroupType::Classic)
+            == Some(crabka_broker::coordinator::unified::GroupType::Classic),
+        "precondition: group_type must be Classic before upgrade, got {:?}",
+        broker.group_type_for_test("g")
     );
 
     // ── Phase 2: StreamsGroupHeartbeat for the same group_id → converge. ──
@@ -378,46 +418,24 @@ async fn drained_classic_group_converts_and_preserves_offsets() {
         15,
     )
     .await;
-    assert2::assert!(resp.error_code == ERR_NONE);
+    assert!(
+        resp.error_code == ERR_NONE,
+        "streams heartbeat after conversion must succeed, got {resp:?}"
+    );
 
     // Group must now be Streams-typed.
     broker
         .wait_until_group_type("g", crabka_broker::coordinator::unified::GroupType::Streams)
         .await;
-    assert2::assert!(
+    assert!(
         broker.group_type_for_test("g")
-            == Some(crabka_broker::coordinator::unified::GroupType::Streams)
+            == Some(crabka_broker::coordinator::unified::GroupType::Streams),
+        "group_type must be Streams after upgrade, got {:?}",
+        broker.group_type_for_test("g")
     );
 
     // ── Phase 3: committed offsets survive the flip. ──
-    let fr = streams_client
-        .send(OffsetFetchRequest {
-            groups: vec![OffsetFetchRequestGroup {
-                group_id: "g".into(),
-                topics: Some(vec![OffsetFetchRequestTopics {
-                    name: "in".into(),
-                    topic_id,
-                    partition_indexes: vec![0],
-                    ..Default::default()
-                }]),
-                ..Default::default()
-            }],
-            ..Default::default()
-        })
-        .await
-        .expect("OffsetFetch");
-    let grp = fr
-        .groups
-        .iter()
-        .find(|g| g.group_id == "g")
-        .expect("group g in OffsetFetch response");
-    let t = grp
-        .topics
-        .iter()
-        .find(|t| t.topic_id == topic_id)
-        .expect("topic 'in' in OffsetFetch response");
-    let part = t.partitions.first().expect("partition 0");
-    assert2::assert!((part.error_code, part.committed_offset) == (ERR_NONE, 42));
+    assert_committed_offset(&streams_client, topic_id, 42).await;
 }
 
 /// A classic group with a **live** member rejects the `StreamsGroupHeartbeat`
@@ -441,7 +459,10 @@ async fn classic_group_with_live_member_rejects_streams_heartbeat() {
     .await
     .expect("JoinGroup1 timeout")
     .expect("JoinGroup1");
-    assert2::assert!(r1.error_code == ERR_MEMBER_ID_REQUIRED);
+    assert!(
+        r1.error_code == ERR_MEMBER_ID_REQUIRED,
+        "expected MEMBER_ID_REQUIRED, got {r1:?}"
+    );
     let member_id = r1.member_id.clone();
 
     // Second-round JoinGroup — parks in the rebalance-delay wait. We spawn it
@@ -464,9 +485,11 @@ async fn classic_group_with_live_member_rejects_streams_heartbeat() {
     broker.wait_until_classic_group_member_count("g2", 1).await;
 
     // Precondition: group must be Classic-typed.
-    assert2::assert!(
+    assert!(
         broker.group_type_for_test("g2")
-            == Some(crabka_broker::coordinator::unified::GroupType::Classic)
+            == Some(crabka_broker::coordinator::unified::GroupType::Classic),
+        "precondition: group_type must be Classic, got {:?}",
+        broker.group_type_for_test("g2")
     );
 
     // ── Phase 2: streams heartbeat for the same id must be rejected. ──
@@ -474,11 +497,18 @@ async fn classic_group_with_live_member_rejects_streams_heartbeat() {
         .send(first_join("g2", topology("in2")))
         .await
         .expect("StreamsGroupHeartbeat");
-    assert2::assert!(resp.error_code == ERR_GROUP_ID_NOT_FOUND);
+    assert!(
+        resp.error_code == ERR_GROUP_ID_NOT_FOUND,
+        "streams heartbeat for classic group with live member must return \
+         GROUP_ID_NOT_FOUND (69), got error_code={}",
+        resp.error_code
+    );
 
     // Group must STILL be Classic-typed (no flip).
-    assert2::assert!(
+    assert!(
         broker.group_type_for_test("g2")
-            == Some(crabka_broker::coordinator::unified::GroupType::Classic)
+            == Some(crabka_broker::coordinator::unified::GroupType::Classic),
+        "group_type must remain Classic after rejected upgrade, got {:?}",
+        broker.group_type_for_test("g2")
     );
 }

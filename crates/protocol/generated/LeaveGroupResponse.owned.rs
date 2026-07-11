@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 5;
 pub const FLEXIBLE_MIN: i16 = 4;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -27,10 +27,7 @@ pub struct LeaveGroupResponse {
 impl Encode for LeaveGroupResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 1 {
@@ -64,12 +61,8 @@ impl Encode for LeaveGroupResponse {
         }
         if version >= 3 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
-                let body: usize = (self.members)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.members).len(), flex);
+                let body: usize = (self.members).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -83,10 +76,7 @@ impl Encode for LeaveGroupResponse {
 impl Decode<'_> for LeaveGroupResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -140,11 +130,7 @@ impl Encode for MemberResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 4;
         if version >= 3 {
-            if flex {
-                put_compact_string(buf, &self.member_id);
-            } else {
-                put_string(buf, &self.member_id);
-            }
+            if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) }
         }
         if version >= 3 {
             if flex {
@@ -166,11 +152,7 @@ impl Encode for MemberResponse {
         let flex = version >= 4;
         let mut n: usize = 0;
         if version >= 3 {
-            n += if flex {
-                compact_string_len(&self.member_id)
-            } else {
-                string_len(&self.member_id)
-            };
+            n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) };
         }
         if version >= 3 {
             n += if flex {
@@ -194,18 +176,10 @@ impl Decode<'_> for MemberResponse {
         let flex = version >= 4;
         let mut out = Self::default();
         if version >= 3 {
-            out.member_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 3 {
-            out.group_instance_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.group_instance_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 3 {
             out.error_code = get_i16(buf)?;

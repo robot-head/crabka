@@ -112,6 +112,8 @@ fn common_struct_needs_lifetime(
 
 /// Build a resolution map for one message. Maps each `PascalCase` type name
 /// referenced anywhere in the field tree to its kind + Rust path.
+/// # Errors
+/// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>, ResolveError> {
     let mut map = HashMap::new();
 
@@ -167,6 +169,8 @@ pub fn resolve_message(spec: &MessageSpec) -> Result<HashMap<String, Resolution>
 mod tests {
     use std::path::PathBuf;
 
+    use assert2::assert;
+
     use super::*;
     use crate::ir;
 
@@ -184,7 +188,7 @@ mod tests {
     fn api_versions_request_has_no_nested_structs() {
         let spec = load("ApiVersionsRequest");
         let map = resolve_message(&spec).unwrap();
-        assert2::assert!(map.is_empty());
+        assert!(map.is_empty(), "found unexpected struct refs: {map:?}");
     }
 
     #[test]
@@ -192,6 +196,9 @@ mod tests {
         let spec = load("MetadataRequest");
         let map = resolve_message(&spec).unwrap();
         // MetadataRequest declares a nested MetadataRequestTopic struct.
-        assert2::assert!(map.contains_key("MetadataRequestTopic"));
+        assert!(
+            map.contains_key("MetadataRequestTopic"),
+            "did not resolve MetadataRequestTopic: {map:?}"
+        );
     }
 }

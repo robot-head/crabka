@@ -243,7 +243,6 @@ pub(crate) async fn compute_failover_changes(
 ///
 /// Pure; idempotent (after the change `broker` is neither leader nor in ISR,
 /// so a repeat yields an empty plan).
-#[allow(clippy::too_many_lines)]
 pub(crate) async fn compute_offline_dir_failover_changes(
     image: &MetadataImage,
     broker: NodeId,
@@ -388,14 +387,12 @@ pub(crate) async fn on_broker_dead(
 /// is a no-op — ISR expand happens organically via
 /// `isr_maintenance` once the rejoined broker's replicator catches up.
 /// The hook is here for future enhancements (e.g. auto-rebalance).
-#[allow(clippy::unused_async)]
-pub(crate) async fn on_broker_alive(
+pub(crate) fn on_broker_alive(
     _controller: &Arc<dyn crate::metadata_source::MetadataSource>,
     _node_id: NodeId,
     _alive: NodeId,
     _liveness: &Arc<ControllerLivenessState>,
-) -> Result<(), BrokerError> {
-    Ok(())
+) {
 }
 
 /// Operator-triggered election type per KIP-460.
@@ -550,7 +547,7 @@ pub(crate) async fn select_new_leader_for_partition(
 mod tests {
     use std::{collections::BTreeSet, net::SocketAddr, sync::Arc, time::Duration};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_metadata::{
         LeaderEpoch, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
@@ -656,45 +653,35 @@ mod tests {
         }
 
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            Err(RaftError::NotLeader {
-                current_leader: *self.leader_tx.borrow(),
-            })
+            unimplemented!("unused in leader_election tests")
         }
 
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            Err(RaftError::NotLeader {
-                current_leader: *self.leader_tx.borrow(),
-            })
+            unimplemented!("unused in leader_election tests")
         }
 
         fn controller_bound_addr(&self) -> SocketAddr {
-            SocketAddr::from(([0, 0, 0, 0], 0))
+            unimplemented!("unused in leader_election tests")
         }
 
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            SnapshotRange::NoSnapshot
+            unimplemented!("unused in leader_election tests")
         }
 
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            Ok(())
+            unimplemented!("unused in leader_election tests")
         }
 
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            Err(RaftError::NotLeader {
-                current_leader: *self.leader_tx.borrow(),
-            })
+            unimplemented!("unused in leader_election tests")
         }
 
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            Err(RaftError::NotLeader {
-                current_leader: *self.leader_tx.borrow(),
-            })
+            unimplemented!("unused in leader_election tests")
         }
 
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            Err(RaftError::NotLeader {
-                current_leader: *self.leader_tx.borrow(),
-            })
+            unimplemented!("unused in leader_election tests")
         }
 
         async fn cancel(&self) {}
@@ -724,15 +711,14 @@ mod tests {
             directories: vec![],
             partition_epoch: 1,
         };
-        assert2::assert!(new_pr == expected);
+        assert!(new_pr == expected);
     }
 
     #[tokio::test]
     async fn preferred_election_error_cases() {
         // Replicas are always [1, 2, 3]; the preferred leader is replica 1.
         // (current_leader, isr, alive, expected)
-        type TestCase1<'a> = (u64, &'a [u64], &'a [u64], ElectError);
-        let cases: [TestCase1<'_>; 3] = [
+        let cases: [(u64, &[u64], &[u64], ElectError); 3] = [
             // Preferred replica 1 is already the leader.
             (
                 1,
@@ -751,7 +737,10 @@ mod tests {
             let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Preferred)
                 .await
                 .unwrap_err();
-            assert2::assert!(err == expected);
+            assert!(
+                err == expected,
+                "leader {leader}, isr {isr:?}, alive {alive:?}"
+            );
         }
     }
 
@@ -775,7 +764,7 @@ mod tests {
             directories: vec![],
             partition_epoch: 1,
         };
-        assert2::assert!(new_pr == expected);
+        assert!(new_pr == expected);
     }
 
     #[tokio::test]
@@ -785,7 +774,7 @@ mod tests {
         let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Unclean)
             .await
             .unwrap_err();
-        assert2::assert!(err == ElectError::NoEligibleReplica);
+        assert!(err == ElectError::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -795,7 +784,7 @@ mod tests {
         let err = select_new_leader_for_partition(&img, &l, "foo", 0, ElectionType::Unclean)
             .await
             .unwrap_err();
-        assert2::assert!(err == ElectError::ElectionNotNeeded);
+        assert!(err == ElectError::ElectionNotNeeded);
     }
 
     #[tokio::test]
@@ -825,7 +814,7 @@ mod tests {
             directories: vec![],
             partition_epoch: 1,
         };
-        assert2::assert!(new_pr == expected);
+        assert!(new_pr == expected);
     }
 
     #[tokio::test]
@@ -837,15 +826,15 @@ mod tests {
         let new_pr = select_replacement_leader_for_shutdown(&img, &l, "foo", 0, NodeId(1))
             .await
             .expect("should pick replacement");
-        assert2::assert!((new_pr.leader, new_pr.leader_epoch) == (NodeId(3), LeaderEpoch(6)));
+        assert!(new_pr.leader == 3);
+        assert!(new_pr.leader_epoch == 6);
     }
 
     #[tokio::test]
     async fn shutdown_replacement_error_cases() {
         // Replicas are always [1, 2, 3]; leader is always broker 1.
         // (isr, alive, shutting_down, expected)
-        type TestCase2 = (&'static [u64], &'static [u64], u64, ElectError);
-        let cases: [TestCase2; 3] = [
+        let cases: [(&[u64], &[u64], u64, ElectError); 3] = [
             // Broker 5 wants to shut down, but leader is 1. No-op.
             (&[1, 2, 3], &[1, 2, 3, 5], 5, ElectError::ElectionNotNeeded),
             // Broker 1 wants to drain. ISR is {1} only (singleton). No
@@ -862,7 +851,10 @@ mod tests {
                 select_replacement_leader_for_shutdown(&img, &l, "foo", 0, NodeId(shutting_down))
                     .await
                     .unwrap_err();
-            assert2::assert!(err == expected);
+            assert!(
+                err == expected,
+                "isr {isr:?}, alive {alive:?}, shutting_down {shutting_down}"
+            );
         }
     }
 
@@ -873,7 +865,7 @@ mod tests {
         let err = select_replacement_leader_for_shutdown(&img, &l, "ghost", 0, NodeId(1))
             .await
             .unwrap_err();
-        assert2::assert!(err == ElectError::UnknownTopicOrPartition);
+        assert!(err == ElectError::UnknownTopicOrPartition);
     }
 
     #[tokio::test]
@@ -883,7 +875,7 @@ mod tests {
         let err = select_new_leader_for_partition(&img, &l, "ghost", 0, ElectionType::Preferred)
             .await
             .unwrap_err();
-        assert2::assert!(err == ElectError::UnknownTopicOrPartition);
+        assert!(err == ElectError::UnknownTopicOrPartition);
     }
 
     // ── KIP-841: automatic-failover + unclean.leader.election.enable ────────
@@ -911,7 +903,10 @@ mod tests {
     /// Extract the single-element `PartitionRecord` from a one-entry change
     /// list. Panics if the list is empty or carries a non-partition record.
     fn one_partition_change(changes: &[MetadataRecord]) -> &PartitionRecord {
-        assert2::assert!(changes.len() == 1);
+        assert!(
+            changes.len() == 1,
+            "expected exactly one change, got {changes:?}"
+        );
         match &changes[0] {
             MetadataRecord::V1Partition(pr) => pr,
             other => panic!("expected V1Partition, got {other:?}"),
@@ -933,7 +928,7 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
         // leader_epoch and partition_epoch must both bump on election.
         let expected = PartitionRecord {
@@ -948,7 +943,7 @@ mod tests {
             directories: vec![],
             partition_epoch: 1,
         };
-        assert2::assert!(*pr == expected);
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -970,10 +965,9 @@ mod tests {
         .await;
 
         let pr = one_partition_change(&plan.changes);
-        assert2::assert!(
-            (pr.leader, &pr.isr, pr.leader_epoch)
-                == (NodeId(2), &vec![NodeId(2), NodeId(3)], LeaderEpoch(6))
-        );
+        assert!(pr.leader == 2);
+        assert!(pr.isr == vec![NodeId(2), NodeId(3)]);
+        assert!(pr.leader_epoch == 6, "leader_epoch must bump on election");
     }
 
     #[tokio::test]
@@ -994,8 +988,8 @@ mod tests {
         )
         .await;
 
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.changes.is_empty());
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -1015,8 +1009,12 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(
+            plan.changes.is_empty(),
+            "default-off must not emit any change, got {:?}",
+            plan.changes,
+        );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -1032,7 +1030,7 @@ mod tests {
         }
         let metrics = crate::metrics::BrokerMetrics::new();
         let plan = compute_failover_changes(&img, /*dead=*/ NodeId(1), &l, &metrics).await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
         // Must elect the first alive replica (broker 2) with a singleton
         // ISR (KIP-841) and a bumped leader_epoch.
@@ -1048,9 +1046,9 @@ mod tests {
             directories: vec![],
             partition_epoch: 1,
         };
-        assert2::assert!(*pr == expected);
+        assert!(*pr == expected);
         // Each unclean election bumps the counter exactly once.
-        assert2::assert!(metrics.unclean_leader_elections_total.get() == 1);
+        assert!(metrics.unclean_leader_elections_total.get() == 1);
     }
 
     #[tokio::test]
@@ -1065,7 +1063,7 @@ mod tests {
         }
         let metrics = crate::metrics::BrokerMetrics::new();
         let _ = compute_failover_changes(&img, /*dead=*/ NodeId(1), &l, &metrics).await;
-        assert2::assert!(metrics.unclean_leader_elections_total.get() == 0);
+        assert!(metrics.unclean_leader_elections_total.get() == 0);
     }
 
     #[tokio::test]
@@ -1082,8 +1080,12 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(
+            plan.changes.is_empty(),
+            "no alive replica → no election, got {:?}",
+            plan.changes,
+        );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -1102,8 +1104,11 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(
+            plan.changes.is_empty(),
+            "explicit `false` keeps safe default"
+        );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -1122,9 +1127,10 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert2::assert!((pr.leader, &pr.isr) == (NodeId(3), &vec![NodeId(3)]));
+        assert!(pr.leader == 3);
+        assert!(pr.isr == vec![NodeId(3)]);
     }
 
     #[tokio::test]
@@ -1145,9 +1151,13 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
-        assert2::assert!((pr.leader, &pr.isr) == (NodeId(2), &vec![NodeId(2)]));
+        assert!(pr.leader == 2);
+        assert!(
+            pr.isr == vec![NodeId(2)],
+            "clean ISR-only election keeps the surviving ISR member, not a singleton-of-some-other-replica"
+        );
     }
 
     #[tokio::test]
@@ -1167,7 +1177,7 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
         // Leader unchanged; a non-leader-change must NOT bump leader_epoch
         // (stays 5) but does bump partition_epoch.
@@ -1183,7 +1193,7 @@ mod tests {
             directories: vec![],
             partition_epoch: 1,
         };
-        assert2::assert!(*pr == expected);
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -1206,9 +1216,10 @@ mod tests {
         .expect("broker dead handling should submit");
 
         let batches = source.submitted_batches().await;
-        assert2::assert!(batches.len() == 1);
+        assert!(batches.len() == 1);
         let pr = one_partition_change(&batches[0]);
-        assert2::assert!((pr.leader, pr.partition_epoch) == (NodeId(2), 1));
+        assert!(pr.leader == 2);
+        assert!(pr.partition_epoch == 1);
     }
 
     // ── KIP-112: compute_offline_dir_failover_changes ───────────────────────
@@ -1275,7 +1286,7 @@ mod tests {
             directories: vec![bad, good, good],
             partition_epoch: 1,
         };
-        assert2::assert!(*pr == expected);
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -1296,7 +1307,7 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
+        assert!(plan.changes.is_empty());
     }
 
     #[tokio::test]
@@ -1332,7 +1343,7 @@ mod tests {
             directories: vec![good, bad, good],
             partition_epoch: 1,
         };
-        assert2::assert!(*pr == expected);
+        assert!(*pr == expected);
     }
 
     #[tokio::test]
@@ -1355,7 +1366,7 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
+        assert!(plan.changes.is_empty());
     }
 
     // ── KIP-112: compute_offline_dir_failover_changes empty-ISR branches ──────
@@ -1384,8 +1395,16 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)]);
+        assert!(
+            plan.changes.is_empty(),
+            "Balanced strategy must not make an immediate change; got {:?}",
+            plan.changes
+        );
+        assert!(
+            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)],
+            "Balanced strategy must enqueue a recovery job; got {:?}",
+            plan.recoveries
+        );
     }
 
     #[tokio::test]
@@ -1407,9 +1426,11 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(
-            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Aggressive)]
+        assert!(plan.changes.is_empty());
+        assert!(
+            plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Aggressive)],
+            "Aggressive strategy must enqueue a recovery job; got {:?}",
+            plan.recoveries
         );
     }
 
@@ -1430,7 +1451,7 @@ mod tests {
         let metrics = crate::metrics::BrokerMetrics::new();
         let plan =
             compute_offline_dir_failover_changes(&img, NodeId(1), &offline, &l, &metrics).await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(plan.recoveries.is_empty());
         let pr = one_partition_change(&plan.changes);
         // Must elect broker 3 (only alive out-of-ISR) with a singleton
         // ISR (unclean election) and a bumped leader_epoch.
@@ -1446,8 +1467,11 @@ mod tests {
             directories: vec![bad, good, good],
             partition_epoch: 1,
         };
-        assert2::assert!(*pr == expected);
-        assert2::assert!(metrics.unclean_leader_elections_total.get() == 1);
+        assert!(*pr == expected);
+        assert!(
+            metrics.unclean_leader_elections_total.get() == 1,
+            "unclean counter must be bumped exactly once"
+        );
     }
 
     #[tokio::test]
@@ -1468,8 +1492,12 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.changes.is_empty());
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(
+            plan.changes.is_empty(),
+            "default-off must not emit any change; got {:?}",
+            plan.changes
+        );
+        assert!(plan.recoveries.is_empty());
     }
 
     #[tokio::test]
@@ -1519,13 +1547,12 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(
-            (&plan.changes, &plan.recoveries)
-                == (
-                    &Vec::new(),
-                    &vec![("t".to_string(), 0, RecoveryStrategy::Balanced)],
-                )
+        assert!(
+            plan.changes.is_empty(),
+            "Balanced strategy must defer to the URM, not elect immediately, got {:?}",
+            plan.changes,
         );
+        assert!(plan.recoveries == vec![("t".to_string(), 0, RecoveryStrategy::Balanced)]);
     }
 
     #[tokio::test]
@@ -1546,9 +1573,13 @@ mod tests {
             &crate::metrics::BrokerMetrics::new(),
         )
         .await;
-        assert2::assert!(plan.recoveries.is_empty());
+        assert!(
+            plan.recoveries.is_empty(),
+            "strategy None must not enqueue an offset-aware recovery",
+        );
         let pr = one_partition_change(&plan.changes);
-        assert2::assert!((pr.leader, &pr.isr) == (NodeId(2), &vec![NodeId(2)]));
+        assert!(pr.leader == 2, "legacy path picks first alive replica");
+        assert!(pr.isr == vec![NodeId(2)]);
     }
 }
 

@@ -79,10 +79,10 @@ fn arb_batch(codec: CompressionType) -> impl Strategy<Value = RecordBatch> {
                 .into_iter()
                 .enumerate()
                 .map(|(i, (key, value))| Record {
-                    #[allow(clippy::cast_possible_truncation, clippy::cast_possible_wrap)]
-                    offset_delta: i as i32, // 0, 1, 2, ... — strictly increasing; max 5
-                    #[allow(clippy::cast_possible_wrap)]
-                    timestamp_delta: ts_delta * i as i64,
+                    // 0, 1, 2, ... — strictly increasing; the strategy caps this at 5.
+                    offset_delta: i32::try_from(i).expect("record index must fit in i32"),
+                    timestamp_delta: ts_delta
+                        * i64::try_from(i).expect("record index must fit in i64"),
                     key,
                     value,
                     ..Default::default()

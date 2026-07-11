@@ -15,8 +15,6 @@
 //!
 //! Re-running this test regenerates the fixture file verbatim.
 
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -169,7 +167,7 @@ impl Drop for ContainerGuard {
 // ── REST helpers ──────────────────────────────────────────────────────────────
 
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {
@@ -229,7 +227,7 @@ async fn register_writer(http: &reqwest::Client, base: &str, subject: &str, sche
     eprintln!("CAPTURE registered writer for {subject}: {text}");
 }
 
-/// POST /compatibility/subjects/{subject}/versions/latest — returns is_compatible.
+/// POST /compatibility/subjects/{subject}/versions/latest — returns `is_compatible`.
 async fn check_compat(http: &reqwest::Client, base: &str, subject: &str, reader: &str) -> bool {
     let url = format!("{base}/compatibility/subjects/{subject}/versions/latest");
     let body = serde_json::json!({ "schema": reader });
@@ -250,7 +248,7 @@ async fn check_compat(http: &reqwest::Client, base: &str, subject: &str, reader:
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse compat response {text}: {e}"));
     let result = v
         .get("is_compatible")
-        .and_then(|x| x.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or_else(|| panic!("no bool `is_compatible` in {text}"));
     eprintln!("CAPTURE {subject} is_compatible={result}");
     result

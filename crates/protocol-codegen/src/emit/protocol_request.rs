@@ -15,6 +15,8 @@ use crate::{
 ///
 /// Returns `None` if the spec is not a `MessageType::Request`.
 #[must_use]
+/// # Panics
+/// Panics if the validated schema model cannot be represented as the expected Rust syntax tree.
 pub fn emit_protocol_request(spec: &MessageSpec) -> Option<String> {
     if spec.message_type != MessageType::Request {
         return None;

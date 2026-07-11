@@ -40,7 +40,6 @@ const WIRE_ELECTION_UNCLEAN: i8 = 1;
 /// retriable error.
 const OPERATOR_RECOVERY_DEADLINE: std::time::Duration = std::time::Duration::from_secs(25);
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_elect_leaders",
     level = "info",
@@ -83,34 +82,7 @@ pub(crate) async fn handle(
     //   topic_partitions = None      → every partition in the image
     //   Some([{topic, []}])          → every partition of that topic
     //   Some([{topic, [p, q, ...]}]) → exact set
-    let targets: Vec<(String, Vec<i32>)> = match &req.topic_partitions {
-        None => image
-            .topics()
-            .map(|t| {
-                (
-                    t.name.clone(),
-                    image
-                        .partitions_of(&t.name)
-                        .map(|p| p.partition)
-                        .collect::<Vec<_>>(),
-                )
-            })
-            .collect(),
-        Some(list) => list
-            .iter()
-            .map(|tp| {
-                let partitions = if tp.partitions.is_empty() {
-                    image
-                        .partitions_of(&tp.topic)
-                        .map(|p| p.partition)
-                        .collect()
-                } else {
-                    tp.partitions.clone()
-                };
-                (tp.topic.clone(), partitions)
-            })
-            .collect(),
-    };
+    let targets = resolve_targets(&image, &req);
 
     // Run the algorithm per target; accumulate new records to submit
     // and per-partition results to ship back.
@@ -133,45 +105,7 @@ pub(crate) async fn handle(
                 );
             if use_offset_aware {
                 let strategy = resolve_recovery_strategy(&image, topic);
-                let (tx, rx) = oneshot::channel();
-                broker
-                    .unclean_recovery
-                    .enqueue(RecoveryJob {
-                        topic: topic.clone(),
-                        partition: p,
-                        strategy,
-                        reply: Some(tx),
-                    })
-                    .await;
-                let row = match tokio::time::timeout(OPERATOR_RECOVERY_DEADLINE, rx).await {
-                    Ok(Ok(RecoveryOutcome::Elected(_))) => PartitionResult {
-                        partition_id: p,
-                        error_code: 0,
-                        error_message: None,
-                        ..Default::default()
-                    },
-                    Ok(Ok(RecoveryOutcome::NoEligibleReplica)) => PartitionResult {
-                        partition_id: p,
-                        error_code: codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
-                        error_message: Some("no eligible replica responded".into()),
-                        ..Default::default()
-                    },
-                    Ok(Ok(RecoveryOutcome::NotNeeded)) => PartitionResult {
-                        partition_id: p,
-                        error_code: codes::ELECTION_NOT_NEEDED,
-                        error_message: Some("partition already has a leader".into()),
-                        ..Default::default()
-                    },
-                    // Stale / InProgress, dropped reply channel, or the
-                    // operator deadline elapsed: surface a retriable error.
-                    _ => PartitionResult {
-                        partition_id: p,
-                        error_code: codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
-                        error_message: Some("unclean recovery in progress".into()),
-                        ..Default::default()
-                    },
-                };
-                rows.push(row);
+                rows.push(run_offset_aware_recovery(broker, topic, p, strategy).await);
                 continue;
             }
 
@@ -234,6 +168,82 @@ pub(crate) async fn handle(
         ..Default::default()
     };
     encode_response(&resp, api_version)
+}
+
+fn resolve_targets(
+    image: &crabka_metadata::MetadataImage,
+    request: &ElectLeadersRequest,
+) -> Vec<(String, Vec<i32>)> {
+    request.topic_partitions.as_ref().map_or_else(
+        || {
+            image
+                .topics()
+                .map(|topic| {
+                    let partitions = image
+                        .partitions_of(&topic.name)
+                        .map(|partition| partition.partition)
+                        .collect();
+                    (topic.name.clone(), partitions)
+                })
+                .collect()
+        },
+        |topics| {
+            topics
+                .iter()
+                .map(|topic| {
+                    let partitions = if topic.partitions.is_empty() {
+                        image
+                            .partitions_of(&topic.topic)
+                            .map(|partition| partition.partition)
+                            .collect()
+                    } else {
+                        topic.partitions.clone()
+                    };
+                    (topic.topic.clone(), partitions)
+                })
+                .collect()
+        },
+    )
+}
+
+async fn run_offset_aware_recovery(
+    broker: &Broker,
+    topic: &str,
+    partition: i32,
+    strategy: RecoveryStrategy,
+) -> PartitionResult {
+    let (tx, rx) = oneshot::channel();
+    broker
+        .unclean_recovery
+        .enqueue(RecoveryJob {
+            topic: topic.to_string(),
+            partition,
+            strategy,
+            reply: Some(tx),
+        })
+        .await;
+    let (error_code, error_message) =
+        match tokio::time::timeout(OPERATOR_RECOVERY_DEADLINE, rx).await {
+            Ok(Ok(RecoveryOutcome::Elected(_))) => (codes::NONE, None),
+            Ok(Ok(RecoveryOutcome::NoEligibleReplica)) => (
+                codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
+                Some("no eligible replica responded".into()),
+            ),
+            Ok(Ok(RecoveryOutcome::NotNeeded)) => (
+                codes::ELECTION_NOT_NEEDED,
+                Some("partition already has a leader".into()),
+            ),
+            _ => (
+                codes::ELIGIBLE_LEADERS_NOT_AVAILABLE,
+                Some("unclean recovery in progress".into()),
+            ),
+        };
+    PartitionResult {
+        partition_id: partition,
+        error_code,
+        error_message,
+        ..Default::default()
+    }
 }
 
 fn elect_error_to_wire(err: ElectError) -> (i16, &'static str) {

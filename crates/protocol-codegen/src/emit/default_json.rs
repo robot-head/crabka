@@ -14,12 +14,17 @@ use std::{fmt::Write as FmtWrite, str::FromStr};
 use proc_macro2::TokenStream;
 use quote::quote;
 
-use crate::ir::{FieldSpec, MessageSpec, VersionRange};
+use crate::{
+    emit::common::format_int_literal,
+    ir::{FieldSpec, MessageSpec, VersionRange},
+};
 
 /// Emit the `default_json(version: i16)` function body for the given message.
 /// The output is plain Rust source intended to be appended to the
 /// per-message owned module body.
 #[must_use]
+/// # Panics
+/// Panics if the validated schema model cannot be represented as the expected Rust syntax tree.
 pub fn emit_default_json(spec: &MessageSpec) -> String {
     let field_stmts = fields_stmts_tokens(&spec.fields);
 
@@ -179,7 +184,12 @@ fn scalar_value_expr(field_type: &str, val: &serde_json::Value, f: &FieldSpec) -
                 trimmed.to_string()
             };
             // Produce a json! Number value.
-            format!("::serde_json::json!({decimal})")
+            let literal = if base == "float64" {
+                decimal
+            } else {
+                format_int_literal(&decimal, "")
+            };
+            format!("::serde_json::json!({literal})")
         }
 
         serde_json::Value::String(s) if base == "bool" => {
@@ -197,7 +207,12 @@ fn scalar_value_expr(field_type: &str, val: &serde_json::Value, f: &FieldSpec) -
         }
 
         serde_json::Value::Number(n) => {
-            format!("::serde_json::json!({n})")
+            let literal = if base == "float64" {
+                n.to_string()
+            } else {
+                format_int_literal(&n.to_string(), "")
+            };
+            format!("::serde_json::json!({literal})")
         }
 
         serde_json::Value::Bool(b) => {

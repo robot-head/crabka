@@ -1,5 +1,5 @@
 //! Exhaustive stateright enumeration of the classic consumer-group membership
-//! state machine (KIP-345/62), wrapping the real [`super::Group`]. Drives the
+//! state machine (KIP-345/62), wrapping the real [`super::ClassicGroup`]. Drives the
 //! real `add_member` / `remove_member` / `complete_rebalance` /
 //! `install_assignments` / `expire_dead_members` + the handler's KIP-345 fence
 //! pre-check (`current_member_id_for_instance`) under every interleaving of join
@@ -17,7 +17,7 @@ use std::{
 use bytes::Bytes;
 use stateright::{Checker, Model, Property};
 
-use super::{Group, GroupState, Member};
+use super::{ClassicGroup, GroupState, Member};
 
 // Exhaustiveness is bounded on UNIQUE states (memory-proportional); the BFS's
 // generated count runs several times the unique count here (high branching:
@@ -58,7 +58,7 @@ fn mk_member(mid: &str, iid: Option<&str>, clock: i64) -> Member {
 
 /// Every index entry points at a live member carrying the matching instance id,
 /// and every static member has a matching index entry (bidirectional mirror).
-fn index_coherent(g: &Group) -> bool {
+fn index_coherent(g: &ClassicGroup) -> bool {
     for (iid, mid) in &g.static_members {
         match g.members.get(mid) {
             Some(m) if m.group_instance_id.as_deref() == Some(iid.as_str()) => {}
@@ -76,7 +76,7 @@ fn index_coherent(g: &Group) -> bool {
 }
 
 /// No two live members share a `group.instance.id` (no fencing-bypass).
-fn single_owner(g: &Group) -> bool {
+fn single_owner(g: &ClassicGroup) -> bool {
     let mut seen = std::collections::HashSet::new();
     for m in g.members.values() {
         if let Some(iid) = &m.group_instance_id
@@ -94,11 +94,11 @@ struct ClassicModel {
     max_clock: i64,
 }
 
-/// Model state: a real `Group` plus the logical clock. `Hash`/`Eq` are manual
-/// over a canonical projection because `Group` holds `HashMap`s.
+/// Model state: a real `ClassicGroup` plus the logical clock. `Hash`/`Eq` are manual
+/// over a canonical projection because `ClassicGroup` holds `HashMap`s.
 #[derive(Clone, Debug)]
 struct GrpState {
-    g: Group,
+    g: ClassicGroup,
     clock: i64,
 }
 
@@ -185,7 +185,7 @@ impl Model for ClassicModel {
 
     fn init_states(&self) -> Vec<Self::State> {
         vec![GrpState {
-            g: Group::new("g"),
+            g: ClassicGroup::new("g"),
             clock: 0,
         }]
     }
@@ -210,7 +210,6 @@ impl Model for ClassicModel {
         }
     }
 
-    #[allow(clippy::too_many_lines)]
     fn next_state(&self, last: &Self::State, action: Self::Action) -> Option<Self::State> {
         let mut s = last.clone();
         match action {
@@ -285,12 +284,15 @@ impl Model for ClassicModel {
                 s.clock += 1;
                 let dropped = s.g.expire_dead_members(at(s.clock));
                 for id in &dropped {
-                    assert2::assert!(!last.g.members.get(id).is_some_and(Member::is_static));
+                    assert!(
+                        !last.g.members.get(id).is_some_and(Member::is_static),
+                        "static member {id} was expired"
+                    );
                 }
             }
         }
-        assert2::assert!(index_coherent(&s.g));
-        assert2::assert!(single_owner(&s.g));
+        assert!(index_coherent(&s.g), "index coherence violated: {:?}", s.g);
+        assert!(single_owner(&s.g), "single-owner violated: {:?}", s.g);
         Some(s)
     }
 
@@ -340,9 +342,16 @@ fn run(model: ClassicModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < TARGET_STATE_COUNT);
-    assert2::assert!(checker.unique_state_count() < MAX_UNIQUE_STATES);
+    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    assert!(
+        checker.state_count() < TARGET_STATE_COUNT,
+        "[{label}] truncated at the state-count target — not exhaustive"
+    );
+    assert!(
+        checker.unique_state_count() < MAX_UNIQUE_STATES,
+        "[{label}] unique-state bound exceeded ({})",
+        checker.unique_state_count()
+    );
     checker.assert_properties();
 }
 
@@ -376,7 +385,7 @@ mod fuzz {
     use proptest::prelude::*;
 
     use super::{
-        super::{Group, GroupState},
+        super::{ClassicGroup, GroupState},
         at, index_coherent, mk_member, single_owner,
     };
 
@@ -404,14 +413,14 @@ mod fuzz {
     }
 
     proptest! {
-        /// Large-N random op sequences over a real `Group` (mirroring the handler
+        /// Large-N random op sequences over a real `ClassicGroup` (mirroring the handler
         /// fence guards + leave retrigger): the membership invariants hold after
         /// every step.
         #[test]
         fn classic_invariants_hold(ops in proptest::collection::vec(op_strategy(), 0..300)) {
             let mids = ["a", "b", "c"];
             let iids = ["x", "y"];
-            let mut g = Group::new("g");
+            let mut g = ClassicGroup::new("g");
             let mut clock: i64 = 0;
             for op in ops {
                 match op {

@@ -2,13 +2,10 @@
 
 use crate::primitives::fixed::{get_i32, get_i64, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
-use crate::tagged_fields::{
-    WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len,
-};
+use crate::tagged_fields::{WriteTaggedFields, encode_to_bytes, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::{Buf, BufMut};
 pub const API_KEY: i16 = 59;
@@ -16,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -34,17 +32,14 @@ impl Default for FetchSnapshotRequest {
             max_bytes: 2_147_483_647i32,
             topics: Vec::new(),
             cluster_id: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl Encode for FetchSnapshotRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -63,7 +58,7 @@ impl Encode for FetchSnapshotRequest {
         }
         if flex {
             let mut tagged = WriteTaggedFields::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 let payload = encode_to_bytes(
                     if flex {
                         compact_nullable_string_len(self.cluster_id.as_deref())
@@ -96,15 +91,14 @@ impl Encode for FetchSnapshotRequest {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if flex {
             let mut known_pairs: Vec<(u32, usize)> = Vec::new();
-            if !(self.cluster_id.is_none()) {
+            if self.cluster_id.is_some() {
                 known_pairs.push((
                     0,
                     if flex {
@@ -122,10 +116,7 @@ impl Encode for FetchSnapshotRequest {
 impl Decode<'_> for FetchSnapshotRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -151,11 +142,7 @@ impl Decode<'_> for FetchSnapshotRequest {
                 0 => {
                     tag_cluster_id = Some({
                         let b: &mut &[u8] = payload;
-                        if flex {
-                            get_compact_nullable_string_owned(b)?
-                        } else {
-                            get_nullable_string_owned(b)?
-                        }
+                        if flex { get_compact_nullable_string_owned(b)? } else { get_nullable_string_owned(b)? }
                     });
                     Ok(true)
                 }
@@ -198,11 +185,7 @@ impl Encode for TopicSnapshot {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.name);
-            } else {
-                put_string(buf, &self.name);
-            }
+            if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) }
         }
         if version >= 0 {
             {
@@ -222,20 +205,12 @@ impl Encode for TopicSnapshot {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.name)
-            } else {
-                string_len(&self.name)
-            };
+            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -251,11 +226,7 @@ impl Decode<'_> for TopicSnapshot {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.partitions = {
@@ -478,11 +449,11 @@ impl SnapshotId {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("replicaId".to_string(), ::serde_json::json!(-1));
-    obj.insert("maxBytes".to_string(), ::serde_json::json!(2147483647));
+    obj.insert("maxBytes".to_string(), ::serde_json::json!(2_147_483_647));
     obj.insert("topics".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }

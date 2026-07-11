@@ -196,8 +196,7 @@ impl FlowWorker {
                 security: p.security_target.clone(),
             },
             Duration::from_secs(5),
-        )
-        .await?;
+        );
 
         Ok(Self {
             runtime,
@@ -267,7 +266,7 @@ mod tests {
         crate::test_util::create_topic(&sb, "orders", 1).await;
         crate::test_util::produce(&sb, "orders", b"k", b"v").await;
 
-        let worker = FlowWorker::start(FlowWorkerParams {
+        let worker = Box::pin(FlowWorker::start(FlowWorkerParams {
             flow_name: "us-east__eu-west".into(),
             source_bootstrap: sb,
             target_bootstrap: tb.clone(),
@@ -280,7 +279,7 @@ mod tests {
             group_selector: crate::selector::Selector::compile(&[], &[]).unwrap(),
             security_source: None,
             security_target: None,
-        })
+        }))
         .await
         .unwrap();
 

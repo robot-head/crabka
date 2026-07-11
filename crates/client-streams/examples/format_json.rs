@@ -35,6 +35,6 @@ fn main() {
     let bytes = serde.serialize("orders.json", &event);
     let back: OrderEvent = serde.deserialize("orders.json", &bytes).unwrap();
     // docs:end json-roundtrip
-    assert2::assert!(back == event);
+    assert_eq!(back, event);
     println!("format_json: OK ({} bytes)", bytes.len());
 }

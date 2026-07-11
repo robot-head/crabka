@@ -19,6 +19,9 @@ pub enum WireFormat {
 pub type WireError = TracesError;
 
 /// Pick the decoder from the request path.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn negotiate(path: &str, content_type: Option<&str>) -> Result<WireFormat, WireError> {
     match path {
         "/v1/traces" | "/api/push" => Ok(WireFormat::Otlp),

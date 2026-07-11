@@ -29,7 +29,7 @@ use bytes::Bytes;
 use config::NextGenConfig;
 use crabka_protocol::records::{Record, RecordBatch};
 use dashmap::DashMap;
-use group::Group;
+use group::CoordinatorGroup;
 use offsets_log::OffsetsLog;
 use share::{
     actor::{ShareGroupActorHandle, ShareGroupActorMessage},
@@ -80,13 +80,13 @@ pub(crate) fn expired_member_ids<'a>(
 
 #[cfg(test)]
 mod helper_tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn first_join_member_id_preserves_client_supplied_id() {
-        assert2::assert!(first_join_member_id("member-a") == "member-a");
+        assert!(first_join_member_id("member-a") == "member-a");
     }
 
     #[test]
@@ -94,19 +94,15 @@ mod helper_tests {
         let member_id = first_join_member_id("");
 
         check!(!member_id.is_empty());
-        assert2::assert!(uuid::Uuid::parse_str(&member_id).is_ok());
+        assert!(uuid::Uuid::parse_str(&member_id).is_ok());
     }
 
     #[test]
     fn validate_member_epoch_maps_all_fencing_outcomes() {
-        for (_case, stored, request, expected) in [
-            ("unknown member", None, 7, Err(codes::UNKNOWN_MEMBER_ID)),
-            ("stale epoch", Some(5), 4, Err(codes::STALE_MEMBER_EPOCH)),
-            ("fenced epoch", Some(5), 6, Err(codes::FENCED_MEMBER_EPOCH)),
-            ("accepted epoch", Some(5), 5, Ok(5)),
-        ] {
-            assert2::assert!(validate_member_epoch(stored, request) == expected);
-        }
+        assert!(validate_member_epoch(None, 7) == Err(codes::UNKNOWN_MEMBER_ID));
+        assert!(validate_member_epoch(Some(5), 4) == Err(codes::STALE_MEMBER_EPOCH));
+        assert!(validate_member_epoch(Some(5), 6) == Err(codes::FENCED_MEMBER_EPOCH));
+        assert!(validate_member_epoch(Some(5), 5) == Ok(5));
     }
 
     #[test]
@@ -129,7 +125,7 @@ mod helper_tests {
             session_timeout,
         );
 
-        assert2::assert!(expired == vec!["expired".to_string()]);
+        assert!(expired == vec!["expired".to_string()]);
     }
 }
 
@@ -674,7 +670,7 @@ impl GroupCoordinator {
     }
 
     /// Spawn a classic actor seeded with a fully-replayed `Group` (bootstrap).
-    pub fn seed_classic(self: &Arc<Self>, group_id: &str, group: Box<Group>) {
+    pub fn seed_classic(self: &Arc<Self>, group_id: &str, group: Box<CoordinatorGroup>) {
         let handle = self.get_or_create_classic(group_id);
         let _ = handle.tx.try_send(GroupActorMessage::ClassicSeed(group));
     }
@@ -728,6 +724,8 @@ impl GroupCoordinator {
 
     /// Drop a **classic** group from the registry. `NonEmpty` if it still has
     /// live members; `NotFound` if unknown / consumer.
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn delete_group(&self, group_id: &str) -> Result<(), DeleteGroupError> {
         // KIP-1071: a Streams-locked group is deleted through the streams path —
         // never fall through to the classic path, which would remove the offset-home
@@ -1352,7 +1350,7 @@ pub struct StreamsGroupSeed {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -1607,10 +1605,10 @@ mod tests {
     fn mark_share_locks_group_type() {
         let coord = make_coord();
         coord.mark_share("sg");
-        assert2::assert!(coord.group_type("sg") == Some(GroupType::Share));
+        assert!(coord.group_type("sg") == Some(GroupType::Share));
         // First mark wins: a later mark_classic must not override.
         coord.mark_classic("sg");
-        assert2::assert!(coord.group_type("sg") == Some(GroupType::Share));
+        assert!(coord.group_type("sg") == Some(GroupType::Share));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1622,7 +1620,7 @@ mod tests {
         let coord = make_coord();
         let a = coord.get_or_create_group("g", GroupKindTag::Classic);
         let b = coord.get_or_create_group("g", GroupKindTag::Consumer);
-        assert2::assert!(Arc::ptr_eq(&a, &b));
+        assert!(Arc::ptr_eq(&a, &b));
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1630,41 +1628,41 @@ mod tests {
         let coord = make_coord();
         let a = coord.get_or_create_share("sg");
         let b = coord.get_or_create_share("sg");
-        assert2::assert!(Arc::ptr_eq(&a, &b));
-        assert2::assert!(coord.find_share("sg").is_some());
+        assert!(Arc::ptr_eq(&a, &b));
+        assert!(coord.find_share("sg").is_some());
     }
 
     #[test]
     fn mark_streams_after_upgrade_forces_streams_over_classic() {
         let c = make_coord();
         c.mark_classic("g");
-        assert2::assert!(c.group_type("g") == Some(GroupType::Classic));
+        assert!(c.group_type("g") == Some(GroupType::Classic));
         // or_insert mark_streams must NOT override an existing Classic lock:
         c.mark_streams("g");
-        assert2::assert!(c.group_type("g") == Some(GroupType::Classic));
+        assert!(c.group_type("g") == Some(GroupType::Classic));
         // The forced upgrade variant MUST override it:
         c.mark_streams_after_upgrade("g");
-        assert2::assert!(c.group_type("g") == Some(GroupType::Streams));
+        assert!(c.group_type("g") == Some(GroupType::Streams));
     }
 
     #[test]
     fn mark_classic_after_streams_downgrade_forces_classic_over_streams() {
         let c = make_coord();
         c.mark_streams("g");
-        assert2::assert!(c.group_type("g") == Some(GroupType::Streams));
+        assert_eq!(c.group_type("g"), Some(GroupType::Streams));
         // mark_classic is first-mark-wins, so it must NOT override an existing lock:
         c.mark_classic("g");
-        assert2::assert!(c.group_type("g") == Some(GroupType::Streams));
+        assert_eq!(c.group_type("g"), Some(GroupType::Streams));
         // The forced downgrade variant MUST override it:
         c.mark_classic_after_streams_downgrade("g");
-        assert2::assert!(c.group_type("g") == Some(GroupType::Classic));
+        assert_eq!(c.group_type("g"), Some(GroupType::Classic));
     }
 
     #[test]
     fn share_state_partition_metadata_none_then_some() {
         let coord = make_coord();
         // Unknown group → None.
-        assert2::assert!(coord.share_state_partition_metadata("sg").is_none());
+        assert!(coord.share_state_partition_metadata("sg").is_none());
 
         let tid = uuid::Uuid::from_u128(1);
         let v = share::persistence::ShareGroupStatePartitionMetadataValue {
@@ -1673,16 +1671,16 @@ mod tests {
         };
         coord.replay_share_state_partition_metadata("sg", v.clone());
         // Some after a replay, with the same contents.
-        assert2::assert!(coord.share_state_partition_metadata("sg") == Some(v));
+        assert!(coord.share_state_partition_metadata("sg") == Some(v));
     }
 
     #[test]
     fn debug_wrappers_write_type_names() {
         let source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(1)));
-        assert2::assert!(
+        assert!(
             format!("{:?}", MetadataSourceHandle(source.clone())).contains("MetadataSourceHandle")
         );
-        assert2::assert!(
+        assert!(
             format!("{:?}", ImageMetadataProvider { controller: source })
                 .contains("ImageMetadataProvider")
         );
@@ -1691,38 +1689,30 @@ mod tests {
     #[test]
     fn once_lock_getters_return_installed_first_values() {
         let coord = make_coord();
-        assert2::assert!(
-            (
-                coord.metadata_source().is_none(),
-                coord.share_persister().is_none(),
-            ) == (true, true)
-        );
+        assert!(coord.metadata_source().is_none());
+        assert!(coord.share_persister().is_none());
 
         let first_source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(1)));
         let second_source = fixed_source(crabka_metadata::MetadataImage::new(real_uuid(2)));
         coord.set_metadata_source(first_source.clone());
         coord.set_metadata_source(second_source);
         let got_source = coord.metadata_source().unwrap();
-        assert2::assert!(Arc::ptr_eq(&got_source, &first_source));
+        assert!(Arc::ptr_eq(&got_source, &first_source));
 
         let first_persister = make_share_persister(first_source.clone());
         let second_persister = make_share_persister(first_source);
         coord.set_share_persister(first_persister.clone());
         coord.set_share_persister(second_persister);
         let got_persister = coord.share_persister().unwrap();
-        assert2::assert!(Arc::ptr_eq(got_persister, &first_persister));
+        assert!(Arc::ptr_eq(got_persister, &first_persister));
     }
 
     #[test]
     fn cache_updates_and_forced_type_transitions_are_observable() {
         let coord = make_coord();
-        check!(
-            (
-                coord.cached_seed("g").is_none(),
-                coord.cached_share_seed("sg").is_none(),
-                coord.cached_streams_seed("st").is_none(),
-            ) == (true, true, true)
-        );
+        check!(coord.cached_seed("g") == None);
+        check!(coord.cached_share_seed("sg") == None);
+        check!(coord.cached_streams_seed("st") == None);
 
         coord.update_cache(
             "g",
@@ -1733,7 +1723,8 @@ mod tests {
             },
         );
         let cached = coord.cached_seed("g").unwrap();
-        assert2::assert!((cached.group_epoch, cached.target_epoch) == (7, 8));
+        assert!(cached.group_epoch == 7);
+        assert!(cached.target_epoch == 8);
 
         coord.seeds.insert(
             "g".into(),
@@ -1743,15 +1734,11 @@ mod tests {
             },
         );
         coord.mark_next_gen("g");
-        assert2::assert!(coord.group_type("g") == Some(GroupType::NextGen));
+        assert!(coord.group_type("g") == Some(GroupType::NextGen));
         coord.mark_classic_after_downgrade("g");
-        check!(
-            (
-                coord.group_type("g"),
-                coord.seeds.get("g").is_none(),
-                coord.cached_seed("g").is_none(),
-            ) == (Some(GroupType::Classic), true, true)
-        );
+        check!(coord.group_type("g") == Some(GroupType::Classic));
+        check!(coord.seeds.get("g").is_none());
+        check!(coord.cached_seed("g") == None);
 
         coord.update_share_cache(
             "sg",
@@ -1762,7 +1749,8 @@ mod tests {
             },
         );
         let share_cached = coord.cached_share_seed("sg").unwrap();
-        assert2::assert!((share_cached.group_epoch, share_cached.target_epoch) == (17, 18));
+        assert!(share_cached.group_epoch == 17);
+        assert!(share_cached.target_epoch == 18);
 
         coord.update_streams_cache(
             "st",
@@ -1773,7 +1761,8 @@ mod tests {
             },
         );
         let streams_cached = coord.cached_streams_seed("st").unwrap();
-        assert2::assert!((streams_cached.group_epoch, streams_cached.assignment_epoch) == (27, 28));
+        assert!(streams_cached.group_epoch == 27);
+        assert!(streams_cached.assignment_epoch == 28);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1786,22 +1775,22 @@ mod tests {
         check!(!Arc::ptr_eq(&share_a, &share_b));
 
         let streams_a = coord.get_or_create_streams("streams-a");
-        assert2::assert!(Arc::ptr_eq(
+        assert!(Arc::ptr_eq(
             &streams_a,
             &coord.get_or_create_streams("streams-a")
         ));
-        assert2::assert!(Arc::ptr_eq(
+        assert!(Arc::ptr_eq(
             &streams_a,
             &coord.find_streams("streams-a").unwrap()
         ));
 
         let mut share_ids = coord.share_group_ids();
         share_ids.sort();
-        assert2::assert!(share_ids == vec!["share-a".to_string(), "share-b".to_string()]);
+        assert!(share_ids == vec!["share-a".to_string(), "share-b".to_string()]);
 
         let mut streams_ids = coord.streams_group_ids();
         streams_ids.sort();
-        assert2::assert!(streams_ids == vec!["streams-a".to_string()]);
+        assert!(streams_ids == vec!["streams-a".to_string()]);
 
         coord.shutdown_all().await;
     }
@@ -1809,7 +1798,7 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn conversion_paths_update_type_locks_and_report_missing_streams() {
         let (coord, offsets_log) = make_coord_with_log();
-        assert2::assert!(
+        assert!(
             coord
                 .try_convert_classic_to_streams("fresh", 100)
                 .await
@@ -1846,7 +1835,7 @@ mod tests {
         check!(offsets_log.appended.lock().await.len() == 2);
 
         coord.mark_streams("missing-streams-actor");
-        assert2::assert!(
+        assert!(
             coord.delete_group("missing-streams-actor").await == Err(DeleteGroupError::NotFound)
         );
     }
@@ -1865,8 +1854,8 @@ mod tests {
             group.tx.is_closed() && share.tx.is_closed()
         })
         .await;
-        assert2::assert!(group.tx.is_closed());
-        assert2::assert!(share.tx.is_closed());
+        assert!(group.tx.is_closed());
+        assert!(share.tx.is_closed());
     }
 
     #[test]
@@ -1902,8 +1891,8 @@ mod tests {
                 current,
             )]),
         };
-        assert2::assert!(*coord.seeds.get("g").unwrap() == expected);
-        assert2::assert!(coord.cached_seed("g") == Some(expected));
+        assert!(*coord.seeds.get("g").unwrap() == expected);
+        assert!(coord.cached_seed("g") == Some(expected));
     }
 
     #[test]
@@ -1949,8 +1938,8 @@ mod tests {
                 deleting: vec![],
             },
         };
-        assert2::assert!(*coord.share_seeds.get("sg").unwrap() == expected);
-        assert2::assert!(coord.cached_share_seed("sg") == Some(expected));
+        assert!(*coord.share_seeds.get("sg").unwrap() == expected);
+        assert!(coord.cached_share_seed("sg") == Some(expected));
     }
 
     #[test]
@@ -2018,8 +2007,8 @@ mod tests {
                 current,
             )]),
         };
-        assert2::assert!(*coord.streams_seeds.get("st").unwrap() == expected);
-        assert2::assert!(coord.cached_streams_seed("st") == Some(expected));
+        assert!(*coord.streams_seeds.get("st").unwrap() == expected);
+        assert!(coord.cached_streams_seed("st") == Some(expected));
     }
 
     #[test]
@@ -2080,19 +2069,12 @@ mod tests {
         let snapshot = provider.snapshot();
         let proto_topic_id = crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes());
 
+        check!(snapshot.topic_id_by_name.get("input") == Some(&proto_topic_id));
+        check!(snapshot.partitions_per_topic.get(&proto_topic_id) == Some(&2));
         check!(
-            (
-                snapshot.topic_id_by_name,
-                snapshot.partitions_per_topic,
-                snapshot.partition_racks,
-            ) == (
-                std::collections::HashMap::from([("input".to_string(), proto_topic_id)]),
-                std::collections::HashMap::from([(proto_topic_id, 2)]),
-                std::collections::HashMap::from([(
-                    (proto_topic_id, 0),
-                    vec!["rack-a".to_string(), "rack-b".to_string()],
-                )]),
-            )
+            snapshot.partition_racks.get(&(proto_topic_id, 0))
+                == Some(&vec!["rack-a".to_string(), "rack-b".to_string()])
         );
+        check!(snapshot.partition_racks.get(&(proto_topic_id, 1)) == None);
     }
 }

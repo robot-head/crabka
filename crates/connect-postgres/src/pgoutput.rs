@@ -61,6 +61,8 @@ pub enum DecodedMessage {
     Keepalive,
 }
 
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn decode_pgoutput_message(
     bytes: &[u8],
     lsn: PgLsn,
@@ -427,6 +429,8 @@ impl RelationCache {
         );
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn translate(&self, event: RowEvent) -> Result<EntityDifference, PostgresConnectError> {
         let schema = self.relations.get(&event.relation_id).ok_or_else(|| {
             PostgresConnectError::Backend(format!(

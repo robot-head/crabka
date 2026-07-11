@@ -212,6 +212,8 @@ pub fn send_stream_inner(
 }
 
 /// Bidi `SendStream` Connect handler.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn send_stream(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<Principal>>,
@@ -334,6 +336,8 @@ pub fn subscribe_inner(
 }
 
 /// Bidi `Subscribe` Connect handler.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub async fn subscribe(
     Extension(state): Extension<Arc<AppState>>,
     principal: Option<Extension<Principal>>,

@@ -1,8 +1,7 @@
 // rustc 1.95 clippy ICEs on annotate-snippets in pedantic lints on these
 // raw-wire test files; match the opt-out used by compaction.rs / elect_leaders.rs.
-#![allow(clippy::pedantic)]
 
-//! JBOD / multi-log-dir + DescribeLogDirs (KIP-113) end-to-end.
+//! JBOD / multi-log-dir + `DescribeLogDirs` (KIP-113) end-to-end.
 //!
 //! Boots a single broker with two log directories, creates a 6-partition
 //! topic, and asserts:
@@ -13,6 +12,7 @@
 
 use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_protocol::{
@@ -84,14 +84,14 @@ async fn create_topic(addr: SocketAddr, topic: &str, partitions: i32) {
         timeout_ms: 5_000,
         ..Default::default()
     };
-    const VERSION: i16 = 7;
+    let version: i16 = 7;
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).unwrap();
-    let resp_bytes = round_trip(&mut stream, 19, VERSION, &body).await.unwrap();
+    req.encode(&mut body, version).unwrap();
+    let resp_bytes = round_trip(&mut stream, 19, version, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
-    let resp = CreateTopicsResponse::decode(&mut cur, VERSION).unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    let resp = CreateTopicsResponse::decode(&mut cur, version).unwrap();
+    assert!(resp.topics[0].error_code == 0, "CreateTopics must succeed");
 }
 
 async fn describe_log_dirs(addr: SocketAddr) -> DescribeLogDirsResponse {
@@ -99,13 +99,13 @@ async fn describe_log_dirs(addr: SocketAddr) -> DescribeLogDirsResponse {
         topics: None,
         ..Default::default()
     };
-    const VERSION: i16 = 4;
+    let version: i16 = 4;
     let mut stream = TcpStream::connect(addr).await.unwrap();
     let mut body = BytesMut::new();
-    req.encode(&mut body, VERSION).unwrap();
-    let resp_bytes = round_trip(&mut stream, 35, VERSION, &body).await.unwrap();
+    req.encode(&mut body, version).unwrap();
+    let resp_bytes = round_trip(&mut stream, 35, version, &body).await.unwrap();
     let mut cur: &[u8] = &resp_bytes;
-    DescribeLogDirsResponse::decode(&mut cur, VERSION).unwrap()
+    DescribeLogDirsResponse::decode(&mut cur, version).unwrap()
 }
 
 async fn wait_all_partitions(handle: &BrokerHandle, topic: &str, n: i32) {
@@ -125,12 +125,11 @@ fn count_topic_dirs(dir: &std::path::Path, topic: &str) -> usize {
     std::fs::read_dir(dir)
         .unwrap()
         .filter_map(Result::ok)
-        .filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false))
+        .filter(|e| e.file_type().is_ok_and(|t| t.is_dir()))
         .filter(|e| {
             e.file_name()
                 .to_str()
-                .map(|n| n.starts_with(&prefix))
-                .unwrap_or(false)
+                .is_some_and(|n| n.starts_with(&prefix))
         })
         .count()
 }
@@ -138,35 +137,46 @@ fn count_topic_dirs(dir: &std::path::Path, topic: &str) -> usize {
 #[tokio::test]
 async fn partitions_spread_across_dirs_and_describe_log_dirs_reports_them() {
     let (handle, primary, extra, addr) = start_two_dir_broker().await;
-    const N: i32 = 6;
-    create_topic(addr, "t", N).await;
-    wait_all_partitions(&handle, "t", N).await;
+    let n: i32 = 6;
+    create_topic(addr, "t", n).await;
+    wait_all_partitions(&handle, "t", n).await;
 
     // 1. Placement spread: both directories hold at least one partition of `t`.
     let in_primary = count_topic_dirs(primary.path(), "t");
     let in_extra = count_topic_dirs(extra.path(), "t");
-    assert2::assert!(in_primary + in_extra == N as usize);
-    assert2::assert!(in_primary > 0 && in_extra > 0);
+    assert!(
+        in_primary + in_extra == usize::try_from(n).unwrap(),
+        "all partitions on disk"
+    );
+    assert!(
+        in_primary > 0 && in_extra > 0,
+        "partitions must spread across both dirs: primary={in_primary} extra={in_extra}"
+    );
 
     // 2. DescribeLogDirs reports one result per configured dir, and the
-    //    union of `t` partitions across results is the full 0..N set.
+    //    union of `t` partitions across results is the full 0..n set.
     let resp = describe_log_dirs(addr).await;
-    assert2::assert!((resp.error_code, resp.results.len()) == (0, 2));
+    assert!(resp.error_code == 0);
+    assert!(resp.results.len() == 2, "one result per log dir");
 
     let mut reported: Vec<i32> = Vec::new();
     for result in &resp.results {
-        assert2::assert!(result.error_code == 0);
+        assert!(result.error_code == 0);
         for topic in &result.topics {
             if topic.name == "t" {
                 for p in &topic.partitions {
                     reported.push(p.partition_index);
-                    assert2::assert!((p.partition_size >= 0, p.is_future_key) == (true, false));
+                    assert!(p.partition_size >= 0);
+                    assert!(!p.is_future_key);
                 }
             }
         }
     }
     reported.sort_unstable();
-    assert2::assert!(reported == (0..N).collect::<Vec<_>>());
+    assert!(
+        reported == (0..n).collect::<Vec<_>>(),
+        "all partitions reported"
+    );
 
     handle.shutdown().await;
 }

@@ -2,20 +2,17 @@
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{DecodeBorrow, Encode, ProtocolError, UnknownTaggedFields};
 use bytes::BufMut;
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct Assignment<'a> {
     pub topic_partitions: Vec<super::topic_partitions::TopicPartitions<'a>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Assignment<'_> {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::common::consumer_group_describe_response::assignment::Assignment {
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::common::consumer_group_describe_response::assignment::Assignment {
         crate::owned::common::consumer_group_describe_response::assignment::Assignment {
-            topic_partitions: (self.topic_partitions)
-                .iter()
-                .map(super::topic_partitions::TopicPartitions::to_owned)
-                .collect(),
+            topic_partitions: (self.topic_partitions).iter().map(super::topic_partitions::TopicPartitions::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -42,14 +39,8 @@ impl Encode for Assignment<'_> {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.topic_partitions).len(),
-                    flex,
-                );
-                let body: usize = (self.topic_partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_partitions).len(), flex);
+                let body: usize = (self.topic_partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -69,9 +60,7 @@ impl<'de> DecodeBorrow<'de> for Assignment<'de> {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::topic_partitions::TopicPartitions::decode_borrow(
-                        buf, version,
-                    )?);
+                    v.push(super::topic_partitions::TopicPartitions::decode_borrow(buf, version)?);
                 }
                 v
             };

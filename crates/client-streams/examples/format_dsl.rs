@@ -2,7 +2,6 @@
 //! Reads JSON `OrderEvent`s, normalizes to a Protobuf `OrderProto`, writes them out.
 //! Requires an external broker + registry to actually run; by default it only
 //! builds the topology. Run: `cargo run -p crabka-client-streams --example format_dsl`
-#![allow(clippy::cast_possible_truncation)]
 use crabka_client_streams::{DefaultSerde, SchemaSerde, StreamsApp};
 use crabka_schema_serde::format::{json::JsonSerde, protobuf::ProtobufSerde};
 use serde::{Deserialize, Serialize};
@@ -23,6 +22,17 @@ struct OrderEvent {
     amount: f64,
     currency: String,
     ts_ms: i64,
+}
+
+fn amount_cents(amount: f64) -> i64 {
+    let rounded = (amount * 100.0).round();
+    rounded.to_string().parse().unwrap_or_else(|_| {
+        if rounded.is_sign_negative() {
+            i64::MIN
+        } else {
+            i64::MAX
+        }
+    })
 }
 
 // docs:begin dsl-defaultserde
@@ -56,7 +66,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .map_values(|e: &OrderEvent| OrderProto {
             order_id: e.order_id.clone(),
             user: e.user.clone(),
-            amount_cents: (e.amount * 100.0).round() as i64,
+            amount_cents: amount_cents(e.amount),
             currency: e.currency.to_uppercase(),
             ts_ms: e.ts_ms,
         })

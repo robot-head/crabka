@@ -9,6 +9,8 @@ pub struct ConfigEntryDto {
 }
 
 impl ConfigEntryDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("config name", &self.name)
     }
@@ -23,6 +25,8 @@ pub struct CreateTopicRequestDto {
 }
 
 impl CreateTopicRequestDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("topic name", &self.name)?;
         ensure_positive("partition count", self.partitions)?;
@@ -42,6 +46,8 @@ pub struct DeleteTopicRequestDto {
 }
 
 impl DeleteTopicRequestDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("topic name", &self.name)
     }
@@ -54,6 +60,8 @@ pub struct CreatePartitionsRequestDto {
 }
 
 impl CreatePartitionsRequestDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("topic name", &self.topic)?;
         ensure_positive("partition count", self.total_count)
@@ -68,6 +76,8 @@ pub struct AlterConfigRequestDto {
 }
 
 impl AlterConfigRequestDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("config resource type", &self.resource_type)?;
         ensure_not_blank("config resource name", &self.resource_name)?;
@@ -91,6 +101,8 @@ pub struct AclRequestDto {
 }
 
 impl AclRequestDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("ACL resource type", &self.resource_type)?;
         ensure_not_blank("ACL resource name", &self.resource_name)?;
@@ -109,6 +121,8 @@ pub struct ScramUserUpsertDto {
 }
 
 impl ScramUserUpsertDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("SCRAM username", &self.username)?;
         ensure_not_blank("SCRAM password", &self.password)?;
@@ -133,6 +147,8 @@ pub struct ScramUserDeleteDto {
 }
 
 impl ScramUserDeleteDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("SCRAM username", &self.username)
     }
@@ -146,6 +162,8 @@ pub struct QuotaUpsertDto {
 }
 
 impl QuotaUpsertDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("quota entity", &self.entity)?;
         ensure_not_blank("quota type", &self.quota_type)?;
@@ -160,6 +178,8 @@ pub struct QuotaDeleteDto {
 }
 
 impl QuotaDeleteDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("quota entity", &self.entity)?;
         ensure_not_blank("quota type", &self.quota_type)
@@ -174,6 +194,8 @@ pub struct LogDirMoveRequestDto {
 }
 
 impl LogDirMoveRequestDto {
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub fn validate(&self) -> Result<(), String> {
         ensure_not_blank("log-dir move topic", &self.topic)?;
         ensure_nonnegative("log-dir move partition", self.partition)?;

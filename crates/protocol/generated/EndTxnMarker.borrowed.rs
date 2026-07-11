@@ -6,15 +6,18 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 32767;
 #[inline]
-fn is_flexible(version: i16) -> bool {
-    version >= FLEXIBLE_MIN
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
+    version == FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct EndTxnMarker {
     pub coordinator_epoch: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl EndTxnMarker {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::end_txn_marker::EndTxnMarker {
         crate::owned::end_txn_marker::EndTxnMarker {
             coordinator_epoch: (self.coordinator_epoch),
@@ -25,18 +28,14 @@ impl EndTxnMarker {
 impl Encode for EndTxnMarker {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "EndTxnMarker version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("EndTxnMarker version out of range"));
         }
-        let flex = is_flexible(version);
         if version >= 0 {
             put_i32(buf, self.coordinator_epoch);
         }
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
-        let flex = is_flexible(version);
         let mut n: usize = 0;
         if version >= 0 {
             n += 4;
@@ -47,11 +46,8 @@ impl Encode for EndTxnMarker {
 impl<'de> DecodeBorrow<'de> for EndTxnMarker {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "EndTxnMarker version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("EndTxnMarker version out of range"));
         }
-        let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
             out.coordinator_epoch = get_i32(buf)?;

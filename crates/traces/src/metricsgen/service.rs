@@ -64,6 +64,9 @@ where
     }
 
     #[must_use]
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
     pub fn with_checkpoint_store_for_tenants<I, T>(
         self,
         store: &Arc<dyn EdgeCheckpointStore>,
@@ -110,6 +113,15 @@ where
         self.with_checkpoint_store_for_tenants(store, tenants)
     }
 
+    ///
+    /// # Panics
+    /// Panics if an internal synchronization primitive is poisoned.
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
+    ///
+    /// # Panics
+    /// Panics if the metrics generator mutex is poisoned.
     pub async fn poll_once(&self, max: usize) -> Result<usize, SinkError> {
         // NOTE: do not gate polling on `pending_payloads`. Awaiting `source.poll`
         // is what keeps the Kafka WAL consumer alive and draining; an early
@@ -135,6 +147,12 @@ where
         Ok(count)
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
+    ///
+    /// # Panics
+    /// Panics if a metrics generator mutex is poisoned.
     pub async fn collect_once(&self) -> Result<usize, SinkError> {
         let timestamp_ms = self.clock.now_ns() / 1_000_000;
         let payload_count = {

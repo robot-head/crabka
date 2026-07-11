@@ -144,10 +144,10 @@ mod tests {
     #[test]
     fn ident_start_accepts_logql_identifier_prefixes() {
         for ch in ['_', ':', '.', 'a', 'Z'] {
-            assert2::assert!(is_ident_start(ch));
+            assert!(is_ident_start(ch), "{ch:?} should start an identifier");
         }
-        assert2::assert!(!is_ident_start('0'));
-        assert2::assert!(!is_ident_start('-'));
+        assert!(!is_ident_start('0'));
+        assert!(!is_ident_start('-'));
     }
 
     #[test]
@@ -165,54 +165,54 @@ mod tests {
         ];
 
         for (unit, expected) in units {
-            assert2::assert!(duration_unit(unit) == Some(expected));
+            assert_eq!(duration_unit(unit), Some(expected), "unit {unit}");
         }
-        assert2::assert!(duration_unit("fortnight") == None);
+        assert_eq!(duration_unit("fortnight"), None);
     }
 
     #[test]
     fn prometheus_duration_literals_parse_long_and_short_units() {
-        assert2::assert!(
-            parse_prometheus_duration_literal("1y2w3d4h5m6s7ms8us9ns")
-                == Some(
-                    31_536_000_000_000_000
-                        + 2 * 604_800_000_000_000
-                        + 3 * 86_400_000_000_000
-                        + 4 * 3_600_000_000_000
-                        + 5 * 60_000_000_000
-                        + 6 * 1_000_000_000
-                        + 7 * 1_000_000
-                        + 8 * 1_000
-                        + 9
-                )
+        assert_eq!(
+            parse_prometheus_duration_literal("1y2w3d4h5m6s7ms8us9ns"),
+            Some(
+                31_536_000_000_000_000
+                    + 2 * 604_800_000_000_000
+                    + 3 * 86_400_000_000_000
+                    + 4 * 3_600_000_000_000
+                    + 5 * 60_000_000_000
+                    + 6 * 1_000_000_000
+                    + 7 * 1_000_000
+                    + 8 * 1_000
+                    + 9
+            )
         );
-        assert2::assert!(parse_prometheus_duration_literal("1us") == Some(1_000));
-        assert2::assert!(parse_prometheus_duration_literal("1ns") == Some(1));
-        assert2::assert!(parse_prometheus_duration_literal("1m1h") == None);
-        assert2::assert!(parse_prometheus_duration_literal("") == None);
+        assert_eq!(parse_prometheus_duration_literal("1us"), Some(1_000));
+        assert_eq!(parse_prometheus_duration_literal("1ns"), Some(1));
+        assert_eq!(parse_prometheus_duration_literal("1m1h"), None);
+        assert_eq!(parse_prometheus_duration_literal(""), None);
     }
 
     #[test]
     fn decimal_ratios_stop_at_nine_fractional_digits() {
-        assert2::assert!(format_decimal_ratio(1, 2) == "0.5");
-        assert2::assert!(format_decimal_ratio(1, 3) == "0.333333333");
-        assert2::assert!(format_decimal_ratio(1_234, 1_000) == "1.234");
+        assert_eq!(format_decimal_ratio(1, 2), "0.5");
+        assert_eq!(format_decimal_ratio(1, 3), "0.333333333");
+        assert_eq!(format_decimal_ratio(1_234, 1_000), "1.234");
     }
 
     #[test]
     fn bytes_literals_cover_decimal_binary_and_invalid_amounts() {
-        assert2::assert!(parse_bytes_literal("0B") == Some(0.0));
-        assert2::assert!(parse_bytes_literal("-1B") == None);
-        assert2::assert!(parse_bytes_literal("2GB") == Some(2_000_000_000.0));
-        assert2::assert!(parse_bytes_literal("3TB") == Some(3_000_000_000_000.0));
-        assert2::assert!(parse_bytes_literal("4KiB") == Some(4_096.0));
-        assert2::assert!(parse_bytes_literal("5GiB") == Some(5_368_709_120.0));
-        assert2::assert!(parse_bytes_literal("6TiB") == Some(6_597_069_766_656.0));
+        assert_eq!(parse_bytes_literal("0B"), Some(0.0));
+        assert_eq!(parse_bytes_literal("-1B"), None);
+        assert_eq!(parse_bytes_literal("2GB"), Some(2_000_000_000.0));
+        assert_eq!(parse_bytes_literal("3TB"), Some(3_000_000_000_000.0));
+        assert_eq!(parse_bytes_literal("4KiB"), Some(4_096.0));
+        assert_eq!(parse_bytes_literal("5GiB"), Some(5_368_709_120.0));
+        assert_eq!(parse_bytes_literal("6TiB"), Some(6_597_069_766_656.0));
     }
 
     #[test]
     fn quoted_char_display_wraps_character() {
-        assert2::assert!(QuotedChar('"').to_string() == "'\"'");
-        assert2::assert!(QuotedChar('x').to_string() == "'x'");
+        assert_eq!(QuotedChar('"').to_string(), "'\"'");
+        assert_eq!(QuotedChar('x').to_string(), "'x'");
     }
 }

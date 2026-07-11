@@ -6,13 +6,9 @@
 //!
 //! Run with: `cargo test -p crabka-client-core --features mock --test unit`
 
-// Doc-comment prose uses Kafka term names that clippy wants backtick-escaped.
-// Suppressing here keeps comments readable without cluttering them.
-#![allow(clippy::doc_markdown)]
-
 use std::time::Duration;
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::BytesMut;
 use crabka_client_core::{ClientError, Connection, ConnectionOptions, MockBroker};
 // Use the raw constants so we don't need `ProtocolRequest` in scope.
@@ -30,8 +26,8 @@ use crabka_protocol::{
 // ── helpers ──────────────────────────────────────────────────────────────────
 
 /// Encode an `ApiVersionsResponse` at version 0 that advertises:
-/// - api_key 18 (ApiVersions): min 0, max 3
-/// - api_key  3 (Metadata):    min 0, max 12
+/// - `api_key` 18 (`ApiVersions`): min 0, max 3
+/// - `api_key` 3 (`Metadata`): min 0, max 12
 ///
 /// The mock returns this as the response body (after the correlation-id,
 /// which `MockBroker` prepends automatically).
@@ -63,13 +59,13 @@ fn api_versions_response_v0() -> Vec<u8> {
 /// `ResponseHeader` prefix.
 ///
 /// Kafka's `ResponseHeader`:
-/// - v0 (non-flexible): only `correlation_id` (already prepended by MockBroker).
+/// - v0 (non-flexible): only `correlation_id` (already prepended by `MockBroker`).
 ///   No additional bytes.
-/// - v1 (flexible, i.e., version >= FLEXIBLE_MIN): one additional byte,
+/// - v1 (flexible, i.e., version >= `FLEXIBLE_MIN`): one additional byte,
 ///   the UVARINT-encoded empty tagged-fields count (0x00).
 ///
-/// Exception: `ApiVersionsResponse` always uses ResponseHeader v0 even when
-/// the request version is flexible — but the tests here handle MetadataResponse
+/// Exception: `ApiVersionsResponse` always uses `ResponseHeader` v0 even when
+/// the request version is flexible — but the tests here handle `MetadataResponse`
 /// which follows the normal rule.
 fn metadata_response_at(version: i16) -> Vec<u8> {
     metadata_response_with_throttle(version, 0)
@@ -99,7 +95,7 @@ fn metadata_response_with_throttle(version: i16, throttle_time_ms: i32) -> Vec<u
 async fn connect_negotiates_api_versions() {
     let mock = MockBroker::start(|api_key, _version, _corr_id, _body| {
         // Only the bootstrap ApiVersions call is expected here.
-        assert2::assert!(api_key == api_versions_request::API_KEY);
+        assert!(api_key == api_versions_request::API_KEY);
         Some(api_versions_response_v0())
     })
     .await;
@@ -108,19 +104,17 @@ async fn connect_negotiates_api_versions() {
         .await
         .unwrap();
 
-    check!(
-        (
-            conn.versions().is_empty(),
-            conn.versions().broker_range(api_versions_request::API_KEY),
-            conn.versions().broker_range(metadata_request_mod::API_KEY),
-        ) == (false, Some((0, 3)), Some((0, 12)))
-    );
+    check!(!conn.versions().is_empty());
+    // The mock advertised api_key 18 min=0 max=3.
+    check!(conn.versions().broker_range(api_versions_request::API_KEY) == Some((0, 3)));
+    // The mock advertised api_key 3 min=0 max=12.
+    check!(conn.versions().broker_range(metadata_request_mod::API_KEY) == Some((0, 12)));
 
     conn.close();
     mock.stop();
 }
 
-/// When the mock never responds to ApiVersions, `Connection::connect` returns
+/// When the mock never responds to `ApiVersions`, `Connection::connect` returns
 /// `ClientError::Timeout` once `connect_timeout` elapses.
 ///
 /// Design note: the handler returns `None` (the `Option<Vec<u8>>` sentinel in
@@ -152,7 +146,7 @@ async fn timeout_when_handler_silent() {
     mock.stop();
 }
 
-/// A full round-trip: connect (ApiVersions handshake) then send a
+/// A full round-trip: connect (`ApiVersions` handshake) then send a
 /// `MetadataRequest` and receive a `MetadataResponse`.
 ///
 /// The mock encodes the `MetadataResponse` at the same version as the
@@ -234,7 +228,10 @@ async fn concurrent_sends_get_correct_responses() {
         r3.throttle_time_ms,
     ];
     seen.sort_unstable();
-    assert2::assert!(seen == [0, 1, 2]);
+    assert!(
+        seen == [0, 1, 2],
+        "each concurrent send must get a distinct response"
+    );
 
     conn.close();
     mock.stop();
@@ -294,7 +291,10 @@ async fn client_refresh_metadata_populates_pool() {
         .unwrap();
 
     let metadata = client.refresh_metadata().await.unwrap();
-    assert2::assert!(metadata.brokers.len() == 2);
+    assert!(
+        metadata.brokers.len() == 2,
+        "expected 2 brokers in metadata"
+    );
 
     // After refresh the pool knows broker 1 and 2's addresses. We can't
     // actually connect to those ports (the mock isn't listening there), but

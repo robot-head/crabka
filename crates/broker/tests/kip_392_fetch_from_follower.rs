@@ -17,8 +17,6 @@
 
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files; the
 // sibling integration tests allow it wholesale for the same reason.
-#![allow(clippy::pedantic)]
-#![allow(clippy::manual_assert, clippy::cast_possible_truncation)]
 
 use std::{
     collections::BTreeSet,
@@ -26,6 +24,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use assert2::assert;
 use crabka_broker::{BrokerConfig, BrokerHandle, replica_selector::ReplicaSelectorKind};
 use crabka_client_core::Client;
 use crabka_protocol::{
@@ -58,7 +57,7 @@ const RACK_B: &str = "rack-b"; // broker 2 (follower)
 /// Boot an `n`-broker cluster where each broker carries a distinct `rack` and
 /// the `RackAware` replica selector, via KIP-595 Slice 3c static multi-voter
 /// bootstrap (all brokers boot in `Bootstrap` mode with the same static voter
-/// set and elect among themselves — no add_learner / change_membership).
+/// set and elect among themselves — no `add_learner` / `change_membership`).
 /// Injects the KIP-392 config into each broker before it starts. `racks[i]`
 /// is broker `i+1`'s rack.
 async fn start_rack_aware_cluster(racks: &[&str]) -> Vec<(BrokerHandle, BrokerConfig, TempDir)> {
@@ -122,7 +121,7 @@ fn record_batch(n: i32) -> RecordBatch {
     }
 }
 
-/// Build a consumer Fetch (replica_id = -1) for a single (topic, partition)
+/// Build a consumer Fetch (`replica_id` = -1) for a single (topic, partition)
 /// at `offset`, carrying `rack_id`. The shared `Client` negotiates the
 /// broker's max Fetch version (>= 11), so `rack_id` is serialized on the
 /// wire and `preferred_read_replica` is present in the decoded response.
@@ -151,12 +150,48 @@ fn consumer_fetch(topic: &str, topic_id: WireUuid, offset: i64, rack: &str) -> F
     }
 }
 
+async fn fetch_all_from_follower(client: &Client, topic_id: WireUuid) -> usize {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    loop {
+        let response = client
+            .send(consumer_fetch("t", topic_id, 0, RACK_B))
+            .await
+            .expect("Fetch to follower (rack-b)");
+        let partition = &response.responses[0].partitions[0];
+        assert!(partition.error_code == 0, "follower fetch error_code");
+        let count = partition
+            .records
+            .as_ref()
+            .and_then(|records| records.as_v2())
+            .map_or(0, |batches| {
+                batches.iter().map(|batch| batch.records.len()).sum()
+            });
+        if count >= N_RECORDS as usize {
+            return count;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "follower did not serve all records; last count={count}"
+        );
+        tokio::time::sleep(Duration::from_millis(50)).await;
+    }
+}
+
+async fn assert_leader_serves_same_rack(client: &Client, topic_id: WireUuid) {
+    let response = client
+        .send(consumer_fetch("t", topic_id, 0, RACK_A))
+        .await
+        .expect("Fetch to leader (rack-a)");
+    assert!(
+        response.responses[0].partitions[0].preferred_read_replica == -1,
+        "same-rack consumer must read from the leader"
+    );
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
     let _g = cluster_lock().lock().await;
 
-    // Step 1: 2 brokers, broker 1 = rack-a (leader), broker 2 = rack-b
-    // (follower), both RackAware.
     let cluster = start_rack_aware_cluster(&[RACK_A, RACK_B]).await;
     support::wait_for_all_brokers_registered(&cluster, 2).await;
 
@@ -184,7 +219,7 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0, "CreateTopics t");
     let topic_id = resp.topics[0].topic_id;
 
     wait_for_partition_on_all(&cluster, "t", 0).await;
@@ -196,13 +231,13 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
     wait_leader_and_isr(leader_handle, "t", 0, 1, &[1, 2]).await;
     let leader_id = leader_handle.partition_leader_for_test("t", 0).unwrap();
     let isr = leader_handle.partition_isr_for_test("t", 0).unwrap();
-    assert2::assert!(leader_id == 1);
+    assert!(leader_id == 1, "leader must be broker 1");
     // Follower = the in-sync replica that isn't the leader.
     let follower_id = *isr
         .iter()
         .find(|&&r| r != leader_id)
         .expect("a non-leader ISR member");
-    assert2::assert!(follower_id == 2);
+    assert!(follower_id == 2, "follower (rack-b) must be broker 2");
     let follower_node = i32::try_from(follower_id).unwrap();
 
     // Step 3: produce N records to the leader with acks=all so they commit.
@@ -229,7 +264,10 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         })
         .await
         .expect("Produce");
-    assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
+    assert!(
+        prod.responses[0].partition_responses[0].error_code == 0,
+        "Produce acks=all"
+    );
 
     // Step 4: wait for the follower (broker 2) to replicate to N. The
     // follower's local log catching up to N is the prerequisite for it to
@@ -250,7 +288,11 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         .await
         .expect("Fetch to leader (rack-b)");
     let part = &r_leader.responses[0].partitions[0];
-    assert2::assert!((part.partition_index, part.preferred_read_replica) == (0, follower_node));
+    assert!(part.partition_index == 0);
+    assert!(
+        part.preferred_read_replica == follower_node,
+        "leader should redirect a rack-b consumer to the rack-b follower (node {follower_node})"
+    );
 
     // Step 6: consumer Fetch to the FOLLOWER (broker 2) with rack_id=rack-b.
     // Bounded retry until the follower's HW has advanced enough to serve
@@ -260,41 +302,12 @@ async fn rack_aware_consumer_is_redirected_to_same_rack_follower() {
         .build()
         .await
         .unwrap();
-    let deadline = Instant::now() + Duration::from_secs(5);
-    let got = loop {
-        let r = follower_client
-            .send(consumer_fetch("t", topic_id, 0, RACK_B))
-            .await
-            .expect("Fetch to follower (rack-b)");
-        let p = &r.responses[0].partitions[0];
-        assert2::assert!(p.error_code == 0);
-        let count = p
-            .records
-            .as_ref()
-            .and_then(|rp| rp.as_v2())
-            .map_or(0, |b| b.iter().map(|batch| batch.records.len()).sum());
-        if count >= N_RECORDS as usize {
-            break count;
-        }
-        if Instant::now() > deadline {
-            panic!("follower didn't serve {N_RECORDS} records within 5s; last count={count}");
-        }
-        // intentional: retry backoff on a real follower Fetch RPC. The gating
-        // state is the follower's high watermark (HW propagation lags the local
-        // log), and no awaiter/metric reflects HW — a LEO awaiter would return
-        // before the follower can actually serve all N records.
-        tokio::time::sleep(Duration::from_millis(50)).await;
-    };
-    assert2::assert!(got == N_RECORDS as usize);
+    let got = fetch_all_from_follower(&follower_client, topic_id).await;
+    assert!(got == N_RECORDS as usize, "follower returned all N records");
 
     // Step 7: sanity — consumer Fetch to the LEADER with rack_id=rack-a
     // (same rack as the leader) yields no redirect.
-    let r_same = leader_client
-        .send(consumer_fetch("t", topic_id, 0, RACK_A))
-        .await
-        .expect("Fetch to leader (rack-a)");
-    let part_same = &r_same.responses[0].partitions[0];
-    assert2::assert!(part_same.preferred_read_replica == -1);
+    assert_leader_serves_same_rack(&leader_client, topic_id).await;
 
     for (h, _, _) in cluster {
         h.shutdown().await;

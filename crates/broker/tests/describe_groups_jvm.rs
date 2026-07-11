@@ -1,5 +1,3 @@
-#![allow(clippy::pedantic)]
-
 //! cp/JVM cross-validation for `DescribeGroups` (`api_key=15`) metadata.
 //!
 //! Boots a single-node real Kafka (`mirror.gcr.io/confluentinc/cp-kafka:7.4.0`, `KRaft`) in
@@ -47,7 +45,7 @@ use std::{
 use crabka_client_core::Client;
 use crabka_protocol::owned::{
     describe_groups_request::DescribeGroupsRequest,
-    describe_groups_response::DescribeGroupsResponse,
+    describe_groups_response::{DescribeGroupsResponse, DescribedGroup},
 };
 
 const KAFKA_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-kafka:7.4.0";
@@ -127,14 +125,19 @@ fn docker_pull(image: &str) {
         .args(["pull", image])
         .output()
         .expect("spawn docker pull");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "docker pull {image} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 fn docker_rm_f(name: &str) {
     let _ = Command::new("docker").args(["rm", "-f", name]).output();
 }
 
-/// Boot single-node cp-kafka in KRaft mode with the dual listener layout. The
+/// Boot single-node cp-kafka in `KRaft` mode with the dual listener layout. The
 /// `EXTERNAL` listener is published to the fixed host port so the host `Client`
 /// can dial it directly.
 fn docker_run_kafka() {
@@ -181,7 +184,12 @@ fn docker_run_kafka() {
         ])
         .output()
         .expect("spawn docker run kafka");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "docker run kafka failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     eprintln!(
         "CAPTURE kafka container started id={}",
         String::from_utf8_lossy(&out.stdout).trim()
@@ -204,7 +212,11 @@ fn exec_detached(script: &str) {
         .args(["exec", "-d", CONTAINER, "bash", "-c", script])
         .output()
         .expect("spawn docker exec -d");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "docker exec -d failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 fn docker_logs() -> String {
@@ -230,7 +242,7 @@ impl Drop for ContainerGuard {
 // ── readiness + group setup (in-container CLI on the PLAINTEXT listener) ─────────
 
 fn wait_for_broker() {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     while Instant::now() < deadline {
         if exec(&[
             "kafka-broker-api-versions",
@@ -255,7 +267,7 @@ fn wait_for_broker() {
 /// Wait until classic group `g` reports `Stable` with a member, via the JVM
 /// admin tool (`kafka-consumer-groups --describe --state`).
 fn wait_for_group_stable() {
-    let deadline = Instant::now() + Duration::from_secs(60);
+    let deadline = Instant::now() + Duration::from_mins(1);
     let mut last = String::new();
     while Instant::now() < deadline {
         let out = exec(&[
@@ -281,18 +293,8 @@ fn wait_for_group_stable() {
     );
 }
 
-// ── the test ──────────────────────────────────────────────────────────────────
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[ignore = "requires Docker; captures real cp-kafka DescribeGroups (api_key=15) metadata"]
-async fn capture_real_kafka_describe_groups() {
-    docker_pull(KAFKA_IMAGE);
-    docker_run_kafka();
-    let _guard = ContainerGuard;
-    wait_for_broker();
-
-    // Topic with 2 partitions so the classic assignment is non-trivial.
-    let out = exec(&[
+fn prepare_groups() {
+    let created = exec(&[
         "kafka-topics",
         "--create",
         "--if-not-exists",
@@ -305,20 +307,24 @@ async fn capture_real_kafka_describe_groups() {
         "--replication-factor",
         "1",
     ]);
-    assert2::assert!(out.status.success());
+    assert!(
+        created.status.success(),
+        "create topic failed: {}",
+        String::from_utf8_lossy(&created.stderr)
+    );
 
-    // Produce a few records so the consumer actually has data + an assignment.
-    let out = exec(&[
+    let produced = exec(&[
         "bash",
         "-c",
         &format!(
             "printf 'r1\\nr2\\nr3\\nr4\\n' | kafka-console-producer --bootstrap-server localhost:9092 --topic {TOPIC}"
         ),
     ]);
-    assert2::assert!(out.status.success());
-
-    // ── A classic consumer group `g` with the RangeAssignor. Detached with a
-    // generous read timeout so the group stays Stable across the capture. ──
+    assert!(
+        produced.status.success(),
+        "produce failed: {}",
+        String::from_utf8_lossy(&produced.stderr)
+    );
     exec_detached(&format!(
         "kafka-console-consumer --bootstrap-server localhost:9092 --topic {TOPIC} --group {GROUP} \
          --consumer-property partition.assignment.strategy=org.apache.kafka.clients.consumer.RangeAssignor \
@@ -326,9 +332,7 @@ async fn capture_real_kafka_describe_groups() {
     ));
     wait_for_group_stable();
 
-    // ── A TYPELESS group: an offset-commit-only ("simple") group that never
-    // joined with a protocol. cp reports protocol_type == "" for it. ──
-    let out = exec(&[
+    let typeless = exec(&[
         "kafka-consumer-groups",
         "--bootstrap-server",
         "localhost:9092",
@@ -340,41 +344,62 @@ async fn capture_real_kafka_describe_groups() {
         "--to-earliest",
         "--execute",
     ]);
-    assert2::assert!(out.status.success());
+    assert!(
+        typeless.status.success(),
+        "create typeless group failed: {}",
+        String::from_utf8_lossy(&typeless.stderr)
+    );
+}
 
-    // ── Capture from the HOST via crabka_client_core::Client. ──
+async fn describe_real_groups() -> DescribeGroupsResponse {
     let client = Client::builder()
         .bootstrap(HOST_BOOTSTRAP)
         .client_id("cap")
         .build()
         .await
         .expect("client build against real kafka");
-    let resp: DescribeGroupsResponse = client
+    let response = client
         .send(DescribeGroupsRequest {
             groups: vec![GROUP.to_string(), TYPELESS_GROUP.to_string()],
             include_authorized_operations: false,
             ..Default::default()
         })
         .await
-        .expect("DescribeGroups must round-trip against real kafka");
+        .expect("DescribeGroups against real kafka");
     client.close();
+    response
+}
 
-    // ── Persist the fixture (the oracle). ──
-    let classic = resp
+fn assert_classic_group(classic: &DescribedGroup) {
+    assert_eq!(
+        classic.error_code, 0,
+        "classic group describe error: {classic:?}"
+    );
+    assert_eq!(classic.protocol_type, "consumer");
+    assert_eq!(classic.protocol_data, "range");
+    assert_eq!(classic.group_state, "Stable");
+    assert_eq!(classic.members.len(), 1);
+    let member = &classic.members[0];
+    assert!(!member.member_metadata.is_empty());
+    assert_eq!(&member.member_metadata[..2], &[0x00, 0x03]);
+}
+
+fn persist_and_assert(response: &DescribeGroupsResponse) {
+    let classic = response
         .groups
         .iter()
-        .find(|g| g.group_id == GROUP)
-        .unwrap_or_else(|| panic!("group {GROUP} missing from response: {resp:?}"));
-    let typeless = resp
+        .find(|group| group.group_id == GROUP)
+        .unwrap_or_else(|| panic!("group {GROUP} missing: {response:?}"));
+    let typeless = response
         .groups
         .iter()
-        .find(|g| g.group_id == TYPELESS_GROUP)
-        .unwrap_or_else(|| panic!("group {TYPELESS_GROUP} missing from response: {resp:?}"));
+        .find(|group| group.group_id == TYPELESS_GROUP)
+        .unwrap_or_else(|| panic!("group {TYPELESS_GROUP} missing: {response:?}"));
     let fixture = serde_json::json!({
         "provenance": {
             "image": KAFKA_IMAGE,
             "api_key": 15,
-            "note": "Real cp-kafka DescribeGroups. cp/JVM is the authority for protocol_type / protocol_data / member_metadata.",
+            "note": "Real cp-kafka DescribeGroups authority capture.",
         },
         "classic_consumer_group": group_json(classic),
         "typeless_group": group_json(typeless),
@@ -383,45 +408,22 @@ async fn capture_real_kafka_describe_groups() {
         "real_kafka_classic.json",
         &serde_json::to_string_pretty(&fixture).unwrap(),
     );
+    assert_classic_group(classic);
+    assert_eq!(typeless.error_code, 0);
+    assert_eq!(typeless.protocol_type, "");
+    assert_eq!(typeless.protocol_data, "");
+}
 
-    // ── Report the captured authority values verbatim. ──
-    eprintln!(
-        "CAPTURE classic g: state={:?} protocol_type={:?} protocol_data={:?} members={}",
-        classic.group_state,
-        classic.protocol_type,
-        classic.protocol_data,
-        classic.members.len()
-    );
-    let m = classic
-        .members
-        .first()
-        .unwrap_or_else(|| panic!("classic group {GROUP} has no member: {classic:?}"));
-    eprintln!(
-        "CAPTURE classic member: meta_len={} meta_head={:02x?} assign_len={} assign_head={:02x?}",
-        m.member_metadata.len(),
-        &m.member_metadata[..m.member_metadata.len().min(16)],
-        m.member_assignment.len(),
-        &m.member_assignment[..m.member_assignment.len().min(16)],
-    );
-    eprintln!(
-        "CAPTURE typeless {TYPELESS_GROUP}: state={:?} protocol_type={:?} protocol_data={:?}",
-        typeless.group_state, typeless.protocol_type, typeless.protocol_data
-    );
+// ── the test ──────────────────────────────────────────────────────────────────
 
-    // ── ASSERT the real-Kafka authority semantics (the spec premise). ──
-    assert2::assert!(classic.error_code == 0);
-    assert2::assert!(classic.protocol_type == "consumer");
-    assert2::assert!(classic.protocol_data == "range");
-    assert2::assert!(classic.group_state == "Stable");
-    assert2::assert!(classic.members.len() == 1);
-    assert2::assert!(!m.member_metadata.is_empty());
-    // The subscription begins with the ConsumerProtocol version (i16) followed
-    // by the subscribed-topics array. cp-kafka 7.4.0 emits version 3.
-    assert2::assert!(&m.member_metadata[..2] == &[0x00, 0x03]);
-
-    // ── The typeless-group authority: protocol_type == "" (settles the
-    // unwrap_or_default() projection in handlers/describe_groups.rs). ──
-    assert2::assert!(typeless.error_code == 0);
-    assert2::assert!(typeless.protocol_type == "");
-    assert2::assert!(typeless.protocol_data == "");
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires Docker; captures real cp-kafka DescribeGroups (api_key=15) metadata"]
+async fn capture_real_kafka_describe_groups() {
+    docker_pull(KAFKA_IMAGE);
+    docker_run_kafka();
+    let _guard = ContainerGuard;
+    wait_for_broker();
+    prepare_groups();
+    let response = describe_real_groups().await;
+    persist_and_assert(&response);
 }

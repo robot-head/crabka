@@ -48,6 +48,9 @@ impl ColdProfileStore {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn new_with_debuginfod_urls(
         store: Arc<dyn ObjectStore>,
         index: Arc<ProfileIndex>,
@@ -69,6 +72,9 @@ impl ColdProfileStore {
 
     /// Current block index snapshot. Clones the inner `Arc` (cheap) so the lock is
     /// released immediately and never held across an `.await`.
+    ///
+    /// # Panics
+    /// Panics if another thread poisoned the profile index lock.
     #[must_use]
     fn current_index(&self) -> Arc<ProfileIndex> {
         Arc::clone(&self.index.read().expect("profile index lock poisoned"))
@@ -76,11 +82,14 @@ impl ColdProfileStore {
 
     /// Swap in a freshly-loaded block index so blocks written since the querier
     /// started become queryable. Called by the querier's periodic refresh task.
+    ///
+    /// # Panics
+    /// Panics if another thread poisoned the profile index lock.
     pub fn replace_index(&self, index: Arc<ProfileIndex>) {
         *self.index.write().expect("profile index lock poisoned") = index;
     }
 
-    async fn block_keys(
+    fn block_keys(
         &self,
         tenant: &str,
         profile_type: &str,
@@ -119,9 +128,7 @@ impl ProfileStore for ColdProfileStore {
         start_ms: i64,
         end_ms: i64,
     ) -> Result<ProfileScan, ProfileError> {
-        let (blocks, fps) = self
-            .block_keys(tenant, profile_type, matchers, start_ms, end_ms)
-            .await?;
+        let (blocks, fps) = self.block_keys(tenant, profile_type, matchers, start_ms, end_ms)?;
         let mut batches = Vec::new();
         let mut symbols = CompositeSymbols::default();
         for (block_idx, block_key) in blocks.iter().enumerate() {
@@ -526,7 +533,7 @@ fn filter_and_remap_batch(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, SymbolizeRequest};
     use object_store::{ObjectStore, memory::InMemory};
@@ -544,11 +551,11 @@ mod tests {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let rec_a = record("t", "api", vec![0], 5);
         let rec_b = record("t", "api", vec![0], 7);
-        let meta_a = build_block(&store, "t", 0, &[rec_a.clone()], (0, 0))
+        let meta_a = build_block(&store, "t", 0, std::slice::from_ref(&rec_a), (0, 0))
             .await
             .unwrap()
             .remove(0);
-        let meta_b = build_block(&store, "t", 0, &[rec_b.clone()], (1, 1))
+        let meta_b = build_block(&store, "t", 0, std::slice::from_ref(&rec_b), (1, 1))
             .await
             .unwrap()
             .remove(0);
@@ -565,8 +572,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(fg.total == 12);
-        assert2::assert!(fg.names.iter().any(|name| name == "main"));
+        assert!(fg.total == 12);
+        assert!(fg.names.iter().any(|name| name == "main"));
     }
 
     #[tokio::test]
@@ -594,7 +601,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(values == vec!["api".to_string()]);
+        assert!(values == vec!["api".to_string()]);
     }
 
     #[tokio::test]
@@ -613,7 +620,7 @@ mod tests {
 
         let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
 
-        assert2::assert!(
+        assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -643,7 +650,7 @@ mod tests {
 
         let stats = cold.stats("t", 1_000, 1_000).await.unwrap();
 
-        assert2::assert!(
+        assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -672,8 +679,8 @@ mod tests {
             .await
             .unwrap()
             .remove(0);
-        assert2::assert!(meta_early.min_ts == 1000 && meta_early.max_ts == 1000);
-        assert2::assert!(meta_late.min_ts == 5000 && meta_late.max_ts == 5000);
+        assert!(meta_early.min_ts == 1000 && meta_early.max_ts == 1000);
+        assert!(meta_late.min_ts == 5000 && meta_late.max_ts == 5000);
         let mut index = ProfileIndex::new();
         for rec in [&early, &late] {
             let labels = Labels::from_pairs(rec.labels.iter().cloned());
@@ -694,7 +701,7 @@ mod tests {
 
         let stats = cold.stats("t", 0, i64::MAX).await.unwrap();
 
-        assert2::assert!(
+        assert!(
             stats
                 == ProfileStats {
                     data_ingested: true,
@@ -705,7 +712,7 @@ mod tests {
 
         // A tenant with no blocks reports no data without touching the store.
         let empty = stats_for_unknown_tenant(&cold).await;
-        assert2::assert!(
+        assert!(
             empty
                 == ProfileStats {
                     data_ingested: false,
@@ -735,7 +742,7 @@ mod tests {
 
         let types = cold.profile_types("t", 2_000, 3_000).await.unwrap();
 
-        assert2::assert!(types.is_empty());
+        assert!(types.is_empty(), "{types:?}");
     }
 
     #[tokio::test]
@@ -764,7 +771,7 @@ mod tests {
 
         let types = cold.profile_types("t", 1_000, 1_000).await.unwrap();
 
-        assert2::assert!(types == vec![PT.to_string()]);
+        assert!(types == vec![PT.to_string()], "{types:?}");
     }
 
     #[tokio::test]
@@ -786,7 +793,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(values.is_empty());
+        assert!(values.is_empty(), "{values:?}");
     }
 
     #[tokio::test]
@@ -812,7 +819,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(values == vec!["api".to_string()]);
+        assert!(values == vec!["api".to_string()], "{values:?}");
     }
 
     #[tokio::test]
@@ -831,7 +838,7 @@ mod tests {
 
         let names = cold.label_names("t", &[], 2_000, 3_000).await.unwrap();
 
-        assert2::assert!(names.is_empty());
+        assert!(names.is_empty(), "{names:?}");
     }
 
     #[tokio::test]
@@ -857,7 +864,7 @@ mod tests {
 
         let names = cold.label_names("t", &[], 1_000, 1_000).await.unwrap();
 
-        assert2::assert!(!names.contains(&"pod".to_string()));
+        assert!(!names.contains(&"pod".to_string()), "{names:?}");
     }
 
     #[tokio::test]
@@ -879,7 +886,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(series.is_empty());
+        assert!(series.is_empty(), "{series:?}");
     }
 
     #[tokio::test]
@@ -905,7 +912,10 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(series == vec![vec![("service_name".to_string(), "api".to_string())]]);
+        assert!(
+            series == vec![vec![("service_name".to_string(), "api".to_string())]],
+            "{series:?}"
+        );
     }
 
     #[tokio::test]
@@ -968,8 +978,8 @@ mod tests {
             })
             .unwrap();
 
-        assert2::assert!(out[0].function.as_str() == "/missing/native+0x99");
-        assert2::assert!(out[0].file.as_str() == "/missing/native");
+        assert!(out[0].function == "/missing/native+0x99");
+        assert!(out[0].file == "/missing/native");
     }
 
     #[test]
@@ -1037,7 +1047,7 @@ mod tests {
         let out = filter_and_remap_batch(&batch, &partition_map, &fps, PT, 0, 5_000).unwrap();
 
         // Two surviving rows (the partition-0 and partition-1 keeps).
-        assert2::assert!(out.num_rows() == 2);
+        assert!(out.num_rows() == 2);
         let out_fps = out.column(0).as_primitive::<UInt64Type>();
         let out_partitions = out.column(5).as_primitive::<UInt64Type>();
         check!(out_fps.value(0) == fp_keep);

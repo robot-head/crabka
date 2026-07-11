@@ -36,9 +36,12 @@ impl ProfilesError {
     pub fn status_code(&self) -> u16 {
         match self {
             Self::UnsupportedFormat(_) => 415,
-            Self::Decode(_) | Self::Gunzip(_) | Self::Invalid(_) | Self::Pprof(_) => 400,
+            Self::Decode(_)
+            | Self::Gunzip(_)
+            | Self::Invalid(_)
+            | Self::Pprof(_)
+            | Self::TooLarge { .. } => 400,
             Self::Limit(err) => err.http_status(),
-            Self::TooLarge { .. } => 400,
             Self::Wal(_) | Self::Produce(_) | Self::Block(_) | Self::Internal(_) => 500,
         }
     }

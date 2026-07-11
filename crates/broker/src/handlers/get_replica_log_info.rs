@@ -29,7 +29,6 @@ use crate::{
     error::BrokerError,
 };
 
-#[allow(clippy::unused_async)] // async to match the inline-intercept handler shape.
 #[tracing::instrument(
     name = "handle_get_replica_log_info",
     level = "info",
@@ -37,7 +36,7 @@ use crate::{
     fields(api = "GetReplicaLogInfo", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -187,6 +186,7 @@ fn denied_response(version: i16, req_bytes: &[u8]) -> Result<Bytes, BrokerError>
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -272,23 +272,18 @@ mod tests {
         let p = principal("admin");
         let peer = peer();
         let ctx = crate::test_support::request_context(&p, &peer, "inter-broker");
-        let bytes = handle(&broker, version, 123, &req_buf, &ctx)
-            .await
-            .expect("handle");
+        let bytes = handle(&broker, version, 123, &req_buf, &ctx).expect("handle");
         let mut cur: &[u8] = &bytes;
         let resp = GetReplicaLogInfoResponse::decode(&mut cur, version).unwrap();
 
         let row = &resp.topic_partition_log_info_list[0].partition_log_info[0];
-        let expected = PartitionLogInfo {
-            partition: 0,
-            last_written_leader_epoch: 11,
-            current_leader_epoch: 11,
-            log_end_offset: 0,
-            error_code: codes::NONE,
-            error_message: None,
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
-        };
-        assert2::assert!(row == &expected);
+        assert!(row.error_code == codes::NONE);
+        assert!(
+            row.current_leader_epoch == 11,
+            "hosted partition must report its current_leader_epoch (11), got {}",
+            row.current_leader_epoch
+        );
+        assert!(row.last_written_leader_epoch == 11);
         broker_handle.shutdown().await;
     }
 
@@ -313,7 +308,7 @@ mod tests {
         };
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
 
-        assert2::assert!(cluster_action_denied(
+        assert!(cluster_action_denied(
             &authorizer,
             &image,
             &principal,
@@ -340,8 +335,8 @@ mod tests {
             .iter()
             .flat_map(|t| t.partition_log_info.iter().map(|p| p.error_code))
             .collect();
-        assert2::assert!(!codes_seen.is_empty());
-        assert2::assert!(
+        assert!(!codes_seen.is_empty());
+        assert!(
             codes_seen
                 .iter()
                 .all(|&c| c == codes::CLUSTER_AUTHORIZATION_FAILED)

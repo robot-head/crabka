@@ -14,8 +14,6 @@
 //!
 //! Re-running this test regenerates the fixture file verbatim.
 
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -168,7 +166,7 @@ impl Drop for ContainerGuard {
 // ── REST helpers ──────────────────────────────────────────────────────────────
 
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {
@@ -209,7 +207,7 @@ async fn set_subject_compat(http: &reqwest::Client, base: &str, subject: &str, l
 }
 
 /// POST /subjects/{subject}/versions to register writer as v1.
-/// Returns Ok(()) on success, Err(error_text) if cp rejects it (caller logs + skips).
+/// Returns `Ok(())` on success, `Err(error_text)` if cp rejects it (caller logs + skips).
 async fn try_register_writer(
     http: &reqwest::Client,
     base: &str,
@@ -240,8 +238,8 @@ async fn try_register_writer(
     }
 }
 
-/// POST /compatibility/subjects/{subject}/versions/latest — returns Ok(is_compatible) or
-/// Err(error_text) if cp returns a non-success status (e.g. 500 Internal Server Error on
+/// POST /compatibility/subjects/{subject}/versions/latest — returns `Ok(is_compatible)` or
+/// `Err(error_text)` if cp returns a non-success status (e.g. 500 Internal Server Error on
 /// certain oneof transitions — a known cp bug; caller logs + skips).
 async fn try_check_compat(
     http: &reqwest::Client,
@@ -272,7 +270,7 @@ async fn try_check_compat(
         serde_json::from_str(&text).unwrap_or_else(|e| panic!("parse compat response {text}: {e}"));
     let result = v
         .get("is_compatible")
-        .and_then(|x| x.as_bool())
+        .and_then(serde_json::Value::as_bool)
         .unwrap_or_else(|| panic!("no bool `is_compatible` in {text}"));
     eprintln!("CAPTURE {subject} is_compatible={result}");
     Ok(result)
@@ -287,6 +285,12 @@ struct CompatCase {
 }
 
 fn protobuf_cases() -> Vec<CompatCase> {
+    let mut cases = protobuf_field_cases();
+    cases.extend(protobuf_advanced_cases());
+    cases
+}
+
+fn protobuf_field_cases() -> Vec<CompatCase> {
     vec![
         // 1. field_added: reader adds a new optional field
         CompatCase {
@@ -390,6 +394,11 @@ fn protobuf_cases() -> Vec<CompatCase> {
             writer: "syntax = \"proto3\";\nmessage U { int32 id = 1; }",
             reader: "syntax = \"proto3\";\nmessage U { reserved 2; int32 id = 1; }",
         },
+    ]
+}
+
+fn protobuf_advanced_cases() -> Vec<CompatCase> {
+    vec![
         // 18. reserved_name: reader reserves a field name
         CompatCase {
             name: "reserved_name",

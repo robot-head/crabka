@@ -70,6 +70,8 @@ impl TlsConfig {
     // of span fields; only the non-sensitive client-auth mode is recorded.
     // `err` surfaces cert/key loading + verifier-build failures (Debug).
     #[tracing::instrument(level = "info", skip_all, fields(client_auth = ?self.client_auth), err)]
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     pub fn build_server_config(&self) -> Result<Arc<rustls::ServerConfig>, TlsError> {
         let certs = load_certs(&self.cert_chain_path)?;
         let key = load_private_key(&self.private_key_path)?;
@@ -119,6 +121,8 @@ impl TlsConfig {
     // keeps loaded trust roots out of span fields. `err` surfaces cert-loading
     // failures (Debug).
     #[tracing::instrument(level = "info", skip_all, err)]
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     pub fn build_client_config(&self) -> Result<Arc<rustls::ClientConfig>, TlsError> {
         let mut roots = rustls::RootCertStore::empty();
         if let Some(path) = &self.trust_roots_path {

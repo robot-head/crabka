@@ -90,13 +90,9 @@ pub fn bearer_token(req: &Request) -> Option<String> {
 /// an acceptable safe-fail.
 #[must_use]
 pub fn now_ms() -> i64 {
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        // The `.min(i64::MAX as u128)` ensures the cast never truncates;
-        // any timestamp past year 292277026596 is clamped to i64::MAX.
-        #[allow(clippy::cast_possible_truncation)]
-        let ms = d.as_millis().min(i64::MAX as u128) as i64;
-        ms
-    })
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 /// Return the peer [`SocketAddr`] from request extensions, or the default

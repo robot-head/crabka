@@ -113,6 +113,8 @@ impl SchemaCache {
     }
 
     /// Register a local `(subject, kind, schema)` for pre-warm. Idempotent.
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn intern(
         &self,
         subject: &str,
@@ -134,6 +136,10 @@ impl SchemaCache {
 
     /// Resolve every interned subject's id (register/lookup/latest per mode).
     /// Called once at client/membership start.
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub async fn prewarm(&self) -> Result<(), SchemaSerdeError> {
         let pending: Vec<Interned> = self.inner.lock().unwrap().interned.clone();
         for i in pending {
@@ -172,12 +178,18 @@ impl SchemaCache {
     /// Synchronous hot-path read: the id bound to `subject`, or `None` if
     /// pre-warm has not resolved it.
     #[must_use]
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn id_for_subject(&self, subject: &str) -> Option<u32> {
         self.inner.lock().unwrap().subject_id.get(subject).copied()
     }
 
     /// Synchronous hot-path read of a writer schema by id. On a miss, spawns a
     /// background fetch and returns `WriterSchemaPending` (retriable).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn writer_schema(self: &Arc<Self>, id: u32) -> Result<String, SchemaSerdeError> {
         {
             let mut g = self.inner.lock().unwrap();
@@ -203,6 +215,8 @@ impl SchemaCache {
     }
 
     /// Test/seed hook: install an id→schema mapping directly.
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn seed_writer_schema(&self, id: u32, schema: impl Into<String>) {
         self.inner
             .lock()
@@ -213,11 +227,15 @@ impl SchemaCache {
 
     /// Synchronous hot-path read of protobuf message metadata for a writer id.
     #[must_use]
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn writer_message_type(&self, id: u32) -> Option<String> {
         self.inner.lock().unwrap().id_message_type.get(&id).cloned()
     }
 
     /// Test/seed hook: install id→protobuf message metadata directly.
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn seed_writer_message_type(&self, id: u32, message_type: impl Into<String>) {
         self.inner
             .lock()
@@ -227,6 +245,8 @@ impl SchemaCache {
     }
 
     /// Test/seed hook: install a subject→id mapping directly.
+    /// # Panics
+    /// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
     pub fn seed_subject_id(&self, subject: impl Into<String>, id: u32) {
         self.inner
             .lock()

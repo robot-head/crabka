@@ -52,7 +52,7 @@ mod tests {
     fn decodes_valid_metrics_data() {
         let bytes = sample_metrics_data();
         let md = decode_metrics(&bytes).expect("decode");
-        assert2::assert!(md.resource_metrics.len() == 1);
+        assert_eq!(md.resource_metrics.len(), 1);
     }
 
     #[test]
@@ -60,6 +60,6 @@ mod tests {
         // A truncated varint (high-bit set, no continuation byte) reliably
         // causes prost to return a DecodeError.
         let bad = vec![0x82u8, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82, 0x82];
-        assert2::assert!(decode_metrics(&bad).is_err());
+        assert!(decode_metrics(&bad).is_err());
     }
 }

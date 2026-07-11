@@ -52,6 +52,8 @@ impl AdminClient {
     ///
     /// `assignments` maps each target absolute directory path to the
     /// `(topic, [partition])` pairs that should be moved into it.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn alter_replica_log_dirs(
         &mut self,
         assignments: &BTreeMap<String, Vec<(String, Vec<i32>)>>,
@@ -96,6 +98,8 @@ impl AdminClient {
     /// in-progress future logs). Pass `None` to fetch all partitions
     /// or `Some` with topic → partitions filter (empty inner vec means
     /// all partitions of that topic).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_log_dirs(
         &mut self,
         filter: Option<&BTreeMap<String, Vec<i32>>>,

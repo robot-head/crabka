@@ -21,6 +21,8 @@ pub fn step_bucket_ms(ts_ms: i64, step_ms: i64) -> i64 {
     ts_ms.div_euclid(step_ms) * step_ms
 }
 
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn step_ms_from_secs(step_secs: f64) -> Result<i64, ProfileError> {
     if !(step_secs.is_finite() && step_secs > 0.0) {
         return Err(ProfileError::Plan(format!(
@@ -30,22 +32,38 @@ pub fn step_ms_from_secs(step_secs: f64) -> Result<i64, ProfileError> {
     if step_secs * 1000.0 < 1.0 {
         return Err(ProfileError::Plan("step must be >= 1ms".to_string()));
     }
-    #[allow(clippy::cast_possible_truncation)]
-    Ok((step_secs * 1000.0).round() as i64)
+    let rounded_ms = (step_secs * 1000.0).round();
+    format!("{rounded_ms:.0}")
+        .parse::<i64>()
+        .map_err(|_| ProfileError::Plan(format!("step is too large: {step_secs}")))
 }
 
 #[must_use]
-#[allow(clippy::cast_precision_loss)]
 pub fn fold_bucket(agg: SeriesAgg, values: &[i64]) -> f64 {
     let sum: i64 = values.iter().sum();
     match agg {
-        SeriesAgg::Sum => sum as f64,
-        SeriesAgg::Average => sum as f64 / values.len() as f64,
+        SeriesAgg::Sum => decimal_i64_to_f64(sum),
+        SeriesAgg::Average => decimal_i64_to_f64(sum) / decimal_usize_to_f64(values.len()),
     }
+}
+
+fn decimal_i64_to_f64(value: i64) -> f64 {
+    value
+        .to_string()
+        .parse::<f64>()
+        .expect("i64 decimal representation parses as f64")
+}
+
+fn decimal_usize_to_f64(value: usize) -> f64 {
+    value
+        .to_string()
+        .parse::<f64>()
+        .expect("usize decimal representation parses as f64")
 }
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -57,7 +75,7 @@ mod tests {
             labels: vec![("service_name".to_string(), "checkout".to_string())],
             points: vec![(1000, 1.5), (2000, 2.0)],
         };
-        assert2::assert!(series.points[1] == (2000, 2.0));
+        assert!(series.points[1] == (2000, 2.0));
         let agg = SeriesAgg::Sum;
         takes_copy(agg);
         takes_copy(agg);
@@ -65,15 +83,13 @@ mod tests {
 
     #[test]
     fn step_secs_to_ms_rounds_and_rejects_nonpositive() {
-        assert2::assert!(step_ms_from_secs(15.0).unwrap() == 15_000);
-        assert2::assert!(step_ms_from_secs(0.5).unwrap() == 500);
+        assert!(step_ms_from_secs(15.0).unwrap() == 15_000);
+        assert!(step_ms_from_secs(0.5).unwrap() == 500);
         let zero = step_ms_from_secs(0.0).unwrap_err();
-        assert2::assert!(
-            matches!(zero, ProfileError::Plan(message) if message.contains("positive finite"))
-        );
-        assert2::assert!(step_ms_from_secs(-1.0).is_err());
+        assert!(matches!(zero, ProfileError::Plan(message) if message.contains("positive finite")));
+        assert!(step_ms_from_secs(-1.0).is_err());
         let infinity = step_ms_from_secs(f64::INFINITY).unwrap_err();
-        assert2::assert!(
+        assert!(
             matches!(infinity, ProfileError::Plan(message) if message.contains("positive finite"))
         );
     }
@@ -86,7 +102,7 @@ mod tests {
             (0.000_999_9, None),
             (0.001, Some(1)),
         ] {
-            assert2::assert!(step_ms_from_secs(step_secs).ok() == want);
+            assert!(step_ms_from_secs(step_secs).ok() == want, "{step_secs}");
         }
     }
 
@@ -98,13 +114,16 @@ mod tests {
             (14_999, 0),
             (-1, -15_000),
         ] {
-            assert2::assert!(step_bucket_ms(timestamp_ms, 15_000) == want);
+            assert!(
+                step_bucket_ms(timestamp_ms, 15_000) == want,
+                "{timestamp_ms}"
+            );
         }
     }
 
     #[test]
     fn fold_sum_vs_average() {
-        assert2::assert!((fold_bucket(SeriesAgg::Sum, &[2, 3, 5]) - 10.0).abs() < f64::EPSILON);
-        assert2::assert!((fold_bucket(SeriesAgg::Average, &[2, 3, 5]) - 10.0 / 3.0).abs() < 1e-12);
+        assert!((fold_bucket(SeriesAgg::Sum, &[2, 3, 5]) - 10.0).abs() < f64::EPSILON);
+        assert!((fold_bucket(SeriesAgg::Average, &[2, 3, 5]) - 10.0 / 3.0).abs() < 1e-12);
     }
 }

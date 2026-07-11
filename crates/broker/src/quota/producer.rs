@@ -6,11 +6,6 @@ use crabka_metadata::MetadataImage;
 
 use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss,
-    clippy::cast_precision_loss
-)]
 #[must_use]
 pub fn consume_producer_quota(
     image: &MetadataImage,
@@ -30,16 +25,31 @@ pub fn consume_producer_quota(
             amount: bytes,
         },
         |entity_key| entity_key.push(("qos-tier".into(), Some(qos_tier.into()))),
-        |rate| Some(rate as u64),
-        |overage, rate, _| Duration::from_micros(((overage as f64 / rate) * 1_000_000.0) as u64),
+        quota_rate_to_bucket_rate,
+        |overage, rate, _| {
+            let overage = u64_to_f64(overage);
+            Duration::from_secs_f64(overage / rate)
+        },
     )
+}
+
+fn quota_rate_to_bucket_rate(rate: f64) -> Option<u64> {
+    if !rate.is_finite() || rate < 1.0 {
+        return None;
+    }
+
+    rate.floor().to_string().parse().ok()
+}
+
+fn u64_to_f64(value: u64) -> f64 {
+    value.to_string().parse().unwrap_or(f64::INFINITY)
 }
 
 #[cfg(test)]
 mod tests {
     use std::time::Duration;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_metadata::MetadataImage;
 
     use super::consume_producer_quota;
@@ -77,8 +87,8 @@ mod tests {
         let other_client =
             consume_producer_quota(&img, &buckets, "alice", "other", "default", 4096);
 
-        assert2::assert!(matching > Duration::ZERO);
-        assert2::assert!(other_client == Duration::ZERO);
+        assert!(matching > Duration::ZERO);
+        assert!(other_client == Duration::ZERO);
     }
 
     #[test]
@@ -88,6 +98,6 @@ mod tests {
 
         let delay = consume_producer_quota(&img, &buckets, "alice", "app", "default", 1_250);
 
-        assert2::assert!(delay == Duration::from_millis(250));
+        assert!(delay == Duration::from_millis(250));
     }
 }

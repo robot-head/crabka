@@ -15,10 +15,10 @@
 // `u64::try_from(i+1).unwrap()`-style casts when turning 1-based `i` into broker
 // ids, and topics are built with `..Default::default()`. Hoisting these into
 // named helpers would obscure the per-test narrative.
-#![allow(clippy::cast_possible_truncation, clippy::default_trait_access)]
 
 use std::{sync::OnceLock, time::Duration};
 
+use assert2::assert;
 use crabka_broker::{BrokerConfig, BrokerHandle};
 use tokio::sync::Mutex;
 
@@ -65,11 +65,14 @@ async fn three_node_cluster_elects_leader() {
     }
     let mut leaders = std::collections::HashSet::new();
     for (h, _, _) in &cluster {
-        if let Some(l) = h.controller_leader_id().await {
+        if let Some(l) = h.controller_leader_id() {
             leaders.insert(l);
         }
     }
-    assert2::assert!(leaders.len() == 1 && !leaders.contains(&crabka_broker::NodeId(0)));
+    assert!(
+        leaders.len() == 1 && !leaders.contains(&crabka_broker::NodeId(0)),
+        "leader not converged: {leaders:?}"
+    );
     for (h, _, _) in cluster {
         h.shutdown().await;
     }
@@ -100,7 +103,7 @@ async fn create_topic_on_any_node_propagates() {
         })
         .await
         .unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0);
 
     // Metadata against node 2 should see it within 1s.
     let c2 = Client::builder()
@@ -112,7 +115,10 @@ async fn create_topic_on_any_node_propagates() {
     // client metadata reflects it immediately.
     cluster[2].0.wait_until_partition_present("prop", 0).await;
     let m = c2.send(MetadataRequest::default()).await.unwrap();
-    assert2::assert!(m.topics.iter().any(|t| t.name.as_deref() == Some("prop")));
+    assert!(
+        m.topics.iter().any(|t| t.name.as_deref() == Some("prop")),
+        "topic 'prop' not visible to node 2"
+    );
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -128,7 +134,7 @@ async fn leader_kill_recovers() {
     // Find a broker that thinks it is the leader.
     let mut leader_idx = None;
     for (i, (h, cfg, _)) in cluster.iter().enumerate() {
-        if h.controller_leader_id().await == Some(cfg.node_id) {
+        if h.controller_leader_id() == Some(cfg.node_id) {
             leader_idx = Some(i);
             break;
         }
@@ -154,14 +160,15 @@ async fn leader_kill_recovers() {
     }
     let mut leaders = std::collections::HashSet::new();
     for (h, _, _) in &cluster {
-        if let Some(l) = h.controller_leader_id().await {
+        if let Some(l) = h.controller_leader_id() {
             leaders.insert(l);
         }
     }
-    assert2::assert!(
+    assert!(
         leaders.len() == 1
             && !leaders.contains(&crabka_broker::NodeId(0))
-            && !leaders.contains(&killed_node_id)
+            && !leaders.contains(&killed_node_id),
+        "no single new leader: {leaders:?}"
     );
 
     // CreateTopics against a survivor succeeds.
@@ -183,7 +190,7 @@ async fn leader_kill_recovers() {
         })
         .await
         .unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0);
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -199,7 +206,7 @@ async fn follower_forwards_create_topic() {
     // Identify a follower (any broker whose self-view of the leader != its own node_id).
     let mut follower_idx = None;
     for (i, (h, cfg, _)) in cluster.iter().enumerate() {
-        if h.controller_leader_id().await != Some(cfg.node_id) {
+        if h.controller_leader_id() != Some(cfg.node_id) {
             follower_idx = Some(i);
             break;
         }
@@ -224,7 +231,7 @@ async fn follower_forwards_create_topic() {
         })
         .await
         .unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0);
 
     for (h, _, _) in cluster {
         h.shutdown().await;
@@ -294,8 +301,14 @@ async fn concurrent_topic_creates_one_wins() {
     for (h, _, _) in &cluster {
         h.wait_until_partition_present("race", 0).await;
     }
-    assert2::assert!(zero == 1);
-    assert2::assert!(already == 2);
+    assert!(
+        zero == 1,
+        "exactly one winner, got zero={zero} already={already}"
+    );
+    assert!(
+        already == 2,
+        "two losers see TOPIC_ALREADY_EXISTS, got zero={zero} already={already}"
+    );
 
     for (h, _, _) in cluster {
         h.shutdown().await;

@@ -32,7 +32,7 @@ pub struct RegisteredSchema {
 
 /// A single subject-version's stored schema (the domain view returned by
 /// [`StoreState::version`]). Named to avoid colliding with the
-/// [`SchemaVersion`](crate::ids::SchemaVersion) version-number newtype.
+/// [`SchemaVersion`] version-number newtype.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VersionedSchema {
     pub id: SchemaId,
@@ -81,6 +81,8 @@ impl StoreState {
     /// The `schema` string is assumed to be already in normalised storage form
     /// (see `format::normalized_storage_form`); the caller (e.g. `KafkaStore`)
     /// is responsible for normalising before passing it in.
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub fn register(
         &mut self,
         subject: &str,
@@ -160,6 +162,8 @@ impl StoreState {
     /// referring schema, dedup-by-name keeping first, cycle-guarded by
     /// `(subject, version)`). `ReferenceNotFound` if any
     /// referenced `(subject, version)` is absent.
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub fn resolve_closure(
         &self,
         references: &[SchemaReference],

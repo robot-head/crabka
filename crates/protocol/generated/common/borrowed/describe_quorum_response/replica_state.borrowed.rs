@@ -16,18 +16,17 @@ impl Default for ReplicaState {
     fn default() -> Self {
         Self {
             replica_id: 0i32,
-            replica_directory_id: Default::default(),
+            replica_directory_id: crate::primitives::uuid::Uuid::default(),
             log_end_offset: 0i64,
             last_fetch_timestamp: -1i64,
             last_caught_up_timestamp: -1i64,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl ReplicaState {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::common::describe_quorum_response::replica_state::ReplicaState {
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::common::describe_quorum_response::replica_state::ReplicaState {
         crate::owned::common::describe_quorum_response::replica_state::ReplicaState {
             replica_id: (self.replica_id),
             replica_directory_id: (self.replica_directory_id),

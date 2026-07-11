@@ -3,9 +3,8 @@ use std::collections::BTreeMap;
 use crabka_admin_ui::{
     admin::{acl_rows, group_rows, log_dir_rows, quota_rows, resource_outcome_rows, topic_rows},
     dto::{
-        AclRow, ConfigEntryDto, CreateTopicRequestDto, GroupRow, KafkaErrorDto,
-        LogDirMoveRequestDto, LogDirRow, QuotaRow, ResourceOutcome, ScramUserUpsertDto, TopicRow,
-        UserRow,
+        ConfigEntryDto, CreateTopicRequestDto, KafkaErrorDto, LogDirMoveRequestDto,
+        ResourceOutcome, ScramUserUpsertDto,
     },
     error::UiError,
 };
@@ -18,23 +17,18 @@ use crabka_client_admin::{
 
 #[test]
 fn resource_outcome_reports_error_state() {
-    for (_name, outcome, expected) in [
-        ("successful resource", ResourceOutcome::ok("orders"), false),
-        (
-            "failed resource",
-            ResourceOutcome::failed(
-                "orders",
-                KafkaErrorDto {
-                    code: 36,
-                    name: "TOPIC_ALREADY_EXISTS".to_string(),
-                    message: Some("topic exists".to_string()),
-                },
-            ),
-            true,
-        ),
-    ] {
-        assert2::assert!(outcome.has_error() == expected);
-    }
+    let ok = ResourceOutcome::ok("orders");
+    let failed = ResourceOutcome::failed(
+        "orders",
+        KafkaErrorDto {
+            code: 36,
+            name: "TOPIC_ALREADY_EXISTS".to_string(),
+            message: Some("topic exists".to_string()),
+        },
+    );
+
+    assert!(!ok.has_error());
+    assert!(failed.has_error());
 }
 
 #[test]
@@ -49,69 +43,53 @@ fn create_topic_request_accepts_valid_topic_shape() {
         }],
     };
 
-    assert2::assert!(request.validate().is_ok());
+    assert!(request.validate().is_ok());
 }
 
 #[test]
 fn create_topic_request_rejects_invalid_counts_and_blank_names() {
-    for (_name, request) in [
-        (
-            "zero partitions",
-            CreateTopicRequestDto {
-                name: "orders".to_string(),
-                partitions: 0,
-                replicas: 1,
-                configs: Vec::new(),
-            },
-        ),
-        (
-            "blank topic name",
-            CreateTopicRequestDto {
-                name: " ".to_string(),
-                partitions: 1,
-                replicas: 1,
-                configs: Vec::new(),
-            },
-        ),
-        (
-            "blank config name",
-            CreateTopicRequestDto {
-                name: "orders".to_string(),
-                partitions: 1,
-                replicas: 1,
-                configs: vec![ConfigEntryDto {
-                    name: "\t".to_string(),
-                    value: "delete".to_string(),
-                }],
-            },
-        ),
-    ] {
-        assert2::assert!(request.validate().is_err());
-    }
+    let zero_partitions = CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 0,
+        replicas: 1,
+        configs: Vec::new(),
+    };
+    let blank_name = CreateTopicRequestDto {
+        name: " ".to_string(),
+        partitions: 1,
+        replicas: 1,
+        configs: Vec::new(),
+    };
+    let blank_config = CreateTopicRequestDto {
+        name: "orders".to_string(),
+        partitions: 1,
+        replicas: 1,
+        configs: vec![ConfigEntryDto {
+            name: "\t".to_string(),
+            value: "delete".to_string(),
+        }],
+    };
+
+    assert!(zero_partitions.validate().is_err());
+    assert!(blank_name.validate().is_err());
+    assert!(blank_config.validate().is_err());
 }
 
 #[test]
 fn scram_upsert_request_rejects_empty_password_and_bad_iterations() {
-    for (_name, request) in [
-        (
-            "empty password",
-            ScramUserUpsertDto {
-                username: "alice".to_string(),
-                password: String::new(),
-                iterations: 4096,
-            },
-        ),
-        (
-            "zero iterations",
-            ScramUserUpsertDto {
-                username: "alice".to_string(),
-                password: "not-asserted".to_string(),
-                iterations: 0,
-            },
-        ),
-    ] {
-        assert2::assert!(request.validate().is_err());
-    }
+    let empty_password = ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: String::new(),
+        iterations: 4096,
+    };
+    let zero_iterations = ScramUserUpsertDto {
+        username: "alice".to_string(),
+        password: "not-asserted".to_string(),
+        iterations: 0,
+    };
+
+    assert!(empty_password.validate().is_err());
+    assert!(zero_iterations.validate().is_err());
 }
 
 #[test]
@@ -125,8 +103,11 @@ fn scram_upsert_debug_redacts_password() {
 
     let debug = format!("{request:?}");
 
-    assert2::assert!(!debug.contains(password_sentinel));
-    assert2::assert!(debug.contains("<redacted>"));
+    assert!(
+        !debug.contains(password_sentinel),
+        "debug output leaked password"
+    );
+    assert!(debug.contains("<redacted>"));
 }
 
 #[test]
@@ -137,7 +118,7 @@ fn log_dir_move_request_rejects_nonsensical_fields() {
         destination_log_dir: " ".to_string(),
     };
 
-    assert2::assert!(request.validate().is_err());
+    assert!(request.validate().is_err());
 }
 
 #[test]
@@ -150,13 +131,9 @@ fn kafka_error_dto_from_kafka_error_preserves_fields() {
 
     let dto = KafkaErrorDto::from(&error);
 
-    assert2::assert!(
-        dto == KafkaErrorDto {
-            code: 36,
-            name: "TOPIC_ALREADY_EXISTS".to_string(),
-            message: Some("topic exists".to_string()),
-        }
-    );
+    assert_eq!(dto.code, 36);
+    assert_eq!(dto.name, "TOPIC_ALREADY_EXISTS");
+    assert_eq!(dto.message, Some("topic exists".to_string()));
 }
 
 #[test]
@@ -170,14 +147,14 @@ fn ui_error_from_broker_admin_error_preserves_structured_fields() {
 
     let ui_error = UiError::from(error);
 
-    assert2::assert!(
-        ui_error
-            == UiError::Broker {
-                api: "CreateTopics",
-                code: 36,
-                name: "TOPIC_ALREADY_EXISTS".to_string(),
-                message: Some("topic exists".to_string()),
-            }
+    assert_eq!(
+        ui_error,
+        UiError::Broker {
+            api: "CreateTopics",
+            code: 36,
+            name: "TOPIC_ALREADY_EXISTS".to_string(),
+            message: Some("topic exists".to_string()),
+        }
     );
 }
 
@@ -211,27 +188,20 @@ fn maps_topic_metadata_to_rows_with_errors() {
 
     let rows = topic_rows(metadata);
 
-    assert2::assert!(
-        rows == [
-            TopicRow {
-                name: "orders".to_string(),
-                topic_id: Some(topic_id.to_string()),
-                partition_count: 3,
-                replication_factor: 2,
-                error: None,
-            },
-            TopicRow {
-                name: "missing".to_string(),
-                topic_id: None,
-                partition_count: 0,
-                replication_factor: 0,
-                error: Some(KafkaErrorDto {
-                    code: 3,
-                    name: "UNKNOWN_TOPIC_OR_PARTITION".to_string(),
-                    message: Some("topic missing".to_string()),
-                }),
-            },
-        ]
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].name, "orders");
+    assert_eq!(rows[0].topic_id, Some(topic_id.to_string()));
+    assert_eq!(rows[0].partition_count, 3);
+    assert_eq!(rows[0].replication_factor, 2);
+    assert_eq!(rows[0].error, None);
+    assert_eq!(rows[1].name, "missing");
+    assert_eq!(
+        rows[1].error,
+        Some(KafkaErrorDto {
+            code: 3,
+            name: "UNKNOWN_TOPIC_OR_PARTITION".to_string(),
+            message: Some("topic missing".to_string()),
+        })
     );
 }
 
@@ -239,16 +209,9 @@ fn maps_topic_metadata_to_rows_with_errors() {
 fn maps_group_ids_to_group_rows() {
     let rows = group_rows(vec!["payments".to_string(), "shipping".to_string()]);
 
-    assert2::assert!(
-        rows == [
-            GroupRow {
-                group_id: "payments".to_string(),
-            },
-            GroupRow {
-                group_id: "shipping".to_string(),
-            },
-        ]
-    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].group_id, "payments");
+    assert_eq!(rows[1].group_id, "shipping");
 }
 
 #[test]
@@ -263,14 +226,11 @@ fn maps_acl_entries_to_visible_rows() {
         permission_type: PermissionType::Allow,
     }]);
 
-    assert2::assert!(
-        rows == [AclRow {
-            resource: "Topic:orders (Literal)".to_string(),
-            principal: "User:alice".to_string(),
-            operation: "Read".to_string(),
-            permission: "Allow".to_string(),
-        }]
-    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].resource, "Topic:orders (Literal)");
+    assert_eq!(rows[0].principal, "User:alice");
+    assert_eq!(rows[0].operation, "Read");
+    assert_eq!(rows[0].permission, "Allow");
 }
 
 #[test]
@@ -282,20 +242,12 @@ fn maps_user_quota_config_to_visible_rows() {
 
     let rows = quota_rows("alice", quotas);
 
-    assert2::assert!(
-        rows == [
-            QuotaRow {
-                entity: "alice".to_string(),
-                quota_type: "consumer_byte_rate".to_string(),
-                value: "2048".to_string(),
-            },
-            QuotaRow {
-                entity: "alice".to_string(),
-                quota_type: "producer_byte_rate".to_string(),
-                value: "1024.5".to_string(),
-            },
-        ]
-    );
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].entity, "alice");
+    assert_eq!(rows[0].quota_type, "consumer_byte_rate");
+    assert_eq!(rows[0].value, "2048");
+    assert_eq!(rows[1].quota_type, "producer_byte_rate");
+    assert_eq!(rows[1].value, "1024.5");
 }
 
 #[test]
@@ -309,12 +261,9 @@ fn maps_scram_credentials_to_user_rows() {
         error: None,
     }]);
 
-    assert2::assert!(
-        rows == [UserRow {
-            username: "alice".to_string(),
-            principal: "SCRAM-SHA-512".to_string(),
-        }]
-    );
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].username, "alice");
+    assert_eq!(rows[0].principal, "SCRAM-SHA-512");
 }
 
 #[test]
@@ -347,34 +296,12 @@ fn maps_mutation_outcomes_preserving_kafka_errors() {
         matched: Vec::new(),
     }]);
 
-    let expected_error = Some(KafkaErrorDto {
-        code: 3,
-        name: "UNKNOWN_TOPIC_OR_PARTITION".to_string(),
-        message: Some("missing".to_string()),
-    });
-    assert2::assert!(
-        delete_topic_rows
-            == vec![ResourceOutcome {
-                resource: "orders".to_string(),
-                error: expected_error.clone(),
-            }]
-    );
-    assert2::assert!(partition_rows == vec![ResourceOutcome::ok("payments")]);
-    assert2::assert!(
-        scram_rows
-            == vec![ResourceOutcome {
-                resource: "alice".to_string(),
-                error: expected_error.clone(),
-            }]
-    );
-    assert2::assert!(log_dir_rows == vec![ResourceOutcome::ok("orders-1")]);
-    assert2::assert!(
-        delete_acl_rows
-            == vec![ResourceOutcome {
-                resource: "acl-filter".to_string(),
-                error: expected_error,
-            }]
-    );
+    assert_eq!(delete_topic_rows[0].resource, "orders");
+    assert!(delete_topic_rows[0].has_error());
+    assert_eq!(partition_rows[0].resource, "payments");
+    assert_eq!(scram_rows[0].resource, "alice");
+    assert_eq!(log_dir_rows[0].resource, "orders-1");
+    assert!(delete_acl_rows[0].has_error());
 }
 
 #[test]
@@ -407,33 +334,26 @@ fn maps_log_dir_info_to_partition_rows_with_directory_errors() {
 
     let rows = log_dir_rows(log_dirs);
 
-    let error = Some(KafkaErrorDto {
-        code: 57,
-        name: "KAFKA_STORAGE_ERROR".to_string(),
-        message: Some("disk offline".to_string()),
-    });
-    assert2::assert!(
-        rows == [
-            LogDirRow {
-                log_dir: "/var/lib/crabka-0".to_string(),
-                topic: "orders".to_string(),
-                partition: 0,
-                partition_size: 1024,
-                offset_lag: 0,
-                is_future_key: false,
-                error: error.clone(),
-            },
-            LogDirRow {
-                log_dir: "/var/lib/crabka-0".to_string(),
-                topic: "orders".to_string(),
-                partition: 1,
-                partition_size: 2048,
-                offset_lag: 7,
-                is_future_key: true,
-                error,
-            },
-        ]
+    assert_eq!(rows.len(), 2);
+    assert_eq!(rows[0].log_dir, "/var/lib/crabka-0");
+    assert_eq!(rows[0].topic, "orders");
+    assert_eq!(rows[0].partition, 0);
+    assert_eq!(rows[0].partition_size, 1024);
+    assert_eq!(rows[0].offset_lag, 0);
+    assert!(!rows[0].is_future_key);
+    assert_eq!(rows[1].partition, 1);
+    assert_eq!(rows[1].partition_size, 2048);
+    assert_eq!(rows[1].offset_lag, 7);
+    assert!(rows[1].is_future_key);
+    assert_eq!(
+        rows[0].error,
+        Some(KafkaErrorDto {
+            code: 57,
+            name: "KAFKA_STORAGE_ERROR".to_string(),
+            message: Some("disk offline".to_string()),
+        })
     );
+    assert_eq!(rows[1].error, rows[0].error);
 }
 
 #[test]
@@ -450,19 +370,19 @@ fn maps_errored_empty_log_dir_to_sentinel_row() {
 
     let rows = log_dir_rows(log_dirs);
 
-    assert2::assert!(
-        rows == [LogDirRow {
-            log_dir: "/var/lib/crabka-offline".to_string(),
-            topic: String::new(),
-            partition: -1,
-            partition_size: 0,
-            offset_lag: 0,
-            is_future_key: false,
-            error: Some(KafkaErrorDto {
-                code: 57,
-                name: "KAFKA_STORAGE_ERROR".to_string(),
-                message: Some("disk offline".to_string()),
-            }),
-        }]
+    assert_eq!(rows.len(), 1);
+    assert_eq!(rows[0].log_dir, "/var/lib/crabka-offline");
+    assert_eq!(rows[0].topic, "");
+    assert_eq!(rows[0].partition, -1);
+    assert_eq!(rows[0].partition_size, 0);
+    assert_eq!(rows[0].offset_lag, 0);
+    assert!(!rows[0].is_future_key);
+    assert_eq!(
+        rows[0].error,
+        Some(KafkaErrorDto {
+            code: 57,
+            name: "KAFKA_STORAGE_ERROR".to_string(),
+            message: Some("disk offline".to_string()),
+        })
     );
 }

@@ -16,9 +16,6 @@ unsafe_code = "forbid"
 pedantic = { level = "warn", priority = -1 }
 # These three opt-outs are intentional while the public API is still pre-1.0;
 # re-evaluate once API surfaces stabilise.
-module_name_repetitions = "allow"
-missing_errors_doc = "allow"
-missing_panics_doc = "allow"
 clone_on_copy = "warn"
 
 [profile.mutants]
@@ -46,6 +43,7 @@ url = "2"
 promql-parser = { version = "0.10", features = ["ser"] }
 columnar = "0.13"
 bytes = "1"
+num-traits = "0.2.19"
 thiserror = "2"
 # Derive boilerplate for domain newtypes (Display/From/Into/Deref/AsRef/
 # Constructor/FromStr and numeric ops) so wrappers over wire/domain primitives

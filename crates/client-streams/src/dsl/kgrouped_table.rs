@@ -234,7 +234,6 @@ where
 
     /// Record SELECT → repartition(Changed) → AGGREGATE + store; return
     /// `KTable<KR, T>`.
-    #[allow(clippy::too_many_lines)]
     fn lower<KS, VS, T, I, Add, Sub>(
         mut self,
         materialized: Materialized<KS, VS>,

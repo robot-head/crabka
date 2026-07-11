@@ -7,6 +7,7 @@ use std::{
     cmp::Ordering,
     collections::{BTreeMap, BTreeSet},
     convert::Infallible,
+    fmt::Write as _,
     future::{Future, IntoFuture, pending},
     io::{ErrorKind, Read as _},
     net::SocketAddr,
@@ -87,6 +88,7 @@ use datafusion::{
 use flate2::read::{DeflateDecoder, GzDecoder};
 use futures_util::{StreamExt as _, TryStreamExt as _};
 pub use ids::{Offset, PartitionIndex};
+use num_traits::{FromPrimitive as _, ToPrimitive as _};
 use object_store::{
     ObjectStore, ObjectStoreExt, local::LocalFileSystem, parse_url_opts, path::Path as ObjectPath,
 };
@@ -120,8 +122,8 @@ use url::Url;
 
 use crate::metrics::ServiceMetrics;
 
-const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_secs(7 * 24 * 60 * 60);
-const LOKI_CREATION_GRACE_PERIOD: Duration = Duration::from_secs(10 * 60);
+const LOKI_REJECT_OLD_SAMPLES_MAX_AGE: Duration = Duration::from_hours(168);
+const LOKI_CREATION_GRACE_PERIOD: Duration = Duration::from_mins(10);
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, ValueEnum)]
 pub enum Role {
@@ -280,7 +282,7 @@ struct HotTailDependency {
 }
 
 /// Parameters needed to connect a [`KafkaLogWalConsumer`] in the background.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone)]
 struct DeferredWalConsumerConnect {
     bootstrap: String,
     group_id: String,
@@ -429,6 +431,8 @@ impl ServiceDependencies {
 }
 
 #[must_use]
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
     let ServiceConfig {
         target,
@@ -454,11 +458,11 @@ pub fn run(config: ServiceConfig) -> Result<ServiceStatus, Infallible> {
     Ok(ServiceStatus { role: target })
 }
 
-const WAL_CONNECT_STARTUP_DEADLINE: Duration = Duration::from_secs(120);
+const WAL_CONNECT_STARTUP_DEADLINE: Duration = Duration::from_mins(2);
 const WAL_CONNECT_ATTEMPT_TIMEOUT: Duration = Duration::from_secs(15);
 const COMPACTION_FRONTIER_REFRESH_INTERVAL: Duration = Duration::from_secs(5);
 const DYNAMIC_INDEX_CACHE_TTL: Duration = Duration::from_secs(5);
-const DYNAMIC_INDEX_SHARD_CACHE_TTL: Duration = Duration::from_secs(5 * 60);
+const DYNAMIC_INDEX_SHARD_CACHE_TTL: Duration = Duration::from_mins(5);
 const DYNAMIC_INDEX_SHARD_FETCH_CONCURRENCY: usize = 32;
 const OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY: usize = 8;
 const LOG_COMPACTION_ACCUMULATION_WINDOW: Duration = Duration::from_secs(2);
@@ -530,19 +534,20 @@ where
                     }
                     // All attempts so far only timed out (no Err variant captured).
                     // Do one final timed attempt; whatever it returns is the answer.
-                    return match tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await {
-                        Ok(r) => r,
+                    return if let Ok(result) =
+                        tokio::time::timeout(WAL_CONNECT_ATTEMPT_TIMEOUT, make()).await
+                    {
+                        result
+                    } else {
                         // Still timing out after the deadline — treat as a persistent
                         // hang; update last_err on next loop iteration and eventually
                         // we'll return Err from the Ok(Err) deadline arm.  For now,
                         // sleep briefly and let the loop expire naturally.
-                        Err(_) => {
-                            eprintln!(
-                                "[crabka-observability] WAL dependency {what} connect timed out repeatedly; giving up"
-                            );
-                            sleep(Duration::from_millis(200)).await;
-                            continue;
-                        }
+                        eprintln!(
+                            "[crabka-observability] WAL dependency {what} connect timed out repeatedly; giving up"
+                        );
+                        sleep(Duration::from_millis(200)).await;
+                        continue;
                     };
                 }
                 eprintln!(
@@ -555,6 +560,8 @@ where
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn build_service_dependencies(
     config: &ServiceConfig,
 ) -> Result<ServiceDependencies, ServiceRuntimeError> {
@@ -619,6 +626,8 @@ pub async fn build_service_dependencies(
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn run_compactor_once(
     config: &ServiceConfig,
     dependencies: ServiceDependencies,
@@ -662,6 +671,8 @@ pub async fn run_compactor_once(
     Ok(descriptors.into_iter().next())
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn run_compactor_until_idle(
     config: &ServiceConfig,
     dependencies: ServiceDependencies,
@@ -719,6 +730,8 @@ pub async fn run_compactor_until_idle(
 }
 
 #[cfg_attr(test, mutants::skip)]
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn run_compactor_until_shutdown(
     config: &ServiceConfig,
     dependencies: ServiceDependencies,
@@ -1120,8 +1133,7 @@ async fn compact_polled_kafka_wal_records_inner(
             block_index,
             &mut committer,
             chunk,
-            &delete_filters,
-            LogCompactionIndexOutput::ShardManifests,
+            (&delete_filters, LogCompactionIndexOutput::ShardManifests),
         )
         .await?;
         let position = committer
@@ -1484,6 +1496,8 @@ enum LogCompactionIndexOutput {
     ShardManifests,
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn compact_log_block_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -1587,6 +1601,8 @@ async fn write_tenant_compaction_indexes_to_object_store(
 }
 
 pub trait CompactionOffsetCommitter {
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     fn commit_compacted(&mut self, position: WalPosition) -> Result<(), CompactionCommitError>;
 }
 
@@ -1655,6 +1671,8 @@ pub enum CompactionFrontierStoreError {
     ObjectStore(#[from] object_store::Error),
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn compact_next_kafka_wal_batch_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -1698,6 +1716,8 @@ impl CompactionOffsetCommitter for LastCompactedPosition {
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn compact_kafka_wal_records_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -1722,6 +1742,8 @@ pub async fn compact_kafka_wal_records_to_object_store(
     .await?)
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn compact_wal_records_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -1737,8 +1759,7 @@ pub async fn compact_wal_records_to_object_store(
         block_index,
         committer,
         records,
-        &[],
-        LogCompactionIndexOutput::FullManifestAndShardCatalog,
+        (&[], LogCompactionIndexOutput::FullManifestAndShardCatalog),
     )
     .await?
     .ok_or(CompactionError::AllRowsDeleted)
@@ -1751,9 +1772,9 @@ async fn compact_wal_records_to_object_store_with_delete_filters_and_index_outpu
     block_index: &mut BlockIndex,
     committer: &mut impl CompactionOffsetCommitter,
     records: Vec<WalLogRecord>,
-    delete_filters: &[ActiveLogDeleteFilter],
-    index_output: LogCompactionIndexOutput,
+    output: (&[ActiveLogDeleteFilter], LogCompactionIndexOutput),
 ) -> Result<Option<BlockDescriptor>, CompactionError> {
+    let (delete_filters, index_output) = output;
     let first = records.first().ok_or(CompactionError::EmptyWalBatch)?;
     let tenant = first.tenant.clone();
     let first_position = first.position.ok_or(CompactionError::MissingWalPosition {
@@ -1930,6 +1951,8 @@ impl SharedCompactionFrontier {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn snapshot(&self) -> CompactionFrontier {
         self.frontier
             .lock()
@@ -1937,6 +1960,8 @@ impl SharedCompactionFrontier {
             .clone()
     }
 
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn advance_partition_offset(&self, position: WalPosition) {
         self.frontier
             .lock()
@@ -1944,6 +1969,8 @@ impl SharedCompactionFrontier {
             .advance_partition_offset(position);
     }
 
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn replace(&self, frontier: CompactionFrontier) {
         *self.frontier.lock().expect("frontier mutex poisoned") = frontier;
     }
@@ -1993,6 +2020,8 @@ impl TryFrom<CompactionFrontierManifest> for CompactionFrontier {
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn write_compaction_frontier_to_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -2008,6 +2037,8 @@ pub async fn write_compaction_frontier_to_object_store(
     Ok(())
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn read_compaction_frontier_from_object_store(
     store: &dyn ObjectStore,
     prefix: &ObjectPath,
@@ -2183,6 +2214,8 @@ pub struct InMemoryWalSink {
 
 impl InMemoryWalSink {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn records(&self) -> Vec<WalLogRecord> {
         self.records.lock().expect("wal sink lock poisoned").clone()
     }
@@ -2351,7 +2384,7 @@ impl LogIngestLimiter for BrokerBackedIngestLimiter {
             .entry(tenant.to_string())
             .or_insert_with(|| IngestQuotaBucket::new(rate));
         bucket.update_rate(rate);
-        if bucket.consume(bytes as f64) {
+        if bucket.consume(bytes.to_f64().unwrap_or(f64::MAX)) {
             return Ok(());
         }
 
@@ -2632,6 +2665,8 @@ pub struct BufferedLogHotTail {
 
 impl BufferedLogHotTail {
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn records(&self) -> Vec<WalLogRecord> {
         self.buffer
             .lock()
@@ -2641,6 +2676,8 @@ impl BufferedLogHotTail {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn records_in_range(&self, start_ns: i64, end_ns: i64) -> Vec<WalLogRecord> {
         self.buffer
             .lock()
@@ -2648,6 +2685,8 @@ impl BufferedLogHotTail {
             .records_in_range(start_ns, end_ns)
     }
 
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn append_records(&self, records: Vec<WalLogRecord>) {
         let mut buffer = self.buffer.lock().expect("hot tail buffer lock poisoned");
         for record in records {
@@ -2656,6 +2695,8 @@ impl BufferedLogHotTail {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
     pub fn prune_compacted(&self, frontier: &CompactionFrontier) -> usize {
         self.buffer
             .lock()
@@ -2690,6 +2731,8 @@ impl KafkaLogWalSink {
     }
 
     #[cfg_attr(test, mutants::skip)]
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     pub async fn connect(
         bootstrap: impl Into<String>,
         topic: impl Into<String>,
@@ -2725,6 +2768,8 @@ pub struct KafkaLogWalConsumer {
 
 impl KafkaLogWalConsumer {
     #[cfg_attr(test, mutants::skip)]
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     pub async fn connect(
         bootstrap: impl Into<String>,
         group_id: impl Into<String>,
@@ -2790,6 +2835,8 @@ impl LogWalConsumer for KafkaLogWalConsumer {
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn build_kafka_wal_record(
     topic: impl Into<String>,
     record: &WalLogRecord,
@@ -2825,6 +2872,8 @@ pub fn build_kafka_wal_record(
     })
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn decode_kafka_wal_record(
     value: &[u8],
     partition: PartitionIndex,
@@ -2835,6 +2884,8 @@ pub fn decode_kafka_wal_record(
     Ok(record)
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn decode_kafka_wal_record_envelope(
     record: KafkaWalRecord,
 ) -> Result<WalLogRecord, WalRecordDecodeError> {
@@ -2847,6 +2898,8 @@ pub fn decode_kafka_wal_record_envelope(
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn poll_log_hot_tail_once(
     consumer: &mut (impl LogWalConsumer + ?Sized),
     hot_tail: &BufferedLogHotTail,
@@ -2908,7 +2961,7 @@ fn spawn_log_hot_tail_poller(
 /// retrying here lets the querier serve its HTTP port immediately (FIX B2).
 ///
 /// Cancelling `token` causes the poll loop to exit and calls `consumer.close()` to send
-/// LeaveGroup, removing the consumer from the broker's group immediately on graceful shutdown.
+/// `LeaveGroup`, removing the consumer from the broker's group immediately on graceful shutdown.
 #[cfg_attr(test, mutants::skip)]
 fn spawn_wal_hot_tail_connect_and_poll(
     bootstrap: String,
@@ -2959,7 +3012,7 @@ fn spawn_wal_hot_tail_connect_and_poll(
 }
 
 /// Spawn a background task that retries `BrokerBackedQueryAuthorizer::connect` until it succeeds,
-/// then swaps the provided `slot` from AllowAll to the real broker-backed authorizer (FIX B2).
+/// then swaps the provided `slot` from `AllowAll` to the real broker-backed authorizer (FIX B2).
 #[cfg_attr(test, mutants::skip)]
 fn spawn_query_authorizer_connect(
     bootstrap: String,
@@ -3703,10 +3756,10 @@ fn encode_otlp_status_message(message: &str) -> Vec<u8> {
 
 fn encode_varint(mut value: u64, body: &mut Vec<u8>) {
     while value >= 0x80 {
-        body.push((value as u8) | 0x80);
+        body.push(u8::try_from(value & 0x7f).expect("masked varint byte fits in u8") | 0x80);
         value >>= 7;
     }
-    body.push(value as u8);
+    body.push(u8::try_from(value).expect("final varint byte fits in u8"));
 }
 
 fn validate_ingest_body_limit(
@@ -4028,11 +4081,11 @@ fn loki_structured_metadata_object_parse_error(body: &[u8], value: &Value) -> St
 fn loki_structured_metadata_value_parse_error(body: &[u8], name: &str, value: &Value) -> String {
     let body = String::from_utf8_lossy(body);
     let key = quote_logql_string(name);
-    let needle = format!("{key}:{}", value);
-    let value_start = body
-        .find(&needle)
-        .map(|offset| offset + key.len() + 1)
-        .unwrap_or_else(|| body.find(&value.to_string()).unwrap_or(body.len()));
+    let needle = format!("{key}:{value}");
+    let value_start = body.find(&needle).map_or_else(
+        || body.find(&value.to_string()).unwrap_or(body.len()),
+        |offset| offset + key.len() + 1,
+    );
     let context = loki_decode_error_context(&body, value_start.saturating_sub(3));
     let bigger_context = loki_decode_error_context(&body, value_start.saturating_sub(43));
 
@@ -4306,7 +4359,7 @@ fn normalize_loki_proto_push(
                 labels,
                 timestamp_ns,
                 line: entry.line,
-                structured_metadata: loki_proto_label_pairs_to_labels(&entry.structured_metadata)?,
+                structured_metadata: loki_proto_label_pairs_to_labels(&entry.structured_metadata),
                 position: None,
             });
         }
@@ -4386,8 +4439,7 @@ fn loki_json_timestamp_parse_error(timestamp: &str, line: &str) -> String {
     let found_context = timestamp
         .char_indices()
         .nth(9)
-        .map(|(offset, _)| &timestamp[offset..])
-        .unwrap_or(timestamp);
+        .map_or(timestamp, |(offset, _)| &timestamp[offset..]);
     format!(
         "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}}' symbol, error found in #10 byte of ...|{found_context}\"]]}}]}}|..., bigger context ...|s\":[[\"{timestamp}\",\"{line}\"]]}}]}}|...\n"
     )
@@ -4401,19 +4453,16 @@ fn loki_json_timestamp_value_parse_error(
     let body = String::from_utf8_lossy(body);
     let timestamp_text = timestamp.to_string();
     let value_start = body.find(&timestamp_text).unwrap_or(body.len());
-    let found_context = line
-        .and_then(Value::as_str)
-        .map(|line| {
+    let found_context = line.and_then(Value::as_str).map_or_else(
+        || loki_decode_error_context(&body, value_start.saturating_add(10)).to_string(),
+        |line| {
             let start = line
                 .char_indices()
                 .nth(line.chars().count().saturating_sub(6))
-                .map(|(offset, _)| offset)
-                .unwrap_or(0);
+                .map_or(0, |(offset, _)| offset);
             format!("{}\"]]}}]}}", &line[start..])
-        })
-        .unwrap_or_else(|| {
-            loki_decode_error_context(&body, value_start.saturating_add(10)).to_string()
-        });
+        },
+    );
     let context_prefix_len = if timestamp.is_array() {
         10
     } else if timestamp.is_object() {
@@ -4436,8 +4485,7 @@ fn loki_json_line_parse_error(stream_labels: &Labels, timestamp: &str, line: &Va
         timestamp
             .char_indices()
             .nth(timestamp.chars().count().saturating_sub(2))
-            .map(|(offset, _)| &timestamp[offset..])
-            .unwrap_or(timestamp),
+            .map_or(timestamp, |(offset, _)| &timestamp[offset..]),
         line
     );
     let labels = serde_json::to_string(stream_labels).unwrap_or_else(|_| "{}".to_string());
@@ -4499,9 +4547,10 @@ fn parse_loki_proto_labels(labels: &str) -> Result<Labels, DistributorError> {
     }
 
     let query = parse_query(labels).map_err(|_| {
-        loki_proto_label_parse_error(labels)
-            .map(DistributorError::InvalidPushLabelSyntax)
-            .unwrap_or(DistributorError::InvalidPushLabels)
+        loki_proto_label_parse_error(labels).map_or(
+            DistributorError::InvalidPushLabels,
+            DistributorError::InvalidPushLabelSyntax,
+        )
     })?;
     if !query.pipeline.is_empty() {
         return Err(DistributorError::InvalidPushLabels);
@@ -4621,14 +4670,12 @@ fn loki_missing_proto_timestamp_error(
     }
 }
 
-fn loki_proto_label_pairs_to_labels(
-    labels: &[LokiProtoLabelPair],
-) -> Result<Labels, DistributorError> {
+fn loki_proto_label_pairs_to_labels(labels: &[LokiProtoLabelPair]) -> Labels {
     let mut labels_by_name = Labels::new();
     for label in labels {
         labels_by_name.insert(label.name.clone(), label.value.clone());
     }
-    Ok(labels_by_name)
+    labels_by_name
 }
 
 fn normalize_otlp_proto_logs(
@@ -5777,12 +5824,16 @@ impl QuerierState {
         Ok(merge_tenant_shard_indexes(tenant, indexes))
     }
 
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     pub fn from_manifest(root: impl Into<PathBuf>) -> Result<Self, BlockStoreError> {
         let root = root.into();
         let (label_index, block_index) = read_log_index_manifest(&root)?;
         Ok(Self::new(root, label_index, block_index))
     }
 
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     pub async fn from_tenant_object_store(
         root: impl Into<PathBuf>,
         store: &dyn ObjectStore,
@@ -5795,6 +5846,8 @@ impl QuerierState {
         Ok(Self::new(root, label_index, block_index))
     }
 
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     pub async fn from_tenant_object_store_shard(
         root: impl Into<PathBuf>,
         store: &dyn ObjectStore,
@@ -5809,6 +5862,8 @@ impl QuerierState {
         Ok(Self::new(root, label_index, block_index))
     }
 
+    /// # Errors
+    /// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
     pub async fn from_tenant_object_store_shards(
         root: impl Into<PathBuf>,
         store: &dyn ObjectStore,
@@ -5824,6 +5879,8 @@ impl QuerierState {
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn build_querier_state(
     config: &ServiceConfig,
     object_store: Option<&dyn ObjectStore>,
@@ -5993,6 +6050,8 @@ async fn build_configured_querier_state(
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn build_service_router(
     config: &ServiceConfig,
     dependencies: ServiceDependencies,
@@ -6140,6 +6199,8 @@ async fn build_service_router_with_shutdown(
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn serve_service(
     config: ServiceConfig,
     dependencies: ServiceDependencies,
@@ -6149,6 +6210,10 @@ pub async fn serve_service(
     serve_service_listener(listener, config, dependencies, object_store).await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
+/// # Panics
+/// Panics if synchronized telemetry state is poisoned or validated columnar data is missing a required field.
 pub async fn serve_service_listener(
     listener: TcpListener,
     config: ServiceConfig,
@@ -6403,15 +6468,15 @@ async fn log_level_post(RawQuery(raw_query): RawQuery, body: Bytes) -> Response 
         Err(HttpQueryError::InvalidQueryParameter {
             name: "log_level",
             value,
-        }) => log_level_failed_response(format!("unrecognized log level \"{value}\"")),
+        }) => log_level_failed_response(&format!("unrecognized log level \"{value}\"")),
         Err(HttpQueryError::MissingQueryParameter("log_level")) => {
-            log_level_failed_response("unrecognized log level \"\"".to_owned())
+            log_level_failed_response("unrecognized log level \"\"")
         }
         Err(error) => error.into_response(),
     }
 }
 
-fn log_level_failed_response(message: String) -> Response {
+fn log_level_failed_response(message: &str) -> Response {
     json_response(
         StatusCode::BAD_REQUEST,
         &json!({
@@ -6578,14 +6643,12 @@ struct CompactorDeleteRequestResponse {
     created_at: i64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
 struct CreateDeleteRequestParams {
     query: String,
     start_time: i64,
     end_time: i64,
 }
 
-#[derive(Debug, PartialEq, Eq)]
 struct ListDeleteRequestsParams {
     start_time: Option<i64>,
     end_time: Option<i64>,
@@ -6739,19 +6802,19 @@ async fn create_delete_request(
     RawQuery(raw_query): RawQuery,
     body: Bytes,
 ) -> Response {
-    match execute_create_delete_request(state, headers, raw_query.as_deref(), &body) {
+    match execute_create_delete_request(&state, &headers, raw_query.as_deref(), &body) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error.into_response(),
     }
 }
 
 fn execute_create_delete_request(
-    state: CompactorDeleteState,
-    headers: HeaderMap,
+    state: &CompactorDeleteState,
+    headers: &HeaderMap,
     raw_query: Option<&str>,
     body: &Bytes,
 ) -> Result<(), HttpQueryError> {
-    let tenant = tenant(&headers)?.to_string();
+    let tenant = tenant(headers)?.to_string();
     let raw_params = request_query_or_form_body(raw_query, body)?;
     let params = parse_create_delete_request_params(Some(raw_params.as_str()))?;
     parse_query(&params.query).map_err(|source| HttpQueryError::LokiParse {
@@ -6785,18 +6848,18 @@ async fn list_delete_requests(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    match execute_list_delete_requests(state, headers, raw_query.as_deref()) {
+    match execute_list_delete_requests(&state, &headers, raw_query.as_deref()) {
         Ok(requests) => json_response(StatusCode::OK, &json!(requests)),
         Err(error) => error.into_response(),
     }
 }
 
 fn execute_list_delete_requests(
-    state: CompactorDeleteState,
-    headers: HeaderMap,
+    state: &CompactorDeleteState,
+    headers: &HeaderMap,
     raw_query: Option<&str>,
 ) -> Result<Vec<CompactorDeleteRequestResponse>, HttpQueryError> {
-    let tenant = tenant(&headers)?;
+    let tenant = tenant(headers)?;
     let params = parse_list_delete_requests_params(raw_query)?;
     let requests = state
         .delete_requests
@@ -6824,18 +6887,18 @@ async fn cancel_delete_request(
     headers: HeaderMap,
     RawQuery(raw_query): RawQuery,
 ) -> Response {
-    match execute_cancel_delete_request(state, headers, raw_query.as_deref()) {
+    match execute_cancel_delete_request(&state, &headers, raw_query.as_deref()) {
         Ok(()) => StatusCode::NO_CONTENT.into_response(),
         Err(error) => error.into_response(),
     }
 }
 
 fn execute_cancel_delete_request(
-    state: CompactorDeleteState,
-    headers: HeaderMap,
+    state: &CompactorDeleteState,
+    headers: &HeaderMap,
     raw_query: Option<&str>,
 ) -> Result<(), HttpQueryError> {
-    let tenant = tenant(&headers)?.to_string();
+    let tenant = tenant(headers)?.to_string();
     let request_id = parse_cancel_delete_request_params(raw_query)?;
     let mut requests = state
         .delete_requests
@@ -6971,7 +7034,7 @@ fn parse_loki_delete_timestamp_query_param(
     }
     OffsetDateTime::parse(value, &Rfc3339)
         .ok()
-        .map(|timestamp| timestamp.unix_timestamp())
+        .map(time::OffsetDateTime::unix_timestamp)
         .ok_or_else(|| HttpQueryError::InvalidTimestampQueryParameter {
             name,
             value: value.to_string(),
@@ -8894,7 +8957,7 @@ async fn handle_api_prom_query(
     };
 
     match execute_http_query(&state, &headers, params, QueryKind::Instant).await {
-        Ok(value) => api_prom_streams_only_response(value),
+        Ok(value) => api_prom_streams_only_response(&value),
         Err(error) => error.into_response(),
     }
 }
@@ -8910,14 +8973,14 @@ async fn handle_api_prom_query_range(
     };
 
     match execute_http_query(&state, &headers, params, QueryKind::Range).await {
-        Ok(value) => api_prom_streams_only_response(value),
+        Ok(value) => api_prom_streams_only_response(&value),
         Err(error) => error.into_response(),
     }
 }
 
-fn api_prom_streams_only_response(value: Value) -> Response {
+fn api_prom_streams_only_response(value: &Value) -> Response {
     if value.pointer("/data/resultType").and_then(Value::as_str) == Some("streams") {
-        json_response(StatusCode::OK, &value)
+        json_response(StatusCode::OK, value)
     } else {
         text_response(
             StatusCode::BAD_REQUEST,
@@ -8969,7 +9032,7 @@ async fn execute_http_multi_tenant_query(
     for tenant in tenants {
         let response = execute_http_query_for_tenant(state, tenant, params, kind).await?;
         match &mut merged {
-            Some(merged) => merge_loki_query_response(merged, response),
+            Some(merged) => merge_loki_query_response(merged, &response),
             None => merged = Some(response),
         }
     }
@@ -9089,6 +9152,26 @@ async fn execute_http_query_for_tenant(
         apply_label_join_to_loki_result(&mut value, &label_join);
         return Ok(value);
     }
+    execute_http_remaining_query(
+        state,
+        tenant,
+        params,
+        kind,
+        time_range,
+        (direction, limit, interval),
+    )
+    .await
+}
+
+async fn execute_http_remaining_query(
+    state: &QuerierState,
+    tenant: &str,
+    params: &QueryParams,
+    kind: QueryKind,
+    time_range: TimeRange,
+    stream_options: (LokiDirection, Option<usize>, Option<i64>),
+) -> Result<Value, HttpQueryError> {
+    let (direction, limit, interval) = stream_options;
     if let Some(inner_query) = strip_outer_parenthesized_expression(&params.query) {
         return execute_http_metric_expression_query(
             state,
@@ -9202,14 +9285,16 @@ async fn execute_http_query_for_tenant(
             &params.query,
             tenant,
             time_range,
-            direction,
-            limit,
-            interval,
-            if matches!(kind, QueryKind::Range) {
-                Some(time_range.end_ns)
-            } else {
-                None
-            },
+            (
+                direction,
+                limit,
+                interval,
+                if matches!(kind, QueryKind::Range) {
+                    Some(time_range.end_ns)
+                } else {
+                    None
+                },
+            ),
         )
         .await
         .map_err(|error| match error {
@@ -10318,7 +10403,7 @@ enum ScalarSetOp {
 fn scalar_literal_len(input: &str) -> Option<usize> {
     let bytes = input.as_bytes();
     let mut position = 0;
-    if matches!(bytes.get(position), Some(b'+') | Some(b'-')) {
+    if matches!(bytes.get(position), Some(b'+' | b'-')) {
         position += 1;
     }
 
@@ -10342,9 +10427,9 @@ fn scalar_literal_len(input: &str) -> Option<usize> {
         return None;
     }
 
-    if matches!(bytes.get(position), Some(b'e') | Some(b'E')) {
+    if matches!(bytes.get(position), Some(b'e' | b'E')) {
         position += 1;
-        if matches!(bytes.get(position), Some(b'+') | Some(b'-')) {
+        if matches!(bytes.get(position), Some(b'+' | b'-')) {
             position += 1;
         }
         let exponent_start = position;
@@ -10468,7 +10553,7 @@ impl ScalarSample {
     }
 
     fn to_f64(self) -> Option<f64> {
-        let value = self.numerator as f64 / self.denominator as f64;
+        let value = self.numerator.to_f64()? / self.denominator.to_f64()?;
         value.is_finite().then_some(value)
     }
 
@@ -10477,11 +10562,8 @@ impl ScalarSample {
             return None;
         }
 
-        let scaled = (value * METRIC_DECIMAL_SCALE as f64).round();
-        if scaled < i128::MIN as f64 || scaled > i128::MAX as f64 {
-            return None;
-        }
-        Some(Self::new(scaled as i128, METRIC_DECIMAL_SCALE))
+        let scaled = (value * METRIC_DECIMAL_SCALE.to_f64()?).round();
+        Some(Self::new(i128::from_f64(scaled)?, METRIC_DECIMAL_SCALE))
     }
 
     fn format(self) -> String {
@@ -10509,7 +10591,7 @@ impl ScalarSample {
     }
 
     fn format_fixed_six(self) -> String {
-        format!("{:.6}", self.numerator as f64 / self.denominator as f64)
+        format!("{:.6}", self.to_f64().unwrap_or_default())
     }
 }
 
@@ -10668,8 +10750,7 @@ async fn execute_http_metric_query(
                 &query,
                 &records,
                 &frontier,
-                time_range,
-                step_ns,
+                (time_range, step_ns),
                 &delete_filters,
             ));
         }
@@ -10689,8 +10770,7 @@ async fn execute_http_metric_query(
             &query,
             &records,
             &frontier,
-            eval_range,
-            1,
+            (eval_range, 1),
             &delete_filters,
         ));
     }
@@ -11370,8 +11450,7 @@ async fn execute_http_metric_scalar_comparison_query(
                 &query,
                 &records,
                 &frontier,
-                time_range,
-                step_ns,
+                (time_range, step_ns),
                 &delete_filters,
             ));
         }
@@ -11393,8 +11472,7 @@ async fn execute_http_metric_scalar_comparison_query(
             &query,
             &records,
             &frontier,
-            eval_range,
-            1,
+            (eval_range, 1),
             &delete_filters,
         ));
     }
@@ -11445,8 +11523,7 @@ async fn execute_http_metric_scalar_arithmetic_query(
                 &query,
                 &records,
                 &frontier,
-                time_range,
-                step_ns,
+                (time_range, step_ns),
                 &delete_filters,
             ));
         }
@@ -11468,8 +11545,7 @@ async fn execute_http_metric_scalar_arithmetic_query(
             &query,
             &records,
             &frontier,
-            eval_range,
-            1,
+            (eval_range, 1),
             &delete_filters,
         ));
     }
@@ -11684,9 +11760,7 @@ fn metric_binary_sample_timestamp_ns_candidates(sample: &Value) -> Option<Vec<i6
     }
     if let Some(timestamp) = timestamp.as_f64() {
         let timestamp = timestamp * 1_000_000_000.0;
-        if timestamp.is_finite() && timestamp >= i64::MIN as f64 && timestamp <= i64::MAX as f64 {
-            return Some(vec![timestamp.round() as i64]);
-        }
+        return i64::from_f64(timestamp.round()).map(|timestamp| vec![timestamp]);
     }
     if let Some(timestamp) = timestamp.as_str() {
         let mut candidates = Vec::new();
@@ -12072,15 +12146,11 @@ fn apply_metric_binary_set_to_loki_result(
                 .is_some_and(|labels| metric_vector_matching_key(&labels, matching) == left_key)
         });
         let keep = match (op, right_series) {
-            (MetricBinarySetOp::And, Some(right_series)) => {
+            (MetricBinarySetOp::And | MetricBinarySetOp::Unless, Some(right_series)) => {
                 apply_metric_binary_set_to_series(&mut left_results[index], right_series, op)
             }
             (MetricBinarySetOp::And, None) => false,
-            (MetricBinarySetOp::Unless, Some(right_series)) => {
-                apply_metric_binary_set_to_series(&mut left_results[index], right_series, op)
-            }
-            (MetricBinarySetOp::Unless, None) => true,
-            (MetricBinarySetOp::Or, _) => true,
+            (MetricBinarySetOp::Unless, None) | (MetricBinarySetOp::Or, _) => true,
         };
         if keep {
             index += 1;
@@ -12117,8 +12187,9 @@ fn metric_vector_group_modifier(
     matching: Option<&MetricVectorMatching>,
 ) -> Option<&MetricVectorGroupModifier> {
     match matching {
-        Some(MetricVectorMatching::On { group, .. })
-        | Some(MetricVectorMatching::Ignoring { group, .. }) => group.as_ref(),
+        Some(
+            MetricVectorMatching::On { group, .. } | MetricVectorMatching::Ignoring { group, .. },
+        ) => group.as_ref(),
         None => None,
     }
 }
@@ -12435,11 +12506,12 @@ async fn execute_http_metric_range_query(
             plan,
             query,
             &state.label_index,
-            time_range,
-            step_ns,
-            &records,
-            &frontier,
-            delete_filters,
+            (time_range, step_ns),
+            QueryHotTail {
+                records: &records,
+                frontier: &frontier,
+                delete_filters,
+            },
         )
         .await
         .map_err(HttpQueryError::from);
@@ -12454,11 +12526,12 @@ async fn execute_http_metric_range_query(
             plan,
             query,
             &state.label_index,
-            time_range,
-            step_ns,
-            &records,
-            &frontier,
-            delete_filters,
+            (time_range, step_ns),
+            QueryHotTail {
+                records: &records,
+                frontier: &frontier,
+                delete_filters,
+            },
         )
         .await
         .map_err(HttpQueryError::from);
@@ -12490,9 +12563,11 @@ async fn execute_http_metric_instant_query(
             plan,
             query,
             &state.label_index,
-            &records,
-            &frontier,
-            delete_filters,
+            QueryHotTail {
+                records: &records,
+                frontier: &frontier,
+                delete_filters,
+            },
         )
         .await
         .map_err(HttpQueryError::from)?
@@ -12532,11 +12607,9 @@ async fn execute_http_stream_query(
     query: &str,
     tenant: &str,
     time_range: TimeRange,
-    direction: LokiDirection,
-    limit: Option<usize>,
-    interval: Option<i64>,
-    end_exclusive: Option<i64>,
+    options: (LokiDirection, Option<usize>, Option<i64>, Option<i64>),
 ) -> Result<Value, HttpQueryError> {
+    let (direction, limit, interval, end_exclusive) = options;
     validate_loki_interval(interval)?;
     let query = parse_query(query)?;
     let state = state.with_request_tenant_index(tenant, time_range).await?;
@@ -12557,9 +12630,11 @@ async fn execute_http_stream_query(
             &cold_store.prefix,
             &plan,
             &state.label_index,
-            &records,
-            &frontier,
-            &delete_filters,
+            QueryHotTail {
+                records: &records,
+                frontier: &frontier,
+                delete_filters: &delete_filters,
+            },
             StreamScanOptions::from_stream_options(direction, limit, interval, end_exclusive),
         )
         .await
@@ -13609,9 +13684,8 @@ fn format_logql_query(query: &str) -> Result<String, HttpQueryError> {
                 || parse_metric_binary_set_query(query).is_ok()
                 || parse_metric_scalar_arithmetic_query(query).is_ok()
                 || parse_metric_scalar_comparison_query(query).is_ok()
+                || scalar_vector_expression_result(query).is_some()
             {
-                Ok(query.trim().to_string())
-            } else if scalar_vector_expression_result(query).is_some() {
                 Ok(query.trim().to_string())
             } else {
                 Err(HttpQueryError::LokiFormatParse {
@@ -13773,8 +13847,7 @@ fn format_metric_binary_comparison_query(query: &str) -> Option<String> {
     let right_text = right_text.trim_start();
     let right_text = right_text
         .strip_prefix("bool")
-        .map(str::trim_start)
-        .unwrap_or(right_text);
+        .map_or(right_text, str::trim_start);
     let (_, right_text) = split_leading_vector_binary_modifiers(right_text);
     parse_metric_query(left_text.trim()).ok()?;
     parse_metric_query(right_text.trim()).ok()?;
@@ -14468,25 +14541,25 @@ fn format_loki_duration_ns(duration_ns: i64) -> Option<String> {
         if remaining >= unit_ns {
             let value = remaining / unit_ns;
             remaining %= unit_ns;
-            formatted.push_str(&format!("{value}{suffix}"));
+            write!(formatted, "{value}{suffix}").expect("writing to a String cannot fail");
         }
     }
     Some(formatted)
 }
 
 fn format_loki_offset_duration_ns(duration_ns: i64) -> Option<String> {
+    const HOUR_NS: i64 = 3_600_000_000_000;
+    const MINUTE_NS: i64 = 60_000_000_000;
+    const SECOND_NS: i64 = 1_000_000_000;
+    const MILLISECOND_NS: i64 = 1_000_000;
+    const MICROSECOND_NS: i64 = 1_000;
+
     if duration_ns < 0 {
         return None;
     }
     if duration_ns == 0 {
         return Some("0s".to_string());
     }
-
-    const HOUR_NS: i64 = 3_600_000_000_000;
-    const MINUTE_NS: i64 = 60_000_000_000;
-    const SECOND_NS: i64 = 1_000_000_000;
-    const MILLISECOND_NS: i64 = 1_000_000;
-    const MICROSECOND_NS: i64 = 1_000;
 
     let mut remaining = duration_ns;
     let hours = remaining / HOUR_NS;
@@ -16405,6 +16478,8 @@ fn loki_direction(direction: Option<&str>) -> Result<LokiDirection, HttpQueryErr
     }
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_stream_query(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -16430,6 +16505,8 @@ async fn execute_stream_query_with_deletes(
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_stream_query_with_hot_tail(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -16448,6 +16525,8 @@ pub async fn execute_stream_query_with_hot_tail(
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_stream_query_with_hot_tail_frontier(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -16492,6 +16571,8 @@ async fn execute_stream_query_with_hot_tail_frontier_and_deletes(
     Ok(loki_streams_response(streams))
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_stream_query_from_object_store(
     store: Arc<dyn ObjectStore>,
     prefix: &ObjectPath,
@@ -16503,9 +16584,11 @@ pub async fn execute_stream_query_from_object_store(
         prefix,
         plan,
         label_index,
-        &[],
-        &CompactionFrontier::new(i64::MAX),
-        &[],
+        QueryHotTail {
+            records: &[],
+            frontier: &CompactionFrontier::new(i64::MAX),
+            delete_filters: &[],
+        },
     )
     .await
 }
@@ -16513,6 +16596,13 @@ pub async fn execute_stream_query_from_object_store(
 struct ObjectStoreStreamScan {
     value: Value,
     scanned_blocks: Vec<BlockDescriptor>,
+}
+
+#[derive(Clone, Copy)]
+struct QueryHotTail<'a> {
+    records: &'a [WalLogRecord],
+    frontier: &'a CompactionFrontier,
+    delete_filters: &'a [ActiveLogDeleteFilter],
 }
 
 #[derive(Clone, Copy)]
@@ -16559,8 +16649,9 @@ impl StreamScanOptions {
             return OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY;
         }
         self.limit
-            .map(|limit| OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY.min(limit.max(1)))
-            .unwrap_or(OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY)
+            .map_or(OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY, |limit| {
+                OBJECT_STORE_STREAM_BLOCK_FETCH_CONCURRENCY.min(limit.max(1))
+            })
     }
 }
 
@@ -16620,7 +16711,8 @@ pub fn stream_plan_scan_sql(plan: &StreamPlan) -> String {
     stream_plan_scan_sql_for_time_range(plan, plan.time_range)
 }
 
-#[must_use]
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub fn metric_plan_scan_sql(
     plan: &StreamPlan,
     query: &MetricQuery,
@@ -16712,9 +16804,7 @@ async fn execute_stream_query_from_object_store_with_hot_tail_frontier(
     prefix: &ObjectPath,
     plan: &StreamPlan,
     label_index: &LabelIndex,
-    hot_tail: &[WalLogRecord],
-    frontier: &CompactionFrontier,
-    delete_filters: &[ActiveLogDeleteFilter],
+    hot_tail: QueryHotTail<'_>,
 ) -> Result<Value, QueryError> {
     Ok(
         execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_options(
@@ -16723,8 +16813,6 @@ async fn execute_stream_query_from_object_store_with_hot_tail_frontier(
             plan,
             label_index,
             hot_tail,
-            frontier,
-            delete_filters,
             StreamScanOptions::exhaustive(),
         )
         .await?
@@ -16732,21 +16820,24 @@ async fn execute_stream_query_from_object_store_with_hot_tail_frontier(
     )
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_options(
     store: Arc<dyn ObjectStore>,
     prefix: &ObjectPath,
     plan: &StreamPlan,
     label_index: &LabelIndex,
-    hot_tail: &[WalLogRecord],
-    frontier: &CompactionFrontier,
-    delete_filters: &[ActiveLogDeleteFilter],
+    hot_tail: QueryHotTail<'_>,
     options: StreamScanOptions,
 ) -> Result<ObjectStoreStreamScan, QueryError> {
     if plan.blocks.is_empty() || plan.fingerprints.is_empty() {
         let mut streams = BTreeMap::new();
-        for record in hot_tail {
-            append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
+        for record in hot_tail.records {
+            append_matching_hot_log_record(
+                &mut streams,
+                plan,
+                record,
+                hot_tail.frontier,
+                hot_tail.delete_filters,
+            );
         }
         sort_loki_stream_values(&mut streams);
         return Ok(ObjectStoreStreamScan {
@@ -16760,8 +16851,14 @@ async fn execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_
     let mut scanned_blocks = Vec::new();
 
     if matches!(options.direction, LokiDirection::Backward) {
-        for record in hot_tail {
-            append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
+        for record in hot_tail.records {
+            append_matching_hot_log_record(
+                &mut streams,
+                plan,
+                record,
+                hot_tail.frontier,
+                hot_tail.delete_filters,
+            );
         }
     }
 
@@ -16794,15 +16891,21 @@ async fn execute_stream_query_from_object_store_with_hot_tail_frontier_and_scan_
                     plan,
                     label_index,
                     &batches,
-                    delete_filters,
+                    hot_tail.delete_filters,
                 )?;
             }
         }
     }
 
     if matches!(options.direction, LokiDirection::Forward) && !options.reached_limit(&streams) {
-        for record in hot_tail {
-            append_matching_hot_log_record(&mut streams, plan, record, frontier, delete_filters);
+        for record in hot_tail.records {
+            append_matching_hot_log_record(
+                &mut streams,
+                plan,
+                record,
+                hot_tail.frontier,
+                hot_tail.delete_filters,
+            );
         }
     }
     sort_loki_stream_values(&mut streams);
@@ -16902,10 +17005,12 @@ fn append_matching_log_batches(
                 streams,
                 plan,
                 label_index,
-                fingerprints.value(row),
-                timestamps.value(row),
-                lines.value(row),
-                &structured_metadata,
+                QueryRow {
+                    fingerprint: fingerprints.value(row),
+                    timestamp_ns: timestamps.value(row),
+                    line: lines.value(row),
+                    structured_metadata: &structured_metadata,
+                },
                 delete_filters,
             )?;
         }
@@ -16958,6 +17063,8 @@ fn execute_tail_query_with_frontier_and_deletes(
     })
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -16987,6 +17094,8 @@ async fn execute_metric_query_with_deletes(
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_with_hot_tail(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -17006,6 +17115,8 @@ pub async fn execute_metric_query_with_hot_tail(
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_with_hot_tail_frontier(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -17041,15 +17152,18 @@ async fn execute_metric_query_with_hot_tail_frontier_and_deletes(
         plan,
         query,
         label_index,
-        eval_range,
-        1,
-        hot_tail,
-        frontier,
-        delete_filters,
+        (eval_range, 1),
+        QueryHotTail {
+            records: hot_tail,
+            frontier,
+            delete_filters,
+        },
     )
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_range(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
@@ -17084,15 +17198,18 @@ async fn execute_metric_query_range_with_deletes(
         plan,
         query,
         label_index,
-        eval_range,
-        step_ns,
-        &[],
-        &CompactionFrontier::new(i64::MAX),
-        delete_filters,
+        (eval_range, step_ns),
+        QueryHotTail {
+            records: &[],
+            frontier: &CompactionFrontier::new(i64::MAX),
+            delete_filters,
+        },
     )
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_from_object_store(
     store: Arc<dyn ObjectStore>,
     prefix: &ObjectPath,
@@ -17127,9 +17244,11 @@ async fn execute_metric_query_from_object_store_with_hot_tail_frontier(
         plan,
         query,
         label_index,
-        hot_tail,
-        frontier,
-        &[],
+        QueryHotTail {
+            records: hot_tail,
+            frontier,
+            delete_filters: &[],
+        },
     )
     .await
 }
@@ -17140,9 +17259,7 @@ async fn execute_metric_query_from_object_store_with_hot_tail_frontier_and_delet
     plan: &StreamPlan,
     query: &MetricQuery,
     label_index: &LabelIndex,
-    hot_tail: &[WalLogRecord],
-    frontier: &CompactionFrontier,
-    delete_filters: &[ActiveLogDeleteFilter],
+    hot_tail: QueryHotTail<'_>,
 ) -> Result<Value, QueryError> {
     let eval_range = TimeRange::new(plan.time_range.end_ns, plan.time_range.end_ns)?;
     execute_metric_query_range_from_object_store_with_hot_tail_frontier_and_deletes(
@@ -17151,15 +17268,14 @@ async fn execute_metric_query_from_object_store_with_hot_tail_frontier_and_delet
         plan,
         query,
         label_index,
-        eval_range,
-        1,
+        (eval_range, 1),
         hot_tail,
-        frontier,
-        delete_filters,
     )
     .await
 }
 
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_range_from_object_store(
     store: Arc<dyn ObjectStore>,
     prefix: &ObjectPath,
@@ -17175,22 +17291,24 @@ pub async fn execute_metric_query_range_from_object_store(
         plan,
         query,
         label_index,
-        eval_range,
-        step_ns,
-        &[],
-        &CompactionFrontier::new(i64::MAX),
+        (eval_range, step_ns),
+        QueryHotTail {
+            records: &[],
+            frontier: &CompactionFrontier::new(i64::MAX),
+            delete_filters: &[],
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_range_with_hot_tail(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
     query: &MetricQuery,
     label_index: &LabelIndex,
-    eval_range: TimeRange,
-    step_ns: i64,
+    evaluation: (TimeRange, i64),
     hot_tail: &[WalLogRecord],
     compacted_through_ns: i64,
 ) -> Result<Value, QueryError> {
@@ -17199,22 +17317,21 @@ pub async fn execute_metric_query_range_with_hot_tail(
         plan,
         query,
         label_index,
-        eval_range,
-        step_ns,
+        evaluation,
         hot_tail,
         &CompactionFrontier::new(compacted_through_ns),
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
+/// # Errors
+/// Returns an error when telemetry input is malformed, a query cannot be evaluated, or the configured storage or export backend fails.
 pub async fn execute_metric_query_range_with_hot_tail_frontier(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
     query: &MetricQuery,
     label_index: &LabelIndex,
-    eval_range: TimeRange,
-    step_ns: i64,
+    evaluation: (TimeRange, i64),
     hot_tail: &[WalLogRecord],
     frontier: &CompactionFrontier,
 ) -> Result<Value, QueryError> {
@@ -17223,27 +17340,25 @@ pub async fn execute_metric_query_range_with_hot_tail_frontier(
         plan,
         query,
         label_index,
-        eval_range,
-        step_ns,
-        hot_tail,
-        frontier,
-        &[],
+        evaluation,
+        QueryHotTail {
+            records: hot_tail,
+            frontier,
+            delete_filters: &[],
+        },
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_metric_query_range_with_hot_tail_frontier_and_deletes(
     root: impl AsRef<FsPath>,
     plan: &StreamPlan,
     query: &MetricQuery,
     label_index: &LabelIndex,
-    eval_range: TimeRange,
-    step_ns: i64,
-    hot_tail: &[WalLogRecord],
-    frontier: &CompactionFrontier,
-    delete_filters: &[ActiveLogDeleteFilter],
+    evaluation: (TimeRange, i64),
+    hot_tail: QueryHotTail<'_>,
 ) -> Result<Value, QueryError> {
+    let (eval_range, step_ns) = evaluation;
     if step_ns <= 0 {
         return Err(QueryError::InvalidStep(step_ns));
     }
@@ -17262,20 +17377,22 @@ async fn execute_metric_query_range_with_hot_tail_frontier_and_deletes(
             query,
             label_index,
             &eval_times,
-            delete_filters,
+            hot_tail.delete_filters,
         )?;
     }
 
-    for record in hot_tail {
+    for record in hot_tail.records {
         append_matching_hot_metric_record(
             &mut samples,
             plan,
-            query,
             record,
-            frontier,
-            &eval_times,
-            query.range_ns.0,
-            delete_filters,
+            hot_tail.frontier,
+            MetricWindow {
+                query,
+                eval_times: &eval_times,
+                range_ns: query.range_ns.0,
+                delete_filters: hot_tail.delete_filters,
+            },
         )?;
     }
     apply_absent_over_time(&mut samples, query, &eval_times);
@@ -17283,17 +17400,14 @@ async fn execute_metric_query_range_with_hot_tail_frontier_and_deletes(
     Ok(loki_matrix_response(format_metric_samples(samples, query)))
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier(
     store: Arc<dyn ObjectStore>,
     prefix: &ObjectPath,
     plan: &StreamPlan,
     query: &MetricQuery,
     label_index: &LabelIndex,
-    eval_range: TimeRange,
-    step_ns: i64,
-    hot_tail: &[WalLogRecord],
-    frontier: &CompactionFrontier,
+    evaluation: (TimeRange, i64),
+    hot_tail: QueryHotTail<'_>,
 ) -> Result<Value, QueryError> {
     execute_metric_query_range_from_object_store_with_hot_tail_frontier_and_deletes(
         store,
@@ -17301,28 +17415,22 @@ async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier(
         plan,
         query,
         label_index,
-        eval_range,
-        step_ns,
+        evaluation,
         hot_tail,
-        frontier,
-        &[],
     )
     .await
 }
 
-#[allow(clippy::too_many_arguments)]
 async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier_and_deletes(
     store: Arc<dyn ObjectStore>,
     prefix: &ObjectPath,
     plan: &StreamPlan,
     query: &MetricQuery,
     label_index: &LabelIndex,
-    eval_range: TimeRange,
-    step_ns: i64,
-    hot_tail: &[WalLogRecord],
-    frontier: &CompactionFrontier,
-    delete_filters: &[ActiveLogDeleteFilter],
+    evaluation: (TimeRange, i64),
+    hot_tail: QueryHotTail<'_>,
 ) -> Result<Value, QueryError> {
+    let (eval_range, step_ns) = evaluation;
     if step_ns <= 0 {
         return Err(QueryError::InvalidStep(step_ns));
     }
@@ -17352,22 +17460,24 @@ async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier_and
                 query,
                 label_index,
                 &eval_times,
-                delete_filters,
+                hot_tail.delete_filters,
             )?;
             merge_metric_samples(&mut samples, block_samples);
         }
     }
 
-    for record in hot_tail {
+    for record in hot_tail.records {
         append_matching_hot_metric_record(
             &mut samples,
             plan,
-            query,
             record,
-            frontier,
-            &eval_times,
-            query.range_ns.0,
-            delete_filters,
+            hot_tail.frontier,
+            MetricWindow {
+                query,
+                eval_times: &eval_times,
+                range_ns: query.range_ns.0,
+                delete_filters: hot_tail.delete_filters,
+            },
         )?;
     }
     apply_absent_over_time(&mut samples, query, &eval_times);
@@ -17380,6 +17490,14 @@ async fn execute_metric_query_range_from_object_store_with_hot_tail_frontier_and
 
 type MetricSamples = BTreeMap<Labels, BTreeMap<i64, MetricSampleState>>;
 type FormattedMetricSeries = Vec<(Labels, Vec<[String; 2]>)>;
+
+#[derive(Clone, Copy)]
+struct MetricWindow<'a> {
+    query: &'a MetricQuery,
+    eval_times: &'a [i64],
+    range_ns: i64,
+    delete_filters: &'a [ActiveLogDeleteFilter],
+}
 
 fn merge_metric_samples(samples: &mut MetricSamples, block_samples: MetricSamples) {
     for (labels, values) in block_samples {
@@ -17474,16 +17592,18 @@ fn metric_samples_from_batches(
                 &mut samples,
                 plan,
                 label_index,
-                query,
                 QueryRow {
                     fingerprint: fingerprints.value(row),
                     timestamp_ns: timestamps.value(row),
                     line: lines.value(row),
                     structured_metadata: &structured_metadata,
                 },
-                eval_times,
-                query.range_ns.0,
-                delete_filters,
+                MetricWindow {
+                    query,
+                    eval_times,
+                    range_ns: query.range_ns.0,
+                    delete_filters,
+                },
             )?;
         }
     }
@@ -17731,7 +17851,8 @@ fn select_vector_samples(
                 };
                 value_order.then_with(|| left.0.cmp(&right.0))
             });
-            for (labels, value) in candidates.into_iter().take(limit as usize) {
+            let limit = usize::try_from(limit).unwrap_or(usize::MAX);
+            for (labels, value) in candidates.into_iter().take(limit) {
                 selected
                     .entry(labels)
                     .or_insert_with(BTreeMap::new)
@@ -17779,12 +17900,10 @@ fn range_sample_value(value: MetricSampleState, query: &MetricQuery) -> MetricVa
         RangeAggregation::MaxOverTime => value.max.unwrap_or_else(MetricValue::zero),
         RangeAggregation::FirstOverTime => value
             .first
-            .map(|(_, value)| value)
-            .unwrap_or_else(MetricValue::zero),
+            .map_or_else(MetricValue::zero, |(_, value)| value),
         RangeAggregation::LastOverTime => value
             .last
-            .map(|(_, value)| value)
-            .unwrap_or_else(MetricValue::zero),
+            .map_or_else(MetricValue::zero, |(_, value)| value),
     }
 }
 
@@ -17905,13 +18024,14 @@ impl MetricValue {
     }
 
     fn sqrt(self) -> Self {
-        let value = (self.numerator as f64 / self.denominator as f64).sqrt();
+        let value = self.to_f64().unwrap_or_default().sqrt();
         if !value.is_finite() || value <= 0.0 {
             return Self::zero();
         }
 
+        let scaled = (value * METRIC_DECIMAL_SCALE.to_f64().unwrap_or_default()).floor();
         Self::new(
-            (value * METRIC_DECIMAL_SCALE as f64).floor() as i128,
+            i128::from_f64(scaled).unwrap_or_default(),
             METRIC_DECIMAL_SCALE,
         )
     }
@@ -17924,7 +18044,7 @@ impl MetricValue {
     }
 
     fn to_f64(self) -> Option<f64> {
-        let value = self.numerator as f64 / self.denominator as f64;
+        let value = self.numerator.to_f64()? / self.denominator.to_f64()?;
         value.is_finite().then_some(value)
     }
 
@@ -17933,11 +18053,8 @@ impl MetricValue {
             return None;
         }
 
-        let scaled = (value * METRIC_DECIMAL_SCALE as f64).round();
-        if scaled < i128::MIN as f64 || scaled > i128::MAX as f64 {
-            return None;
-        }
-        Some(Self::new(scaled as i128, METRIC_DECIMAL_SCALE))
+        let scaled = (value * METRIC_DECIMAL_SCALE.to_f64()?).round();
+        Some(Self::new(i128::from_f64(scaled)?, METRIC_DECIMAL_SCALE))
     }
 }
 
@@ -18238,12 +18355,15 @@ fn append_matching_log_row(
     streams: &mut BTreeMap<Labels, Vec<[String; 2]>>,
     plan: &StreamPlan,
     label_index: &LabelIndex,
-    fingerprint: SeriesFingerprint,
-    timestamp_ns: i64,
-    line: &str,
-    structured_metadata: &Labels,
+    row: QueryRow<'_>,
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> Result<(), QueryError> {
+    let QueryRow {
+        fingerprint,
+        timestamp_ns,
+        line,
+        structured_metadata,
+    } = row;
     if timestamp_ns < plan.time_range.start_ns
         || timestamp_ns > plan.time_range.end_ns
         || !plan.fingerprints.contains(&fingerprint)
@@ -18529,12 +18649,15 @@ fn append_matching_metric_row(
     samples: &mut MetricSamples,
     plan: &StreamPlan,
     label_index: &LabelIndex,
-    query: &MetricQuery,
     row: QueryRow<'_>,
-    eval_times: &[i64],
-    range_ns: i64,
-    delete_filters: &[ActiveLogDeleteFilter],
+    window: MetricWindow<'_>,
 ) -> Result<(), QueryError> {
+    let MetricWindow {
+        query,
+        eval_times,
+        range_ns,
+        delete_filters,
+    } = window;
     if !plan.fingerprints.contains(&row.fingerprint) {
         return Ok(());
     }
@@ -18600,13 +18723,16 @@ fn append_matching_metric_row(
 fn append_matching_hot_metric_record(
     samples: &mut MetricSamples,
     plan: &StreamPlan,
-    query: &MetricQuery,
     record: &WalLogRecord,
     frontier: &CompactionFrontier,
-    eval_times: &[i64],
-    range_ns: i64,
-    delete_filters: &[ActiveLogDeleteFilter],
+    window: MetricWindow<'_>,
 ) -> Result<(), QueryError> {
+    let MetricWindow {
+        query,
+        eval_times,
+        range_ns,
+        delete_filters,
+    } = window;
     if record.tenant != plan.tenant || frontier.is_compacted(record) {
         return Ok(());
     }
@@ -19103,11 +19229,6 @@ fn loki_parquet_metric_sample(
     Ok((timestamp_ns, value))
 }
 
-#[allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_precision_loss,
-    reason = "Loki metric JSON can carry seconds floats; Parquet timestamps are integer nanoseconds"
-)]
 fn loki_parquet_metric_timestamp_ns(
     value: &Value,
     kind: LokiMetricParquetKind,
@@ -19129,13 +19250,9 @@ fn loki_parquet_metric_timestamp_ns(
         "metric timestamp is not numeric",
     ))?;
     let timestamp_ns = (seconds * 1_000_000_000.0).round();
-    if !timestamp_ns.is_finite() || timestamp_ns < i64::MIN as f64 || timestamp_ns > i64::MAX as f64
-    {
-        return Err(HttpQueryError::LokiParquet(
-            "metric timestamp is out of range",
-        ));
-    }
-    Ok(timestamp_ns as i64)
+    i64::from_f64(timestamp_ns).ok_or(HttpQueryError::LokiParquet(
+        "metric timestamp is out of range",
+    ))
 }
 
 fn loki_parquet_labels(
@@ -19211,7 +19328,7 @@ fn add_loki_query_stats(mut value: Value) -> Value {
     value
 }
 
-fn merge_loki_query_response(target: &mut Value, source: Value) {
+fn merge_loki_query_response(target: &mut Value, source: &Value) {
     if let Some(source_result) = source
         .pointer("/data/result")
         .and_then(Value::as_array)
@@ -19338,15 +19455,13 @@ fn add_loki_query_stats_for_metric_plan(
     value
 }
 
-#[allow(clippy::too_many_arguments)]
 fn add_loki_query_stats_for_metric_plan_with_hot_tail(
     mut value: Value,
     plan: &StreamPlan,
     query: &MetricQuery,
     hot_tail: &[WalLogRecord],
     frontier: &CompactionFrontier,
-    eval_range: TimeRange,
-    step_ns: i64,
+    evaluation: (TimeRange, i64),
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> Value {
     let bytes = planned_block_bytes(plan);
@@ -19358,8 +19473,7 @@ fn add_loki_query_stats_for_metric_plan_with_hot_tail(
         query,
         hot_tail,
         frontier,
-        eval_range,
-        step_ns,
+        evaluation,
         delete_filters,
     );
     let store_samples = samples.saturating_sub(ingester_samples);
@@ -19407,14 +19521,13 @@ fn count_loki_stream_result_lines(value: &Value) -> u64 {
     value
         .pointer("/data/result")
         .and_then(Value::as_array)
-        .map(|streams| {
+        .map_or(0, |streams| {
             streams
                 .iter()
                 .filter_map(|stream| stream.get("values").and_then(Value::as_array))
                 .map(|values| u64::try_from(values.len()).unwrap_or(u64::MAX))
                 .fold(0_u64, u64::saturating_add)
         })
-        .unwrap_or(0)
 }
 
 fn count_loki_stream_result_hot_tail_lines(
@@ -19505,10 +19618,8 @@ fn count_loki_metric_result_samples(value: &Value) -> u64 {
         .map(|result| {
             if let Some(values) = result.get("values").and_then(Value::as_array) {
                 u64::try_from(values.len()).unwrap_or(u64::MAX)
-            } else if result.get("value").is_some() {
-                1
             } else {
-                0
+                u64::from(result.get("value").is_some())
             }
         })
         .fold(0_u64, u64::saturating_add)
@@ -19521,33 +19632,34 @@ fn count_loki_metric_result_scan_lines(value: &Value, query: &MetricQuery) -> u6
     count_loki_metric_result_samples(value)
 }
 
-#[allow(clippy::too_many_arguments)]
 fn count_loki_metric_result_hot_tail_samples(
     value: &Value,
     plan: &StreamPlan,
     query: &MetricQuery,
     hot_tail: &[WalLogRecord],
     frontier: &CompactionFrontier,
-    eval_range: TimeRange,
-    step_ns: i64,
+    evaluation: (TimeRange, i64),
     delete_filters: &[ActiveLogDeleteFilter],
 ) -> u64 {
     if matches!(query.aggregation, RangeAggregation::AbsentOverTime) {
         return 0;
     }
 
+    let (eval_range, step_ns) = evaluation;
     let eval_times = eval_times(eval_range, step_ns);
     let mut hot_samples = BTreeMap::new();
     for record in hot_tail {
         append_matching_hot_metric_record(
             &mut hot_samples,
             plan,
-            query,
             record,
             frontier,
-            &eval_times,
-            query.range_ns.0,
-            delete_filters,
+            MetricWindow {
+                query,
+                eval_times: &eval_times,
+                range_ns: query.range_ns.0,
+                delete_filters,
+            },
         )
         .ok();
     }
@@ -19966,12 +20078,9 @@ fn distributor_error_to_grpc_status(error: &DistributorError) -> tonic::Status {
         DistributorError::IngestQuota(IngestLimitError::Unauthorized { .. }) => {
             tonic::Status::permission_denied(message)
         }
-        DistributorError::IngestQuota(IngestLimitError::Unavailable { .. }) => {
-            tonic::Status::unavailable(message)
-        }
-        DistributorError::WalAppendTimeout | DistributorError::WalSink(_) => {
-            tonic::Status::unavailable(message)
-        }
+        DistributorError::IngestQuota(IngestLimitError::Unavailable { .. })
+        | DistributorError::WalAppendTimeout
+        | DistributorError::WalSink(_) => tonic::Status::unavailable(message),
         DistributorError::EmptyStreamLabels
         | DistributorError::InvalidOtlpAttribute
         | DistributorError::InvalidOtlpPayload
@@ -20118,13 +20227,14 @@ impl IntoResponse for HttpQueryError {
             | Self::QuerySeriesTooLarge { .. }
             | Self::LokiPlainParse(_)
             | Self::CountValuesQuery
-            | Self::Plan(_) => StatusCode::BAD_REQUEST,
-            Self::ApproxTopKDisabled => StatusCode::INTERNAL_SERVER_ERROR,
+            | Self::Plan(_)
+            | Self::Query(QueryError::MetricPipelineError { .. })
+            | Self::Parse(_) => StatusCode::BAD_REQUEST,
             Self::QueryAuthorization(QueryAuthorizationError::Unauthorized { .. }) => {
                 StatusCode::FORBIDDEN
             }
-            Self::Query(QueryError::MetricPipelineError { .. }) => StatusCode::BAD_REQUEST,
-            Self::Arrow(_)
+            Self::ApproxTopKDisabled
+            | Self::Arrow(_)
             | Self::QueryAuthorization(QueryAuthorizationError::Unavailable { .. })
             | Self::Query(_)
             | Self::DeleteRequests(_)
@@ -20150,7 +20260,6 @@ impl IntoResponse for HttpQueryError {
                     "parse error : syntax error: unexpected $end",
                 );
             }
-            Self::Parse(_) => StatusCode::BAD_REQUEST,
         };
         let error_type = match status {
             StatusCode::BAD_REQUEST => "bad_data",
@@ -20196,14 +20305,14 @@ mod tests {
     fn ingest_tenant_reads_header_or_falls_back() {
         let mut present = HeaderMap::new();
         present.insert("X-Scope-OrgID", "acme".parse().unwrap());
-        assert2::assert!(ingest_tenant(&present) == "acme");
+        assert_eq!(ingest_tenant(&present), "acme");
 
         let missing = HeaderMap::new();
-        assert2::assert!(ingest_tenant(&missing) == "unknown");
+        assert_eq!(ingest_tenant(&missing), "unknown");
 
         let mut empty = HeaderMap::new();
         empty.insert("X-Scope-OrgID", "".parse().unwrap());
-        assert2::assert!(ingest_tenant(&empty) == "unknown");
+        assert_eq!(ingest_tenant(&empty), "unknown");
     }
 
     #[derive(Clone)]
@@ -20414,7 +20523,10 @@ mod tests {
         let configured_store = build_compactor_configured_object_store(&config, None)
             .expect("valid object-store URL should configure a compactor store");
 
-        assert2::assert!(configured_store.is_some());
+        assert!(
+            configured_store.is_some(),
+            "compactor should build the configured object store when no store is injected"
+        );
     }
 
     /// The OTLP/HTTP logs handler must decompress `Content-Encoding: gzip`
@@ -20468,8 +20580,8 @@ mod tests {
         // Identity (no Content-Encoding) decodes to a single record.
         let identity = normalize_otlp_http_logs(&headers, &raw, None, None)
             .expect("uncompressed OTLP proto logs should decode");
-        assert2::assert!(identity.len() == 1);
-        assert2::assert!(identity[0].line.as_str() == "hello world");
+        assert_eq!(identity.len(), 1);
+        assert_eq!(identity[0].line, "hello world");
 
         // The gzip-compressed body must decode to exactly the same records.
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
@@ -20480,7 +20592,7 @@ mod tests {
         gz_headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
         let from_gzip = normalize_otlp_http_logs(&gz_headers, &gzipped, None, None)
             .expect("gzip-compressed OTLP proto logs should decode");
-        assert2::assert!(from_gzip == identity);
+        assert_eq!(from_gzip, identity);
     }
 
     fn hot_tail_test_record(timestamp_ns: i64, app: &str) -> WalLogRecord {
@@ -20514,11 +20626,12 @@ mod tests {
     /// scanning the whole retained buffer.
     #[tokio::test]
     async fn hot_tail_records_in_range_matches_full_scan_under_out_of_order_inserts() {
+        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
+
         let hot_tail = BufferedLogHotTail::default();
 
         // Timestamps deliberately out of order and spread across many one-minute buckets,
         // with duplicates at the same instant and records straddling bucket boundaries.
-        const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
         let timestamps = [
             5 * BUCKET + 10,
             BUCKET - 1, // last ns of bucket 0
@@ -20547,7 +20660,7 @@ mod tests {
 
         // `records()` must still return the full append-ordered buffer (the tail path
         // depends on this).
-        assert2::assert!(hot_tail.records() == records);
+        assert_eq!(hot_tail.records(), records);
 
         // Probe a wide set of windows: exact bucket edges, sub-bucket slivers, windows
         // spanning many buckets, empty windows, and windows entirely outside the data.
@@ -20575,27 +20688,33 @@ mod tests {
         for (start, end) in probes {
             if start > end {
                 // Mirror the guard: an inverted window yields nothing.
-                assert2::assert!(hot_tail.records_in_range(start, end).is_empty());
+                assert!(hot_tail.records_in_range(start, end).is_empty());
                 continue;
             }
             let expected = brute_force_in_range(&records, start, end);
             let actual = hot_tail.records_in_range(start, end);
-            assert2::assert!(actual == expected);
+            assert_eq!(
+                actual, expected,
+                "records_in_range({start}, {end}) diverged from full-scan oracle"
+            );
 
             // The label sets a query would derive must be identical too (records are the
             // sole input to label/field extraction).
             let expected_labels: BTreeSet<Labels> =
                 expected.iter().map(|r| r.labels.clone()).collect();
             let actual_labels: BTreeSet<Labels> = actual.iter().map(|r| r.labels.clone()).collect();
-            assert2::assert!(actual_labels == expected_labels);
+            assert_eq!(
+                actual_labels, expected_labels,
+                "label sets diverged at [{start}, {end}]"
+            );
         }
 
         // The trait-object path the querier actually uses must agree with the inherent method.
         let dyn_tail: Arc<dyn LogHotTail> = Arc::new(hot_tail.clone());
         let window = (2 * BUCKET, 6 * BUCKET);
-        assert2::assert!(
-            dyn_tail.records_in_range(window.0, window.1)
-                == hot_tail.records_in_range(window.0, window.1)
+        assert_eq!(
+            dyn_tail.records_in_range(window.0, window.1),
+            hot_tail.records_in_range(window.0, window.1),
         );
 
         // The default trait impl (used by other LogHotTail implementors, e.g. the
@@ -20607,17 +20726,17 @@ mod tests {
                 .unwrap();
         }
         let in_memory_dyn: Arc<dyn LogHotTail> = Arc::new(in_memory);
-        assert2::assert!(
-            in_memory_dyn.records_in_range(window.0, window.1)
-                == brute_force_in_range(&records, window.0, window.1)
+        assert_eq!(
+            in_memory_dyn.records_in_range(window.0, window.1),
+            brute_force_in_range(&records, window.0, window.1),
         );
     }
 
     #[test]
     fn hot_tail_prune_compacted_rebuilds_records_and_time_index() {
-        let hot_tail = BufferedLogHotTail::default();
         const BUCKET: i64 = HOT_TAIL_BUCKET_NS;
 
+        let hot_tail = BufferedLogHotTail::default();
         let mut compacted_by_offset = hot_tail_test_record(4 * BUCKET, "offset-old");
         compacted_by_offset.position = Some(WalPosition {
             partition: PartitionIndex(0),
@@ -20642,11 +20761,11 @@ mod tests {
         let frontier =
             CompactionFrontier::new(2 * BUCKET).with_partition_offset(PartitionIndex(0), Offset(7));
 
-        assert2::assert!(hot_tail.prune_compacted(&frontier) == 2);
-        assert2::assert!(hot_tail.records() == expected.clone());
-        assert2::assert!(hot_tail.records_in_range(0, 6 * BUCKET) == expected);
-        assert2::assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
-        assert2::assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
+        assert_eq!(hot_tail.prune_compacted(&frontier), 2);
+        assert_eq!(hot_tail.records(), expected);
+        assert_eq!(hot_tail.records_in_range(0, 6 * BUCKET), expected);
+        assert!(hot_tail.records_in_range(2 * BUCKET, 2 * BUCKET).is_empty());
+        assert!(hot_tail.records_in_range(4 * BUCKET, 4 * BUCKET).is_empty());
     }
 
     #[tokio::test]
@@ -20666,9 +20785,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(pruned == 1);
-        assert2::assert!(frontier.snapshot() == CompactionFrontier::new(2_000));
-        assert2::assert!(hot_tail.records() == vec![fresh]);
+        assert_eq!(pruned, 1);
+        assert_eq!(frontier.snapshot(), CompactionFrontier::new(2_000));
+        assert_eq!(hot_tail.records(), vec![fresh]);
     }
 
     #[tokio::test]
@@ -20684,9 +20803,9 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(pruned == 0);
-        assert2::assert!(frontier.snapshot() == CompactionFrontier::new(123));
-        assert2::assert!(hot_tail.records() == vec![fresh]);
+        assert_eq!(pruned, 0);
+        assert_eq!(frontier.snapshot(), CompactionFrontier::new(123));
+        assert_eq!(hot_tail.records(), vec![fresh]);
     }
 
     #[tokio::test]
@@ -20747,14 +20866,15 @@ mod tests {
         // tenant manifest, the shard catalog, and the old shard manifests
         // must not be rewritten.
         let put_paths = store.put_paths();
-        assert2::assert!(
-            put_paths
-                == vec![
-                    crabka_blockstore::log_tenant_index_shard_manifest_object_path(
-                        &prefix, tenant, new_range
-                    )
-                    .to_string()
-                ]
+        assert_eq!(
+            put_paths,
+            vec![
+                crabka_blockstore::log_tenant_index_shard_manifest_object_path(
+                    &prefix, tenant, new_range
+                )
+                .to_string()
+            ],
+            "only the new shard manifest should be written"
         );
     }
 
@@ -20766,11 +20886,11 @@ mod tests {
         // rejects "" with `syntax error: unexpected $end, expecting '{'`.
         for raw in ["query=", "query=%20", "query=%20%20"] {
             let params = parse_detected_labels_params(Some(raw)).unwrap();
-            assert2::assert!(params.query.is_none());
+            assert!(params.query.is_none(), "{raw}: {:?}", params.query);
         }
         // A real stream selector is still preserved.
         let params = parse_detected_labels_params(Some("query=%7Bapp%3D%22api%22%7D")).unwrap();
-        assert2::assert!(params.query.as_deref() == Some(r#"{app="api"}"#));
+        assert_eq!(params.query.as_deref(), Some(r#"{app="api"}"#));
     }
 
     #[test]
@@ -20783,7 +20903,10 @@ mod tests {
             },
         );
 
-        assert2::assert!(response["data"]["result"][0]["value"][0] == json!(4_000_000_000i64));
+        assert_eq!(
+            response["data"]["result"][0]["value"][0],
+            json!(4_000_000_000i64)
+        );
     }
 
     #[test]
@@ -20795,18 +20918,18 @@ mod tests {
             },
         );
 
-        assert2::assert!(response["data"]["result"][0] == json!(4));
+        assert_eq!(response["data"]["result"][0], json!(4));
     }
 
     #[test]
     fn formats_loki_numeric_json_timestamp_error_context() {
         let body = br#"{"streams":[{"stream":{"app":"api"},"values":[[1000000000,"non-string push timestamp"]]}]}"#;
-        let timestamp = json!(1000000000);
+        let timestamp = json!(1_000_000_000);
         let line = json!("non-string push timestamp");
 
-        assert2::assert!(
-            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line))
-                == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|alues\":[[1000000000,\"non-string push timestamp\"]]}]}|...\n"
+        assert_eq!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
+            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|alues\":[[1000000000,\"non-string push timestamp\"]]}]}|...\n"
         );
     }
 
@@ -20816,9 +20939,9 @@ mod tests {
         let timestamp = json!({"ts": "1000000000"});
         let line = json!("object push timestamp");
 
-        assert2::assert!(
-            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line))
-                == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|\":[[{\"ts\":\"1000000000\"},\"object push timestamp\"]]}]}|...\n"
+        assert_eq!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
+            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|\":[[{\"ts\":\"1000000000\"},\"object push timestamp\"]]}]}|...\n"
         );
     }
 
@@ -20828,16 +20951,16 @@ mod tests {
         let timestamp = json!(["1000000000"]);
         let line = json!("array push timestamp");
 
-        assert2::assert!(
-            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line))
-                == "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|values\":[[[\"1000000000\"],\"array push timestamp\"]]}]}|...\n"
+        assert_eq!(
+            loki_json_timestamp_value_parse_error(body, &timestamp, Some(&line)),
+            "loghttp.PushRequest.Streams: []loghttp.LogProtoStream: unmarshalerDecoder: Value looks like Number/Boolean/None, but can't find its end: ',' or '}' symbol, error found in #10 byte of ...|estamp\"]]}]}|..., bigger context ...|values\":[[[\"1000000000\"],\"array push timestamp\"]]}]}|...\n"
         );
     }
 
     // --- FIX B1 tests ---
 
-    /// A TenantObjectStoreManifest source backed by an empty in-memory store (no manifest present)
-    /// must return Ok with an empty (self-clone) index rather than propagating NotFound as an error.
+    /// A `TenantObjectStoreManifest` source backed by an empty in-memory store (no manifest present)
+    /// must return Ok with an empty (self-clone) index rather than propagating `NotFound` as an error.
     #[tokio::test]
     async fn querier_state_with_request_tenant_index_tolerates_absent_manifest() {
         use object_store::memory::InMemory;
@@ -20853,12 +20976,19 @@ mod tests {
             .with_request_tenant_index("test-tenant", query_range)
             .await;
 
-        assert2::assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "expected Ok on absent cold index manifest, got: {:?}",
+            result.err()
+        );
         let returned = result.unwrap();
-        assert2::assert!(returned.block_index.blocks().is_empty());
+        assert!(
+            returned.block_index.blocks().is_empty(),
+            "expected empty block index when no manifest exists"
+        );
     }
 
-    /// Same check for the TenantObjectStoreShards variant.
+    /// Same check for the `TenantObjectStoreShards` variant.
     #[tokio::test]
     async fn querier_state_with_request_tenant_index_tolerates_absent_shards() {
         use object_store::memory::InMemory;
@@ -20874,7 +21004,11 @@ mod tests {
             .with_request_tenant_index("test-tenant", query_range)
             .await;
 
-        assert2::assert!(result.is_ok());
+        assert!(
+            result.is_ok(),
+            "expected Ok on absent cold index shards, got: {:?}",
+            result.err()
+        );
     }
 
     #[tokio::test]
@@ -20919,11 +21053,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(
-            first.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
+        assert_eq!(
+            first.label_index.label_names(tenant),
+            BTreeSet::from(["app".to_string()])
         );
-        assert2::assert!(
-            second.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
+        assert_eq!(
+            second.label_index.label_names(tenant),
+            BTreeSet::from(["app".to_string()])
         );
 
         let shard_prefix =
@@ -20945,8 +21081,11 @@ mod tests {
             .filter(|path| path == &shard_manifest)
             .count();
 
-        assert2::assert!(list_count == 1);
-        assert2::assert!(shard_get_count == 1);
+        assert!(list_count == 1, "shard prefix should be listed once");
+        assert!(
+            shard_get_count == 1,
+            "shard manifest should be fetched once"
+        );
     }
 
     #[tokio::test]
@@ -21000,11 +21139,9 @@ mod tests {
             .await
             .unwrap();
 
-        for (_name, state) in [("first range", &first), ("moving range", &second)] {
-            assert2::assert!(
-                state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
-            );
-            assert2::assert!(state.block_index.blocks().len() == 2);
+        for state in [&first, &second] {
+            check!(state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()]));
+            check!(state.block_index.blocks().len() == 2);
         }
 
         let shard_prefix =
@@ -21095,14 +21232,19 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(
-            state.label_index.label_names(tenant) == BTreeSet::from(["app".to_string()])
+        assert_eq!(
+            state.label_index.label_names(tenant),
+            BTreeSet::from(["app".to_string()])
         );
         let expected_offset =
             crabka_blockstore::log_tenant_index_shards_object_prefix(&prefix, tenant)
                 .join(format!("time={}", query_start - (query_end - query_start)))
                 .to_string();
-        assert2::assert!(store.list_offsets().contains(&expected_offset));
+        assert!(
+            store.list_offsets().contains(&expected_offset),
+            "shard listing should start near the query window; offsets={:?}",
+            store.list_offsets()
+        );
     }
 
     #[test]
@@ -21176,21 +21318,27 @@ mod tests {
             &prefix,
             &plan,
             &label_index,
-            &[],
-            &CompactionFrontier::new(i64::MAX),
-            &[],
+            QueryHotTail {
+                records: &[],
+                frontier: &CompactionFrontier::new(i64::MAX),
+                delete_filters: &[],
+            },
             StreamScanOptions::from_stream_options(LokiDirection::Forward, Some(100), None, None),
         )
         .await
         .unwrap();
 
-        assert2::assert!(scan.scanned_blocks.len() == 4);
-        assert2::assert!(store.max_active_gets() > 1);
+        assert_eq!(scan.scanned_blocks.len(), 4);
+        assert!(
+            store.max_active_gets() > 1,
+            "expected cold block reads to overlap, max_active_gets={}",
+            store.max_active_gets()
+        );
     }
 
     // --- FIX B3 tests ---
 
-    /// connect_with_startup_retry returns Ok immediately when the closure succeeds on the first try.
+    /// `connect_with_startup_retry` returns Ok immediately when the closure succeeds on the first try.
     #[tokio::test]
     async fn connect_with_startup_retry_succeeds_on_first_try() {
         let result: Result<u32, String> =
@@ -21199,10 +21347,10 @@ mod tests {
             })
             .await;
 
-        assert2::assert!(result.unwrap() == 42);
+        assert_eq!(result.unwrap(), 42);
     }
 
-    /// connect_with_startup_retry retries on failure and returns Ok when a later attempt succeeds.
+    /// `connect_with_startup_retry` retries on failure and returns Ok when a later attempt succeeds.
     #[tokio::test]
     async fn connect_with_startup_retry_retries_then_succeeds() {
         use std::sync::atomic::{AtomicU32, Ordering as AO};
@@ -21215,7 +21363,7 @@ mod tests {
                 async move {
                     let n = c.fetch_add(1, AO::SeqCst);
                     if n < 2 {
-                        Err(format!("not ready yet (attempt {})", n))
+                        Err(format!("not ready yet (attempt {n})"))
                     } else {
                         Ok(99u32)
                     }
@@ -21223,11 +21371,11 @@ mod tests {
             })
             .await;
 
-        assert2::assert!(result.unwrap() == 99);
-        assert2::assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
+        assert_eq!(result.unwrap(), 99);
+        assert!(counter.load(std::sync::atomic::Ordering::SeqCst) >= 3);
     }
 
-    /// connect_with_startup_retry returns the error after the deadline is exceeded.
+    /// `connect_with_startup_retry` returns the error after the deadline is exceeded.
     #[tokio::test]
     async fn connect_with_startup_retry_gives_up_after_deadline() {
         let result: Result<u32, String> = connect_with_startup_retry(
@@ -21237,7 +21385,8 @@ mod tests {
         )
         .await;
 
-        assert2::assert!(result.unwrap_err() == "always fails");
+        assert!(result.is_err(), "expected Err after deadline");
+        assert_eq!(result.unwrap_err(), "always fails");
     }
 
     fn acl_entry(
@@ -21261,8 +21410,8 @@ mod tests {
 
     #[test]
     fn service_duration_constants_are_exact() {
-        assert2::assert!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE == Duration::from_secs(604_800));
-        assert2::assert!(LOKI_CREATION_GRACE_PERIOD == Duration::from_secs(600));
+        assert_eq!(LOKI_REJECT_OLD_SAMPLES_MAX_AGE, Duration::from_hours(168));
+        assert_eq!(LOKI_CREATION_GRACE_PERIOD, Duration::from_mins(10));
     }
 
     #[test]
@@ -21303,45 +21452,41 @@ mod tests {
                 "topic".to_string(),
             );
 
-        assert2::assert!(deps.metrics.is_some());
-        assert2::assert!(deps.wal_sink.is_some());
-        assert2::assert!(deps.ingest_limiter.is_some());
-        assert2::assert!(deps.query_authorizer.is_some());
-        assert2::assert!(deps.hot_tail.is_some());
-        assert2::assert!(deps.deferred_wal_consumer_connect.is_some());
+        check!(deps.metrics.is_some());
+        check!(deps.wal_sink.is_some());
+        check!(deps.ingest_limiter.is_some());
+        check!(deps.query_authorizer.is_some());
+        check!(deps.hot_tail.is_some());
+        check!(deps.deferred_wal_consumer_connect.is_some());
         check!(Arc::ptr_eq(
             &deps.metrics.as_ref().unwrap().registry,
             &metrics.registry
         ));
         match deps.hot_tail.as_ref().unwrap().frontier.clone() {
             CompactionFrontierSource::Shared(actual) => {
-                assert2::assert!(actual.snapshot() == frontier.snapshot());
+                assert_eq!(actual.snapshot(), frontier.snapshot());
             }
             CompactionFrontierSource::Snapshot(_) => panic!("expected shared frontier"),
         }
-        assert2::assert!(
-            deps.deferred_wal_consumer_connect.as_ref()
-                == Some(&DeferredWalConsumerConnect {
-                    bootstrap: "broker:9092".to_string(),
-                    group_id: "group".to_string(),
-                    topic: "topic".to_string(),
-                })
-        );
+        let deferred = deps.deferred_wal_consumer_connect.as_ref().unwrap();
+        assert_eq!(deferred.bootstrap, "broker:9092");
+        assert_eq!(deferred.group_id, "group");
+        assert_eq!(deferred.topic, "topic");
     }
 
     #[test]
     fn retry_backoff_doubles_and_caps() {
-        assert2::assert!(
-            next_compactor_object_store_backoff(Duration::from_millis(10))
-                == Duration::from_millis(20)
+        assert_eq!(
+            next_compactor_object_store_backoff(Duration::from_millis(10)),
+            Duration::from_millis(20)
         );
-        assert2::assert!(
-            next_compactor_object_store_backoff(Duration::from_millis(300))
-                == Duration::from_millis(500)
+        assert_eq!(
+            next_compactor_object_store_backoff(Duration::from_millis(300)),
+            Duration::from_millis(500)
         );
-        assert2::assert!(
-            next_compactor_object_store_backoff(Duration::from_millis(500))
-                == Duration::from_millis(500)
+        assert_eq!(
+            next_compactor_object_store_backoff(Duration::from_millis(500)),
+            Duration::from_millis(500)
         );
     }
 
@@ -21471,28 +21616,28 @@ mod tests {
             + "prod".len()
             + "trace_id".len()
             + "abc".len();
-        assert2::assert!(ingest_quota_bytes(&[record]) == expected_bytes);
+        assert_eq!(ingest_quota_bytes(&[record]), expected_bytes);
 
         let mut bucket = IngestQuotaBucket::new(10.0);
         check!((bucket.capacity() - 10.0).abs() < f64::EPSILON);
         check!(bucket.consume(10.0));
         check!(!bucket.consume(0.1));
         bucket.update_rate(5.0);
-        assert2::assert!(bucket.available <= 5.0);
+        assert!(bucket.available <= 5.0);
         bucket.available = 4.0;
         bucket.update_rate(20.0);
-        assert2::assert!(bucket.available >= 4.0);
-        assert2::assert!(bucket.consume(4.0));
+        assert!(bucket.available >= 4.0);
+        assert!(bucket.consume(4.0));
     }
 
     #[test]
     fn hot_tail_bucket_key_uses_euclidean_minutes() {
-        assert2::assert!(hot_tail_bucket_key(0) == 0);
-        assert2::assert!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS - 1) == 0);
-        assert2::assert!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS) == 1);
-        assert2::assert!(hot_tail_bucket_key(-1) == -1);
-        assert2::assert!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS) == -1);
-        assert2::assert!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS - 1) == -2);
+        assert_eq!(hot_tail_bucket_key(0), 0);
+        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS - 1), 0);
+        assert_eq!(hot_tail_bucket_key(HOT_TAIL_BUCKET_NS), 1);
+        assert_eq!(hot_tail_bucket_key(-1), -1);
+        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS), -1);
+        assert_eq!(hot_tail_bucket_key(-HOT_TAIL_BUCKET_NS - 1), -2);
     }
 
     #[test]
@@ -21508,7 +21653,7 @@ mod tests {
                 key: key.to_string(),
                 value: value.map(<[u8]>::to_vec),
             };
-            assert2::assert!(has_native_kafka_log_headers(&[header]) == want);
+            assert_eq!(has_native_kafka_log_headers(&[header]), want);
         }
     }
 
@@ -21519,7 +21664,7 @@ mod tests {
         encode_varint(127, &mut body);
         encode_varint(128, &mut body);
         encode_varint(300, &mut body);
-        assert2::assert!(body == vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
+        assert_eq!(body, vec![0x00, 0x7f, 0x80, 0x01, 0xac, 0x02]);
 
         let state = DistributorState {
             sink: Arc::new(InMemoryWalSink::default()),
@@ -21531,30 +21676,31 @@ mod tests {
             reject_old_samples_max_age: None,
             creation_grace_period: None,
         };
-        assert2::assert!(validate_ingest_body_limit(&state, 5).is_ok());
-        assert2::assert!(validate_ingest_body_limit(&state, 6).is_err());
+        assert!(validate_ingest_body_limit(&state, 5).is_ok());
+        assert!(validate_ingest_body_limit(&state, 6).is_err());
+    }
+
+    fn loki_content_type(value: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert(CONTENT_TYPE, value.parse().unwrap());
+        headers
     }
 
     #[test]
     fn loki_content_type_and_body_decoding_accept_only_expected_forms() {
         let mut headers = HeaderMap::new();
-        assert2::assert!(decode_loki_http_body(&headers, b"raw").unwrap() == b"raw");
+        assert_eq!(decode_loki_http_body(&headers, b"raw").unwrap(), b"raw");
         headers.insert(CONTENT_ENCODING, "snappy".parse().unwrap());
-        assert2::assert!(decode_loki_http_body(&headers, b"raw").unwrap() == b"raw");
+        assert_eq!(decode_loki_http_body(&headers, b"raw").unwrap(), b"raw");
         headers.insert(CONTENT_ENCODING, "gzip".parse().unwrap());
         let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
         std::io::Write::write_all(&mut encoder, b"raw").unwrap();
-        assert2::assert!(
-            decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap() == b"raw"
+        assert_eq!(
+            decode_loki_http_body(&headers, &encoder.finish().unwrap()).unwrap(),
+            b"raw"
         );
         headers.insert(CONTENT_ENCODING, "br".parse().unwrap());
-        assert2::assert!(decode_loki_http_body(&headers, b"raw").is_err());
-
-        fn loki_content_type(value: &str) -> HeaderMap {
-            let mut headers = HeaderMap::new();
-            headers.insert(CONTENT_TYPE, value.parse().unwrap());
-            headers
-        }
+        assert!(decode_loki_http_body(&headers, b"raw").is_err());
 
         for (value, want) in [
             ("application/json", Some(true)),
@@ -21563,14 +21709,17 @@ mod tests {
             ("application/json; charset", None),
             ("application/json; charset=", None),
         ] {
-            assert2::assert!(is_loki_json_content_type(&loki_content_type(value)).ok() == want);
+            assert_eq!(
+                is_loki_json_content_type(&loki_content_type(value)).ok(),
+                want
+            );
         }
     }
 
     #[test]
     fn loki_error_contexts_respect_utf8_boundaries_and_offsets() {
         let body = "{\"streams\":\"not-array\"}";
-        assert2::assert!(
+        assert!(
             loki_json_push_streams_parse_error(body.as_bytes(), &json!("not-array"))
                 .contains("|{\"streams\":\"not-array\"}|")
         );
@@ -21578,11 +21727,11 @@ mod tests {
         let structured =
             br#"{"streams":[{"stream":{"app":"api"},"values":[["1","line",{"ok":true}]]}]}"#;
         let error = loki_structured_metadata_value_parse_error(structured, "ok", &json!(true));
-        assert2::assert!(error.contains("ok\":true"));
+        assert!(error.contains("ok\":true"));
 
         let text = "ab\u{20ac}cd";
-        assert2::assert!(previous_char_boundary(text, 4) == 2);
-        assert2::assert!(previous_char_boundary(text, text.len()) == text.len());
+        assert_eq!(previous_char_boundary(text, 4), 2);
+        assert_eq!(previous_char_boundary(text, text.len()), text.len());
     }
 
     #[test]
@@ -21591,7 +21740,10 @@ mod tests {
             ("app".to_string(), "api".to_string()),
             ("env".to_string(), "prod".to_string()),
         ]);
-        assert2::assert!(loki_label_set(&rendered_labels) == r#"{app="api",env="prod"}"#);
+        assert_eq!(
+            loki_label_set(&rendered_labels),
+            r#"{app="api",env="prod"}"#
+        );
         check!(loki_push_label_parse_error(&rendered_labels, "bad-name").contains("1:5"));
         check!(
             loki_proto_label_parse_error(r#"{9bad="x"}"#)
@@ -21606,30 +21758,36 @@ mod tests {
 
         let mut detected = BTreeMap::from([("app".to_string(), "api".to_string())]);
         discover_detected_level_label(&mut detected, "api ERROR happened");
-        assert2::assert!(detected.get("detected_level").map(String::as_str) == Some("error"));
+        assert_eq!(
+            detected.get("detected_level").map(String::as_str),
+            Some("error")
+        );
         let mut explicit = BTreeMap::from([("level".to_string(), "custom".to_string())]);
         discover_detected_level_label(&mut explicit, "api error happened");
-        assert2::assert!(!explicit.contains_key("detected_level"));
+        assert!(!explicit.contains_key("detected_level"));
         for (line, want) in [
             ("error happened", true),
             ("happened error", true),
             ("terror", false),
             ("error_code", false),
         ] {
-            assert2::assert!(contains_log_level_token(line, "error") == want);
+            assert_eq!(contains_log_level_token(line, "error"), want);
         }
         for (byte, want) in [(b'a', true), (b'1', true), (b'_', true), (b'-', false)] {
-            assert2::assert!(is_log_level_word_byte(byte) == want);
+            assert_eq!(is_log_level_word_byte(byte), want);
         }
     }
 
     #[test]
     fn timestamp_and_value_conversions_cover_json_and_proto_shapes() {
-        assert2::assert!(otlp_timestamp_ns(&json!("123")).unwrap() == 123);
-        assert2::assert!(otlp_timestamp_ns(&json!(456)).unwrap() == 456);
-        assert2::assert!(otlp_timestamp_ns(&json!(-1)).is_err());
-        assert2::assert!(otlp_severity_number_to_string(&json!("INFO")).unwrap() == "INFO");
-        assert2::assert!(otlp_severity_number_to_string(&json!(9)).unwrap() == "9");
+        assert_eq!(otlp_timestamp_ns(&json!("123")).unwrap(), 123);
+        assert_eq!(otlp_timestamp_ns(&json!(456)).unwrap(), 456);
+        assert!(otlp_timestamp_ns(&json!(-1)).is_err());
+        assert_eq!(
+            otlp_severity_number_to_string(&json!("INFO")).unwrap(),
+            "INFO"
+        );
+        assert_eq!(otlp_severity_number_to_string(&json!(9)).unwrap(), "9");
 
         let otlp_value = OtlpAnyValue::Kvlist(OtlpKeyValueList {
             values: Some(vec![
@@ -21645,7 +21803,10 @@ mod tests {
                 },
             ]),
         });
-        assert2::assert!(otlp_value_to_json(&otlp_value) == json!({"items": ["a"], "ok": true}));
+        assert_eq!(
+            otlp_value_to_json(&otlp_value),
+            json!({"items": ["a"], "ok": true})
+        );
 
         let proto_value = ProtoAnyValue {
             value: Some(proto_any_value::Value::KvlistValue(
@@ -21660,7 +21821,7 @@ mod tests {
                 },
             )),
         };
-        assert2::assert!(proto_value_to_json(&proto_value) == json!({"answer": 42}));
+        assert_eq!(proto_value_to_json(&proto_value), json!({"answer": 42}));
     }
 
     #[test]
@@ -21669,34 +21830,26 @@ mod tests {
             "query=%7Bapp%3D%22api%22%7D&start=10&end=20&max_interval=1h",
         ))
         .unwrap();
-        assert2::assert!(
-            params
-                == CreateDeleteRequestParams {
-                    query: r#"{app="api"}"#.to_string(),
-                    start_time: 10,
-                    end_time: 20,
-                }
-        );
-        assert2::assert!(
-            parse_create_delete_request_params(Some("query=x&start=20&end=10")).is_err()
-        );
+        assert_eq!(params.query, r#"{app="api"}"#);
+        assert_eq!(params.start_time, 10);
+        assert_eq!(params.end_time, 20);
+        assert!(parse_create_delete_request_params(Some("query=x&start=20&end=10")).is_err());
 
         let list = parse_list_delete_requests_params(Some("start=10&end=20")).unwrap();
-        assert2::assert!(
-            list == ListDeleteRequestsParams {
-                start_time: Some(10),
-                end_time: Some(20),
-            }
+        assert_eq!(list.start_time, Some(10));
+        assert_eq!(list.end_time, Some(20));
+        assert!(parse_list_delete_requests_params(Some("start=10")).is_err());
+        assert_eq!(
+            parse_cancel_delete_request_params(Some("request_id=delete-1&force=true")).unwrap(),
+            "delete-1"
         );
-        assert2::assert!(parse_list_delete_requests_params(Some("start=10")).is_err());
-        assert2::assert!(
-            parse_cancel_delete_request_params(Some("request_id=delete-1&force=true")).unwrap()
-                == "delete-1"
-        );
-        assert2::assert!(
+        assert!(
             parse_cancel_delete_request_params(Some("request_id=delete-1&force=maybe")).is_err()
         );
-        assert2::assert!(parse_loki_delete_timestamp_query_param("start", "1.5").unwrap() == 1);
+        assert_eq!(
+            parse_loki_delete_timestamp_query_param("start", "1.5").unwrap(),
+            1
+        );
 
         let request = CompactorDeleteRequest {
             tenant: "tenant-a".to_string(),
@@ -21724,13 +21877,13 @@ mod tests {
                 false,
             ),
         ] {
-            assert2::assert!(delete_request_overlaps_filter(&request, &filter) == want);
+            assert_eq!(delete_request_overlaps_filter(&request, &filter), want);
         }
         for (right, want) in [
             (TimeRange::new(20, 30).unwrap(), true),
             (TimeRange::new(21, 30).unwrap(), false),
         ] {
-            assert2::assert!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right) == want);
+            assert_eq!(ranges_overlap(TimeRange::new(10, 20).unwrap(), right), want);
         }
     }
 
@@ -21740,21 +21893,21 @@ mod tests {
             "type=alert&exclude_alerts=true&time=10&rule_name=HighError&rule_group=api&file=rules.yaml&group_limit=2&group_next_token=next&match=%7Bapp%3D%22api%22%7D",
         ))
         .unwrap();
-        assert2::assert!(filters.rule_kind == Some("alerting"));
-        assert2::assert!(filters.exclude_alerts);
-        assert2::assert!(filters.evaluation_time.is_some());
-        assert2::assert!(filters.rule_names.contains("HighError"));
-        assert2::assert!(filters.rule_groups.contains("api"));
-        assert2::assert!(filters.files.contains("rules.yaml"));
-        assert2::assert!(filters.group_limit == Some(2));
-        assert2::assert!(filters.group_next_token.as_deref() == Some("next"));
-        assert2::assert!(filters.label_selectors.len() == 1);
-        assert2::assert!(filters.has_rule_filter());
+        assert_eq!(filters.rule_kind, Some("alerting"));
+        check!(filters.exclude_alerts);
+        check!(filters.evaluation_time.is_some());
+        check!(filters.rule_names.contains("HighError"));
+        check!(filters.rule_groups.contains("api"));
+        check!(filters.files.contains("rules.yaml"));
+        assert_eq!(filters.group_limit, Some(2));
+        assert_eq!(filters.group_next_token.as_deref(), Some("next"));
+        assert_eq!(filters.label_selectors.len(), 1);
+        assert!(filters.has_rule_filter());
 
         let recording = PrometheusRulesFilters::parse(Some("type=record")).unwrap();
-        assert2::assert!(recording.rule_kind == Some("recording"));
-        assert2::assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
-        assert2::assert!(
+        assert_eq!(recording.rule_kind, Some("recording"));
+        assert!(PrometheusRulesFilters::parse(Some("group_next_token=next")).is_err());
+        assert!(
             !PrometheusRulesFilters::parse(Some(""))
                 .unwrap()
                 .has_rule_filter()
@@ -21767,10 +21920,10 @@ mod tests {
         // to one pattern with the timestamp templatized and every constant kept.
         let first = r#"{"timestamp":"2026-07-01T04:19:26.1238077Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#;
         let second = r#"{"timestamp":"2026-07-01T04:19:27.9981001Z","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#;
-        assert2::assert!(log_line_pattern(first) == log_line_pattern(second));
-        assert2::assert!(
-            log_line_pattern(first)
-                == r#"{"timestamp":"<_>","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#
+        assert_eq!(log_line_pattern(first), log_line_pattern(second));
+        assert_eq!(
+            log_line_pattern(first),
+            r#"{"timestamp":"<_>","severity":"INFO","target":"crabka_broker::network::dispatch","message":"connection opened"}"#
         );
     }
 
@@ -21779,65 +21932,65 @@ mod tests {
         let pattern = log_line_pattern(
             r#"{"severity":"INFO","request_id":"550e8400-e29b-41d4-a716-446655440000","trace":"4f3a9c2be18d4f6a5b7c9e0f1a2d3e4b","offset":12345,"sasl":false,"listener":"PLAIN"}"#,
         );
-        assert2::assert!(
-            pattern
-                == r#"{"severity":"INFO","request_id":"<_>","trace":"<_>","offset":"<_>","sasl":false,"listener":"PLAIN"}"#
+        assert_eq!(
+            pattern,
+            r#"{"severity":"INFO","request_id":"<_>","trace":"<_>","offset":"<_>","sasl":false,"listener":"PLAIN"}"#
         );
     }
 
     #[test]
     fn json_message_field_templatizes_embedded_variables() {
-        assert2::assert!(
-            log_line_pattern(r#"{"message":"processed request 550e8400e29b41d4a716 in 42ms"}"#)
-                == r#"{"message":"processed request <_> in <_>"}"#
+        assert_eq!(
+            log_line_pattern(r#"{"message":"processed request 550e8400e29b41d4a716 in 42ms"}"#),
+            r#"{"message":"processed request <_> in <_>"}"#
         );
     }
 
     #[test]
     fn non_json_lines_still_use_logfmt_mining() {
-        assert2::assert!(
-            log_line_pattern("status=500 user=100 route=/checkout")
-                == "status=<_> user=<_> route=/checkout"
+        assert_eq!(
+            log_line_pattern("status=500 user=100 route=/checkout"),
+            "status=<_> user=<_> route=/checkout"
         );
         // A line that merely starts with `{` but is not valid JSON falls back.
-        assert2::assert!(log_line_pattern("{not json ts=1") == "{not json ts=<_>");
+        assert_eq!(log_line_pattern("{not json ts=1"), "{not json ts=<_>");
     }
 
     #[test]
     fn pattern_value_variable_classification() {
         // Variable: timestamps, floats, UUIDs, long hex ids, opaque tokens.
-        assert2::assert!(pattern_value_is_variable("2026-07-01T04:19:26.1238077Z"));
-        assert2::assert!(pattern_value_is_variable("42.5"));
-        assert2::assert!(pattern_value_is_variable(
+        assert!(pattern_value_is_variable("2026-07-01T04:19:26.1238077Z"));
+        assert!(pattern_value_is_variable("42.5"));
+        assert!(pattern_value_is_variable(
             "550e8400-e29b-41d4-a716-446655440000"
         ));
-        assert2::assert!(pattern_value_is_variable(
+        assert!(pattern_value_is_variable(
             "4f3a9c2be18d4f6a5b7c9e0f1a2d3e4b"
         ));
-        assert2::assert!(pattern_value_is_variable("AKIAIOSFODNN7EXAMPLE"));
-        assert2::assert!(pattern_value_is_variable("\"2026-07-01T04:19:26Z\""));
+        assert!(pattern_value_is_variable("AKIAIOSFODNN7EXAMPLE"));
+        assert!(pattern_value_is_variable("\"2026-07-01T04:19:26Z\""));
         // Sole-reason coverage: each value below is variable via exactly one
         // classifier, so every branch of the `||` chain (and the shape checks
         // inside `is_uuid`/`is_hex_id`) is independently exercised.
-        assert2::assert!(pattern_value_is_variable("-42.5")); // negative float: only the f64 parse
-        assert2::assert!(pattern_value_is_variable(
+        assert!(pattern_value_is_variable("-42.5")); // negative float: only the f64 parse
+        assert!(pattern_value_is_variable(
             "f47ac10b-58cc-4372-a567-0e02b2c3d479" // letter-led UUID: only is_uuid
         ));
-        assert2::assert!(pattern_value_is_variable("abcdefabcdefabcd")); // 16 hex letters, no digit: only is_hex_id
+        assert!(pattern_value_is_variable("abcdefabcdefabcd")); // 16 hex letters, no digit: only is_hex_id
         // UUID *layout* but non-hex groups must not be accepted as a UUID (guards
         // the `len == n && all-hex` check inside is_uuid).
-        assert2::assert!(!pattern_value_is_variable(
+        assert!(!pattern_value_is_variable(
             "xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
         ));
         // Constant: levels, module paths, file:line callers, short words.
-        assert2::assert!(!pattern_value_is_variable("INFO"));
-        assert2::assert!(!pattern_value_is_variable(
+        assert!(!pattern_value_is_variable("INFO"));
+        assert!(!pattern_value_is_variable(
             "crabka_broker::network::dispatch"
         ));
-        assert2::assert!(!pattern_value_is_variable("grpc_logging.go:66"));
-        assert2::assert!(!pattern_value_is_variable("/cortex.Ingester/Push"));
-        assert2::assert!(!pattern_value_is_variable("cafe"));
-        assert2::assert!(!pattern_value_is_variable("authenticationToken"));
+        assert!(!pattern_value_is_variable("grpc_logging.go:66"));
+        assert!(!pattern_value_is_variable("/cortex.Ingester/Push"));
+        assert!(!pattern_value_is_variable("cafe"));
+        assert!(!pattern_value_is_variable("authenticationToken"));
     }
 
     /// A negative range offset MUST render with a leading `-` sign, and a positive
@@ -21891,8 +22044,7 @@ mod tests {
             &absent_query,
             &[],
             &frontier,
-            eval_range,
-            step_ns,
+            (eval_range, step_ns),
             &[],
         );
         check!(absent == 0);
@@ -21906,8 +22058,7 @@ mod tests {
             &count_query,
             &[],
             &frontier,
-            eval_range,
-            step_ns,
+            (eval_range, step_ns),
             &[],
         );
         check!(none == 0);

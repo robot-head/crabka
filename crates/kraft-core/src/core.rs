@@ -35,6 +35,16 @@ pub struct QuorumStateMachine {
     election_timeout_ms: u64,
 }
 
+#[derive(Clone, Copy)]
+struct VoteRequest {
+    from: NodeId,
+    voter_id: NodeId,
+    candidate_epoch: Epoch,
+    candidate: NodeId,
+    candidate_log_end: LogEnd,
+    pre_vote: bool,
+}
+
 impl QuorumStateMachine {
     #[must_use]
     pub fn new(me: NodeId, state: QuorumState, election_timeout_ms: u64) -> Self {
@@ -103,10 +113,6 @@ impl QuorumStateMachine {
         )
     }
 
-    // `event` is taken by value: it models a consumed input message and hands
-    // ownership to the machine. The current arms happen to only read Copy
-    // fields, but future events can carry owned records/snapshots.
-    #[allow(clippy::needless_pass_by_value)]
     #[tracing::instrument(
         level = "debug",
         skip_all,
@@ -122,13 +128,15 @@ impl QuorumStateMachine {
                 candidate_log_end,
                 pre_vote,
             } => self.handle_vote_request(
+                VoteRequest {
+                    from,
+                    voter_id,
+                    candidate_epoch,
+                    candidate,
+                    candidate_log_end,
+                    pre_vote,
+                },
                 log,
-                from,
-                voter_id,
-                candidate_epoch,
-                candidate,
-                candidate_log_end,
-                pre_vote,
                 now,
             ),
             Event::ElectionTimeout => self.handle_election_timeout(log, now),
@@ -579,23 +587,25 @@ impl QuorumStateMachine {
         ]
     }
 
-    #[allow(clippy::too_many_arguments)]
     #[tracing::instrument(
         level = "debug",
         skip_all,
-        fields(node = self.me.0, epoch = self.state.leader_epoch, from = from.0, voter_id = voter_id.0, candidate = candidate.0, candidate_epoch, pre_vote)
+        fields(node = self.me.0, epoch = self.state.leader_epoch, from = request.from.0, voter_id = request.voter_id.0, candidate = request.candidate.0, candidate_epoch = request.candidate_epoch, pre_vote = request.pre_vote)
     )]
     fn handle_vote_request(
         &mut self,
+        request: VoteRequest,
         log: &dyn LogView,
-        from: NodeId,
-        voter_id: NodeId,
-        candidate_epoch: Epoch,
-        candidate: NodeId,
-        cand_log: LogEnd,
-        pre_vote: bool,
         now: SimInstant,
     ) -> Vec<Action> {
+        let VoteRequest {
+            from,
+            voter_id,
+            candidate_epoch,
+            candidate,
+            candidate_log_end: cand_log,
+            pre_vote,
+        } = request;
         let mut actions = Vec::new();
         // Recipient-targeting check (KIP-595 / `KafkaRaftClient`): a Vote carries
         // the id of the voter it is addressed to. If it targets a different node

@@ -45,20 +45,18 @@ fn base_ns() -> i64 {
     i64::try_from(now).unwrap_or(i64::MAX) - 180_000_000_000 // 3 minutes ago
 }
 
-#[allow(clippy::too_many_arguments)]
 fn span(
     base: i64,
-    trace_id: u8,
-    id: u8,
-    parent: Option<u8>,
+    identity: (u8, u8, Option<u8>),
     name: &str,
     kind: i32,
-    start_offset_ms: i64,
-    duration_ms: i64,
-    status: i32,
-    status_message: &str,
+    timing_ms: (i64, i64),
+    status: (i32, &str),
     attrs: Vec<(&str, AttrValue)>,
 ) -> InputSpan {
+    let (trace_id, id, parent) = identity;
+    let (start_offset_ms, duration_ms) = timing_ms;
+    let (status, status_message) = status;
     InputSpan {
         trace_id: [trace_id; 16],
         span_id: [id; 8],
@@ -95,7 +93,6 @@ async fn log_req(req: Request, next: Next) -> AxumResponse {
     resp
 }
 
-#[allow(clippy::too_many_lines, reason = "verbose multi-service demo fixture")]
 fn demo_store() -> InMemorySpanStore {
     let base = base_ns();
     let mut store = InMemorySpanStore::new();
@@ -108,15 +105,11 @@ fn demo_store() -> InMemorySpanStore {
         vec![
             span(
                 base,
-                0x11,
-                0x02,
-                None,
+                (0x11, 0x02, None),
                 "GET /checkout",
                 SERVER,
-                0,
-                120,
-                OK,
-                "",
+                (0, 120),
+                (OK, ""),
                 vec![
                     ("http.method", str_attr("GET")),
                     ("http.target", str_attr("/checkout")),
@@ -125,15 +118,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x11,
-                0x03,
-                Some(0x02),
+                (0x11, 0x03, Some(0x02)),
                 "cart.rpc",
                 CLIENT,
-                5,
-                45,
-                OK,
-                "",
+                (5, 45),
+                (OK, ""),
                 vec![
                     ("rpc.system", str_attr("grpc")),
                     ("peer.service", str_attr("cart-backend")),
@@ -141,15 +130,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x11,
-                0x04,
-                Some(0x03),
+                (0x11, 0x04, Some(0x03)),
                 "cart.lookup",
                 SERVER,
-                10,
-                30,
-                OK,
-                "",
+                (10, 30),
+                (OK, ""),
                 vec![
                     ("db.system", str_attr("postgresql")),
                     ("db.statement", str_attr("SELECT * FROM cart WHERE user=$1")),
@@ -157,15 +142,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x11,
-                0x05,
-                Some(0x02),
+                (0x11, 0x05, Some(0x02)),
                 "POST /charge",
                 CLIENT,
-                55,
-                70,
-                ERROR,
-                "payment declined",
+                (55, 70),
+                (ERROR, "payment declined"),
                 vec![
                     ("http.method", str_attr("POST")),
                     ("http.status_code", AttrValue::Int(402)),
@@ -174,15 +155,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x11,
-                0x06,
-                Some(0x05),
+                (0x11, 0x06, Some(0x05)),
                 "payment.charge",
                 SERVER,
-                60,
-                55,
-                ERROR,
-                "card_declined",
+                (60, 55),
+                (ERROR, "card_declined"),
                 vec![
                     ("db.system", str_attr("mysql")),
                     ("payment.provider", str_attr("stripe")),
@@ -199,15 +176,11 @@ fn demo_store() -> InMemorySpanStore {
         vec![
             span(
                 base,
-                0x22,
-                0x02,
-                None,
+                (0x22, 0x02, None),
                 "GET /products",
                 SERVER,
-                0,
-                80,
-                OK,
-                "",
+                (0, 80),
+                (OK, ""),
                 vec![
                     ("http.method", str_attr("GET")),
                     ("http.status_code", AttrValue::Int(200)),
@@ -215,15 +188,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x22,
-                0x03,
-                Some(0x02),
+                (0x22, 0x03, Some(0x02)),
                 "inventory.list",
                 SERVER,
-                8,
-                25,
-                OK,
-                "",
+                (8, 25),
+                (OK, ""),
                 vec![("db.system", str_attr("postgresql"))],
             ),
         ],
@@ -237,15 +206,11 @@ fn demo_store() -> InMemorySpanStore {
         vec![
             span(
                 base,
-                0x33,
-                0x02,
-                None,
+                (0x33, 0x02, None),
                 "GET /checkout",
                 SERVER,
-                0,
-                35,
-                OK,
-                "",
+                (0, 35),
+                (OK, ""),
                 vec![
                     ("http.method", str_attr("GET")),
                     ("http.status_code", AttrValue::Int(200)),
@@ -253,15 +218,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x33,
-                0x03,
-                Some(0x02),
+                (0x33, 0x03, Some(0x02)),
                 "cart.lookup",
                 SERVER,
-                4,
-                15,
-                OK,
-                "",
+                (4, 15),
+                (OK, ""),
                 vec![("db.system", str_attr("postgresql"))],
             ),
         ],
@@ -275,15 +236,11 @@ fn demo_store() -> InMemorySpanStore {
         vec![
             span(
                 base,
-                0x44,
-                0x02,
-                None,
+                (0x44, 0x02, None),
                 "GET /report",
                 SERVER,
-                0,
-                450,
-                OK,
-                "",
+                (0, 450),
+                (OK, ""),
                 vec![
                     ("http.method", str_attr("GET")),
                     ("http.status_code", AttrValue::Int(200)),
@@ -291,15 +248,11 @@ fn demo_store() -> InMemorySpanStore {
             ),
             span(
                 base,
-                0x44,
-                0x03,
-                Some(0x02),
+                (0x44, 0x03, Some(0x02)),
                 "analytics.aggregate",
                 SERVER,
-                20,
-                400,
-                OK,
-                "",
+                (20, 400),
+                (OK, ""),
                 vec![("db.system", str_attr("clickhouse"))],
             ),
         ],
@@ -312,15 +265,11 @@ fn demo_store() -> InMemorySpanStore {
         "POST /login",
         vec![span(
             base,
-            0x55,
-            0x02,
-            None,
+            (0x55, 0x02, None),
             "POST /login",
             SERVER,
-            0,
-            60,
-            ERROR,
-            "invalid credentials",
+            (0, 60),
+            (ERROR, "invalid credentials"),
             vec![
                 ("http.method", str_attr("POST")),
                 ("http.status_code", AttrValue::Int(401)),

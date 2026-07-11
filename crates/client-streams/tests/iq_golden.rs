@@ -67,16 +67,16 @@ async fn iq_kv_golden_parity() {
 
     // get("a") and get("z")=null.
     let want_get_a = kv["get_a"].as_i64().expect("get_a");
-    assert2::assert!(
+    assert_eq!(
         d.iq_kv_get("counts", &"a".to_string(), &StringSerde, &I64Serde)
-            .await
-            == Some(want_get_a)
+            .await,
+        Some(want_get_a)
     );
-    assert2::assert!(kv["get_z"].is_null());
-    assert2::assert!(
+    assert!(kv["get_z"].is_null());
+    assert_eq!(
         d.iq_kv_get("counts", &"z".to_string(), &StringSerde, &I64Serde)
-            .await
-            == None
+            .await,
+        None
     );
 
     // range("a","b") inclusive — exact match against the golden pairs.
@@ -89,14 +89,14 @@ async fn iq_kv_golden_parity() {
             &I64Serde,
         )
         .await;
-    assert2::assert!(got_range == pairs(&kv["range_a_b"]));
+    assert_eq!(got_range, pairs(&kv["range_a_b"]), "range_a_b parity");
 
     // all() — store order may differ, so compare as sorted sets.
     let mut got_all = d.iq_kv_all("counts", &StringSerde, &I64Serde).await;
     got_all.sort();
     let mut want_all = pairs(&kv["all"]);
     want_all.sort();
-    assert2::assert!(got_all == want_all);
+    assert_eq!(got_all, want_all, "all() parity");
 
     // count() — approximateNumEntries is approximate. The JVM (RocksDB) reports
     // total writes; our in-memory store reports distinct keys. Both must land in
@@ -104,9 +104,15 @@ async fn iq_kv_golden_parity() {
     let jvm_count = kv["count"].as_u64().expect("count");
     let distinct = want_all.len() as u64;
     let total_writes = kv["records"].as_array().unwrap().len() as u64;
-    assert2::assert!((distinct..=total_writes).contains(&jvm_count));
+    assert!(
+        (distinct..=total_writes).contains(&jvm_count),
+        "golden count {jvm_count} must be within [{distinct}, {total_writes}]"
+    );
     let our_count = d.iq_kv_count("counts").await;
-    assert2::assert!((distinct..=total_writes).contains(&our_count));
+    assert!(
+        (distinct..=total_writes).contains(&our_count),
+        "our count {our_count} must be within [{distinct}, {total_writes}] (JVM golden: {jvm_count})"
+    );
 }
 
 /// Window count (tumbling): replay timestamped records under key "k", read point +
@@ -138,11 +144,11 @@ async fn iq_window_golden_parity() {
 
     // Point fetch at window start 0.
     let want_single = win["fetch_single_k_0"].as_i64().expect("fetch_single_k_0");
-    assert2::assert!(
+    assert_eq!(
         driver
             .iq_window_fetch_single("wc", &"k".to_string(), 0, &StringSerde, &I64Serde)
-            .await
-            == Some(want_single)
+            .await,
+        Some(want_single)
     );
 
     // Range fetch over [0, size] → ascending (windowStart, count).
@@ -158,7 +164,7 @@ async fn iq_window_golden_parity() {
             (cols[0].as_i64().unwrap(), cols[1].as_i64().unwrap())
         })
         .collect();
-    assert2::assert!(got == want);
+    assert_eq!(got, want, "window range fetch parity");
 }
 
 /// Session count: replay timestamped records under key "k", read fetch(key).
@@ -206,7 +212,7 @@ async fn iq_session_golden_parity() {
         .collect();
     want.sort_by_key(|((st, en), _)| (*st, *en));
 
-    assert2::assert!(got == want);
+    assert_eq!(got, want, "session fetch parity");
 }
 
 /// `[[key, value], ...]` JSON → `Vec<(String, i64)>`.

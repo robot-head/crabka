@@ -188,6 +188,8 @@ impl TraceIndex {
     }
 
     #[instrument(skip_all, fields(key = %key, len = tracing::field::Empty), err)]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, key: &str) -> Result<()> {
         let bytes = serde_json::to_vec(self)?;
         tracing::Span::current().record("len", bytes.len());
@@ -195,6 +197,8 @@ impl TraceIndex {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn save_latest_snapshot(
         &self,
         store: &Arc<dyn ObjectStore>,
@@ -203,10 +207,14 @@ impl TraceIndex {
         put_index_snapshot(store, key, serde_json::to_vec(self)?).await
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
         Self::load_path(store, &Path::from(key)).await
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load_latest_snapshot(store: &Arc<dyn ObjectStore>, key: &str) -> Result<Self> {
         if let Some(path) = latest_index_snapshot_path(store, key).await? {
             return Self::load_path(store, &path).await;

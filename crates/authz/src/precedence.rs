@@ -102,7 +102,6 @@ fn oracle_op_match(stored: AclOperation, requested: AclOperation) -> bool {
 
 // ----- builders -----
 
-#[allow(clippy::too_many_arguments)]
 fn entry(
     rt: ResourceType,
     pattern: PatternType,

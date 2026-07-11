@@ -2,8 +2,8 @@
 
 use crate::primitives::fixed::{get_i8, get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
-    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -30,10 +31,7 @@ pub struct ShareGroupHeartbeatResponse {
 impl Encode for ShareGroupHeartbeatResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -109,10 +107,7 @@ impl Encode for ShareGroupHeartbeatResponse {
             n += 4;
         }
         if version >= 0 {
-            n += 1 + self
-                .assignment
-                .as_ref()
-                .map_or(0, |v| v.encoded_len(version));
+            n += 1 + self.assignment.as_ref().map_or(0, |v| v.encoded_len(version));
         }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -124,10 +119,7 @@ impl Encode for ShareGroupHeartbeatResponse {
 impl Decode<'_> for ShareGroupHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -138,18 +130,10 @@ impl Decode<'_> for ShareGroupHeartbeatResponse {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 0 {
-            out.member_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.member_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 0 {
             out.member_epoch = get_i32(buf)?;
@@ -158,11 +142,7 @@ impl Decode<'_> for ShareGroupHeartbeatResponse {
             out.heartbeat_interval_ms = get_i32(buf)?;
         }
         if version >= 0 {
-            out.assignment = if get_i8(buf)? < 0 {
-                None
-            } else {
-                Some(Assignment::decode(buf, version)?)
-            };
+            out.assignment = if get_i8(buf)? < 0 { None } else { Some(Assignment::decode(buf, version)?) };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -201,8 +181,7 @@ impl ShareGroupHeartbeatResponse {
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Assignment {
-    pub topic_partitions:
-        Vec<super::common::share_group_heartbeat_response::topic_partitions::TopicPartitions>,
+    pub topic_partitions: Vec<super::common::share_group_heartbeat_response::topic_partitions::TopicPartitions>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for Assignment {
@@ -227,14 +206,8 @@ impl Encode for Assignment {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.topic_partitions).len(),
-                    flex,
-                );
-                let body: usize = (self.topic_partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_partitions).len(), flex);
+                let body: usize = (self.topic_partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -254,12 +227,7 @@ impl Decode<'_> for Assignment {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::share_group_heartbeat_response::topic_partitions::TopicPartitions::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::share_group_heartbeat_response::topic_partitions::TopicPartitions::decode(buf, version)?);
                 }
                 v
             };
@@ -276,9 +244,7 @@ impl Assignment {
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 0 {
-            m.topic_partitions = vec![
-                super::common::share_group_heartbeat_response::topic_partitions::TopicPartitions::populated(version)
-            ];
+            m.topic_partitions = vec![super::common::share_group_heartbeat_response::topic_partitions::TopicPartitions::populated(version)];
         }
         m
     }
@@ -287,7 +253,7 @@ impl Assignment {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));

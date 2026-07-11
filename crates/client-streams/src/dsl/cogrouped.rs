@@ -7,8 +7,8 @@
 //! `KGroupedStream::cogroup` / `CogroupedKStream::cogroup` capture each input's
 //! lineage plus a **type-erased** `make_agg` thunk (closing over the concrete
 //! `Vn` + aggregator). The terminal `aggregate` / `windowed_by*` supply the
-//! shared `Initializer` (and, for sessions, the `Merger`) as a [`CogroupSpec`],
-//! then [`lower_cogroup`] records the per-input repartition+aggregate nodes and
+//! shared `Initializer` (and, for sessions, the `Merger`) as an internal `CogroupSpec`,
+//! then `lower_cogroup` records the per-input repartition+aggregate nodes and
 //! the merge node, registering the shared store exactly once in the merge thunk.
 
 use std::{any::Any, cell::RefCell, marker::PhantomData, rc::Rc, sync::Arc};
@@ -45,11 +45,14 @@ pub(crate) enum CogroupKind {
 /// The terminal aggregation spec, built once at `aggregate()` time and cloned
 /// per input. `init`/`merger` are `Arc`-erased so a per-input `make_agg` thunk
 /// (which doesn't know `VOut`'s concrete closure type) can hold them.
-#[allow(dead_code, clippy::type_complexity)]
+type CogroupInitializer<VOut> = Arc<dyn Fn() -> VOut + Send + Sync>;
+type CogroupMerger<K, VOut> = Arc<dyn Fn(&K, VOut, VOut) -> VOut + Send + Sync>;
+
+#[allow(dead_code)]
 pub(crate) struct CogroupSpec<K, VOut> {
     pub kind: CogroupKind,
-    pub init: Arc<dyn Fn() -> VOut + Send + Sync>,
-    pub merger: Option<Arc<dyn Fn(&K, VOut, VOut) -> VOut + Send + Sync>>,
+    pub init: CogroupInitializer<VOut>,
+    pub merger: Option<CogroupMerger<K, VOut>>,
 }
 
 impl<K, VOut> Clone for CogroupSpec<K, VOut> {
@@ -83,7 +86,7 @@ pub(crate) struct CogroupInput<K, VOut> {
 
 /// Handle accumulating cogrouped inputs; terminal `aggregate`/`windowed_by*`
 /// consume it. `builder`/`inputs` are `pub(crate)` so the windowed-handle modules
-/// can move the inputs into their own handles; construct via [`Self::new`].
+/// can move the inputs into their own handles; construct via the DSL entry points.
 pub struct CogroupedKStream<K, VOut> {
     pub(crate) builder: Rc<RefCell<InternalStreamsBuilder>>,
     pub(crate) inputs: Vec<CogroupInput<K, VOut>>,
@@ -109,7 +112,6 @@ impl<K, VOut> CogroupedKStream<K, VOut> {
 /// aggregator. The returned thunk matches on the window kind to attach the right
 /// per-window processor. Shared by `KGroupedStream::cogroup` and the chained
 /// `CogroupedKStream::cogroup`.
-#[allow(clippy::too_many_lines)]
 pub(crate) fn make_agg_for_input<K, Vn, VOut, A>(agg: A) -> MakeAggFn<K, VOut>
 where
     K: Any + Send + Sync + Clone,
@@ -347,8 +349,8 @@ where
         let merge_id = lower_cogroup::<K, VOut, K>(
             &self.builder,
             self.inputs,
-            store_name.clone(),
-            spec,
+            &store_name,
+            &spec,
             logging,
             registrar,
         );
@@ -397,12 +399,11 @@ pub(crate) type StoreRegistrarFn = Box<dyn FnOnce(&mut LowerState, Vec<String>) 
 /// register the shared store. Returns the merge node id (the result `KTable`'s
 /// source). Generic over the merge output key `KOut` (`K` non-windowed,
 /// `Windowed<K>` windowed).
-#[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
 pub(crate) fn lower_cogroup<K, VOut, KOut>(
     builder: &Rc<RefCell<InternalStreamsBuilder>>,
     inputs: Vec<CogroupInput<K, VOut>>,
-    store_name: String,
-    spec: CogroupSpec<K, VOut>,
+    store_name: &str,
+    spec: &CogroupSpec<K, VOut>,
     logging: bool,
     registrar: StoreRegistrarFn,
 ) -> NodeId
@@ -429,7 +430,7 @@ where
         } = input;
         let agg_parent = KGroupedStream::<K, ()>::record_repartition(
             &mut g,
-            &store_name,
+            store_name,
             parent,
             key_changing_upstream,
             repartition_lower,
@@ -438,7 +439,7 @@ where
         let agg_id = g.graph.add(
             proc_name.clone(),
             GraphNodeKind::Aggregate {
-                store_name: store_name.clone(),
+                store_name: store_name.to_string(),
                 // Per-input nodes share the store; only the merge node owns the
                 // changelog (set `changelog: logging` below). The actual store
                 // registration happens once, in the merge thunk via `registrar`.
@@ -447,7 +448,7 @@ where
             vec![agg_parent],
         );
         let thunk = make_agg(spec.clone());
-        let store_for = store_name.clone();
+        let store_for = store_name.to_string();
         let pn = proc_name.clone();
         g.graph.nodes[agg_id].lower = Some(Box::new(move |state: &mut LowerState| {
             let parent_name = state.handle_name[&agg_parent].clone();
@@ -461,7 +462,7 @@ where
     let merge_id = g.graph.add(
         merge_name.clone(),
         GraphNodeKind::Aggregate {
-            store_name: store_name.clone(),
+            store_name: store_name.to_string(),
             changelog: logging,
         },
         agg_ids.clone(),
@@ -579,13 +580,10 @@ mod cogroup_caching_tests {
 
         pollster::block_on(g.flush_caches()).unwrap();
         let out = g.take_output();
-        check!(
-            (
-                out.len(),
-                out[0].topic.as_str(),
-                out[0].value.as_ref().map(bytes::Bytes::as_ref),
-            ) == (1, "out", Some(3i64.to_be_bytes().as_slice()))
-        );
+        check!(out.len() == 1);
+        check!(out[0].topic == "out");
+        // 3 = in1(+2) then in2(+1) — in2 read in1's buffered accumulator.
+        check!(out[0].value.as_ref().unwrap().as_ref() == 3i64.to_be_bytes());
     }
 
     /// `with_caching(false)`: the cogroup store stays uncached even with budget.

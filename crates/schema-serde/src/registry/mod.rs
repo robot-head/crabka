@@ -38,6 +38,8 @@ impl RegistryClient {
 
     /// Register `schema` under `subject`, returning its global id
     /// (`auto.register.schemas=true`).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn register(
         &self,
         subject: &str,
@@ -58,6 +60,8 @@ impl RegistryClient {
 
     /// Look up the id of an already-registered `schema` under `subject`
     /// (`auto.register.schemas=false`).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn lookup(
         &self,
         subject: &str,
@@ -78,6 +82,8 @@ impl RegistryClient {
 
     /// Fetch the latest registered version's id under `subject`
     /// (`use.latest.version=true`).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn latest(&self, subject: &str) -> Result<SubjectVersionResponse, SchemaSerdeError> {
         let url = format!("{}/subjects/{subject}/versions/latest", self.base_url);
         self.get_json(&url).await
@@ -85,11 +91,15 @@ impl RegistryClient {
 
     /// Fetch the latest registered version's id under `subject`
     /// (`use.latest.version=true`).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn latest_id(&self, subject: &str) -> Result<u32, SchemaSerdeError> {
         Ok(self.latest(subject).await?.id)
     }
 
     /// Fetch a schema's text and optional metadata by global id (deserialize path).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn schema_by_id(&self, id: u32) -> Result<FetchedSchema, SchemaSerdeError> {
         let url = format!("{}/schemas/ids/{id}", self.base_url);
         let resp: SchemaByIdResponse = self.get_json(&url).await?;

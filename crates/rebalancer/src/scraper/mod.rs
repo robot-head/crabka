@@ -64,6 +64,8 @@ pub struct Scraper {
 
 impl Scraper {
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated cluster state is missing an assignment required by the plan.
     pub fn new(
         source: TargetSource,
         interval: Duration,

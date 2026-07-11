@@ -97,6 +97,7 @@ fn encode_resp(version: i16, resp: &RemoveRaftVoterResponse) -> Result<Bytes, Br
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid as ProtoUuid;
     use crabka_security::{AuthMethod, Principal};
 
@@ -136,8 +137,18 @@ mod tests {
             let bytes = encode_resp(version, &resp).expect("encode");
             let mut cur: &[u8] = &bytes;
             let decoded = RemoveRaftVoterResponse::decode(&mut cur, version).expect("decode");
-            assert2::assert!(decoded == resp);
-            assert2::assert!(cur.is_empty());
+            assert!(
+                (
+                    decoded.error_code,
+                    decoded.error_message.as_deref(),
+                    cur.is_empty(),
+                ) == (
+                    codes::INVALID_REQUEST,
+                    Some("cannot remove the last voter"),
+                    true,
+                ),
+                "all bytes consumed at v{version}"
+            );
         }
     }
 
@@ -160,12 +171,8 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        let expected = RemoveRaftVoterResponse {
-            error_code: codes::CLUSTER_AUTHORIZATION_FAILED,
-            error_message: Some("remove-raft-voter denied".into()),
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.error_code == codes::CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.error_message.as_deref() == Some("remove-raft-voter denied"));
         broker_handle.shutdown().await;
     }
 
@@ -189,8 +196,8 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp, version);
 
-        assert2::assert!(resp.error_code == codes::INVALID_REQUEST);
-        assert2::assert!(
+        assert!(resp.error_code == codes::INVALID_REQUEST);
+        assert!(
             resp.error_message.as_deref().is_some_and(|m| {
                 m.contains("voter_id must be non-negative") && m.contains("-7")
             })

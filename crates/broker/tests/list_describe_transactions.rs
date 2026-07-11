@@ -1,14 +1,13 @@
 // Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
-#![allow(clippy::pedantic)]
 
-//! KIP-664 `ListTransactions` (api_key 66) + `DescribeTransactions`
-//! (api_key 65). Both surface the broker's local `TxnCoordinator`
+//! KIP-664 `ListTransactions` (`api_key` 66) + `DescribeTransactions`
+//! (`api_key` 65). Both surface the broker's local `TxnCoordinator`
 //! state — `(transactional_id, producer_id, state)` summary for List,
 //! full per-tid detail (timeout, start time, partitions) for Describe.
 
 use std::time::Duration;
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_producer::{Producer, ProducerRecord};
@@ -47,7 +46,11 @@ async fn create_topic(bootstrap: &str, name: &str) {
         })
         .await
         .unwrap();
-    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
+    assert!(
+        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
+        "create_topic {name}: error_code={}",
+        cr.topics[0].error_code
+    );
 }
 
 fn rec(topic: &str, v: &str) -> ProducerRecord {
@@ -116,27 +119,26 @@ async fn list_transactions_returns_ongoing_txn() {
         if !r.transaction_states.is_empty() {
             break r;
         }
-        if std::time::Instant::now() > deadline {
-            panic!("ListTransactions never saw the ongoing txn: {r:?}");
-        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "ListTransactions never saw the ongoing txn: {r:?}"
+        );
         // intentional: polls RPC response until the txn is visible as Ongoing
         // (coordinator TxnEntry state after AddPartitionsToTxn); no
         // metadata-image signal for this
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
+    assert!(resp.error_code == 0);
     let row = resp
         .transaction_states
         .iter()
         .find(|r| r.transactional_id == "my-tid")
         .expect("my-tid not present");
+    check!(row.transaction_state == "Ongoing");
+    check!(row.producer_id > 0);
     check!(
-        (
-            resp.error_code,
-            row.transaction_state.as_str(),
-            row.producer_id > 0,
-            resp.unknown_state_filters.is_empty(),
-        ) == (0, "Ongoing", true, true),
+        resp.unknown_state_filters.is_empty(),
         "no filters sent → no unknowns: {:?}",
         resp.unknown_state_filters,
     );
@@ -160,13 +162,12 @@ async fn list_transactions_state_filter_excludes_non_matching() {
         })
         .await
         .expect("ListTransactions(state=Empty)");
-    assert2::assert!(
-        (
-            r.error_code,
-            r.transaction_states
-                .iter()
-                .all(|t| t.transactional_id != "my-tid"),
-        ) == (0, true)
+    assert!(r.error_code == 0);
+    assert!(
+        r.transaction_states
+            .iter()
+            .all(|t| t.transactional_id != "my-tid"),
+        "Ongoing txn must not match an Empty state filter: {r:?}",
     );
 
     producer.close().await.unwrap();
@@ -185,15 +186,10 @@ async fn list_transactions_reports_unknown_state_filters() {
         })
         .await
         .expect("ListTransactions");
+    assert!(r.error_code == 0);
     // The known names round-trip silently; the bogus one rides on the
     // unknown_state_filters echo per KIP-664.
-    assert2::assert!(
-        (
-            r.error_code,
-            r.unknown_state_filters.len(),
-            r.unknown_state_filters[0].as_str(),
-        ) == (0, 1, "BogusState")
-    );
+    assert!(r.unknown_state_filters == vec!["BogusState".to_string()]);
 
     broker.shutdown().await;
 }
@@ -217,43 +213,31 @@ async fn describe_transactions_returns_full_state_for_known_tid() {
             })
             .await
             .expect("DescribeTransactions");
-        assert2::assert!(r.transaction_states.len() == 1);
+        assert!(r.transaction_states.len() == 1);
         let row = &r.transaction_states[0];
         if row.error_code == 0 && !row.topics.is_empty() {
             break row.clone();
         }
-        if std::time::Instant::now() > deadline {
-            panic!("Ongoing txn never showed its partitions: {row:?}");
-        }
+        assert!(
+            std::time::Instant::now() <= deadline,
+            "Ongoing txn never showed its partitions: {row:?}"
+        );
         // intentional: polls RPC response until the txn shows its registered
         // partitions (coordinator TxnEntry state after AddPartitionsToTxn); no
         // metadata-image signal for this
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
+    check!(row.transactional_id == "describe-tid");
+    check!(row.transaction_state == "Ongoing");
+    check!(row.producer_id > 0);
+    check!(row.transaction_timeout_ms == 60_000);
+    check!(row.transaction_start_time_ms > 0);
     // Exactly one topic + partition, since we produced one record to
     // a 1-partition topic.
-    check!(
-        (
-            row.transactional_id.as_str(),
-            row.transaction_state.as_str(),
-            row.producer_id > 0,
-            row.transaction_timeout_ms,
-            row.transaction_start_time_ms > 0,
-            row.topics.len(),
-            row.topics[0].topic.as_str(),
-            row.topics[0].partitions.as_slice(),
-        ) == (
-            "describe-tid",
-            "Ongoing",
-            true,
-            60_000,
-            true,
-            1,
-            "t-describe",
-            &[0i32][..],
-        )
-    );
+    assert!(row.topics.len() == 1);
+    check!(row.topics[0].topic == "t-describe");
+    check!(row.topics[0].partitions == vec![0]);
 
     producer.close().await.unwrap();
     broker.shutdown().await;
@@ -271,15 +255,13 @@ async fn describe_transactions_returns_not_found_for_unknown_tid() {
         })
         .await
         .expect("DescribeTransactions");
+    assert!(r.transaction_states.len() == 1);
     check!(
-        (
-            r.transaction_states.len(),
-            r.transaction_states[0].error_code,
-            r.transaction_states[0].transactional_id.as_str(),
-        ) == (1, 75, "ghost-tid"),
+        r.transaction_states[0].error_code == 75,
         "expected TRANSACTIONAL_ID_NOT_FOUND (75), got {:?}",
         r.transaction_states[0]
     );
+    check!(r.transaction_states[0].transactional_id == "ghost-tid");
 
     broker.shutdown().await;
 }

@@ -53,30 +53,30 @@ mod tests {
     #[test]
     fn store_key_layout_and_window_start() {
         let k = store_key(b"k", 0x0102, 0);
-        assert2::assert!(k.len() == 13); // "k"(1) ‖ ws:8 ‖ seq:4
-        assert2::assert!(&k[1..9] == &0x0102i64.to_be_bytes());
-        assert2::assert!(&k[9..13] == &[0, 0, 0, 0]);
-        assert2::assert!(window_start_of(&k) == 0x0102);
-        assert2::assert!(key_bytes_of(&k) == b"k");
+        assert_eq!(k.len(), 13); // "k"(1) ‖ ws:8 ‖ seq:4
+        assert_eq!(&k[1..9], &0x0102i64.to_be_bytes());
+        assert_eq!(&k[9..13], &[0, 0, 0, 0]);
+        assert_eq!(window_start_of(&k), 0x0102);
+        assert_eq!(key_bytes_of(&k), b"k");
     }
 
     #[test]
     fn store_key_encodes_seqnum() {
         let k0 = store_key(b"k", 5, 0);
         let k1 = store_key(b"k", 5, 1);
-        assert2::assert!(&k0[k0.len() - 4..] == &[0, 0, 0, 0]);
-        assert2::assert!(&k1[k1.len() - 4..] == &1u32.to_be_bytes());
-        assert2::assert!(k1 > k0); // same (key, ts), higher seqnum sorts after
-        assert2::assert!(window_start_of(&k1) == 5);
-        assert2::assert!(key_bytes_of(&k1) == b"k");
+        assert_eq!(&k0[k0.len() - 4..], &[0, 0, 0, 0]);
+        assert_eq!(&k1[k1.len() - 4..], &1u32.to_be_bytes());
+        assert!(k1 > k0); // same (key, ts), higher seqnum sorts after
+        assert_eq!(window_start_of(&k1), 5);
+        assert_eq!(key_bytes_of(&k1), b"k");
     }
 
     #[test]
     fn value_wrap_unwrap() {
         let v = wrap_value(7, &99i64.to_be_bytes());
-        assert2::assert!(&v[0..8] == &7i64.to_be_bytes()); // ts prefix
+        assert_eq!(&v[0..8], &7i64.to_be_bytes()); // ts prefix
         let (ts, raw) = unwrap_value(&v);
-        assert2::assert!(ts == 7);
-        assert2::assert!(raw == &99i64.to_be_bytes());
+        assert_eq!(ts, 7);
+        assert_eq!(raw, &99i64.to_be_bytes());
     }
 }

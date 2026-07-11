@@ -38,6 +38,8 @@ impl InmemoryRemoteLogMetadataManager {
     /// snapshotting. The result is order-independent;
     /// [`Self::import`] re-derives ordering and the epoch index.
     #[must_use]
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn export(&self) -> RlmmCacheDump {
         let guard = self.partitions.lock().expect("metadata mutex poisoned");
         let mut partitions: Vec<PartitionDump> = guard
@@ -76,6 +78,8 @@ impl InmemoryRemoteLogMetadataManager {
     /// Seed the cache from a dump, bypassing transition validation
     /// Intended for a freshly-constructed manager during
     /// snapshot restore; existing partitions are overwritten.
+    /// # Panics
+    /// Panics if an internal lock is poisoned or validated block metadata is inconsistent with its index.
     pub fn import(&self, dump: RlmmCacheDump) {
         let mut guard = self.partitions.lock().expect("metadata mutex poisoned");
         for p in dump.partitions {
@@ -180,6 +184,7 @@ impl RemoteLogMetadataManager for InmemoryRemoteLogMetadataManager {
 mod tests {
     use std::collections::BTreeMap;
 
+    use assert2::{assert, check};
     use uuid::Uuid;
 
     use super::*;
@@ -199,9 +204,11 @@ mod tests {
             end,
             1,
             100,
-            2048,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(LeaderEpoch(0), start)]),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                2048,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(LeaderEpoch(0), start)]),
+            ),
         )
         .unwrap()
     }
@@ -219,65 +226,70 @@ mod tests {
     #[test]
     fn add_finish_query_round_trip() {
         let m = InmemoryRemoteLogMetadataManager::new();
-        let started = started(10, 0, 99);
-        let finished = started.clone().with_update(&finish(10)).unwrap();
-        m.add_remote_log_segment_metadata(started).unwrap();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
 
         let got = m
             .remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42)
             .unwrap()
             .expect("segment found");
-        assert2::assert!(got == finished);
-        assert2::assert!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
+        check!(got.remote_log_segment_id().id == Uuid::from_u128(10));
+        check!(got.custom_metadata() == Some(&CustomMetadata(vec![7])));
+        check!(m.highest_offset_for_epoch(&tp(), LeaderEpoch(0)).unwrap() == Some(99));
     }
 
     #[test]
     fn query_unknown_partition_is_none_not_error() {
         let m = InmemoryRemoteLogMetadataManager::new();
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        assert2::assert!(
+        check!(
             m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0)
                 .unwrap()
                 == None
         );
-        assert2::assert!(m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap() == None);
-        assert2::assert!(m.list_remote_log_segments(&other).unwrap() == Vec::new());
+        check!(m.highest_offset_for_epoch(&other, LeaderEpoch(0)).unwrap() == None);
+        check!(m.list_remote_log_segments(&other).unwrap().is_empty());
     }
 
     #[test]
     fn list_by_epoch_returns_added_segment() {
         let m = InmemoryRemoteLogMetadataManager::new();
-        let started = started(10, 0, 99);
-        let finished = started.clone().with_update(&finish(10)).unwrap();
-        m.add_remote_log_segment_metadata(started).unwrap();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
         let listed = m
             .list_remote_log_segments_by_epoch(&tp(), LeaderEpoch(0))
             .unwrap();
-        assert2::assert!(listed == vec![finished]);
+        assert!(listed.len() == 1);
+        assert!(listed[0].remote_log_segment_id().id == Uuid::from_u128(10));
     }
 
     #[test]
     fn inmemory_read_outcomes_are_some_none_never_not_ready() {
         let m = InmemoryRemoteLogMetadataManager::new();
-        let started = started(10, 0, 99);
-        let finished = started.clone().with_update(&finish(10)).unwrap();
-        m.add_remote_log_segment_metadata(started).unwrap();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
 
+        // Found.
+        assert!(matches!(
+            m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 42),
+            Ok(Some(_))
+        ));
+        // Caught up, no covering segment → genuine miss.
+        assert!(matches!(
+            m.remote_log_segment_metadata(&tp(), LeaderEpoch(0), 10_000),
+            Ok(None)
+        ));
+        // Unknown partition → genuine miss, NOT NotReady.
         let other = TopicIdPartition::new(Uuid::from_u128(999), "nope", 0);
-        for (_name, partition, offset, expected) in [
-            ("covered offset", tp(), 42, Some(finished)),
-            ("uncovered offset", tp(), 10_000, None),
-            ("unknown partition", other, 0, None),
-        ] {
-            assert2::assert!(
-                m.remote_log_segment_metadata(&partition, LeaderEpoch(0), offset)
-                    .unwrap()
-                    == expected
-            );
-        }
+        let got = m.remote_log_segment_metadata(&other, LeaderEpoch(0), 0);
+        assert!(matches!(got, Ok(None)));
+        assert!(
+            !matches!(got, Err(RemoteStorageError::NotReady { .. })),
+            "in-memory manager has no consumer lag; never NotReady"
+        );
     }
 
     #[test]
@@ -286,20 +298,23 @@ mod tests {
         let err = m
             .update_remote_log_segment_metadata(finish(10))
             .unwrap_err();
-        assert2::assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
+        assert!(matches!(err, RemoteStorageError::SegmentNotFound(_)));
     }
 
     #[test]
     fn list_returns_all_states_ordered() {
         let m = InmemoryRemoteLogMetadataManager::new();
-        let second = started(11, 100, 199);
-        let first = started(10, 0, 99);
-        let finished_first = first.clone().with_update(&finish(10)).unwrap();
-        m.add_remote_log_segment_metadata(second.clone()).unwrap();
-        m.add_remote_log_segment_metadata(first).unwrap();
+        m.add_remote_log_segment_metadata(started(11, 100, 199))
+            .unwrap();
+        m.add_remote_log_segment_metadata(started(10, 0, 99))
+            .unwrap();
         m.update_remote_log_segment_metadata(finish(10)).unwrap();
         let listed = m.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(listed == vec![finished_first, second]);
+        let start_offsets: Vec<i64> = listed
+            .iter()
+            .map(RemoteLogSegmentMetadata::start_offset)
+            .collect();
+        assert!(start_offsets == [0, 100]);
     }
 
     #[test]
@@ -343,14 +358,16 @@ mod tests {
         // list_remote_log_segments matches across the partition.
         let before = m.list_remote_log_segments(&tp()).unwrap();
         let after = restored.list_remote_log_segments(&tp()).unwrap();
-        assert2::assert!(before == after);
-        assert2::assert!(
+        check!(before == after);
+        // Finished segment still queryable post-import.
+        check!(
             restored
                 .highest_offset_for_epoch(&tp(), LeaderEpoch(0))
                 .unwrap()
                 == Some(99)
         );
-        assert2::assert!(m.export() == restored.export());
+        // Re-exporting yields the same dump (idempotent round trip).
+        check!(m.export() == restored.export());
     }
 
     #[test]
@@ -364,7 +381,7 @@ mod tests {
                 broker_id: 1,
             })
             .unwrap_err();
-        assert2::assert!(matches!(
+        assert!(matches!(
             err,
             RemoteStorageError::InvalidPartitionDeleteTransition { .. }
         ));

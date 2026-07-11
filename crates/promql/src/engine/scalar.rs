@@ -1,3 +1,4 @@
+use num_traits::ToPrimitive;
 use time::OffsetDateTime;
 
 #[cfg(feature = "experimental-functions")]
@@ -42,15 +43,14 @@ pub(super) enum CalendarFn {
 }
 
 impl CalendarFn {
-    #[allow(
-        clippy::cast_possible_truncation,
-        reason = "PromQL calendar functions interpret float sample values as Unix seconds"
-    )]
     pub(super) fn apply(self, unix_seconds: f64) -> f64 {
         if !unix_seconds.is_finite() {
             return f64::NAN;
         }
-        let Ok(timestamp) = OffsetDateTime::from_unix_timestamp(unix_seconds as i64) else {
+        let Some(unix_seconds) = unix_seconds.to_i64() else {
+            return f64::NAN;
+        };
+        let Ok(timestamp) = OffsetDateTime::from_unix_timestamp(unix_seconds) else {
             return f64::NAN;
         };
         match self {

@@ -34,8 +34,7 @@ fn payload_random(size: usize) -> Bytes {
         state = state
             .wrapping_mul(6_364_136_223_846_793_005)
             .wrapping_add(1);
-        #[allow(clippy::cast_possible_truncation)]
-        v.push((state >> 56) as u8);
+        v.push(state.to_be_bytes()[0]);
     }
     Bytes::from(v)
 }

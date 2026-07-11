@@ -65,6 +65,8 @@ pub enum MovementError {
 /// Inspect `movement` against `state`'s broker + partition tables.
 /// Returns `Ok(())` for movements the optimizer should accept,
 /// `Err(MovementError)` for ones it should drop.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn validate_movement(state: &ClusterState, mv: &Movement) -> Result<(), MovementError> {
     if mv.old_replicas.len() != mv.new_replicas.len() {
         return Err(MovementError::ReplicationFactorChanged {

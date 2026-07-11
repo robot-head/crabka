@@ -6,6 +6,7 @@ use std::sync::{
 use crabka_blockstore::Labels;
 use crabka_throttle::TokenBucket;
 use dashmap::DashMap;
+use num_traits::ToPrimitive;
 
 use super::{LimitError, Limits};
 
@@ -85,12 +86,8 @@ impl IngestEnforcer {
         }
     }
 
-    #[allow(
-        clippy::cast_possible_truncation,
-        clippy::cast_sign_loss,
-        clippy::cast_precision_loss,
-        reason = "Mimir sample rates are configured as finite samples/sec and enforced by an integer token bucket."
-    )]
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_sample_rate(
         &self,
         limits: &Limits,
@@ -110,7 +107,12 @@ impl IngestEnforcer {
         // A configured positive rate must never round down to `0`, which the
         // token bucket interprets as the unlimited sentinel. Round to nearest
         // but clamp to at least one sample/sec so e.g. `0.4` still throttles.
-        let rate = (limits.ingestion_rate.round() as u64).max(1);
+        let rate = limits
+            .ingestion_rate
+            .round()
+            .to_u64()
+            .unwrap_or(u64::MAX)
+            .max(1);
         let stamp = self.next_touch_stamp();
         let entry = self
             .sample_rate_buckets
@@ -136,11 +138,13 @@ impl IngestEnforcer {
         } else {
             Err(LimitError::IngestionRateExceeded {
                 rate: limits.ingestion_rate,
-                observed: n_samples as f64,
+                observed: n_samples.to_f64().unwrap_or(f64::MAX),
             })
         }
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_active_series(
         &self,
         limits: &Limits,
@@ -162,6 +166,8 @@ impl IngestEnforcer {
         }
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_labels(limits: &Limits, labels: &Labels) -> Result<(), LimitError> {
         for (name, value) in labels.iter() {
             let name_len = u64::try_from(name.len()).unwrap_or(u64::MAX);
@@ -187,6 +193,8 @@ impl IngestEnforcer {
 pub struct QueryEnforcer;
 
 impl QueryEnforcer {
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_range(
         limits: &Limits,
         start_ms: i64,
@@ -218,6 +226,8 @@ impl QueryEnforcer {
         Ok(())
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_series_count(limits: &Limits, selected: u64) -> Result<(), LimitError> {
         if limits.max_fetched_series_per_query != 0
             && selected > limits.max_fetched_series_per_query
@@ -231,6 +241,8 @@ impl QueryEnforcer {
         }
     }
 
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn check_sample_count(limits: &Limits, processed: u64) -> Result<(), LimitError> {
         if limits.max_samples_per_query != 0 && processed > limits.max_samples_per_query {
             Err(LimitError::SamplesPerQueryExceeded {
@@ -253,7 +265,7 @@ fn millis_to_secs_ceil(ms: u64) -> u64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_blockstore::Labels;
 
     use super::*;
@@ -280,15 +292,15 @@ mod tests {
     fn active_series_cap_rejects_over_limit() {
         let e = IngestEnforcer::new();
         let l = limits_with(100, 1024, 2048);
-        assert2::assert!(e.check_active_series(&l, "t", 1, 99).is_ok());
-        assert2::assert!(e.check_active_series(&l, "t", 1, 100).is_err());
+        assert!(e.check_active_series(&l, "t", 1, 99).is_ok());
+        assert!(e.check_active_series(&l, "t", 1, 100).is_err());
     }
 
     #[test]
     fn zero_series_cap_is_unlimited() {
         let e = IngestEnforcer::new();
         let l = limits_with(0, 1024, 2048);
-        assert2::assert!(e.check_active_series(&l, "t", 1_000_000, 5_000_000).is_ok());
+        assert!(e.check_active_series(&l, "t", 1_000_000, 5_000_000).is_ok());
     }
 
     #[test]
@@ -298,11 +310,11 @@ mod tests {
         let bad_name = labels(&[("toolong", "x")]);
         let bad_val = labels(&[("a", "toolong")]);
         check!(IngestEnforcer::check_labels(&l, &ok).is_ok());
-        assert2::assert!(matches!(
+        assert!(matches!(
             IngestEnforcer::check_labels(&l, &bad_name),
             Err(LimitError::LabelNameTooLong { .. })
         ));
-        assert2::assert!(matches!(
+        assert!(matches!(
             IngestEnforcer::check_labels(&l, &bad_val),
             Err(LimitError::LabelValueTooLong { .. })
         ));
@@ -316,8 +328,8 @@ mod tests {
             ingestion_burst_size: 100,
             ..Limits::default()
         };
-        assert2::assert!(e.check_sample_rate(&l, "t", 100).is_ok());
-        assert2::assert!(e.check_sample_rate(&l, "t", 100).is_err());
+        assert!(e.check_sample_rate(&l, "t", 100).is_ok());
+        assert!(e.check_sample_rate(&l, "t", 100).is_err());
     }
 
     #[test]
@@ -330,8 +342,8 @@ mod tests {
             ingestion_burst_size: 1,
             ..Limits::default()
         };
-        assert2::assert!(e.check_sample_rate(&l, "t", 1).is_ok());
-        assert2::assert!(e.check_sample_rate(&l, "t", 1).is_err());
+        assert!(e.check_sample_rate(&l, "t", 1).is_ok());
+        assert!(e.check_sample_rate(&l, "t", 1).is_err());
     }
 
     #[test]
@@ -342,7 +354,7 @@ mod tests {
             ingestion_burst_size: 0,
             ..Limits::default()
         };
-        assert2::assert!(e.check_sample_rate(&l, "t", 1_000_000).is_ok());
+        assert!(e.check_sample_rate(&l, "t", 1_000_000).is_ok());
     }
 
     #[test]
@@ -355,14 +367,14 @@ mod tests {
             ingestion_burst_size: 0,
             ..Limits::default()
         };
-        assert2::assert!(e.check_sample_rate(&nan, "nan", 1_000_000).is_ok());
+        assert!(e.check_sample_rate(&nan, "nan", 1_000_000).is_ok());
         // +Inf is unbounded throughput, also disabled rather than int-bucketed.
         let inf = Limits {
             ingestion_rate: f64::INFINITY,
             ingestion_burst_size: 0,
             ..Limits::default()
         };
-        assert2::assert!(e.check_sample_rate(&inf, "inf", 1_000_000).is_ok());
+        assert!(e.check_sample_rate(&inf, "inf", 1_000_000).is_ok());
     }
 
     #[test]
@@ -379,9 +391,9 @@ mod tests {
         for i in 0..1_000 {
             let tenant = format!("tenant-{i}");
             let _ = e.check_sample_rate(&l, &tenant, 1);
-            assert2::assert!(e.sample_rate_buckets.len() <= cap);
+            assert!(e.sample_rate_buckets.len() <= cap);
         }
-        assert2::assert!(e.sample_rate_buckets.len() <= cap);
+        assert!(e.sample_rate_buckets.len() <= cap);
     }
 
     #[test]
@@ -405,11 +417,11 @@ mod tests {
             ..Limits::default()
         };
         let now = 1_000_000_000_000_i64;
-        assert2::assert!(matches!(
+        assert!(matches!(
             QueryEnforcer::check_range(&l, now - 7_200_000, now, now),
             Err(LimitError::QueryRangeTooLong { .. })
         ));
-        assert2::assert!(matches!(
+        assert!(matches!(
             QueryEnforcer::check_range(&l, now - 172_800_000, now - 172_799_000, now),
             Err(LimitError::QueryLookbackExceeded { .. })
         ));

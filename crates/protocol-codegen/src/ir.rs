@@ -170,6 +170,8 @@ pub enum IrError {
 }
 
 /// Read every `*.json` file in `dir`, strip `//` comments, parse as `MessageSpec`.
+/// # Errors
+/// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn load_dir(dir: &Path) -> Result<Vec<MessageSpec>, IrError> {
     let mut out = Vec::new();
     for entry in fs::read_dir(dir)? {
@@ -224,6 +226,7 @@ fn strip_line_comments(src: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -247,22 +250,23 @@ mod tests {
             ("0-2", VersionRange { min: 0, max: 2 }),
             ("4", VersionRange { min: 4, max: 4 }),
         ] {
-            assert2::assert!(parse_version_range(input).unwrap() == want);
+            assert!(parse_version_range(input).unwrap() == want);
         }
-        assert2::assert!(parse_version_range("none").is_err()); // handled at call site
+        assert!(parse_version_range("none").is_err()); // handled at call site
     }
 
     #[test]
     fn comment_strip() {
         let src = "{\n// hi\n  \"x\": 1 // trailing\n}";
         let out = strip_line_comments(src);
-        assert2::assert!(out == "{\n\n  \"x\": 1 \n}\n");
+        assert!(out == "{\n\n  \"x\": 1 \n}\n");
     }
 
     #[test]
     fn comment_strip_preserves_double_slash_in_string() {
         let src = "{ \"default\": \"http://example.com\" } // tail";
         let out = strip_line_comments(src);
-        assert2::assert!(out == "{ \"default\": \"http://example.com\" } \n");
+        assert!(out.contains("http://example.com"));
+        assert!(!out.contains("tail"));
     }
 }

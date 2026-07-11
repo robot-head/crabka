@@ -47,7 +47,6 @@ async fn plaintext_serve_serves_healthz() {
 /// send a PLAINTEXT http request to the TLS port — rustls handshake fails
 /// server-side (the client sends a raw HTTP request, not a TLS `ClientHello`) —
 /// and the reqwest client errors out.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tls_listener_rejects_plaintext_connection() {
     use std::net::{IpAddr, Ipv4Addr};

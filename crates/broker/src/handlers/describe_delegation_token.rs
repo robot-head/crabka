@@ -44,14 +44,13 @@ use crate::{
 
 // `async` matches the call-site shape used by every other
 // `crate::handlers::*::handle`; today the body is purely synchronous.
-#[allow(clippy::unused_async)]
 #[tracing::instrument(
     name = "handle_describe_delegation_token",
     level = "info",
     skip_all,
     fields(api = "DescribeDelegationToken")
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     req: &DescribeDelegationTokenRequest,
     auth: &ConnectionAuth,
     secret_key: Option<&SecretBytes>,
@@ -204,6 +203,7 @@ fn err_response(code: i16) -> DescribeDelegationTokenResponse {
 mod tests {
     use std::{net::SocketAddr, sync::Arc, time::Duration};
 
+    use assert2::assert;
     use crabka_metadata::{DelegationTokenRecord, MetadataRecord};
     use crabka_protocol::owned::describe_delegation_token_request::DescribeDelegationTokenOwner;
     use crabka_raft::ControllerHandle;
@@ -224,7 +224,7 @@ mod tests {
         let mut rx = handle.watch_leader();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while rx.borrow().is_none() {
-            assert2::assert!(std::time::Instant::now() < deadline);
+            assert!(std::time::Instant::now() < deadline, "no leader in 5s");
             let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
         }
         handle
@@ -309,9 +309,8 @@ mod tests {
             &*controller,
             &peer(),
             &simple_authz(),
-        )
-        .await;
-        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
+        );
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -334,13 +333,12 @@ mod tests {
             &*controller,
             &peer(),
             &simple_authz(),
-        )
-        .await;
-        assert2::assert!(resp.error_code == 0);
+        );
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
         let expected: std::collections::HashSet<&str> = ["t-a", "t-b"].into_iter().collect();
-        assert2::assert!(ids == expected);
+        assert!(ids == expected);
         controller.cancel().await;
     }
 
@@ -379,13 +377,12 @@ mod tests {
             &*controller,
             &peer(),
             &simple_authz(),
-        )
-        .await;
-        assert2::assert!(resp.error_code == 0);
+        );
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert2::assert!(ids.len() == 1);
-        assert2::assert!(ids.contains("t-b"));
+        assert!(ids.len() == 1);
+        assert!(ids.contains("t-b"));
         controller.cancel().await;
     }
 
@@ -415,13 +412,12 @@ mod tests {
             &*controller,
             &peer(),
             &simple_authz(),
-        )
-        .await;
-        assert2::assert!(resp.error_code == 0);
+        );
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert2::assert!(ids.len() == 1);
-        assert2::assert!(ids.contains("t-a"));
+        assert!(ids.len() == 1);
+        assert!(ids.contains("t-a"));
         controller.cancel().await;
     }
 
@@ -463,12 +459,14 @@ mod tests {
             &*controller,
             &peer(),
             &simple_authz(),
-        )
-        .await;
-        assert2::assert!(resp.error_code == 0);
+        );
+        assert!(resp.error_code == 0);
         let ids: std::collections::HashSet<&str> =
             resp.tokens.iter().map(|t| t.token_id.as_str()).collect();
-        assert2::assert!(ids.contains("t-a"));
+        assert!(
+            ids.contains("t-a"),
+            "expected ACL Describe on TOKEN:User:alice to make t-a visible to bob; got {ids:?}"
+        );
         controller.cancel().await;
     }
 
@@ -503,11 +501,14 @@ mod tests {
             &*controller,
             &peer(),
             &simple_authz(),
-        )
-        .await;
-        assert2::assert!(resp.error_code == 0);
+        );
+        assert!(resp.error_code == 0);
         // bob owns nothing — ACL extension MUST NOT surface alice's t-a.
-        assert2::assert!(resp.tokens.is_empty());
+        assert!(
+            resp.tokens.is_empty(),
+            "token-authed bob must not see alice's token via ACL; got {:?}",
+            resp.tokens.iter().map(|t| &t.token_id).collect::<Vec<_>>()
+        );
         controller.cancel().await;
     }
 }

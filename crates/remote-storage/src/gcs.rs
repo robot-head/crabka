@@ -168,7 +168,7 @@ mod tests {
         path::{Path, PathBuf},
     };
 
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_ids::LeaderEpoch;
     use object_store::memory::InMemory;
@@ -211,7 +211,7 @@ mod tests {
     #[test]
     fn gcs_config_default_uses_multipart_constants() {
         // No credentials by default → Workload Identity / ADC path.
-        assert2::assert!(
+        assert!(
             GcsConfig::default()
                 == GcsConfig {
                     bucket: String::new(),
@@ -237,7 +237,7 @@ mod tests {
             ..Default::default()
         };
         let store = S3RemoteStorage::from_gcs_config(&cfg);
-        assert2::assert!(store.is_ok());
+        assert!(store.is_ok());
     }
 
     #[test]
@@ -251,7 +251,7 @@ mod tests {
             ..Default::default()
         };
         let store = S3RemoteStorage::from_gcs_config(&cfg);
-        assert2::assert!(store.is_ok());
+        assert!(store.is_ok());
     }
 
     #[test]
@@ -265,7 +265,7 @@ mod tests {
             ..Default::default()
         };
         let err = S3RemoteStorage::from_gcs_config(&cfg).unwrap_err();
-        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     fn sample_metadata(id: u128) -> RemoteLogSegmentMetadata {
@@ -279,9 +279,11 @@ mod tests {
             123,
             1,
             456,
-            8,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(LeaderEpoch(0), 0)]),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                8,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(LeaderEpoch(0), 0)]),
+            ),
         )
         .unwrap()
     }
@@ -321,12 +323,8 @@ mod tests {
             store
                 .copy_log_segment_data(&md, &sample_data(src.path()))
                 .unwrap();
-            assert2::assert!(
-                store.fetch_log_segment(&md, 0, None).unwrap() == b"0123456789".to_vec()
-            );
-            assert2::assert!(
-                store.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX".to_vec()
-            );
+            assert!(store.fetch_log_segment(&md, 0, None).unwrap() == b"0123456789");
+            assert!(store.fetch_index(&md, IndexType::Offset).unwrap() == b"OFFSET-IDX");
         })
         .await
         .unwrap();

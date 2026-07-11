@@ -6,6 +6,8 @@ use crate::crd::{
 
 /// Write every CRD this operator owns into `out_dir` as
 /// `<group>_<plural>.yaml`. Existing files are overwritten.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn write_all(out_dir: &Path) -> anyhow::Result<()> {
     fs::create_dir_all(out_dir)?;
     write_one::<Kafka>(out_dir)?;
@@ -34,7 +36,7 @@ where
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use tempfile::tempdir;
 
     use super::*;
@@ -77,11 +79,11 @@ mod tests {
             ),
         ] {
             let path = dir.path().join(file);
-            assert2::assert!(path.exists());
+            assert!(path.exists(), "case {file:?}");
             let yaml = std::fs::read_to_string(&path).unwrap();
-            assert2::assert!(yaml.contains(plural));
+            assert!(yaml.contains(plural), "case {file:?}");
             if let Some(short) = short_name {
-                assert2::assert!(yaml.contains(short));
+                assert!(yaml.contains(short), "case {file:?}");
             }
         }
     }

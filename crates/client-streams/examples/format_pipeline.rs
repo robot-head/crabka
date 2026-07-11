@@ -3,12 +3,6 @@
 //! in-process broker + in-process Schema Registry (no external services).
 //!
 //! Run: `cargo run -p crabka-client-streams --example format_pipeline --features polars,arrow`
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::similar_names,
-    clippy::too_many_lines
-)]
 
 use std::{collections::BTreeMap, sync::Arc, time::Duration};
 
@@ -190,7 +184,11 @@ async fn drain(bootstrap: &str, topic: &str, group: &str, want: usize) -> Vec<By
             }
         }
     }
-    assert2::assert!(out.len() >= want);
+    assert!(
+        out.len() >= want,
+        "drain {topic}: got {} want {want}",
+        out.len()
+    );
     out
 }
 
@@ -408,11 +406,11 @@ async fn main() {
         by_user.insert(s.user.clone(), s);
     }
     let alice = by_user.get("alice").expect("alice summary");
-    assert2::assert!(alice.total_cents == 850);
-    assert2::assert!(alice.order_count == 2);
+    assert_eq!(alice.total_cents, 850, "alice total_cents");
+    assert_eq!(alice.order_count, 2, "alice order_count");
     let bob = by_user.get("bob").expect("bob summary");
-    assert2::assert!(bob.total_cents == 900);
-    assert2::assert!(bob.order_count == 1);
+    assert_eq!(bob.total_cents, 900, "bob total_cents");
+    assert_eq!(bob.order_count, 1, "bob order_count");
     // docs:end assert
 
     boot.cancel.cancel();

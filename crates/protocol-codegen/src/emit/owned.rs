@@ -29,7 +29,6 @@ pub enum EmitError {
 /// Replicates the import selection that the (former) `emit_common_struct_file`
 /// used: it differs from `emit_imports` in that it has NO records-import block
 /// (common structs never carry `records` fields).
-#[allow(clippy::too_many_lines)]
 pub(crate) fn emit_common_imports(fields: &[FieldSpec], flex_min_val: i16) -> TokenStream {
     let types = used_field_types_recursive(fields);
     let has_flex = flex_min_val < i16::MAX;
@@ -294,7 +293,6 @@ fn has_any_tagged_in_spec(spec: &MessageSpec) -> bool {
     has_tagged_fields_recursive(&spec.fields)
 }
 
-#[allow(clippy::too_many_lines)]
 pub(crate) fn emit_imports(spec: &MessageSpec) -> TokenStream {
     let types = used_field_types_recursive(&spec.fields);
     let tagged = has_any_tagged_in_spec(spec);
@@ -412,7 +410,13 @@ pub(crate) fn emit_imports(spec: &MessageSpec) -> TokenStream {
 pub(crate) fn emit_constants(spec: &MessageSpec) -> TokenStream {
     let min_version = Literal::i16_unsuffixed(spec.valid_versions.min);
     let max_version = Literal::i16_unsuffixed(spec.valid_versions.max);
-    let flex = Literal::i16_unsuffixed(flex_min(spec));
+    let flex_minimum = flex_min(spec);
+    let flex = Literal::i16_unsuffixed(flex_minimum);
+    let flex_check = match flex_minimum {
+        i16::MIN => quote!(true),
+        i16::MAX => quote!(version == FLEXIBLE_MIN),
+        _ => quote!(version >= FLEXIBLE_MIN),
+    };
     // Request/Response schemas have an API key; Header/Data schemas do not.
     let api_key_const = match spec.message_type {
         MessageType::Request | MessageType::Response => {
@@ -432,13 +436,14 @@ pub(crate) fn emit_constants(spec: &MessageSpec) -> TokenStream {
         pub const FLEXIBLE_MIN: i16 = #flex;
 
         #[inline]
-        fn is_flexible(version: i16) -> bool { version >= FLEXIBLE_MIN }
+        #[must_use]
+        pub fn is_flexible(version: i16) -> bool { #flex_check }
     }
 }
 
 /// Returns a Rust expression for the default value of an owned field, respecting the
 /// schema-level `default` attribute (e.g. `"-1"` for `ControllerId`).
-pub(crate) fn owned_default_expr(f: &FieldSpec) -> String {
+pub(crate) fn owned_default_expr(f: &FieldSpec, res_map: &HashMap<String, Resolution>) -> String {
     let base = base_type(&f.field_type);
     let is_array = f.field_type.starts_with("[]");
     let nullable = is_nullable(f) || matches!(&f.default, Some(serde_json::Value::Null));
@@ -455,6 +460,11 @@ pub(crate) fn owned_default_expr(f: &FieldSpec) -> String {
     }
     if is_array {
         return "Vec::new()".into();
+    }
+    if f.default.is_none()
+        && let Some(resolution) = res_map.get(base)
+    {
+        return format!("{}::default()", resolution.rust_path);
     }
     match &f.default {
         Some(v) => scalar_owned_default(base, v),
@@ -497,6 +507,7 @@ fn owned_zero(base: &str) -> String {
         "uint16" => "0u16".into(),
         "uint32" => "0u32".into(),
         "float64" => "0.0f64".into(),
+        "uuid" => "crate::primitives::uuid::Uuid::default()".into(),
         _ => "Default::default()".into(),
     }
 }
@@ -557,7 +568,7 @@ pub(crate) fn owned_populated_value(
     // Records are left at default — building a valid batch here is unnecessary
     // and the dedicated records tests cover that codec.
     if base == "records" {
-        return owned_default_expr(f);
+        return owned_default_expr(f, res_map);
     }
     let elem = owned_populated_scalar(base, f, res_map);
     let inner = if is_array {
@@ -655,11 +666,7 @@ pub(crate) fn tagged_is_default_cond(f: &FieldSpec) -> String {
 /// Encode a field whose Rust type is `Option<T>` but the wire format is non-nullable
 /// (because `nullable_versions.min > field.versions.min`).
 /// Treats `None` as the empty/default value for the underlying type.
-pub(crate) fn encode_call_option_as_non_nullable(
-    schema_type: &str,
-    expr: &str,
-    res_map: &HashMap<String, Resolution>,
-) -> String {
+pub(crate) fn encode_call_option_as_non_nullable(schema_type: &str, expr: &str) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
@@ -675,7 +682,7 @@ pub(crate) fn encode_call_option_as_non_nullable(
             "{{ let v = ({expr}).as_ref().map(Vec::as_slice).unwrap_or(&[]); \
              crate::primitives::array::put_array_len(buf, v.len(), flex); \
              for it in v {{ {inner}; }} }}",
-            inner = encode_call(elem, "it", false, res_map),
+            inner = encode_call(elem, "it", false),
         );
     }
     // Option<String> → treat None as ""
@@ -693,21 +700,12 @@ pub(crate) fn encode_call_option_as_non_nullable(
                 Some(__rb) => {{ let mut __rb_buf = bytes::BytesMut::new(); <crate::records::RecordsPayload as crate::Encode>::encode(__rb, &mut __rb_buf, version)?; if flex {{ put_compact_bytes(buf, &__rb_buf) }} else {{ put_bytes(buf, &__rb_buf) }} }} \
             }}"
         ),
-        _ => encode_call(
-            schema_type,
-            &format!("({expr}).unwrap_or_default()"),
-            false,
-            res_map,
-        ),
+        _ => encode_call(schema_type, &format!("({expr}).unwrap_or_default()"), false),
     }
 }
 
 /// Compute the `encoded_len` of a field whose Rust type is `Option<T>` but wire is non-nullable.
-pub(crate) fn encoded_len_expr_option_as_non_nullable(
-    schema_type: &str,
-    expr: &str,
-    res_map: &HashMap<String, Resolution>,
-) -> String {
+pub(crate) fn encoded_len_expr_option_as_non_nullable(schema_type: &str, expr: &str) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
@@ -723,7 +721,7 @@ pub(crate) fn encoded_len_expr_option_as_non_nullable(
              let prefix = crate::primitives::array::array_len_prefix_len(v.len(), flex); \
              let body: usize = v.iter().map(|it| {inner}).sum(); \
              prefix + body }}",
-            inner = encoded_len_expr(elem, "*it", false, res_map),
+            inner = encoded_len_expr(elem, "*it", false),
         );
     }
     match schema_type {
@@ -738,12 +736,7 @@ pub(crate) fn encoded_len_expr_option_as_non_nullable(
                 Some(__rb) => {{ let __rb_len = <crate::records::RecordsPayload as crate::Encode>::encoded_len(__rb, version); if flex {{ crate::primitives::string_bytes::compact_bytes_len_from_size(__rb_len) }} else {{ 4 + __rb_len }} }} \
             }}"
         ),
-        _ => encoded_len_expr(
-            schema_type,
-            &format!("({expr}).unwrap_or_default()"),
-            false,
-            res_map,
-        ),
+        _ => encoded_len_expr(schema_type, &format!("({expr}).unwrap_or_default()"), false),
     }
 }
 
@@ -753,11 +746,10 @@ pub(crate) fn encode_call_with_buf(
     schema_type: &str,
     expr: &str,
     nullable: bool,
-    res_map: &HashMap<String, Resolution>,
     buf_var: &str,
 ) -> String {
     // Replace all instances of `buf` in the generated expression with `buf_var`.
-    let base = encode_call(schema_type, expr, nullable, res_map);
+    let base = encode_call(schema_type, expr, nullable);
     // The expressions use `buf` as the buffer name; substitute with the actual var.
     base.replace("buf", buf_var)
 }
@@ -776,13 +768,7 @@ pub(crate) fn decode_call_with_buf(
 
 // `res_map` is threaded through for array-element recursion even though the
 // primitives branch doesn't use it directly.
-#[allow(clippy::only_used_in_recursion)]
-pub(crate) fn encode_call(
-    schema_type: &str,
-    expr: &str,
-    nullable: bool,
-    res_map: &HashMap<String, Resolution>,
-) -> String {
+pub(crate) fn encode_call(schema_type: &str, expr: &str, nullable: bool) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem); // same as elem here (already stripped)
         if is_struct_type(elem_base) {
@@ -805,13 +791,13 @@ pub(crate) fn encode_call(
                  crate::primitives::array::put_nullable_array_len(buf, len, flex); \
                  if let Some(v) = &{expr} {{ for it in v {{ {inner}; }} }} }}",
                 // `it` is `&T` from iteration; for Copy primitives we dereference with `*it`.
-                inner = encode_call(elem, "*it", false, res_map),
+                inner = encode_call(elem, "*it", false),
             );
         }
         return format!(
             "{{ crate::primitives::array::put_array_len(buf, ({expr}).len(), flex); \
              for it in &{expr} {{ {inner}; }} }}",
-            inner = encode_call(elem, "*it", false, res_map),
+            inner = encode_call(elem, "*it", false),
         );
     }
 
@@ -871,13 +857,7 @@ pub(crate) fn encode_call(
     }
 }
 
-#[allow(clippy::only_used_in_recursion)]
-pub(crate) fn encoded_len_expr(
-    schema_type: &str,
-    expr: &str,
-    nullable: bool,
-    res_map: &HashMap<String, Resolution>,
-) -> String {
+pub(crate) fn encoded_len_expr(schema_type: &str, expr: &str, nullable: bool) -> String {
     if let Some(elem) = schema_type.strip_prefix("[]") {
         let elem_base = base_type(elem);
         if is_struct_type(elem_base) {
@@ -897,7 +877,7 @@ pub(crate) fn encoded_len_expr(
             );
         }
         {
-            let inner = encoded_len_expr(elem, "*it", false, res_map);
+            let inner = encoded_len_expr(elem, "*it", false);
             // Use `|_|` when the inner expression is constant (doesn't reference `*it`),
             // to avoid an unused-variable warning.
             let closure_arg = if inner.contains("*it") { "it" } else { "_" };
@@ -960,7 +940,6 @@ pub(crate) fn encoded_len_expr(
     }
 }
 
-#[allow(clippy::only_used_in_recursion)]
 pub(crate) fn decode_call(
     schema_type: &str,
     nullable: bool,
@@ -1094,18 +1073,32 @@ pub(crate) fn nullable_split_cond(f: &FieldSpec) -> Option<String> {
     }
     let mut parts = Vec::new();
     if need_lower {
-        parts.push(format!("version >= {}", r.min));
+        parts.push(if r.min == i16::MAX {
+            "version == i16::MAX".to_string()
+        } else {
+            format!("version >= {}", r.min)
+        });
     }
     if need_upper {
-        parts.push(format!("version <= {}", r.max));
+        parts.push(if r.max == i16::MIN {
+            "version == i16::MIN".to_string()
+        } else {
+            format!("version <= {}", r.max)
+        });
     }
     Some(parts.join(" && "))
 }
 
 pub(crate) fn version_cond(r: VersionRange, version_var: &str) -> String {
-    if r.max == i16::MAX {
+    if r.min == i16::MIN && r.max == i16::MAX {
+        "true".to_string()
+    } else if r.min == r.max {
+        format!("{version_var} == {}", r.min)
+    } else if r.min == i16::MIN {
+        format!("{version_var} <= {}", r.max)
+    } else if r.max == i16::MAX {
         format!("{version_var} >= {}", r.min)
     } else {
-        format!("{version_var} >= {} && {version_var} <= {}", r.min, r.max)
+        format!("({}..={}).contains(&{version_var})", r.min, r.max)
     }
 }

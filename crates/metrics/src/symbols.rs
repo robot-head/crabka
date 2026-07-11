@@ -53,6 +53,8 @@ impl SymbolTable {
     /// Build from an existing symbol list, such as a received v2 request.
     ///
     /// The first symbol must be the empty string.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn from_symbols(symbols: Vec<String>) -> Result<Self, SymbolError> {
         if symbols.first().map(String::as_str) != Some("") {
             return Err(SymbolError::FirstNotEmpty);
@@ -73,6 +75,8 @@ impl SymbolTable {
     }
 
     /// Intern `s`, returning its stable ref.
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn intern(&mut self, s: &str) -> u32 {
         if let Some(&ref_) = self.index.get(s) {
             return ref_;
@@ -98,6 +102,8 @@ impl SymbolTable {
     }
 
     /// Resolve even-length `(name_ref, value_ref)` pairs into label pairs.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn resolve_label_refs(&self, refs: &[u32]) -> Result<Vec<(String, String)>, SymbolError> {
         if !refs.len().is_multiple_of(2) {
             return Err(SymbolError::OddRefs(refs.len()));
@@ -124,14 +130,14 @@ impl SymbolTable {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn intern_is_stable_and_zero_is_empty() {
         let mut t = SymbolTable::new();
-        assert2::assert!(t.resolve(0) == Some(""));
+        assert!(t.resolve(0) == Some(""));
         let a = t.intern("app");
         let b = t.intern("api");
         check!(t.intern("app") == a);
@@ -147,34 +153,30 @@ mod tests {
         let env = t.intern("env");
         let prod = t.intern("prod");
         let labels = t.resolve_label_refs(&[app, api, env, prod]).unwrap();
-        assert2::assert!(
-            labels == vec![("app".into(), "api".into()), ("env".into(), "prod".into())]
-        );
+        assert!(labels == vec![("app".into(), "api".into()), ("env".into(), "prod".into())]);
     }
 
     #[test]
     fn odd_length_refs_rejected() {
         let t = SymbolTable::new();
-        assert2::assert!(t.resolve_label_refs(&[1]).is_err());
+        assert!(t.resolve_label_refs(&[1]).is_err());
     }
 
     #[test]
     fn from_symbols_requires_empty_first() {
-        assert2::assert!(SymbolTable::from_symbols(vec!["x".into()]).is_err());
-        assert2::assert!(SymbolTable::from_symbols(vec![String::new(), "x".into()]).is_ok());
+        assert!(SymbolTable::from_symbols(vec!["x".into()]).is_err());
+        assert!(SymbolTable::from_symbols(vec![String::new(), "x".into()]).is_ok());
     }
 
     #[test]
     fn from_symbols_rejects_duplicates() {
-        assert2::assert!(
-            SymbolTable::from_symbols(vec![String::new(), "x".into(), "x".into()]).is_err()
-        );
+        assert!(SymbolTable::from_symbols(vec![String::new(), "x".into(), "x".into()]).is_err());
     }
 
     #[test]
     fn resolve_label_refs_rejects_out_of_range_refs() {
         let t = SymbolTable::new();
-        assert2::assert!(t.resolve_label_refs(&[0, 7]).is_err());
+        assert!(t.resolve_label_refs(&[0, 7]).is_err());
     }
 
     #[test]
@@ -186,6 +188,6 @@ mod tests {
 
         let err = t.resolve_label_refs(&[job, api, job, worker]).unwrap_err();
 
-        assert2::assert!(matches!(err, SymbolError::DuplicateLabel(name) if name == "job"));
+        assert!(matches!(err, SymbolError::DuplicateLabel(name) if name == "job"));
     }
 }

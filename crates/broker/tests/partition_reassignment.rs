@@ -5,14 +5,12 @@
 //
 // Both are suppressed locally; the rest of the workspace still enforces the
 // full lint gate.
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
 
 //! Broker-side integration tests for `AlterPartitionReassignments`
-//! (api_key 45) and `ListPartitionReassignments` (api_key 46).
+//! (`api_key` 45) and `ListPartitionReassignments` (`api_key` 46).
 //!
 //! Uses a 3-broker PLAINTEXT cluster. The authorizer's compatibility shim
-//! (no super_users + no ACLs → Allow) lets the tests exercise the full wire
+//! (no `super_users` + no ACLs → Allow) lets the tests exercise the full wire
 //! path without a SASL handshake.
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
@@ -24,7 +22,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -48,6 +46,14 @@ use tokio::{
 };
 
 mod support;
+
+fn node_id(id: i32) -> crabka_metadata::NodeId {
+    crabka_metadata::NodeId(u64::try_from(id).expect("broker IDs are non-negative"))
+}
+
+fn broker_id(node: crabka_metadata::NodeId) -> i32 {
+    i32::try_from(node.0).expect("test broker ID fits in i32")
+}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — PLAINTEXT, no SASL
@@ -99,7 +105,7 @@ async fn round_trip(
     Ok(cur.to_vec())
 }
 
-/// Create a topic via PLAINTEXT. The authorizer's compat shim (no super_users,
+/// Create a topic via PLAINTEXT. The authorizer's compat shim (no `super_users`,
 /// no ACLs) lets the request through. Copied from `elect_leaders.rs`.
 async fn create_topic_plaintext(
     addr: SocketAddr,
@@ -130,7 +136,12 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -180,7 +191,11 @@ async fn controller_leader_addr(handles: &[&BrokerHandle]) -> SocketAddr {
     // which equals (broker_index + 1). The handles slice is ordered
     // [broker1, broker2, broker3], so handle[i] has node_id = i+1.
     let idx = usize::try_from(leader_id.0).unwrap().saturating_sub(1);
-    assert2::assert!(idx < handles.len());
+    assert!(
+        idx < handles.len(),
+        "raft leader id {leader_id:?} out of range for {} handles",
+        handles.len()
+    );
     handles[idx].listen_addr()
 }
 
@@ -318,9 +333,9 @@ async fn drive_list_reassignments(
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: Send AlterPartitionReassignments, then inject ISR to include the
+/// Test 1: Send `AlterPartitionReassignments`, then inject ISR to include the
 /// new replica. The background task observes adding ⊆ ISR and completes the
-/// reassignment, clearing adding_replicas and removing_replicas.
+/// reassignment, clearing `adding_replicas` and `removing_replicas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn alter_then_complete_via_isr_catchup() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -334,19 +349,23 @@ async fn alter_then_complete_via_isr_catchup() {
     // Find which brokers are in `replicas` initially — choose target accordingly.
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let initial_replicas = pr.replicas.clone();
-    assert2::assert!(initial_replicas.len() == 2);
+    assert!(initial_replicas.len() == 2);
     // Pick the third broker (not in initial_replicas) as the new replica.
     let new_replica: i32 = (1..=3)
-        .find(|n| !initial_replicas.contains(&crabka_metadata::NodeId(*n as u64)))
+        .find(|n| !initial_replicas.contains(&node_id(*n)))
         .expect("free broker");
-    let removing: i32 = initial_replicas.last().unwrap().0 as i32;
-    let staying: i32 = initial_replicas.first().unwrap().0 as i32;
+    let removing = broker_id(*initial_replicas.last().unwrap());
+    let staying = broker_id(*initial_replicas.first().unwrap());
     let target = vec![staying, new_replica];
 
     // Send alter to controller leader (whichever broker leads raft).
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, Some(target.clone()))]).await;
-    assert2::assert!(resp[0].1 == vec![(0, 0)]);
+    assert!(
+        resp[0].1 == vec![(0, 0)],
+        "expected error_code=0; got {:?}",
+        resp
+    );
 
     // Wait for the image to reflect the in-flight reassignment.
     h1.wait_for_image(|img| {
@@ -355,24 +374,22 @@ async fn alter_then_complete_via_isr_catchup() {
     })
     .await;
     let pr_after_alter = h1.partition_record_for_test("foo", 0).expect("partition");
-    assert2::assert!(
-        (
-            pr_after_alter
-                .adding_replicas
-                .contains(&crabka_metadata::NodeId(new_replica as u64)),
-            pr_after_alter
-                .removing_replicas
-                .contains(&crabka_metadata::NodeId(removing as u64)),
-        ) == (true, true)
+    assert!(
+        pr_after_alter
+            .adding_replicas
+            .contains(&node_id(new_replica)),
+        "adding_replicas should contain new_replica; pr={pr_after_alter:?}"
+    );
+    assert!(
+        pr_after_alter
+            .removing_replicas
+            .contains(&node_id(removing)),
+        "removing_replicas should contain removing; pr={pr_after_alter:?}"
     );
 
     // Inject ISR including the new replica so the background task completes the reassignment.
     let injected = crabka_metadata::PartitionRecord {
-        isr: vec![
-            crabka_metadata::NodeId(staying as u64),
-            crabka_metadata::NodeId(new_replica as u64),
-            crabka_metadata::NodeId(removing as u64),
-        ],
+        isr: vec![node_id(staying), node_id(new_replica), node_id(removing)],
         ..pr_after_alter.clone()
     };
     h1.submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1Partition(injected))
@@ -388,16 +405,19 @@ async fn alter_then_complete_via_isr_catchup() {
     .await;
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let actual: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
-    let expected: std::collections::HashSet<u64> = target.iter().map(|n| *n as u64).collect();
-    assert2::assert!(actual == expected);
+    let expected: std::collections::HashSet<u64> = target.iter().map(|n| node_id(*n).0).collect();
+    assert!(
+        actual == expected,
+        "replicas after completion should match target; pr={pr:?}"
+    );
     // Clean up.
     h1.shutdown().await;
     h2.shutdown().await;
     h3.shutdown().await;
 }
 
-/// Test 2: After AlterPartitionReassignments starts a reassignment, the
-/// ListPartitionReassignments handler should return the in-flight rows.
+/// Test 2: After `AlterPartitionReassignments` starts a reassignment, the
+/// `ListPartitionReassignments` handler should return the in-flight rows.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn list_in_flight_returns_pending_rows() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -410,9 +430,9 @@ async fn list_in_flight_returns_pending_rows() {
 
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let new_replica: i32 = (1..=3)
-        .find(|n| !pr.replicas.contains(&crabka_metadata::NodeId(*n as u64)))
+        .find(|n| !pr.replicas.contains(&node_id(*n)))
         .expect("free");
-    let staying: i32 = pr.replicas.first().unwrap().0 as i32;
+    let staying = broker_id(*pr.replicas.first().unwrap());
     let target = vec![staying, new_replica];
 
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;
@@ -430,10 +450,16 @@ async fn list_in_flight_returns_pending_rows() {
         .iter()
         .find(|(n, _)| n == "foo")
         .expect("foo should appear in list");
-    check!(
-        (foo.1.len(), foo.1[0].0, foo.1[0].2.as_slice()) == (1, 0, &[new_replica][..]),
-        "unexpected in-flight partition: {:?}",
+    assert!(
+        foo.1.len() == 1,
+        "expected 1 partition in-flight; got {:?}",
         foo.1
+    );
+    check!(foo.1[0].0 == 0, "expected partition_index=0");
+    check!(
+        foo.1[0].2 == vec![new_replica],
+        "expected adding_replicas=[new_replica]; got {:?}",
+        foo.1[0].2
     );
 
     // Clean up.
@@ -580,7 +606,12 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({topic}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Drive `AlterPartitionReassignments` over a SASL/PLAIN authenticated connection.
@@ -716,19 +747,25 @@ async fn non_super_user_denied() {
         {
             break r;
         }
-        assert2::assert!(Instant::now() <= deadline_auth);
+        assert!(
+            Instant::now() <= deadline_auth,
+            "ACL shim still active or wrong error after 5s; got {r:?}"
+        );
         // real-time wait (not a progress poll): retry/backoff cadence between attempts — each attempt opens a fresh TCP connection + full SASL handshake, so the 100ms backoff bounds connection churn while the raft ACL apply propagates.
         tokio::time::sleep(Duration::from_millis(100)).await;
     };
 
     handle.shutdown().await;
 
-    assert2::assert!(resp[0].1 == vec![(0, 31)]);
+    assert!(
+        resp[0].1 == vec![(0, 31)],
+        "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
+    );
 }
 
 /// Test 3: Cancel an in-flight reassignment by sending target=None (null replicas).
 /// The partition record should revert to the original replica set with empty
-/// adding_replicas and removing_replicas.
+/// `adding_replicas` and `removing_replicas`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn cancel_via_null_replicas_reverts() {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
@@ -742,9 +779,9 @@ async fn cancel_via_null_replicas_reverts() {
     let pr = h1.partition_record_for_test("foo", 0).expect("partition");
     let original_replicas = pr.replicas.clone();
     let new_replica: i32 = (1..=3)
-        .find(|n| !original_replicas.contains(&crabka_metadata::NodeId(*n as u64)))
+        .find(|n| !original_replicas.contains(&node_id(*n)))
         .expect("free");
-    let staying: i32 = original_replicas.first().unwrap().0 as i32;
+    let staying = broker_id(*original_replicas.first().unwrap());
     let target = vec![staying, new_replica];
 
     let raft_addr = controller_leader_addr(&[&h1, &h2, &h3]).await;
@@ -759,7 +796,11 @@ async fn cancel_via_null_replicas_reverts() {
 
     // Cancel: replicas = None.
     let resp = drive_alter_reassignments(raft_addr, vec![("foo", 0, None)]).await;
-    assert2::assert!(resp[0].1 == vec![(0, 0)]);
+    assert!(
+        resp[0].1 == vec![(0, 0)],
+        "cancel should succeed; got {:?}",
+        resp
+    );
 
     // Wait for the image to reflect the cancellation.
     h1.wait_for_image(|img| {
@@ -768,7 +809,10 @@ async fn cancel_via_null_replicas_reverts() {
     })
     .await;
     let pr_after_cancel = h1.partition_record_for_test("foo", 0).expect("partition");
-    assert2::assert!(pr_after_cancel.replicas == original_replicas);
+    assert!(
+        pr_after_cancel.replicas == original_replicas,
+        "replicas should revert to original after cancel; pr={pr_after_cancel:?}"
+    );
     // Clean up.
     h1.shutdown().await;
     h2.shutdown().await;

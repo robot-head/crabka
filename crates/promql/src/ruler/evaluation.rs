@@ -9,6 +9,8 @@ use super::{
 use crate::{MetricStore, PromqlEngine, PromqlError};
 
 /// Evaluate one mixed ruler rule group: recording outputs then alert dispatch.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_ruler_rule_group<S, W, A>(
     engine: &PromqlEngine<S>,
     wal_sink: &W,
@@ -43,12 +45,11 @@ where
 }
 
 /// Evaluate one mixed ruler rule group and persist alert state records.
-#[allow(clippy::too_many_arguments)]
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_ruler_rule_group<S, W, A, R>(
     engine: &PromqlEngine<S>,
-    wal_sink: &W,
-    alert_sink: &A,
-    state_sink: &R,
+    sinks: (&W, &A, &R),
     alert_state: &mut RulerAlertState,
     tenant: &str,
     group: &serde_yaml::Value,
@@ -60,6 +61,7 @@ where
     A: AlertmanagerSink,
     R: RulerStateSink,
 {
+    let (wal_sink, alert_sink, state_sink) = sinks;
     let recording_records =
         evaluate_and_append_recording_rule_group(engine, wal_sink, tenant, group, eval_time_ms)
             .await?;
@@ -81,6 +83,8 @@ where
 }
 
 /// Evaluate all ruler rule groups for one tenant.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_ruler_rule_set<S, W, A>(
     engine: &PromqlEngine<S>,
     wal_sink: &W,
@@ -117,12 +121,11 @@ where
 }
 
 /// Evaluate all ruler rule groups for one tenant and persist compactable group state.
-#[allow(clippy::too_many_arguments)]
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_ruler_rule_set<S, W, A, R>(
     engine: &PromqlEngine<S>,
-    wal_sink: &W,
-    alert_sink: &A,
-    state_sink: &R,
+    sinks: (&W, &A, &R),
     alert_state: &mut RulerAlertState,
     tenant: &str,
     rules: &BTreeMap<String, BTreeMap<String, serde_yaml::Value>>,
@@ -134,14 +137,13 @@ where
     A: AlertmanagerSink,
     R: RulerStateSink,
 {
+    let (wal_sink, alert_sink, state_sink) = sinks;
     let mut total = RulerGroupEvaluation::default();
     for (namespace, namespace_groups) in rules {
         for (group_name, group) in namespace_groups {
             let evaluation = evaluate_and_persist_ruler_rule_group(
                 engine,
-                wal_sink,
-                alert_sink,
-                state_sink,
+                (wal_sink, alert_sink, state_sink),
                 alert_state,
                 tenant,
                 group,
@@ -165,18 +167,15 @@ where
 }
 
 /// Evaluate this shard's due ruler rule groups for one tenant and persist state.
-#[allow(clippy::too_many_arguments)]
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub async fn evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval<S, W, A, R>(
     engine: &PromqlEngine<S>,
-    wal_sink: &W,
-    alert_sink: &A,
-    state_sink: &R,
+    sinks: (&W, &A, &R),
     alert_state: &mut RulerAlertState,
     tenant: &str,
     rules: &BTreeMap<String, BTreeMap<String, serde_yaml::Value>>,
-    group_state: &mut RulerGroupState,
-    shard: RulerShard,
-    eval_time_ms: i64,
+    schedule: (&mut RulerGroupState, RulerShard, i64),
 ) -> Result<RulerGroupEvaluation, PromqlError>
 where
     S: MetricStore,
@@ -184,6 +183,8 @@ where
     A: AlertmanagerSink,
     R: RulerStateSink,
 {
+    let (wal_sink, alert_sink, state_sink) = sinks;
+    let (group_state, shard, eval_time_ms) = schedule;
     let scheduled = filter_ruler_rule_set_for_shard_due_for_eval(
         tenant,
         rules,
@@ -193,9 +194,7 @@ where
     );
     let evaluation = evaluate_and_persist_ruler_rule_set(
         engine,
-        wal_sink,
-        alert_sink,
-        state_sink,
+        (wal_sink, alert_sink, state_sink),
         alert_state,
         tenant,
         &scheduled,

@@ -1,4 +1,5 @@
 //! KIP-516: Produce by `topic_id` error semantics.
+use assert2::assert;
 mod support;
 
 use crabka_protocol::{
@@ -54,5 +55,5 @@ async fn produce_unknown_topic_id_returns_unknown_topic_id() {
         .map(|pr| pr.error_code)
         .next()
         .expect("a partition response");
-    assert2::assert!(code == 100); // UNKNOWN_TOPIC_ID
+    assert!(code == 100); // UNKNOWN_TOPIC_ID
 }

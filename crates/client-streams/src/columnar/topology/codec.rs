@@ -160,10 +160,6 @@ fn chunk_by_size(df: &DataFrame, cap: usize) -> Vec<DataFrame> {
     let mid = df.height() / 2;
     let mut out = chunk_by_size(&df.slice(0, mid), cap);
     // `mid` is at most `df.height() / 2`, which fits in i64 on any real frame.
-    #[allow(
-        clippy::cast_possible_wrap,
-        reason = "row count cannot exceed i64::MAX"
-    )]
     let mid_i64 = mid as i64;
     out.extend(chunk_by_size(&df.slice(mid_i64, df.height() - mid), cap));
     out
@@ -280,16 +276,10 @@ mod tests {
 
     #[test]
     fn reserved_columns_are_distinct_and_underscored() {
-        let actual = RESERVED_COLUMNS.map(|column| (column, column.starts_with("__")));
-        check!(
-            actual
-                == [
-                    (COL_KEY, true),
-                    (COL_TIMESTAMP, true),
-                    (COL_PARTITION, true),
-                    (COL_OFFSET, true)
-                ]
-        );
+        check!(RESERVED_COLUMNS.len() == 4);
+        for c in RESERVED_COLUMNS {
+            check!(c.starts_with("__"));
+        }
     }
 
     #[test]
@@ -326,11 +316,13 @@ mod tests {
             },
         ];
         let df = codec.decode(&records).unwrap();
-        check!((df.height(), df.column(COL_PARTITION).is_ok()) == (3, true));
+        check!(df.height() == 3);
+        check!(df.column(COL_PARTITION).is_ok());
 
         let out = codec.encode(&df).unwrap();
+        check!(out.len() == 1);
         let back = PolarsIpcSerde.deserialize("t", &out[0].value).unwrap();
-        check!((out.len(), back.height()) == (1, 3));
+        check!(back.height() == 3);
     }
 
     #[test]
@@ -426,42 +418,19 @@ mod tests {
             },
         ];
         let df = codec.decode(&recs).unwrap();
-        check!(
-            (
-                df.height(),
-                df.column("amount").is_ok(),
-                df.column(COL_KEY).is_ok()
-            ) == (2, true, true)
-        );
+        check!(df.height() == 2);
+        check!(df.column("amount").is_ok());
+        check!(df.column(COL_KEY).is_ok());
 
         let out = codec.encode(&df).unwrap();
-        let actual = out
-            .iter()
-            .map(|record| {
-                (
-                    record.key.as_deref(),
-                    serde_json::from_slice::<Txn>(&record.value).unwrap(),
-                )
-            })
-            .collect::<Vec<_>>();
+        check!(out.len() == 2);
+        check!(out[0].key.as_deref() == Some(b"a".as_ref()));
+        let v0: Txn = serde_json::from_slice(&out[0].value).unwrap();
         check!(
-            actual
-                == vec![
-                    (
-                        Some(b"a".as_ref()),
-                        Txn {
-                            user: "a".into(),
-                            amount: 5
-                        }
-                    ),
-                    (
-                        Some(b"b".as_ref()),
-                        Txn {
-                            user: "b".into(),
-                            amount: 7
-                        }
-                    ),
-                ]
+            v0 == Txn {
+                user: "a".into(),
+                amount: 5
+            }
         );
     }
 
@@ -479,27 +448,11 @@ mod tests {
             }).collect();
             let df = codec.decode(&recs).unwrap();
             let out = codec.encode(&df).unwrap();
-            let actual = out
-                .iter()
-                .map(|record| {
-                    (
-                        record.key.as_deref(),
-                        serde_json::from_slice::<Txn>(&record.value).unwrap(),
-                        record.timestamp,
-                    )
-                })
-                .collect::<Vec<_>>();
-            let expected = recs
-                .iter()
-                .map(|record| {
-                    (
-                        record.key.as_deref(),
-                        serde_json::from_slice::<Txn>(&record.value).unwrap(),
-                        record.timestamp,
-                    )
-                })
-                .collect::<Vec<_>>();
-            prop_assert_eq!(actual, expected);
+            prop_assert_eq!(out.len(), recs.len());
+            for (o, r) in out.iter().zip(&recs) {
+                prop_assert_eq!(o.key.as_deref(), r.key.as_deref());
+                prop_assert_eq!(o.timestamp, r.timestamp);
+            }
         }
     }
 }

@@ -124,6 +124,8 @@ impl<'a, B: LoginBroker> AuthService<'a, B> {
         }
     }
 
+    /// # Errors
+    /// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
     pub async fn login(&self, request: LoginRequest) -> Result<LoginSuccess, UiError> {
         self.broker
             .check_login(self.cfg, &request.username, &request.password)

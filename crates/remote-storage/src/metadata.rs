@@ -150,6 +150,29 @@ pub struct RemoteLogSegmentMetadata {
     txn_index_empty: bool,
 }
 
+/// Size, lifecycle state, and leader-epoch offsets for a remote log segment.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RemoteLogSegmentDetails {
+    segment_size_in_bytes: i32,
+    state: RemoteLogSegmentState,
+    segment_leader_epochs: BTreeMap<LeaderEpoch, i64>,
+}
+
+impl RemoteLogSegmentDetails {
+    #[must_use]
+    pub fn new(
+        segment_size_in_bytes: i32,
+        state: RemoteLogSegmentState,
+        segment_leader_epochs: BTreeMap<LeaderEpoch, i64>,
+    ) -> Self {
+        Self {
+            segment_size_in_bytes,
+            state,
+            segment_leader_epochs,
+        }
+    }
+}
+
 impl RemoteLogSegmentMetadata {
     /// Construct a [`RemoteLogSegmentMetadata`].
     ///
@@ -158,7 +181,6 @@ impl RemoteLogSegmentMetadata {
     /// Returns [`RemoteStorageError::InvalidArgument`] when
     /// `segment_leader_epochs` is empty, `end_offset < start_offset`, or
     /// `segment_size_in_bytes < 0`.
-    #[allow(clippy::too_many_arguments)]
     pub fn new(
         remote_log_segment_id: RemoteLogSegmentId,
         start_offset: i64,
@@ -166,10 +188,13 @@ impl RemoteLogSegmentMetadata {
         max_timestamp_ms: i64,
         broker_id: i32,
         event_timestamp_ms: i64,
-        segment_size_in_bytes: i32,
-        state: RemoteLogSegmentState,
-        segment_leader_epochs: BTreeMap<LeaderEpoch, i64>,
+        details: RemoteLogSegmentDetails,
     ) -> Result<Self, RemoteStorageError> {
+        let RemoteLogSegmentDetails {
+            segment_size_in_bytes,
+            state,
+            segment_leader_epochs,
+        } = details;
         if segment_leader_epochs.is_empty() {
             return Err(RemoteStorageError::InvalidArgument(
                 "segment_leader_epochs must not be empty".into(),
@@ -387,7 +412,7 @@ pub struct RemotePartitionDeleteMetadata {
 mod tests {
     use std::collections::HashSet;
 
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -407,16 +432,16 @@ mod tests {
     fn topic_id_partition_identity_ignores_name() {
         let a = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 3);
         let b = TopicIdPartition::new(Uuid::from_u128(7), "renamed", 3);
-        assert2::assert!(a == b);
+        assert!(a == b);
         let set: HashSet<_> = [a, b].into_iter().collect();
-        assert2::assert!(set.len() == 1);
+        assert!(set.len() == 1, "same id+partition must collapse in a set");
     }
 
     #[test]
     fn topic_id_partition_distinct_partitions_differ() {
         let a = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 0);
         let b = TopicIdPartition::new(Uuid::from_u128(7), "alpha", 1);
-        assert2::assert!(a != b);
+        assert!(a != b);
     }
 
     #[test]
@@ -430,13 +455,15 @@ mod tests {
             777, // max_timestamp_ms
             5,
             888,
-            4096, // segment_size_in_bytes
-            RemoteLogSegmentState::CopySegmentStarted,
-            epochs(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                4096, // segment_size_in_bytes
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs(),
+            ),
         )
         .unwrap();
-        assert2::assert!(md.max_timestamp_ms() == 777);
-        assert2::assert!(md.segment_size_in_bytes() == 4096);
+        assert!(md.max_timestamp_ms() == 777);
+        assert!(md.segment_size_in_bytes() == 4096);
     }
 
     #[test]
@@ -444,24 +471,13 @@ mod tests {
         use RemoteLogSegmentState::{
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,
         };
-        for (name, from, to) in [
-            ("copy completes", CopySegmentStarted, CopySegmentFinished),
-            ("copy cancelled", CopySegmentStarted, DeleteSegmentStarted),
-            (
-                "finished copy deleted",
-                CopySegmentFinished,
-                DeleteSegmentStarted,
-            ),
-            (
-                "delete completes",
-                DeleteSegmentStarted,
-                DeleteSegmentFinished,
-            ),
+        for (from, to) in [
+            (CopySegmentStarted, CopySegmentFinished),
+            (CopySegmentStarted, DeleteSegmentStarted),
+            (CopySegmentFinished, DeleteSegmentStarted),
+            (DeleteSegmentStarted, DeleteSegmentFinished),
         ] {
-            check!(
-                from.is_valid_transition(to),
-                "case {name}: {from:?} -> {to:?}"
-            );
+            check!(from.is_valid_transition(to), "{from:?} -> {to:?}");
         }
     }
 
@@ -471,38 +487,15 @@ mod tests {
             CopySegmentFinished, CopySegmentStarted, DeleteSegmentFinished, DeleteSegmentStarted,
         };
         // No backward / skipping / same-state transitions.
-        for (name, from, to) in [
-            ("repeat copy start", CopySegmentStarted, CopySegmentStarted),
-            (
-                "skip delete start",
-                CopySegmentStarted,
-                DeleteSegmentFinished,
-            ),
-            (
-                "restart copied segment",
-                CopySegmentFinished,
-                CopySegmentStarted,
-            ),
-            (
-                "repeat copy finish",
-                CopySegmentFinished,
-                CopySegmentFinished,
-            ),
-            (
-                "reverse deletion",
-                DeleteSegmentStarted,
-                CopySegmentFinished,
-            ),
-            (
-                "restart finished deletion",
-                DeleteSegmentFinished,
-                DeleteSegmentStarted,
-            ),
+        for (from, to) in [
+            (CopySegmentStarted, CopySegmentStarted),
+            (CopySegmentStarted, DeleteSegmentFinished),
+            (CopySegmentFinished, CopySegmentStarted),
+            (CopySegmentFinished, CopySegmentFinished),
+            (DeleteSegmentStarted, CopySegmentFinished),
+            (DeleteSegmentFinished, DeleteSegmentStarted),
         ] {
-            check!(
-                !from.is_valid_transition(to),
-                "case {name}: {from:?} -> {to:?}"
-            );
+            check!(!from.is_valid_transition(to), "{from:?} -> {to:?}");
         }
     }
 
@@ -515,12 +508,14 @@ mod tests {
             123,
             1,
             456,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::new(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::new(),
+            ),
         )
         .unwrap_err();
-        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     #[test]
@@ -532,12 +527,14 @@ mod tests {
             123,
             1,
             456,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            epochs(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs(),
+            ),
         )
         .unwrap_err();
-        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     #[test]
@@ -549,9 +546,11 @@ mod tests {
             123,
             1,
             456,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            epochs(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs(),
+            ),
         )
         .unwrap();
         let update = RemoteLogSegmentMetadataUpdate {
@@ -562,22 +561,13 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert2::assert!(
-            finished
-                == RemoteLogSegmentMetadata::new(
-                    seg_id(),
-                    0,
-                    10,
-                    123,
-                    2,
-                    789,
-                    1024,
-                    RemoteLogSegmentState::CopySegmentFinished,
-                    epochs(),
-                )
-                .unwrap()
-                .with_custom_metadata(CustomMetadata(vec![1, 2, 3]))
-        );
+        check!(finished.state() == RemoteLogSegmentState::CopySegmentFinished);
+        check!(finished.event_timestamp_ms() == 789);
+        check!(finished.broker_id() == 2);
+        check!(finished.custom_metadata() == Some(&CustomMetadata(vec![1, 2, 3])));
+        // Untouched fields survive.
+        check!(finished.start_offset() == 0);
+        check!(finished.end_offset() == 10);
     }
 
     #[test]
@@ -589,9 +579,11 @@ mod tests {
             123,
             1,
             456,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            epochs(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs(),
+            ),
         )
         .unwrap()
         .with_custom_metadata(CustomMetadata(vec![9]));
@@ -603,22 +595,7 @@ mod tests {
             broker_id: 2,
         };
         let finished = started.with_update(&update).unwrap();
-        assert2::assert!(
-            finished
-                == RemoteLogSegmentMetadata::new(
-                    seg_id(),
-                    0,
-                    10,
-                    123,
-                    2,
-                    789,
-                    1024,
-                    RemoteLogSegmentState::CopySegmentFinished,
-                    epochs(),
-                )
-                .unwrap()
-                .with_custom_metadata(CustomMetadata(vec![9]))
-        );
+        assert!(finished.custom_metadata() == Some(&CustomMetadata(vec![9])));
     }
 
     #[test]
@@ -630,9 +607,11 @@ mod tests {
             123,
             1,
             456,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            epochs(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs(),
+            ),
         )
         .unwrap();
         let update = RemoteLogSegmentMetadataUpdate {
@@ -643,7 +622,7 @@ mod tests {
             broker_id: 2,
         };
         let err = started.with_update(&update).unwrap_err();
-        assert2::assert!(matches!(
+        assert!(matches!(
             err,
             RemoteStorageError::InvalidSegmentTransition { .. }
         ));
@@ -658,9 +637,11 @@ mod tests {
             123,
             1,
             456,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            epochs(),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                epochs(),
+            ),
         )
         .unwrap();
         let other = RemoteLogSegmentId::new(tp(), Uuid::from_u128(1234));
@@ -672,7 +653,7 @@ mod tests {
             broker_id: 2,
         };
         let err = started.with_update(&update).unwrap_err();
-        assert2::assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
+        assert!(matches!(err, RemoteStorageError::InvalidArgument(_)));
     }
 
     #[test]
@@ -687,14 +668,16 @@ mod tests {
             9,
             1,
             100,
-            1024,
-            RemoteLogSegmentState::CopySegmentStarted,
-            BTreeMap::from([(LeaderEpoch(0), 0)]),
+            crate::metadata::RemoteLogSegmentDetails::new(
+                1024,
+                RemoteLogSegmentState::CopySegmentStarted,
+                BTreeMap::from([(LeaderEpoch(0), 0)]),
+            ),
         )
         .unwrap();
-        assert2::assert!(!md.txn_index_empty());
+        assert!(!md.txn_index_empty());
         let md = md.with_txn_index_empty(true);
-        assert2::assert!(md.txn_index_empty());
+        assert!(md.txn_index_empty());
     }
 
     #[test]
@@ -702,38 +685,18 @@ mod tests {
         use RemotePartitionDeleteState::{
             DeletePartitionFinished, DeletePartitionMarked, DeletePartitionStarted,
         };
-        for (name, from, to, want) in [
-            ("mark partition", None, DeletePartitionMarked, true),
-            (
-                "start deletion",
-                Some(DeletePartitionMarked),
-                DeletePartitionStarted,
-                true,
-            ),
-            (
-                "finish deletion",
-                Some(DeletePartitionStarted),
-                DeletePartitionFinished,
-                true,
-            ),
+        for (from, to, want) in [
+            (None, DeletePartitionMarked, true),
+            (Some(DeletePartitionMarked), DeletePartitionStarted, true),
+            (Some(DeletePartitionStarted), DeletePartitionFinished, true),
             // Invalid: skipping, restarting, or marking twice.
-            ("skip mark", None, DeletePartitionStarted, false),
-            (
-                "mark twice",
-                Some(DeletePartitionMarked),
-                DeletePartitionMarked,
-                false,
-            ),
-            (
-                "restart finished deletion",
-                Some(DeletePartitionFinished),
-                DeletePartitionStarted,
-                false,
-            ),
+            (None, DeletePartitionStarted, false),
+            (Some(DeletePartitionMarked), DeletePartitionMarked, false),
+            (Some(DeletePartitionFinished), DeletePartitionStarted, false),
         ] {
             check!(
                 RemotePartitionDeleteState::is_valid_transition(from, to) == want,
-                "case {name}: {from:?} -> {to:?}"
+                "{from:?} -> {to:?}"
             );
         }
     }

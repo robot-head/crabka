@@ -33,6 +33,8 @@ pub struct PostgresProtoEncoder {
 }
 
 impl PostgresProtoEncoder {
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn new() -> Result<Self, PostgresConnectError> {
         let pool = DescriptorPool::from_file_descriptor_set(schema_descriptor_set())
             .map_err(convert_error)?;
@@ -44,6 +46,8 @@ impl PostgresProtoEncoder {
         })
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn encode_key(&self, key: &EntityKey) -> Result<Bytes, PostgresConnectError> {
         let message = self.key_to_message(key)?;
         Ok(encode_protobuf(
@@ -53,6 +57,8 @@ impl PostgresProtoEncoder {
         ))
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn encode_value(&self, value: &EntityDifference) -> Result<Bytes, PostgresConnectError> {
         let message = self.difference_to_message(value)?;
         Ok(encode_protobuf(

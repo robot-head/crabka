@@ -33,12 +33,10 @@ pub(crate) async fn probe_ktls_support() -> bool {
 }
 
 /// On non-Linux targets kTLS does not exist; the probe is a constant `false`
-/// and TLS listeners always serve the userspace rustls path. Kept `async` to
-/// match the Linux signature so the single call site (`.await`) is cfg-free.
+/// and TLS listeners always serve the userspace rustls path.
 #[cfg(not(target_os = "linux"))]
-#[allow(clippy::unused_async)]
-pub(crate) async fn probe_ktls_support() -> bool {
-    false
+pub(crate) fn probe_ktls_support() -> std::future::Ready<bool> {
+    std::future::ready(false)
 }
 
 #[cfg(target_os = "linux")]
@@ -158,9 +156,9 @@ mod tests {
     #[cfg(target_os = "linux")]
     async fn linux_probe_maps_injected_results() {
         super::set_test_probe_result(super::TestProbeResult::Failure);
-        assert2::assert!(!super::probe_ktls_support().await);
+        assert!(!super::probe_ktls_support().await);
 
         super::set_test_probe_result(super::TestProbeResult::Success);
-        assert2::assert!(super::probe_ktls_support().await);
+        assert!(super::probe_ktls_support().await);
     }
 }

@@ -40,7 +40,6 @@ use crate::{
     error::BrokerError,
 };
 
-#[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(
     name = "handle_describe_producers",
     level = "info",

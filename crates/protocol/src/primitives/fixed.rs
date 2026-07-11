@@ -16,6 +16,8 @@ fn need(buf: &impl Buf, n: usize) -> Result<(), ProtocolError> {
 pub fn put_i8<B: BufMut>(buf: &mut B, v: i8) {
     buf.put_i8(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_i8<B: Buf>(buf: &mut B) -> Result<i8, ProtocolError> {
     need(buf, 1)?;
     Ok(buf.get_i8())
@@ -24,6 +26,8 @@ pub fn get_i8<B: Buf>(buf: &mut B) -> Result<i8, ProtocolError> {
 pub fn put_i16<B: BufMut>(buf: &mut B, v: i16) {
     buf.put_i16(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_i16<B: Buf>(buf: &mut B) -> Result<i16, ProtocolError> {
     need(buf, 2)?;
     Ok(buf.get_i16())
@@ -32,6 +36,8 @@ pub fn get_i16<B: Buf>(buf: &mut B) -> Result<i16, ProtocolError> {
 pub fn put_u16<B: BufMut>(buf: &mut B, v: u16) {
     buf.put_u16(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_u16<B: Buf>(buf: &mut B) -> Result<u16, ProtocolError> {
     need(buf, 2)?;
     Ok(buf.get_u16())
@@ -40,6 +46,8 @@ pub fn get_u16<B: Buf>(buf: &mut B) -> Result<u16, ProtocolError> {
 pub fn put_i32<B: BufMut>(buf: &mut B, v: i32) {
     buf.put_i32(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_i32<B: Buf>(buf: &mut B) -> Result<i32, ProtocolError> {
     need(buf, 4)?;
     Ok(buf.get_i32())
@@ -48,6 +56,8 @@ pub fn get_i32<B: Buf>(buf: &mut B) -> Result<i32, ProtocolError> {
 pub fn put_i64<B: BufMut>(buf: &mut B, v: i64) {
     buf.put_i64(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_i64<B: Buf>(buf: &mut B) -> Result<i64, ProtocolError> {
     need(buf, 8)?;
     Ok(buf.get_i64())
@@ -56,6 +66,8 @@ pub fn get_i64<B: Buf>(buf: &mut B) -> Result<i64, ProtocolError> {
 pub fn put_u32<B: BufMut>(buf: &mut B, v: u32) {
     buf.put_u32(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_u32<B: Buf>(buf: &mut B) -> Result<u32, ProtocolError> {
     need(buf, 4)?;
     Ok(buf.get_u32())
@@ -64,6 +76,8 @@ pub fn get_u32<B: Buf>(buf: &mut B) -> Result<u32, ProtocolError> {
 pub fn put_bool<B: BufMut>(buf: &mut B, v: bool) {
     buf.put_u8(u8::from(v));
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_bool<B: Buf>(buf: &mut B) -> Result<bool, ProtocolError> {
     need(buf, 1)?;
     match buf.get_u8() {
@@ -76,6 +90,8 @@ pub fn get_bool<B: Buf>(buf: &mut B) -> Result<bool, ProtocolError> {
 pub fn put_f64<B: BufMut>(buf: &mut B, v: f64) {
     buf.put_f64(v);
 }
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
 pub fn get_f64<B: Buf>(buf: &mut B) -> Result<f64, ProtocolError> {
     need(buf, 8)?;
     Ok(buf.get_f64())

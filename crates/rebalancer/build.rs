@@ -15,6 +15,35 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
             config.protoc_executable(protoc_path.clone());
         })
         .compile()?;
+    normalize_generated_docs_and_builder()?;
     println!("cargo:rerun-if-changed={proto}");
+    Ok(())
+}
+
+fn normalize_generated_docs_and_builder() -> Result<(), Box<dyn std::error::Error>> {
+    let generated =
+        std::path::PathBuf::from(std::env::var("OUT_DIR")?).join("crabka.rebalancer.v1.rs");
+    let source = std::fs::read_to_string(&generated)?;
+    let source = source
+        .replace("ProtoBuf", "`Protobuf`")
+        .replace(
+            "pub struct RebalancerServiceBuilder",
+            "#[must_use]\npub struct RebalancerServiceBuilder",
+        )
+        .replace(
+            "    pub fn as_str_name",
+            "    #[must_use]\n    pub fn as_str_name",
+        )
+        .replace(
+            "    pub fn from_str_name",
+            "    #[must_use]\n    pub fn from_str_name",
+        )
+        .replace("&FIELDS)", "FIELDS)")
+        .replace(
+            "write!(formatter, \"expected one of: {:?}\", FIELDS)",
+            "write!(formatter, \"expected one of: {FIELDS:?}\")",
+        )
+        .replace("[`build()`]", "`build()`");
+    std::fs::write(generated, source)?;
     Ok(())
 }

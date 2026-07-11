@@ -14,6 +14,9 @@ use crate::error::TracesError;
 pub const RESOURCE_ATTR_PREFIX: &str = "__resource.";
 
 /// Build one span-block `RecordBatch` from spans of one trace.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
     span_batch_with_promoted_attrs(spans, &[])
 }
@@ -23,6 +26,9 @@ pub fn span_batch(spans: &[Span]) -> Result<RecordBatch, TracesError> {
 ///
 /// `spans` must be the complete per-trace span set: the trace-level columns
 /// (root service/name, start, duration) are computed over exactly these spans.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn span_batch_with_promoted_attrs(
     spans: &[Span],
     promoted_attrs: &[PromotedSpanAttr],
@@ -38,6 +44,9 @@ pub fn span_batch_with_promoted_attrs(
 /// `root_service_name` / `root_span_name` / `trace_start_unix_nano` /
 /// `trace_duration_nanos` reflect the whole trace rather than only the window.
 /// Pass the same slice for both to materialize a complete trace.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn span_batch_for_window(
     row_spans: &[Span],
     trace_spans: &[Span],

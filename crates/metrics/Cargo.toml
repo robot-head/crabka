@@ -21,7 +21,7 @@ workspace = true
 heap-profiling = ["crabka-telemetry/heap-profiling", "dep:tikv-jemallocator"]
 
 [dependencies]
-assert2 = { workspace = true }
+num-traits = { workspace = true }
 async-trait = { workspace = true }
 arrow = { workspace = true }
 axum = { workspace = true, features = ["json"] }
@@ -60,6 +60,7 @@ prost-build = { workspace = true }
 protoc-bin-vendored = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 crabka-broker = { path = "../broker", version = "0.3.8" }
 crabka-client-admin = { path = "../client-admin", version = "0.3.9" }
 mutants = { workspace = true }

@@ -11,6 +11,8 @@ pub struct PprofProfile {
 }
 
 impl PprofProfile {
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn decode(bytes: &[u8]) -> Result<Self, ProfileError> {
         crate::proto::Profile::decode(bytes)
             .map(|inner| Self { inner })
@@ -87,7 +89,7 @@ impl From<PprofProfile> for crate::proto::Profile {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use prost::Message;
 
     use super::*;
@@ -117,8 +119,8 @@ mod tests {
         let bytes = sample_pprof().encode_to_vec();
         let profile = PprofProfile::decode(&bytes).unwrap();
 
-        assert2::assert!(profile.inner() == &sample_pprof());
-        assert2::assert!(
+        assert!(profile.inner() == &sample_pprof());
+        assert!(
             crate::proto::Profile::decode(profile.encode().as_slice()).unwrap() == sample_pprof()
         );
     }
@@ -127,7 +129,7 @@ mod tests {
     fn invalid_bytes_report_decode_error() {
         let error = PprofProfile::decode(&[0xff]).unwrap_err();
 
-        assert2::assert!(matches!(error, ProfileError::Decode(_)));
+        assert!(matches!(error, ProfileError::Decode(_)));
     }
 
     #[test]
@@ -135,7 +137,7 @@ mod tests {
         let inner = sample_pprof();
         let profile = PprofProfile::from(inner.clone());
 
-        assert2::assert!(crate::proto::Profile::from(profile) == inner);
+        assert!(crate::proto::Profile::from(profile) == inner);
     }
 
     #[test]
@@ -143,22 +145,18 @@ mod tests {
         let inner = sample_pprof();
         let profile = PprofProfile::from(inner.clone());
 
-        assert2::assert!(profile.string(1) == Some("cpu"));
-        assert2::assert!(profile.string(-1) == None);
-        assert2::assert!(profile.string(99) == None);
-        assert2::assert!(
-            profile.sample_types() == vec![("cpu".to_string(), "nanoseconds".to_string())]
-        );
-        assert2::assert!(
-            profile.period_type_strings() == ("wall".to_string(), "milliseconds".to_string())
-        );
-        assert2::assert!(
+        check!(profile.string(1) == Some("cpu"));
+        check!(profile.string(-1).is_none());
+        check!(profile.string(99).is_none());
+        check!(profile.sample_types() == vec![("cpu".to_string(), "nanoseconds".to_string())]);
+        check!(profile.period_type_strings() == ("wall".to_string(), "milliseconds".to_string()));
+        check!(
             profile.samples()
-                == &[crate::proto::Sample {
+                == vec![crate::proto::Sample {
                     location_id: vec![1],
                     value: vec![42],
                     label: Vec::new(),
-                }][..]
+                }]
         );
         check!(profile.into_inner() == inner);
     }

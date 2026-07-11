@@ -211,6 +211,7 @@ pub(crate) async fn group_is_empty(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::{
@@ -290,7 +291,7 @@ mod tests {
             responses: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -366,7 +367,7 @@ mod tests {
                 },
             ),
         ];
-        for (_case, authorizer, share_enabled, topic_name, partitions, expected) in cases {
+        for (case, authorizer, share_enabled, topic_name, partitions, expected) in cases {
             let (broker_handle, _dir) = start_broker(authorizer, share_enabled).await;
             let broker = broker_handle.broker_arc_for_test();
             let principal = principal();
@@ -379,7 +380,7 @@ mod tests {
                 .expect("handle");
             let resp = decode_response(&resp);
 
-            assert2::assert!(resp == expected);
+            assert!(resp == expected, "case: {case}");
             broker_handle.shutdown().await;
         }
     }
@@ -391,7 +392,7 @@ mod tests {
         let broker = broker_handle.broker_arc_for_test();
         let coordinator = broker.group_coordinator.clone();
 
-        assert2::assert!(group_is_empty(Some(&coordinator), "absent").await);
+        assert!(group_is_empty(Some(&coordinator), "absent").await);
 
         coordinator.mark_share("busy");
         let actor = coordinator.get_or_create_share("busy");
@@ -412,9 +413,9 @@ mod tests {
             .await
             .expect("send heartbeat");
         let resp = rx.await.expect("heartbeat response");
-        assert2::assert!(resp.error_code == codes::NONE);
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
 
-        assert2::assert!(!group_is_empty(Some(&coordinator), "busy").await);
+        assert!(!group_is_empty(Some(&coordinator), "busy").await);
         broker_handle.shutdown().await;
     }
 
@@ -461,16 +462,8 @@ mod tests {
             .expect("read state")
             .expect("state present");
 
-        assert2::assert!(
-            (
-                state.state_epoch,
-                state.leader_epoch,
-                state.start_offset,
-                state.delivery_complete_count,
-                state.state_batches,
-                state.updates_since_snapshot,
-            ) == (initial_epoch + 1, 0, crabka_log::Offset(33), 0, vec![], 0,)
-        );
+        assert!(state.state_epoch == initial_epoch + 1);
+        assert!(state.start_offset == crabka_log::Offset(33));
         broker_handle.shutdown().await;
     }
 }

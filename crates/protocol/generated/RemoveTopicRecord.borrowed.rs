@@ -6,15 +6,18 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct RemoveTopicRecord {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl RemoveTopicRecord {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::remove_topic_record::RemoveTopicRecord {
         crate::owned::remove_topic_record::RemoveTopicRecord {
             topic_id: (self.topic_id),
@@ -25,9 +28,7 @@ impl RemoveTopicRecord {
 impl Encode for RemoveTopicRecord {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "RemoveTopicRecord version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("RemoveTopicRecord version out of range"));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -55,9 +56,7 @@ impl Encode for RemoveTopicRecord {
 impl<'de> DecodeBorrow<'de> for RemoveTopicRecord {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "RemoveTopicRecord version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("RemoveTopicRecord version out of range"));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

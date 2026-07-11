@@ -1036,7 +1036,6 @@ rules:
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn ruler_rule_group_evaluation_appends_recordings_and_dispatches_firing_alerts() {
     let group: serde_yaml::Value = serde_yaml::from_str(
         r"
@@ -1188,9 +1187,7 @@ rules:
 
     let evaluation = super::evaluate_and_persist_ruler_rule_set(
         &engine,
-        &wal_sink,
-        &alert_sink,
-        &state_sink,
+        (&wal_sink, &alert_sink, &state_sink),
         &mut alert_state,
         "tenant-a",
         &rules,
@@ -1308,15 +1305,11 @@ rules:
 
     let evaluation = super::evaluate_and_persist_ruler_rule_set_for_shard_due_for_eval(
         &engine,
-        &wal_sink,
-        &alert_sink,
-        &state_sink,
+        (&wal_sink, &alert_sink, &state_sink),
         &mut alert_state,
         "tenant-a",
         &rules,
-        &mut group_state,
-        shard,
-        180_000,
+        (&mut group_state, shard, 180_000),
     )
     .await
     .expect("scheduled rule-set evaluation");
@@ -1340,7 +1333,6 @@ rules:
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn ruler_rule_set_evaluation_runs_namespaced_groups() {
     let recording_group: serde_yaml::Value = serde_yaml::from_str(
         r"

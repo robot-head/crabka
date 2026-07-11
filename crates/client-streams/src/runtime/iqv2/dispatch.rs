@@ -74,10 +74,11 @@ mod tests {
             ],
         };
         let res = assemble::<Option<i64>>(outcome);
-        assert2::assert!(res.partition_results().len() == 2);
-        assert2::assert!(res.partition_results()[&0].result() == Some(&Some(7)));
-        assert2::assert!(
-            res.partition_results()[&1].failure_reason() == Some(FailureReason::NotUpToBound)
+        assert_eq!(res.partition_results().len(), 2);
+        assert_eq!(res.partition_results()[&0].result(), Some(&Some(7)));
+        assert_eq!(
+            res.partition_results()[&1].failure_reason(),
+            Some(FailureReason::NotUpToBound)
         );
     }
 
@@ -88,8 +89,9 @@ mod tests {
             per_partition: vec![(0, Position::default(), Ok(wrong))],
         };
         let res = assemble::<Option<i64>>(outcome);
-        assert2::assert!(
-            res.partition_results()[&0].failure_reason() == Some(FailureReason::StoreException)
+        assert_eq!(
+            res.partition_results()[&0].failure_reason(),
+            Some(FailureReason::StoreException)
         );
     }
 }

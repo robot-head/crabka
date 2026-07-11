@@ -225,10 +225,6 @@ pub(super) fn apply_limitk_aggregate(
 }
 
 #[cfg(feature = "experimental-functions")]
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "Prometheus limit_ratio normalizes a 64-bit label hash into f64 threshold space"
-)]
 fn limit_ratio_includes_sample(ratio: f64, labels: &Labels) -> bool {
     let sample_offset = labels.fingerprint() as f64 / u64::MAX as f64;
     (ratio >= 0.0 && sample_offset < ratio) || (ratio < 0.0 && sample_offset >= 1.0 + ratio)

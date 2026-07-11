@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 
+use assert2::assert;
 use crabka_operator::{
     controller::schema_registry::reconcile,
     crd::{SchemaRegistry, SchemaRegistrySpec},
@@ -103,12 +104,12 @@ async fn kafka_present_but_not_ready_gates_with_no_children() {
 
     let observed = state.take_observed();
     // The gate must fire BEFORE any child is applied.
-    assert2::assert!(
+    assert!(
         !observed
             .iter()
             .any(|r| r.uri().to_string().contains("/services/"))
     );
-    assert2::assert!(
+    assert!(
         !observed
             .iter()
             .any(|r| r.uri().to_string().contains("/deployments/"))
@@ -120,8 +121,8 @@ async fn kafka_present_but_not_ready_gates_with_no_children() {
     let body: serde_json::Value = serde_json::from_slice(patch.body()).unwrap();
     let conds = body["status"]["conditions"].as_array().unwrap();
     let kr = conds.iter().find(|c| c["type"] == "KafkaReady").unwrap();
-    assert2::assert!(kr["status"].as_str() == Some("False"));
-    assert2::assert!(kr["reason"].as_str() == Some("KafkaNotReady"));
+    assert!(kr["status"] == "False");
+    assert!(kr["reason"] == "KafkaNotReady");
 }
 
 #[tokio::test]
@@ -219,7 +220,10 @@ async fn optional_topic_group_and_bearer_render_to_args() {
         "--bearer=unsecured",
         "--bearer-principal-claim=email",
     ] {
-        assert2::assert!(joined.contains(needle));
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
     }
 }
 
@@ -254,8 +258,8 @@ async fn missing_cluster_label_sets_status() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap();
-    assert2::assert!(ready["status"].as_str() == Some("False"));
-    assert2::assert!(ready["reason"].as_str() == Some("MissingClusterLabel"));
+    assert!(ready["status"] == "False");
+    assert!(ready["reason"] == "MissingClusterLabel");
 }
 
 #[tokio::test]
@@ -336,10 +340,10 @@ async fn renders_children_when_kafka_ready() {
         .map(|a| a.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert2::assert!(
+    assert!(
         joined.contains("--bootstrap-servers=demo-broker-headless.default.svc.cluster.local:9092")
     );
-    assert2::assert!(joined.contains("--schemas-topic-rf=1"));
+    assert!(joined.contains("--schemas-topic-rf=1"));
     // advertised-url env uses $(POD_NAME) interpolation.
     let env = body["spec"]["template"]["spec"]["containers"][0]["env"]
         .as_array()
@@ -348,7 +352,7 @@ async fn renders_children_when_kafka_ready() {
         .iter()
         .find(|e| e["name"] == "SCHEMA_REGISTRY_ADVERTISED_URL")
         .unwrap();
-    assert2::assert!(
+    assert!(
         adv["value"]
             .as_str()
             .unwrap()
@@ -366,11 +370,11 @@ async fn renders_children_when_kafka_ready() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap();
-    assert2::assert!(ready["status"] == "True");
+    assert!(ready["status"] == "True");
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)] // the typed-security spec + mock-rule enumeration make the length inherent
+// the typed-security spec + mock-rule enumeration make the length inherent
 async fn full_security_fields_render_to_args_and_mounts() {
     let mut cr = sr("sr1", Some(CLUSTER));
     cr.spec.bootstrap_servers = Some("ext:9092".into()); // skip the Kafka GET
@@ -470,7 +474,10 @@ async fn full_security_fields_render_to_args_and_mounts() {
         "--super-user=User:admin",
         "--acl-refresh-secs=15",
     ] {
-        assert2::assert!(joined.contains(needle));
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
     }
     // Mounts present for tls/client-ca/basic.
     let mounts = c["volumeMounts"].as_array().unwrap();
@@ -479,7 +486,10 @@ async fn full_security_fields_render_to_args_and_mounts() {
         .map(|m| m["mountPath"].as_str().unwrap())
         .collect();
     for path in ["/etc/sr/tls", "/etc/sr/client-ca", "/etc/sr/basic"] {
-        assert2::assert!(mount_paths.contains(&path));
+        assert!(
+            mount_paths.contains(&path),
+            "mount {path:?}, mounts: {mount_paths:?}"
+        );
     }
 }
 
@@ -550,12 +560,11 @@ async fn kafka_client_missing_when_absent() {
         .map(|a| a.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert2::assert!(!joined.contains("--kafka-security-protocol"));
-    assert2::assert!(!joined.contains("--kafka-sasl-mechanism"));
+    assert!(!joined.contains("--kafka-security-protocol"));
+    assert!(!joined.contains("--kafka-sasl-mechanism"));
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
     let mut cr = sr("sr1", Some(CLUSTER));
     cr.spec.bootstrap_servers = Some("ext:9092".into());
@@ -640,7 +649,10 @@ async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
         "--kafka-tls-ca=/etc/sr/kafka-tls/ca.crt",
         "--kafka-tls-server-name=broker.internal",
     ] {
-        assert2::assert!(joined.contains(needle));
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
     }
     // Env: SASL creds via secretKeyRef
     let env = c["env"].as_array().unwrap();
@@ -648,25 +660,33 @@ async fn kafka_client_sasl_ssl_renders_to_args_and_env() {
         .iter()
         .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_USERNAME")
         .unwrap();
+    assert_eq!(
+        sasl_user["valueFrom"]["secretKeyRef"]["name"],
+        "kafka-creds"
+    );
+    assert_eq!(sasl_user["valueFrom"]["secretKeyRef"]["key"], "username");
     let sasl_pass = env
         .iter()
         .find(|e| e["name"] == "SCHEMA_REGISTRY_KAFKA_SASL_PASSWORD")
         .unwrap();
-    assert2::assert!(
-        &sasl_user["valueFrom"]["secretKeyRef"]
-            == &serde_json::json!({"name": "kafka-creds", "key": "username"})
+    assert_eq!(
+        sasl_pass["valueFrom"]["secretKeyRef"]["name"],
+        "kafka-creds"
     );
-    assert2::assert!(
-        &sasl_pass["valueFrom"]["secretKeyRef"]
-            == &serde_json::json!({"name": "kafka-creds", "key": "password"})
-    );
+    assert_eq!(sasl_pass["valueFrom"]["secretKeyRef"]["key"], "password");
     // Volume + mount for kafka-tls CA
     let vols = body["spec"]["template"]["spec"]["volumes"]
         .as_array()
         .unwrap();
-    assert2::assert!(vols.iter().any(|v| v["name"] == "kafka-tls"));
+    assert!(
+        vols.iter().any(|v| v["name"] == "kafka-tls"),
+        "expected kafka-tls volume"
+    );
     let mounts = c["volumeMounts"].as_array().unwrap();
-    assert2::assert!(mounts.iter().any(|m| m["mountPath"] == "/etc/sr/kafka-tls"));
+    assert!(
+        mounts.iter().any(|m| m["mountPath"] == "/etc/sr/kafka-tls"),
+        "expected kafka-tls mount"
+    );
 }
 
 #[tokio::test]
@@ -697,7 +717,7 @@ async fn secret_name_and_issuer_ref_mutual_exclusion() {
     reconcile(Arc::new(cr), ctx).await.unwrap();
 
     let observed = state.take_observed();
-    assert2::assert!(
+    assert!(
         !observed
             .iter()
             .any(|r| r.uri().to_string().contains("/deployments/"))
@@ -713,7 +733,7 @@ async fn secret_name_and_issuer_ref_mutual_exclusion() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap();
-    assert2::assert!(ready["reason"] == "InvalidSpec");
+    assert_eq!(ready["reason"], "InvalidSpec");
 }
 
 #[tokio::test]
@@ -762,13 +782,18 @@ async fn issuer_ref_creates_certificate_cr_and_waits() {
     reconcile(Arc::new(cr), ctx).await.unwrap();
 
     let observed = state.take_observed();
-    assert2::assert!(observed.iter().any(
-        |r| r.method() == Method::PATCH && r.uri().to_string().contains("/certificates/sr1-sr")
-    ));
-    assert2::assert!(
+    assert!(
+        observed
+            .iter()
+            .any(|r| r.method() == Method::PATCH
+                && r.uri().to_string().contains("/certificates/sr1-sr")),
+        "expected Certificate CR PATCH"
+    );
+    assert!(
         !observed
             .iter()
-            .any(|r| r.uri().to_string().contains("/deployments/"))
+            .any(|r| r.uri().to_string().contains("/deployments/")),
+        "expected no deployment while WaitingForCert"
     );
     let patch = observed
         .iter()
@@ -781,11 +806,10 @@ async fn issuer_ref_creates_certificate_cr_and_waits() {
         .iter()
         .find(|c| c["type"] == "Ready")
         .unwrap();
-    assert2::assert!(ready["reason"] == "WaitingForCert");
+    assert_eq!(ready["reason"], "WaitingForCert");
 }
 
 #[tokio::test]
-#[allow(clippy::too_many_lines)]
 async fn issuer_ref_with_cert_secret_ready_renders_deployment() {
     let mut cr = sr("sr1", Some(CLUSTER));
     cr.spec.bootstrap_servers = Some("ext:9092".into());
@@ -877,12 +901,15 @@ async fn issuer_ref_with_cert_secret_ready_renders_deployment() {
         .map(|a| a.as_str().unwrap())
         .collect::<Vec<_>>()
         .join(" ");
-    assert2::assert!(joined.contains("--tls-cert=/etc/sr/tls/tls.crt"));
+    assert!(
+        joined.contains("--tls-cert=/etc/sr/tls/tls.crt"),
+        "joined: {joined}"
+    );
     let vols = body["spec"]["template"]["spec"]["volumes"]
         .as_array()
         .unwrap();
     let tls_vol = vols.iter().find(|v| v["name"] == "tls").unwrap();
-    assert2::assert!(tls_vol["secret"]["secretName"] == "sr1-sr-tls");
+    assert_eq!(tls_vol["secret"]["secretName"], "sr1-sr-tls");
 }
 
 #[tokio::test]
@@ -974,6 +1001,9 @@ async fn bearer_jwks_renders_to_args() {
         "--bearer-jwks-principal-claim=email",
         "--bearer-jwks-refresh-ms=30000",
     ] {
-        assert2::assert!(joined.contains(needle));
+        assert!(
+            joined.contains(needle),
+            "needle {needle:?}, joined: {joined}"
+        );
     }
 }

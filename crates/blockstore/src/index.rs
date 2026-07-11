@@ -108,6 +108,8 @@ impl Index {
         });
     }
 
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn resolve(
         &self,
         tenant: &str,
@@ -215,6 +217,8 @@ impl Index {
 
     /// Full label sets for the series matching `matchers` (every series when
     /// `matchers` is empty).
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn series(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<Labels>> {
         let Some(tenant_index) = self.tenants.get(tenant) else {
             return Ok(Vec::new());
@@ -234,6 +238,8 @@ impl Index {
     /// Resolve matchers to fingerprints, treating an empty matcher set as
     /// "all fingerprints in the tenant" (unlike [`Index::resolve`], which
     /// rejects empty matchers).
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn matching_fingerprints(
         &self,
         tenant: &str,
@@ -249,6 +255,8 @@ impl Index {
     }
 
     /// Distinct label names carried by the series matching `matchers`.
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_names_for(&self, tenant: &str, matchers: &[LabelMatcher]) -> Result<Vec<String>> {
         let fps = self.matching_fingerprints(tenant, matchers)?;
         Ok(self.label_names_for_fingerprints(tenant, &fps))
@@ -274,6 +282,8 @@ impl Index {
     }
 
     /// Distinct values for `name` across the series matching `matchers`.
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn label_values_for(
         &self,
         tenant: &str,
@@ -307,6 +317,8 @@ impl Index {
     }
 
     /// Project the series matching `matchers` onto `label_names`.
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub fn series_projected(
         &self,
         tenant: &str,
@@ -457,6 +469,8 @@ impl Index {
         fields(object_key = %object_key, len = tracing::field::Empty),
         err
     )]
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn save(&self, store: &Arc<dyn ObjectStore>, object_key: &str) -> Result<()> {
         let bytes = serde_json::to_vec(self)?;
         tracing::Span::current().record("len", bytes.len());
@@ -470,6 +484,8 @@ impl Index {
     /// The object is `head()`ed first and rejected when larger than
     /// [`MAX_INDEX_SNAPSHOT_BYTES`], so a corrupt or oversized snapshot from
     /// shared storage cannot OOM the process during the buffered read.
+    /// # Errors
+    /// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
     pub async fn load(store: &Arc<dyn ObjectStore>, object_key: &str) -> Result<Self> {
         Self::load_with_cap(store, object_key, MAX_INDEX_SNAPSHOT_BYTES).await
     }

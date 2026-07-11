@@ -5,6 +5,8 @@
 
 use std::{fs, io, path::Path};
 
+/// # Errors
+/// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
 pub fn sum_partition_dir(path: &Path) -> Result<u64, io::Error> {
     let entries = match fs::read_dir(path) {
         Ok(e) => e,
@@ -26,19 +28,21 @@ pub fn sum_partition_dir(path: &Path) -> Result<u64, io::Error> {
 mod tests {
     use std::io::Write;
 
+    use assert2::assert;
+
     use super::*;
 
     #[test]
     fn empty_dir_returns_zero() {
         let tmp = tempfile::tempdir().unwrap();
-        assert2::assert!(sum_partition_dir(tmp.path()).unwrap() == 0);
+        assert!(sum_partition_dir(tmp.path()).unwrap() == 0);
     }
 
     #[test]
     fn missing_dir_returns_zero() {
         let tmp = tempfile::tempdir().unwrap();
         let missing = tmp.path().join("nope");
-        assert2::assert!(sum_partition_dir(&missing).unwrap() == 0);
+        assert!(sum_partition_dir(&missing).unwrap() == 0);
     }
 
     fn write_file(path: &Path, bytes: &[u8]) {
@@ -54,7 +58,7 @@ mod tests {
         write_file(&tmp.path().join("00000000000000000000.log"), &[0u8; 1024]);
         write_file(&tmp.path().join("00000000000000000000.index"), &[0u8; 128]);
         write_file(&tmp.path().join("leader-epoch-checkpoint"), &[0u8; 32]);
-        assert2::assert!(sum_partition_dir(tmp.path()).unwrap() == 1024 + 128 + 32);
+        assert!(sum_partition_dir(tmp.path()).unwrap() == 1024 + 128 + 32);
     }
 
     #[test]
@@ -63,6 +67,6 @@ mod tests {
         std::fs::create_dir(tmp.path().join("subdir")).unwrap();
         write_file(&tmp.path().join("subdir/inner.log"), &[0u8; 999]);
         write_file(&tmp.path().join("top.log"), &[0u8; 100]);
-        assert2::assert!(sum_partition_dir(tmp.path()).unwrap() == 100);
+        assert!(sum_partition_dir(tmp.path()).unwrap() == 100);
     }
 }

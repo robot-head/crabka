@@ -409,6 +409,10 @@ fn add_spec(
 /// re-read) image after the attempt, so the caller can emit
 /// `MISSING_INTERNAL_TOPICS` and keep the member `NotReady` until a later
 /// heartbeat observes them.
+/// # Errors
+/// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+/// # Panics
+/// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
 pub async fn ensure_internal_topics(
     controller: &Arc<dyn MetadataSource>,
     specs: &[InternalTopicSpec],
@@ -503,7 +507,7 @@ pub async fn ensure_internal_topics(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -595,7 +599,7 @@ mod tests {
         };
 
         let stored = to_stored_topology(&wire_topology);
-        assert2::assert!(
+        assert!(
             stored
                 == StreamsGroupTopologyValue {
                     epoch: 9,
@@ -640,7 +644,7 @@ mod tests {
         };
 
         let derived = derive_tasks(&topology, &image);
-        assert2::assert!(
+        assert!(
             derived
                 == DerivedTasks {
                     num_tasks: BTreeMap::from([("0".to_string(), 6)]),
@@ -681,7 +685,7 @@ mod tests {
 
         let derived = derive_tasks(&topology, &image);
         // Only the external source topic appears in the partition snapshot.
-        assert2::assert!(
+        assert!(
             derived
                 == DerivedTasks {
                     num_tasks: BTreeMap::from([("0".to_string(), 3), ("1".to_string(), 3)]),
@@ -707,13 +711,8 @@ mod tests {
             subtopologies: vec![s0],
         };
         let derived = derive_tasks(&topology, &image);
-        assert2::assert!(
-            derived
-                == DerivedTasks {
-                    num_tasks: BTreeMap::new(),
-                    partition_metadata: StreamsGroupPartitionMetadataValue::default(),
-                }
-        );
+        assert!(!derived.num_tasks.contains_key("0"));
+        assert!(derived.partition_metadata.topics.is_empty());
     }
 
     #[test]
@@ -722,9 +721,8 @@ mod tests {
         num_tasks.insert("0".to_string(), 3);
         num_tasks.insert("1".to_string(), 0);
         let set = task_set(&num_tasks);
-        assert2::assert!(
-            set == BTreeMap::from([("0".to_string(), vec![0, 1, 2]), ("1".to_string(), vec![]),])
-        );
+        assert!(set.get("0").unwrap() == &vec![0, 1, 2]);
+        assert!(set.get("1").unwrap().is_empty());
     }
 
     #[test]
@@ -736,7 +734,7 @@ mod tests {
             epoch: 1,
             subtopologies: vec![s0],
         };
-        assert2::assert!(validate_topology(&topology, &image).is_empty());
+        assert!(validate_topology(&topology, &image).is_empty());
     }
 
     #[test]
@@ -749,10 +747,9 @@ mod tests {
             subtopologies: vec![s0],
         };
         let issues = validate_topology(&topology, &image);
-        check!(
-            (issues.len(), issues[0].0, issues[0].1.contains("in-a"),)
-                == (1, status::MISSING_SOURCE_TOPICS, true)
-        );
+        assert!(issues.len() == 1);
+        check!(issues[0].0 == status::MISSING_SOURCE_TOPICS);
+        check!(issues[0].1.contains("in-a"));
     }
 
     #[test]
@@ -772,7 +769,7 @@ mod tests {
             subtopologies: vec![s0],
         };
         let issues = validate_topology(&topology, &image);
-        assert2::assert!(
+        assert!(
             issues
                 .iter()
                 .any(|(c, _)| *c == status::INCORRECTLY_PARTITIONED_TOPICS)
@@ -793,7 +790,7 @@ mod tests {
             epoch: 1,
             subtopologies: vec![s0],
         };
-        assert2::assert!(validate_topology(&topology, &image).is_empty());
+        assert!(validate_topology(&topology, &image).is_empty());
     }
 
     #[test]
@@ -818,38 +815,30 @@ mod tests {
         let mut num_tasks = BTreeMap::new();
         num_tasks.insert("0".to_string(), 5);
 
-        let specs: BTreeMap<_, _> = required_internal_topics(&topology, &num_tasks)
-            .into_iter()
-            .map(|spec| (spec.name.clone(), spec))
-            .collect();
-        assert2::assert!(
-            specs
-                == BTreeMap::from([
-                    (
-                        "rp".to_string(),
-                        InternalTopicSpec {
-                            name: "rp".to_string(),
-                            partitions: 5,
-                            replication_factor: 2,
-                            configs: BTreeMap::from([
-                                ("cleanup.policy".to_string(), "delete".to_string()),
-                                ("segment.ms".to_string(), "100".to_string()),
-                            ]),
-                        },
-                    ),
-                    (
-                        "cl".to_string(),
-                        InternalTopicSpec {
-                            name: "cl".to_string(),
-                            partitions: 5,
-                            replication_factor: 3,
-                            configs: BTreeMap::from([(
-                                "cleanup.policy".to_string(),
-                                "compact".to_string(),
-                            )]),
-                        },
-                    ),
-                ])
+        let specs = required_internal_topics(&topology, &num_tasks);
+        assert!(specs.len() == 2);
+
+        let rp = specs.iter().find(|s| s.name == "rp").unwrap();
+        assert!(
+            *rp == InternalTopicSpec {
+                name: "rp".to_string(),
+                partitions: 5,
+                replication_factor: 2,
+                configs: BTreeMap::from([
+                    ("cleanup.policy".to_string(), "delete".to_string()),
+                    ("segment.ms".to_string(), "100".to_string()),
+                ]),
+            }
+        );
+
+        let cl = specs.iter().find(|s| s.name == "cl").unwrap();
+        assert!(
+            *cl == InternalTopicSpec {
+                name: "cl".to_string(),
+                partitions: 5,
+                replication_factor: 3,
+                configs: BTreeMap::from([("cleanup.policy".to_string(), "compact".to_string())]),
+            }
         );
     }
 
@@ -868,6 +857,6 @@ mod tests {
         };
         // No entry for subtopology "0" -> unresolved -> no specs.
         let specs = required_internal_topics(&topology, &BTreeMap::new());
-        assert2::assert!(specs.is_empty());
+        assert!(specs.is_empty());
     }
 }

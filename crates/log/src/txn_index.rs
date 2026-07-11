@@ -55,6 +55,10 @@ impl TxnIndex {
         fields(path = %path.display(), entries = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn open(path: PathBuf) -> Result<Self, LogError> {
         let mut entries = Vec::new();
         match std::fs::read(&path) {
@@ -92,6 +96,8 @@ impl TxnIndex {
         fields(producer_id = entry.producer_id.0),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append(&mut self, entry: AbortedTxn) -> Result<(), LogError> {
         let mut f = OpenOptions::new()
             .create(true)

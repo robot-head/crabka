@@ -1,12 +1,12 @@
-//! Convert between v2 `RecordBatch` (crabka-protocol) and v0/v1 MessageSet
+//! Convert between v2 `RecordBatch` (`crabka-protocol`) and v0/v1 `MessageSet`
 //! payloads.
 //!
 //! Down-conversion (v2 → v0/v1): produce a [`ParsedRecord`] stream from a
 //! v2 batch (decompressing the v2 body once), then re-emit it as a flat
-//! or compressed MessageSet.
+//! or compressed `MessageSet`.
 //!
-//! Up-conversion (v0/v1 → v2): decode a MessageSet into ParsedRecords,
-//! then synthesize a v2 RecordBatch with one record per legacy message.
+//! Up-conversion (v0/v1 → v2): decode a `MessageSet` into `ParsedRecord`s,
+//! then synthesize a v2 `RecordBatch` with one record per legacy message.
 //!
 //! Control records (v2 `is_control_batch == true`) are filtered: v0/v1
 //! has no concept of them, and Kafka's reference broker behavior is to
@@ -27,7 +27,7 @@ use crate::{
 
 /// Iterate the v2 batch's records, dropping control batches entirely.
 ///
-/// Each emitted `ParsedRecord` has its absolute offset reconstructed as
+/// Each emitted [`ParsedRecord`] has its absolute offset reconstructed as
 /// `base_offset + offset_delta`, and (for v1 target) its absolute
 /// timestamp as `base_timestamp + timestamp_delta`.
 #[must_use]
@@ -50,13 +50,16 @@ pub fn parsed_from_v2(batch: &RecordBatch, target: Magic) -> Vec<ParsedRecord> {
         .collect()
 }
 
-/// Down-convert a v2 RecordBatch to v0/v1 MessageSet bytes.
+/// Down-convert a v2 [`RecordBatch`] to v0/v1 `MessageSet` bytes.
 ///
 /// If the v2 batch carried gzip or snappy compression, the output also
-/// uses that codec (wrapped MessageSet). LZ4 is preserved as well. Zstd
+/// uses that codec (wrapped `MessageSet`). LZ4 is preserved as well. `Zstd`
 /// — not representable in v0/v1 — is emitted as an uncompressed
-/// MessageSet (the records have already been decompressed in the v2
+/// `MessageSet` (the records have already been decompressed in the v2
 /// decode path).
+///
+/// # Errors
+/// Returns an error if the legacy message set cannot be encoded.
 pub fn v2_to_legacy(batch: &RecordBatch, target: Magic) -> Result<Bytes, LegacyRecordsError> {
     let records = parsed_from_v2(batch, target);
     let mut out = BytesMut::new();
@@ -78,12 +81,15 @@ pub fn v2_to_legacy(batch: &RecordBatch, target: Magic) -> Result<Bytes, LegacyR
     Ok(out.freeze())
 }
 
-/// Up-convert a v0/v1 MessageSet to a v2 RecordBatch suitable for the
+/// Up-convert a v0/v1 `MessageSet` to a v2 [`RecordBatch`] suitable for the
 /// log write path.
 ///
 /// `partition_leader_epoch` is set to `-1` (Kafka's sentinel for
 /// "unknown"). The caller — typically the Produce handler — should
 /// overwrite it with the current leader epoch before append.
+///
+/// # Errors
+/// Returns an error if the legacy message set cannot be decoded or its offsets overflow v2 fields.
 pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError> {
     let mut cur = set_bytes;
     let records = decode_message_set(&mut cur, set_bytes.len())?;
@@ -101,7 +107,10 @@ pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError>
             records: Vec::new(),
         });
     }
-    let base_offset = records[0].offset;
+    let base_offset = records
+        .first()
+        .ok_or_else(|| LegacyRecordsError::Malformed("legacy record set is empty".into()))?
+        .offset;
     let base_timestamp = records
         .iter()
         .filter_map(|r| r.timestamp)
@@ -112,19 +121,28 @@ pub fn legacy_to_v2(set_bytes: &[u8]) -> Result<RecordBatch, LegacyRecordsError>
         .filter_map(|r| r.timestamp)
         .max()
         .unwrap_or(-1);
-    let last_offset_delta = (records.last().unwrap().offset.0 - base_offset.0) as i32;
+    let last_offset = records
+        .last()
+        .ok_or_else(|| LegacyRecordsError::Malformed("legacy record set is empty".into()))?
+        .offset;
+    let last_offset_delta = i32::try_from(last_offset.0 - base_offset.0)
+        .map_err(|_| LegacyRecordsError::Malformed("last offset delta exceeds i32".into()))?;
 
     let out_records: Vec<Record> = records
         .iter()
-        .map(|r| Record {
-            attributes: 0,
-            timestamp_delta: r.timestamp.map_or(0, |ts| ts - base_timestamp),
-            offset_delta: (r.offset.0 - base_offset.0) as i32,
-            key: r.key.clone(),
-            value: r.value.clone(),
-            headers: Vec::new(),
+        .map(|r| {
+            Ok(Record {
+                attributes: 0,
+                timestamp_delta: r.timestamp.map_or(0, |ts| ts - base_timestamp),
+                offset_delta: i32::try_from(r.offset.0 - base_offset.0).map_err(|_| {
+                    LegacyRecordsError::Malformed("record offset delta exceeds i32".into())
+                })?,
+                key: r.key.clone(),
+                value: r.value.clone(),
+                headers: Vec::new(),
+            })
         })
-        .collect();
+        .collect::<Result<_, LegacyRecordsError>>()?;
 
     Ok(RecordBatch {
         base_offset: base_offset.0,
@@ -287,7 +305,7 @@ mod tests {
         let bytes = v2_to_legacy(&v2_batch(CompressionType::Gzip), Magic::V1).unwrap();
         let mut cur: &[u8] = &bytes;
         let _offset = cur.get_i64();
-        let size = cur.get_i32() as usize;
+        let size = usize::try_from(cur.get_i32()).unwrap();
         let msg = crate::message::Message::decode_from(&mut cur, size).unwrap();
         assert2::assert!(msg.compression() == CompressionType::Gzip);
     }

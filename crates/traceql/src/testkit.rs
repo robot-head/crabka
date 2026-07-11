@@ -19,6 +19,8 @@ pub struct Report {
 }
 
 impl Report {
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn write_to(&self, path: impl AsRef<Path>) -> std::io::Result<()> {
         let path = path.as_ref();
         if let Some(parent) = path.parent() {
@@ -45,6 +47,8 @@ impl Report {
 }
 
 #[must_use]
+/// # Panics
+/// Panics if a parsed expression or span set violates an invariant established during `TraceQL` validation.
 pub fn run_corpus_dir(dir: impl AsRef<Path>) -> Report {
     let dir = dir.as_ref();
     let mut files = match fs::read_dir(dir) {
@@ -97,6 +101,8 @@ pub fn run_corpus_dir(dir: impl AsRef<Path>) -> Report {
 }
 
 #[must_use]
+/// # Panics
+/// Panics if a parsed expression or span set violates an invariant established during `TraceQL` validation.
 pub fn run_corpus_file(file: impl AsRef<Path>) -> Report {
     let file = file.as_ref();
     let rel = file_name(file);
@@ -447,6 +453,8 @@ fn span(
 mod tests {
     use std::time::{SystemTime, UNIX_EPOCH};
 
+    use assert2::assert;
+
     use super::*;
 
     fn temp_dir(name: &str) -> std::path::PathBuf {
@@ -484,14 +492,14 @@ mod tests {
             "PASS ok (1/1)",
             "FAIL bad (1/2) mismatch",
         ] {
-            assert2::assert!(text.contains(needle));
+            assert!(text.contains(needle), "missing: {needle}");
         }
 
         let dir = temp_dir("report");
         let path = dir.join("nested").join("report.txt");
         report.write_to(&path).unwrap();
         let written = fs::read_to_string(&path).unwrap();
-        assert2::assert!(written == text);
+        assert!(written == text);
         let _ = fs::remove_dir_all(dir);
     }
 
@@ -519,21 +527,21 @@ query: { .svc = "x" }
 
         let report = run_corpus_dir(&dir);
 
-        assert2::assert!(report.cases.len() == 1);
-        assert2::assert!(report.cases[0].name.as_str() == "one.case:explicit");
+        assert!(report.cases.len() == 1);
+        assert!(report.cases[0].name == "one.case:explicit");
         let _ = fs::remove_dir_all(dir);
     }
 
     #[test]
     fn file_name_uses_only_last_path_component() {
-        assert2::assert!(file_name(Path::new("nested/cases/selectors.case")) == "selectors.case");
+        assert!(file_name(Path::new("nested/cases/selectors.case")) == "selectors.case");
     }
 
     #[test]
     fn span_helper_offsets_start_time_by_span_id() {
         let span = span(9, 2, Some(1), "child", 123, vec![]);
 
-        assert2::assert!(
+        assert!(
             span == InputSpan {
                 trace_id: [9; 16],
                 span_id: [2; 8],
@@ -564,7 +572,7 @@ expect_span_ids: 1
 "#,
         );
 
-        assert2::assert!(
+        assert!(
             cases
                 == vec![Case {
                     name: "selectors.case#1".into(),
@@ -597,7 +605,7 @@ expect_series_count: 1
 "#,
         );
 
-        assert2::assert!(
+        assert!(
             cases
                 == vec![
                     Case {

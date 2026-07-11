@@ -2,8 +2,8 @@
 
 use crate::primitives::fixed::{get_i32, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
-    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -13,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,10 +27,7 @@ pub struct RemoveRaftVoterRequest {
 impl Encode for RemoveRaftVoterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -77,19 +75,12 @@ impl Encode for RemoveRaftVoterRequest {
 impl Decode<'_> for RemoveRaftVoterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.cluster_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.cluster_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 0 {
             out.voter_id = get_i32(buf)?;
@@ -124,14 +115,11 @@ impl RemoveRaftVoterRequest {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("voterId".to_string(), ::serde_json::json!(0));
-    obj.insert(
-        "voterDirectoryId".to_string(),
-        ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()),
-    );
+    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
     ::serde_json::Value::Object(obj)
 }
 impl crate::ProtocolRequest for RemoveRaftVoterRequest {

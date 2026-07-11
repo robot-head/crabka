@@ -15,6 +15,8 @@ use crate::{
 };
 
 /// Write a non-nullable array-length prefix.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
     if flexible {
         put_uvarint(buf, u32::try_from(n + 1).expect("array too large"));
@@ -25,6 +27,8 @@ pub fn put_array_len<B: BufMut>(buf: &mut B, n: usize, flexible: bool) {
 
 /// Write a nullable array-length prefix.  `None` encodes as −1 (non-flex) or
 /// 0 (flex).
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn put_nullable_array_len<B: BufMut>(buf: &mut B, len: Option<usize>, flexible: bool) {
     match (flexible, len) {
         (false, None) => put_i32(buf, -1),
@@ -36,6 +40,8 @@ pub fn put_nullable_array_len<B: BufMut>(buf: &mut B, len: Option<usize>, flexib
 
 /// Number of bytes consumed by a non-nullable array-length prefix.
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn array_len_prefix_len(n: usize, flexible: bool) -> usize {
     if flexible {
         uvarint_len(u32::try_from(n + 1).unwrap())
@@ -46,6 +52,8 @@ pub fn array_len_prefix_len(n: usize, flexible: bool) -> usize {
 
 /// Number of bytes consumed by a nullable array-length prefix.
 #[must_use]
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn nullable_array_len_prefix_len(len: Option<usize>, flexible: bool) -> usize {
     match (flexible, len) {
         (false, _) => 4,
@@ -56,6 +64,10 @@ pub fn nullable_array_len_prefix_len(len: Option<usize>, flexible: bool) -> usiz
 
 /// Read a non-nullable array length.  Returns an error if the encoded value is
 /// null (−1 / 0).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, ProtocolError> {
     let n = if flexible {
         let raw = get_uvarint(buf)?;
@@ -88,6 +100,10 @@ pub fn get_array_len<B: Buf>(buf: &mut B, flexible: bool) -> Result<usize, Proto
 
 /// Read a nullable array length.  Returns `None` when the encoded value is
 /// null (−1 non-flex, 0 flex).
+/// # Errors
+/// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
+/// # Panics
+/// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn get_nullable_array_len<B: Buf>(
     buf: &mut B,
     flexible: bool,

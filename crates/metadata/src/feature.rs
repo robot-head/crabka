@@ -122,19 +122,15 @@ impl Feature for TransactionVersionFeature {
     }
     // The TV_1 tier is retained as an explicit (currently coincident) threshold
     // so a future Kafka release that splits TV_1's bootstrap level below TV_2's
-    // is a one-line constant change; `clippy::bool_to_int_with_if` would
-    // collapse the tiers and lose that.
-    #[allow(clippy::bool_to_int_with_if)]
+    // is a one-line constant change.
     fn default_level(&self, bootstrap_mv: i16) -> i16 {
         // Both TV_1 and TV_2 bootstrap at level 24 (4.0-IV2) → default jumps
         // 0 -> 2 at >= 24. Empirically pinned.
         use crate::transaction_version::{TV1_METADATA_LEVEL, TV2_METADATA_LEVEL};
-        if bootstrap_mv >= TV2_METADATA_LEVEL {
-            2
-        } else if bootstrap_mv >= TV1_METADATA_LEVEL {
-            1
-        } else {
-            0
+        match bootstrap_mv {
+            level if level >= TV2_METADATA_LEVEL => 2,
+            level if level >= TV1_METADATA_LEVEL => 1,
+            _ => 0,
         }
     }
     // dependencies + min_required_floor: inherit the empty/supported-min defaults.
@@ -258,6 +254,9 @@ pub fn bootstrap_feature_records_with_overrides(
 /// time, mirroring the `UpdateFeatures` handler.
 // cargo-mutants: no-op for today's registry (no feature declares deps).
 #[cfg_attr(test, mutants::skip)]
+/// # Errors
+/// Returns an error naming the first finalized feature whose required
+/// dependency is absent or finalized below the minimum level.
 pub fn validate_feature_dependencies(resolved: &BTreeMap<String, i16>) -> Result<(), String> {
     check_deps(resolved, |name, level| {
         feature(name).map_or(&[][..], |f| f.dependencies(level))

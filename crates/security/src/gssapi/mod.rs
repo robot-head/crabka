@@ -64,16 +64,30 @@ pub enum InitStep {
 /// future holds across `.await` points (the `wrap`/`unwrap`/`src_principal`
 /// methods take `&self` and serialise interior mutability behind a mutex).
 pub trait GssAcceptor: Send + Sync {
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn accept(&mut self, client_token: &[u8]) -> Result<AcceptStep, GssError>;
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn wrap(&self, plaintext: &[u8], confidential: bool) -> Result<Vec<u8>, GssError>;
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn unwrap(&self, token: &[u8]) -> Result<Vec<u8>, GssError>;
     /// Authenticated source principal, e.g. "alice@REALM" or "alice/host@REALM".
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn src_principal(&self) -> Result<String, GssError>;
 }
 
 /// Client side: produce tokens to send, consume server tokens.
 pub trait GssInitiator: Send {
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn step(&mut self, server_token: Option<&[u8]>) -> Result<InitStep, GssError>;
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn wrap(&self, plaintext: &[u8], confidential: bool) -> Result<Vec<u8>, GssError>;
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     fn unwrap(&self, token: &[u8]) -> Result<Vec<u8>, GssError>;
 }

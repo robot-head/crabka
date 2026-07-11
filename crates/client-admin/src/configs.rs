@@ -106,6 +106,8 @@ pub(crate) fn parse_incremental_alter_outcomes(
 }
 
 impl AdminClient {
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_configs(
         &mut self,
         topics: &[&str],
@@ -132,6 +134,8 @@ impl AdminClient {
         Ok(out)
     }
 
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn incremental_alter_configs(
         &mut self,
         ops: &[IncrementalAlterOp],

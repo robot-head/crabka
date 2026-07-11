@@ -427,7 +427,7 @@ impl Sim {
         let mut stable_rounds = 0u32;
         for _ in 0..max_ticks {
             if let Some(msg) = self.queue.pop_front() {
-                self.deliver(msg);
+                self.deliver(&msg);
                 continue;
             }
             let fired = self.fire_next_timer();
@@ -466,6 +466,9 @@ impl Sim {
         );
     }
 
+    /// # Panics
+    /// Panics if `leader` is not present in the simulated cluster. Callers must
+    /// elect or add the node before appending through it.
     pub fn leader_append(&mut self, leader: NodeId, n: usize) {
         let epoch = self.nodes[&leader].machine.quorum_state().leader_epoch;
         let node = self.nodes.get_mut(&leader).unwrap();
@@ -495,7 +498,7 @@ impl Sim {
     /// Returns `true` if anything happened (there was a message or a timer).
     pub fn step_once(&mut self) -> bool {
         if let Some(msg) = self.queue.pop_front() {
-            self.deliver(msg);
+            self.deliver(&msg);
             return true;
         }
         self.fire_next_timer()
@@ -676,7 +679,7 @@ impl Sim {
         self.nodes.get_mut(&id).unwrap().heartbeat_deadline = Some(deadline);
     }
 
-    fn deliver(&mut self, msg: Message) {
+    fn deliver(&mut self, msg: &Message) {
         if self.partitioned.contains(&msg.src) || self.partitioned.contains(&msg.dst) {
             return;
         }
@@ -914,7 +917,7 @@ impl Sim {
         drained.reverse();
         let n = drained.len();
         for msg in drained {
-            self.deliver(msg);
+            self.deliver(&msg);
         }
         n
     }
@@ -928,9 +931,9 @@ impl Sim {
         };
         // Deliver the genuine copy.
         let first = self.queue.pop_front().expect("front exists");
-        self.deliver(first);
+        self.deliver(&first);
         // Deliver the duplicate of the same message.
-        self.deliver(msg);
+        self.deliver(&msg);
         true
     }
 }

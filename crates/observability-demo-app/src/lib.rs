@@ -11,8 +11,6 @@ pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =
     include_bytes!(concat!(env!("OUT_DIR"), "/file_descriptor_set.bin"));
 
 mod order {
-    #![allow(clippy::useless_borrows_in_formatting)]
-
     include!(concat!(env!("OUT_DIR"), "/demo.rs"));
 }
 pub use order::Order;
@@ -54,9 +52,7 @@ pub fn order_at(i: u64) -> Order {
     let amount = if i.is_multiple_of(17) {
         0.0
     } else {
-        // value is bounded < 200, so the u64->f64 cast is exact.
-        #[allow(clippy::cast_precision_loss)]
-        let dollars = (i % 200) as f64;
+        let dollars = f64::from(u32::try_from(i % 200).unwrap_or(0));
         dollars + 0.99
     };
     Order {

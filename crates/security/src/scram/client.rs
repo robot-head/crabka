@@ -39,6 +39,8 @@ pub struct AwaitingServerFinal {
 
 impl ScramClientExchange {
     #[must_use]
+    /// # Panics
+    /// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
     pub fn new(username: String, password: Vec<u8>, mechanism: SaslMechanism) -> Self {
         assert2::assert!(mechanism.is_scram());
         Self {
@@ -62,6 +64,8 @@ impl ScramClientExchange {
         fields(mechanism = %self.mechanism.wire_name(), principal = %self.username),
         err
     )]
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     pub fn client_first(self) -> Result<(Vec<u8>, AwaitingServerFirst), AuthError> {
         let mut nonce_bytes = [0u8; 18];
         SystemRandom::new()

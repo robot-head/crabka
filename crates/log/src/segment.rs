@@ -116,7 +116,7 @@ pub struct RawSegmentRead {
 crate::sendfile_cfg! {
     /// Descriptor form of [`Segment::read_raw`] for the zero-copy fetch path
     /// (Increments D + E): the same offset/boundary metadata, but the records
-    /// run is a [`FileRegion`] (an `(Arc<File>, offset, len)` descriptor) instead
+    /// run is a [`crabka_protocol::records::FileRegion`] (an `(Arc<File>, offset, len)` descriptor) instead
     /// of an owned `Bytes` slice — so the broker can `sendfile(2)` it straight
     /// from the page cache without a userspace copy. Compiled on the SENDFILE
     /// alias (Linux + Apple + FreeBSD/DragonFly).
@@ -183,6 +183,8 @@ impl Segment {
         fields(dir = %dir.display(), base_offset = base_offset.0),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn create(dir: &Path, base_offset: Offset) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset.0);
         let log_file = OpenOptions::new()
@@ -215,6 +217,8 @@ impl Segment {
         fields(dir = %dir.display(), base_offset = base_offset.0, validate),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn open_active(dir: &Path, base_offset: Offset, validate: bool) -> Result<Self, LogError> {
         let mut seg = Self::open(dir, base_offset)?;
         if validate {
@@ -285,6 +289,8 @@ impl Segment {
         fields(dir = %dir.display(), base_offset = base_offset.0),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn open(dir: &Path, base_offset: Offset) -> Result<Self, LogError> {
         let log_path = name::log_path(dir, base_offset.0);
         let log_file = OpenOptions::new().read(true).write(true).open(&log_path)?;
@@ -463,6 +469,8 @@ impl Segment {
         fields(base_offset = self.base_offset.0, batches = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn read(&self, offset: Offset, max_bytes: usize) -> Result<Vec<RecordBatch>, LogError> {
         if offset > self.last_offset {
             return Ok(vec![]);
@@ -508,6 +516,10 @@ impl Segment {
         fields(base_offset = self.base_offset.0, bytes = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn read_raw(
         &self,
         fetch_offset: Offset,
@@ -597,7 +609,7 @@ impl Segment {
     /// Descriptor variant of [`Segment::read_raw`] for the zero-copy
     /// (`sendfile`) fetch path: runs the **same** boundary walk — selecting the
     /// identical `[start_pos+range_start, start_pos+range_end)` byte range that
-    /// `read_raw` would have sliced — but returns a [`FileRegion`] descriptor
+    /// `read_raw` would have sliced — but returns a [`crabka_protocol::records::FileRegion`] descriptor
     /// instead of `pread`ing the payload into an owned `Bytes`.
     ///
     /// The walk is header-only: it `pread`s just the fixed v2 batch headers to
@@ -610,6 +622,10 @@ impl Segment {
         fields(base_offset = self.base_offset.0),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn read_raw_desc(
         &self,
         fetch_offset: Offset,
@@ -757,6 +773,8 @@ impl Segment {
         ),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append(
         &mut self,
         batch: &RecordBatch,
@@ -836,6 +854,8 @@ impl Segment {
     // yields identical output; the last_offset/index-presence effects are
     // pinned by `append_verbatim_updates_index_and_last_offset`.
     #[cfg_attr(test, mutants::skip)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn append_verbatim(
         &mut self,
         bytes: &[u8],
@@ -936,6 +956,8 @@ impl Segment {
         fields(base_offset = self.base_offset.0, log_size = self.log_size),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn flush(&mut self) -> Result<(), LogError> {
         self.log_file.sync_data()?;
         self.offset_index.flush()?;
@@ -951,6 +973,8 @@ impl Segment {
         fields(base_offset = self.base_offset.0, new_last_offset = tracing::field::Empty),
         err,
     )]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub fn truncate_to_relative(&mut self, rel: u32) -> Result<(), LogError> {
         // Read only as far as the cut can be: every kept batch lives below
         // the first index entry at or after `rel`. When `rel` is past the

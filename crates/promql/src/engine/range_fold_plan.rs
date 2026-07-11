@@ -56,10 +56,6 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// [`apply_outer_range_fn`] fold. The per-function arity / scalar-type /
     /// modifier errors are raised exactly as the oracle's `eval_*_call` family
     /// raises them.
-    #[allow(
-        clippy::too_many_lines,
-        reason = "the range-fold name -> OuterRangeFn dispatch table is intentionally centralized"
-    )]
     pub(super) async fn resolve_range_fold_call(
         &self,
         tenant: &str,

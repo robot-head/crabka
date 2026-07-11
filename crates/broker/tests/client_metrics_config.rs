@@ -1,17 +1,14 @@
 // rustc 1.95 clippy::pedantic ICEs on this file (an upstream bug in
 // clippy's body-analysis pass). Disable pedantic locally; the rest of
 // the workspace still enforces the full pedantic gate.
-#![allow(clippy::pedantic)]
 
-//! Broker-side integration test for KIP-714 CLIENT_METRICS config round-trip.
+//! Broker-side integration test for KIP-714 `CLIENT_METRICS` config round-trip.
 //!
 //! Drives `IncrementalAlterConfigs` → `DescribeConfigs` → `ListConfigResources`
-//! for a CLIENT_METRICS subscription over the real in-process broker, asserting
+//! for a `CLIENT_METRICS` subscription over the real in-process broker, asserting
 //! the full operator-facing round-trip.
 
-#![allow(clippy::default_trait_access)]
-
-use assert2::check;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::{
@@ -26,16 +23,16 @@ use crabka_protocol::owned::{
 };
 use support::start_n_node;
 
-/// Kafka resource type id for CLIENT_METRICS (KIP-714).
+/// Kafka resource type id for `CLIENT_METRICS` (KIP-714).
 const RESOURCE_TYPE_CLIENT_METRICS: i8 = 16;
 
-/// `config_operation` SET = 0 in the IncrementalAlterConfigs wire protocol.
+/// `config_operation` SET = 0 in the `IncrementalAlterConfigs` wire protocol.
 const CONFIG_OP_SET: i8 = 0;
 
-/// `config_source` CLIENT_METRICS_CONFIG = 7.
+/// `config_source` `CLIENT_METRICS_CONFIG` = 7.
 const CONFIG_SOURCE_CLIENT_METRICS: i8 = 7;
 
-/// `config_source` DEFAULT_CONFIG = 5.
+/// `config_source` `DEFAULT_CONFIG` = 5.
 const CONFIG_SOURCE_DEFAULT: i8 = 5;
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -49,21 +46,61 @@ async fn build_client(addr: std::net::SocketAddr) -> crabka_client_core::Client 
         .expect("client build")
 }
 
+fn assert_describe_response(response: &DescribeConfigsResponse) {
+    assert!(
+        response.results.len() == 1,
+        "expected exactly one describe result"
+    );
+    let result = &response.results[0];
+    check!(result.error_code == 0, "DescribeConfigs failed: {result:?}");
+    check!(result.resource_type == RESOURCE_TYPE_CLIENT_METRICS);
+    check!(result.resource_name == "sub-a");
+
+    let config = |name: &str| {
+        result
+            .configs
+            .iter()
+            .find(|config| config.name == name)
+            .unwrap_or_else(|| panic!("missing {name} config in {:?}", result.configs))
+    };
+    let metrics = config("metrics");
+    assert!(metrics.value.as_deref() == Some("org.apache.kafka.consumer."));
+    assert!(metrics.config_source == CONFIG_SOURCE_CLIENT_METRICS);
+    let interval = config("interval.ms");
+    assert!(interval.value.as_deref() == Some("60000"));
+    assert!(interval.config_source == CONFIG_SOURCE_CLIENT_METRICS);
+    assert!(config("match").config_source == CONFIG_SOURCE_DEFAULT);
+}
+
+fn assert_list_response(response: &ListConfigResourcesResponse) {
+    assert!(
+        response.error_code == 0,
+        "ListConfigResources failed: {response:?}"
+    );
+    assert!(
+        response.config_resources.iter().any(|resource| {
+            resource.resource_type == RESOURCE_TYPE_CLIENT_METRICS
+                && resource.resource_name == "sub-a"
+        }),
+        "CLIENT_METRICS sub-a missing from {response:?}"
+    );
+}
+
 // ── test ──────────────────────────────────────────────────────────────────────
 
 /// CONFIG ROUND-TRIP:
 ///
-/// 1. `IncrementalAlterConfigs` for CLIENT_METRICS "sub-a" with
+/// 1. `IncrementalAlterConfigs` for `CLIENT_METRICS` "sub-a" with
 ///    `metrics=org.apache.kafka.consumer.` and `interval.ms=60000` (SET ops).
-///    Asserts per-resource error_code == NONE (0).
+///    Asserts per-resource `error_code` == NONE (0).
 ///
-/// 2. `DescribeConfigs` for CLIENT_METRICS "sub-a". Asserts:
-///    - `metrics` value == "org.apache.kafka.consumer.", config_source == 7.
-///    - `interval.ms` value == "60000", config_source == 7.
-///    - `match` entry present (defaulted), config_source == 5.
+/// 2. `DescribeConfigs` for `CLIENT_METRICS` "sub-a". Asserts:
+///    - `metrics` value == "org.apache.kafka.consumer.", `config_source` == 7.
+///    - `interval.ms` value == "60000", `config_source` == 7.
+///    - `match` entry present (defaulted), `config_source` == 5.
 ///
-/// 3. `ListConfigResources` (v1, resource_types=[16]). Asserts the result
-///    contains a ConfigResource with resource_type 16 and resource_name "sub-a".
+/// 3. `ListConfigResources` (v1, `resource_types`=[16]). Asserts the result
+///    contains a `ConfigResource` with `resource_type` 16 and `resource_name` "sub-a".
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn client_metrics_config_alter_describe_list_round_trip() {
     let cluster = start_n_node(1).await.expect("start_n_node");
@@ -100,9 +137,18 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
         .await
         .expect("IncrementalAlterConfigs");
 
-    assert2::assert!(alter_resp.responses.len() == 1);
+    assert!(
+        alter_resp.responses.len() == 1,
+        "expected exactly one resource response, got {}",
+        alter_resp.responses.len()
+    );
     let resource_resp = &alter_resp.responses[0];
-    assert2::assert!(resource_resp.error_code == 0);
+    assert!(
+        resource_resp.error_code == 0,
+        "IncrementalAlterConfigs CLIENT_METRICS must succeed; error_code={} message={:?}",
+        resource_resp.error_code,
+        resource_resp.error_message
+    );
 
     // ── Step 2: DescribeConfigs ───────────────────────────────────────────────
     let describe_req = DescribeConfigsRequest {
@@ -120,37 +166,7 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
     let describe_resp: DescribeConfigsResponse =
         client.send(describe_req).await.expect("DescribeConfigs");
 
-    assert2::assert!(describe_resp.results.len() == 1);
-    let result = &describe_resp.results[0];
-    check!(
-        (
-            result.error_code,
-            result.resource_type,
-            result.resource_name.as_str(),
-            result.configs.len(),
-        ) == (0, RESOURCE_TYPE_CLIENT_METRICS, "sub-a", 3),
-        "DescribeConfigs result mismatch: {result:?}"
-    );
-
-    // Assert the three expected config entries.
-    let find_config = |name: &str| result.configs.iter().find(|c| c.name == name);
-
-    assert2::assert!(
-        (
-            find_config("metrics").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
-            find_config("interval.ms").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
-            find_config("match").map(|cfg| (cfg.value.as_deref(), cfg.config_source)),
-        ) == (
-            Some((
-                Some("org.apache.kafka.consumer."),
-                CONFIG_SOURCE_CLIENT_METRICS,
-            )),
-            Some((Some("60000"), CONFIG_SOURCE_CLIENT_METRICS)),
-            // The generated wire type decodes the defaulted empty value as
-            // `Some("")`; keep that normalization explicit in the projection.
-            Some((Some(""), CONFIG_SOURCE_DEFAULT)),
-        )
-    );
+    assert_describe_response(&describe_resp);
 
     // ── Step 3: ListConfigResources ───────────────────────────────────────────
     let list_req = ListConfigResourcesRequest {
@@ -161,9 +177,5 @@ async fn client_metrics_config_alter_describe_list_round_trip() {
     let list_resp: ListConfigResourcesResponse =
         client.send(list_req).await.expect("ListConfigResources");
 
-    let found = list_resp
-        .config_resources
-        .iter()
-        .any(|r| r.resource_type == RESOURCE_TYPE_CLIENT_METRICS && r.resource_name == "sub-a");
-    assert2::assert!((list_resp.error_code, found) == (0, true));
+    assert_list_response(&list_resp);
 }

@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,11 +29,12 @@ impl Default for BrokerHeartbeatResponse {
             is_caught_up: false,
             is_fenced: true,
             should_shut_down: false,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl BrokerHeartbeatResponse {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::broker_heartbeat_response::BrokerHeartbeatResponse {
         crate::owned::broker_heartbeat_response::BrokerHeartbeatResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -47,10 +49,7 @@ impl BrokerHeartbeatResponse {
 impl Encode for BrokerHeartbeatResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -102,10 +101,7 @@ impl Encode for BrokerHeartbeatResponse {
 impl<'de> DecodeBorrow<'de> for BrokerHeartbeatResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

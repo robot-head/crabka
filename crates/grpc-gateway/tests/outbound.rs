@@ -322,7 +322,6 @@ async fn wait_for_dlq(client: &Client, topic: &str, n: usize) -> Vec<DlqRecord> 
 
 /// 3 records, mock always 200: each is delivered once with the right event id,
 /// a verifying signature, and a well-formed envelope body.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn delivers_2xx() {
     let topic = "outbound-2xx";
@@ -394,7 +393,6 @@ async fn delivers_2xx() {
 /// Mock 500 for the first 2 requests then 200: the record is retried and
 /// eventually delivered (≥ 3 requests for the one event), and the configured DLQ
 /// stays empty.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn retries_then_succeeds() {
     let topic = "outbound-retry";
@@ -459,7 +457,6 @@ async fn retries_then_succeeds() {
 /// Mock always 500, `max_attempts = 2`: the record is dead-lettered after
 /// exhaustion (value + `x-crabka-dlq-source` header), and the loop keeps polling
 /// — a SECOND record produced afterwards also reaches the DLQ (no wedge).
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn dead_letters_on_exhaustion() {
     let topic = "outbound-dlq";
@@ -529,7 +526,6 @@ async fn dead_letters_on_exhaustion() {
 
 /// One partition, values 0..5 produced in order, mock 200: the receiver sees the
 /// envelopes in ascending-offset order (offset order == produced order).
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn ordering_within_partition() {
     let topic = "outbound-order";
@@ -576,7 +572,6 @@ async fn ordering_within_partition() {
 
 /// `filter = $.deliver`: of two records `{"deliver":true}` and
 /// `{"deliver":false}`, only the truthy one is delivered.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn filter_skips_nonmatching() {
     let topic = "outbound-filter";

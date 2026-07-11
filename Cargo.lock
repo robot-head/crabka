@@ -2240,6 +2240,7 @@ dependencies = [
  "hdrhistogram",
  "k8s-openapi",
  "kube",
+ "num-traits",
  "plotly",
  "reqwest 0.13.4",
  "rustls",
@@ -2262,6 +2263,7 @@ dependencies = [
  "async-trait",
  "datafusion",
  "futures",
+ "num-traits",
  "object_store",
  "parquet",
  "proptest",
@@ -2315,6 +2317,7 @@ dependencies = [
  "mockall",
  "mutants",
  "nix 0.31.3",
+ "num-traits",
  "opentelemetry-proto",
  "pbkdf2",
  "prometheus-client",
@@ -2806,6 +2809,7 @@ dependencies = [
  "chrono-tz",
  "crabka-blockstore",
  "derive_more",
+ "num-traits",
  "regex",
  "serde_json",
  "thiserror 2.0.18",
@@ -2855,6 +2859,7 @@ dependencies = [
  "dashmap",
  "futures",
  "mutants",
+ "num-traits",
  "object_store",
  "opentelemetry-proto",
  "prometheus-client",
@@ -2934,6 +2939,7 @@ dependencies = [
  "flate2",
  "futures-util",
  "mutants",
+ "num-traits",
  "object_store",
  "opentelemetry-proto",
  "parquet",
@@ -3071,6 +3077,7 @@ dependencies = [
  "futures",
  "jfrs",
  "multer",
+ "num-traits",
  "object_store",
  "parquet",
  "pbjson",
@@ -3110,6 +3117,7 @@ dependencies = [
  "datafusion",
  "datatest-stable",
  "futures",
+ "num-traits",
  "object_store",
  "prometheus-client",
  "promql-parser",
@@ -3214,6 +3222,7 @@ dependencies = [
  "crabka-metadata",
  "crabka-protocol",
  "mutants",
+ "num-traits",
  "parking_lot",
  "pbjson",
  "prometheus-client",
@@ -3476,6 +3485,7 @@ dependencies = [
  "datatest-stable",
  "derive_more",
  "futures",
+ "num-traits",
  "proptest",
  "regex",
  "thiserror 2.0.18",
@@ -3511,6 +3521,7 @@ dependencies = [
  "futures",
  "hex",
  "http-body-util",
+ "num-traits",
  "object_store",
  "opentelemetry",
  "opentelemetry-proto",
@@ -9747,9 +9758,9 @@ dependencies = [
 
 [[package]]
 name = "pollster"
-version = "1.0.1"
+version = "0.4.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bc6355899e1c9462875b6757c79f3caa011a1fdae12bbb1a2e72dd1f234f8336"
+checksum = "2f3a9f18d041e6d0e102a0a46750538147e5e8992d3b4873aaafee2520b00ce3"
 
 [[package]]
 name = "polyval"

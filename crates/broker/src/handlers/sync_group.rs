@@ -111,6 +111,7 @@ fn encode_err(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::owned::{
         join_group_request::{JoinGroupRequest, JoinGroupRequestProtocol},
         join_group_response::{self, JoinGroupResponse},
@@ -185,8 +186,8 @@ mod tests {
         .await
         .expect("JoinGroup bootstrap");
         let r1 = decode_join(&r1);
-        assert2::assert!(r1.error_code == codes::MEMBER_ID_REQUIRED);
-        assert2::assert!(!r1.member_id.is_empty());
+        assert!(r1.error_code == codes::MEMBER_ID_REQUIRED, "{r1:?}");
+        assert!(!r1.member_id.is_empty());
 
         let r2 = crate::handlers::join_group::handle(
             broker,
@@ -198,12 +199,13 @@ mod tests {
         .await
         .expect("JoinGroup rejoin");
         let r2 = decode_join(&r2);
-        assert2::assert!(
+        assert!(
             (
                 r2.error_code,
                 r2.protocol_type.as_deref(),
                 r2.protocol_name.as_deref()
-            ) == (codes::NONE, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME))
+            ) == (codes::NONE, Some(PROTOCOL_TYPE), Some(PROTOCOL_NAME)),
+            "{r2:?}"
         );
         (r2.member_id, r2.generation_id)
     }
@@ -223,7 +225,7 @@ mod tests {
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
         let ctx = crate::test_support::request_context(&principal, &peer, "sync-client");
 
-        assert2::assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let bytes = encode_err(
             sync_group_response::MAX_VERSION,
@@ -234,7 +236,7 @@ mod tests {
         .expect("encode");
         let mut cur: &[u8] = &bytes;
         let resp = SyncGroupResponse::decode(&mut cur, sync_group_response::MAX_VERSION).unwrap();
-        assert2::assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
     }
 
     #[test]
@@ -256,7 +258,7 @@ mod tests {
             assignment: Bytes::new(),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[tokio::test]
@@ -289,7 +291,7 @@ mod tests {
             assignment: Bytes::new(),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -331,7 +333,7 @@ mod tests {
             assignment,
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

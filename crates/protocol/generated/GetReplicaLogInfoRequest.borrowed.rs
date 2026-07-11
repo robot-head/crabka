@@ -8,23 +8,23 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct GetReplicaLogInfoRequest {
     pub broker_id: i32,
     pub topic_partitions: Vec<TopicPartitions>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl GetReplicaLogInfoRequest {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::get_replica_log_info_request::GetReplicaLogInfoRequest {
         crate::owned::get_replica_log_info_request::GetReplicaLogInfoRequest {
             broker_id: (self.broker_id),
-            topic_partitions: (self.topic_partitions)
-                .iter()
-                .map(TopicPartitions::to_owned)
-                .collect(),
+            topic_partitions: (self.topic_partitions).iter().map(TopicPartitions::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -32,10 +32,7 @@ impl GetReplicaLogInfoRequest {
 impl Encode for GetReplicaLogInfoRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -63,14 +60,8 @@ impl Encode for GetReplicaLogInfoRequest {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.topic_partitions).len(),
-                    flex,
-                );
-                let body: usize = (self.topic_partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_partitions).len(), flex);
+                let body: usize = (self.topic_partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -84,10 +75,7 @@ impl Encode for GetReplicaLogInfoRequest {
 impl<'de> DecodeBorrow<'de> for GetReplicaLogInfoRequest {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -124,13 +112,15 @@ impl GetReplicaLogInfoRequest {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct TopicPartitions {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<i32>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicPartitions {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::get_replica_log_info_request::TopicPartitions {
         crate::owned::get_replica_log_info_request::TopicPartitions {
             topic_id: (self.topic_id),
@@ -167,8 +157,7 @@ impl Encode for TopicPartitions {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
                 let body: usize = (self.partitions).iter().map(|_| 4).sum();
                 prefix + body
             };

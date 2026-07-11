@@ -26,6 +26,9 @@ impl OverridesProvider {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn from_yaml(yaml: &str) -> Result<Self, OverridesError> {
         let defaults = Limits::default();
         let file = serde_yaml::from_str::<RuntimeFile>(yaml)

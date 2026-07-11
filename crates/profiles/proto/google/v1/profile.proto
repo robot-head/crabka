@@ -153,10 +153,10 @@ message Mapping {
   int64 build_id = 6; // Index into string table
 
   // The following fields indicate the resolution of symbolic info.
-  bool has_functions = 7;
-  bool has_filenames = 8;
-  bool has_line_numbers = 9;
-  bool has_inline_frames = 10;
+  optional bool has_functions = 7;
+  optional bool has_filenames = 8;
+  optional bool has_line_numbers = 9;
+  optional bool has_inline_frames = 10;
 }
 
 // Describes function and line table debug information.

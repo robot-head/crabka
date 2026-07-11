@@ -149,22 +149,35 @@ pub struct Detector {
     history: AsyncMutex<SnapshotHistory>,
 }
 
+pub struct DetectorDependencies {
+    pub usage_store: Arc<UsageStore>,
+    pub capacities: Arc<BrokerCapacities>,
+    pub anomaly_store: Arc<AnomalyStore>,
+    pub proposal_store: Arc<ProposalStore>,
+    pub executor_state: ExecutorState,
+    pub goal_registry: Arc<crate::api::GoalRegistry>,
+    pub goal_ctx: crate::goals::GoalContext,
+    pub metrics: DetectorMetrics,
+}
+
 impl Detector {
-    #[allow(clippy::too_many_arguments)]
     #[must_use]
     pub fn new(
         cfg: DetectorConfig,
         snapshot: SharedSnapshot,
-        usage_store: Arc<UsageStore>,
-        capacities: Arc<BrokerCapacities>,
-        anomaly_store: Arc<AnomalyStore>,
-        proposal_store: Arc<ProposalStore>,
-        executor_state: ExecutorState,
-        goal_registry: Arc<crate::api::GoalRegistry>,
-        goal_ctx: crate::goals::GoalContext,
-        metrics: DetectorMetrics,
+        dependencies: DetectorDependencies,
         shutdown: CancellationToken,
     ) -> Self {
+        let DetectorDependencies {
+            usage_store,
+            capacities,
+            anomaly_store,
+            proposal_store,
+            executor_state,
+            goal_registry,
+            goal_ctx,
+            metrics,
+        } = dependencies;
         let history_capacity = cfg.history_capacity;
         Self {
             cfg,
@@ -422,14 +435,16 @@ mod tests {
         Detector::new(
             cfg,
             snapshot,
-            usage_store,
-            capacities,
-            anomaly_store,
-            proposal_store,
-            executor_state,
-            Arc::new(crate::api::GoalRegistry::default_registry()),
-            goal_ctx,
-            metrics,
+            DetectorDependencies {
+                usage_store,
+                capacities,
+                anomaly_store,
+                proposal_store,
+                executor_state,
+                goal_registry: Arc::new(crate::api::GoalRegistry::default_registry()),
+                goal_ctx,
+                metrics,
+            },
             shutdown,
         )
     }

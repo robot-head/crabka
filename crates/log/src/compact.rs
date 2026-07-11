@@ -125,7 +125,6 @@ pub(crate) fn txn_data_fully_gone(
 }
 
 #[cfg(test)]
-#[allow(clippy::similar_names)]
 mod core_tests {
     use assert2::check;
 
@@ -470,12 +469,6 @@ impl CleanedTransactionMetadata {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::similar_names,
-    clippy::redundant_closure,
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap
-)]
 mod build_map_tests {
     use bytes::Bytes;
     use crabka_ids::Offset;
@@ -571,15 +564,15 @@ mod build_map_tests {
         };
         data.records[0].offset_delta = 0;
         let seg = write_sealed_batches(dir.path(), &[control_batch(0, 1000, 1 /* COMMIT */), data]);
-        let segs: Vec<&Segment> = vec![&seg];
-        let map = build_offset_map(&segs).unwrap();
+        let segment_refs: Vec<&Segment> = vec![&seg];
+        let map = build_offset_map(&segment_refs).unwrap();
         assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(1))]));
     }
 
     #[test]
     fn build_offset_map_keeps_newest_offset_per_key() {
         let dir = tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             0,
             vec![
@@ -588,8 +581,8 @@ mod build_map_tests {
                 make_record(2, Some(b"k1"), Some(b"v3")), // k1 overwritten
             ],
         );
-        let segs: Vec<&Segment> = vec![&seg0];
-        let map = build_offset_map(&segs).unwrap();
+        let segment_refs: Vec<&Segment> = vec![&first_segment];
+        let map = build_offset_map(&segment_refs).unwrap();
         assert2::assert!(
             map == HashMap::from([
                 (Bytes::from_static(b"k1"), Offset(2)),
@@ -601,7 +594,7 @@ mod build_map_tests {
     #[test]
     fn build_offset_map_drops_null_key_records() {
         let dir = tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             0,
             vec![
@@ -610,26 +603,26 @@ mod build_map_tests {
                 make_record(2, None, Some(b"no-key-2")),
             ],
         );
-        let segs: Vec<&Segment> = vec![&seg0];
-        let map = build_offset_map(&segs).unwrap();
+        let segment_refs: Vec<&Segment> = vec![&first_segment];
+        let map = build_offset_map(&segment_refs).unwrap();
         assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(1))]));
     }
 
     #[test]
     fn build_offset_map_across_segments_uses_newest() {
         let dir = tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             0,
             vec![make_record(0, Some(b"k1"), Some(b"v1"))],
         );
-        let seg1 = write_sealed_segment(
+        let second_segment = write_sealed_segment(
             dir.path(),
             10,
             vec![make_record(0, Some(b"k1"), Some(b"v2"))],
         );
-        let segs: Vec<&Segment> = vec![&seg0, &seg1];
-        let map = build_offset_map(&segs).unwrap();
+        let segment_refs: Vec<&Segment> = vec![&first_segment, &second_segment];
+        let map = build_offset_map(&segment_refs).unwrap();
         assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(10))]));
     }
 
@@ -670,12 +663,12 @@ mod build_map_tests {
             ..RecordBatch::default()
         };
         let seg = write_sealed_batches(dir.path(), &[old, newest]);
-        let segs: Vec<&Segment> = vec![&seg];
-        let map = build_offset_map(&segs).unwrap();
+        let segment_refs: Vec<&Segment> = vec![&seg];
+        let map = build_offset_map(&segment_refs).unwrap();
         // Sanity: the newest-for-key absolute offset is 15 (10 + 5).
         assert2::assert!(map == HashMap::from([(Bytes::from_static(b"k1"), Offset(15))]));
 
-        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segment_refs, &map).unwrap();
         // Producer 2000's newest data survives; producer 1000's is superseded.
         assert2::assert!(txn.txn_state(ProducerId(2000)) == TxnDataState::DataSurvives);
         assert2::assert!(txn.txn_state(ProducerId(1000)) == TxnDataState::DataFullyGone);
@@ -699,6 +692,15 @@ pub struct RewriteOutput {
     pub txnindex_swap: Option<PathBuf>,
 }
 
+/// Time-based retention inputs used while rewriting compacted segments.
+#[derive(Debug, Clone, Copy)]
+pub struct RewriteRetention {
+    /// Current wall-clock time in milliseconds.
+    pub now_ms: i64,
+    /// Time a tombstone remains eligible for reads before deletion.
+    pub delete_retention_ms: i64,
+}
+
 /// Stream `segments` (oldest → newest) into new `.swap` files, applying the
 /// KIP-534 per-record [`retain_decision`].
 ///
@@ -720,7 +722,6 @@ pub struct RewriteOutput {
 ///
 /// The `.swap` files are written to the segments' shared directory. Caller is
 /// responsible for fsyncing + promoting via [`atomic_swap`].
-#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 #[instrument(
     level = "info",
     skip_all,
@@ -737,8 +738,7 @@ pub fn rewrite_segments(
     segments: &[&Segment],
     offset_map: &HashMap<Bytes, Offset>,
     txn_meta: &CleanedTransactionMetadata,
-    now_ms: i64,
-    delete_retention_ms: i64,
+    retention: RewriteRetention,
     active_producers: &HashMap<ProducerId, Offset>,
     _index_interval_bytes: u32,
 ) -> Result<RewriteOutput, LogError> {
@@ -821,8 +821,8 @@ pub fn rewrite_segments(
                 batch_meta,
                 is_newest_for_key,
                 txn,
-                now_ms,
-                delete_retention_ms,
+                retention.now_ms,
+                retention.delete_retention_ms,
             ) {
                 RetainDecision::Keep => kept.push(record.clone()),
                 RetainDecision::SetHorizon(h) => {
@@ -941,7 +941,6 @@ fn swap_path(dir: &Path, base_offset: i64, ext: &str) -> PathBuf {
 }
 
 #[cfg(test)]
-#[allow(clippy::similar_names)]
 mod rewrite_tests {
     use std::fs;
 
@@ -958,17 +957,19 @@ mod rewrite_tests {
     const NEVER_AGE_NOW_MS: i64 = 0;
     const RET_MS: i64 = 1_000;
 
-    fn rewrite_simple(dir: &Path, segs: &[&Segment]) -> RewriteOutput {
-        let map = build_offset_map(segs).unwrap();
-        let txn = CleanedTransactionMetadata::build(segs, &map).unwrap();
+    fn rewrite_simple(dir: &Path, segment_refs: &[&Segment]) -> RewriteOutput {
+        let map = build_offset_map(segment_refs).unwrap();
+        let txn = CleanedTransactionMetadata::build(segment_refs, &map).unwrap();
         let active: HashMap<ProducerId, Offset> = HashMap::new();
         rewrite_segments(
             dir,
-            segs,
+            segment_refs,
             &map,
             &txn,
-            NEVER_AGE_NOW_MS,
-            RET_MS,
+            RewriteRetention {
+                now_ms: NEVER_AGE_NOW_MS,
+                delete_retention_ms: RET_MS,
+            },
             &active,
             4096,
         )
@@ -990,7 +991,7 @@ mod rewrite_tests {
     #[test]
     fn rewrite_drops_superseded_records() {
         let dir = tempfile::tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             0,
             vec![
@@ -999,8 +1000,8 @@ mod rewrite_tests {
                 make_record(2, Some(b"k1"), Some(b"v3")),
             ],
         );
-        let segs = vec![&seg0];
-        let out = rewrite_simple(dir.path(), &segs);
+        let segment_refs = vec![&first_segment];
+        let out = rewrite_simple(dir.path(), &segment_refs);
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
         assert2::assert!(out.new_base_offset == Offset(0));
@@ -1022,7 +1023,7 @@ mod rewrite_tests {
     #[test]
     fn rewrite_keeps_tombstone_as_latest() {
         let dir = tempfile::tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             0,
             vec![
@@ -1030,8 +1031,8 @@ mod rewrite_tests {
                 make_record(1, Some(b"k1"), None), // tombstone
             ],
         );
-        let segs = vec![&seg0];
-        let out = rewrite_simple(dir.path(), &segs);
+        let segment_refs = vec![&first_segment];
+        let out = rewrite_simple(dir.path(), &segment_refs);
         let bytes = fs::read(&out.log_swap).unwrap();
         let mut cursor = &bytes[..];
         let batch = RecordBatch::decode(&mut cursor).unwrap();
@@ -1055,7 +1056,7 @@ mod rewrite_tests {
     #[test]
     fn rewrite_preserves_absolute_offsets() {
         let dir = tempfile::tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             100,
             vec![
@@ -1064,8 +1065,8 @@ mod rewrite_tests {
                 make_record(2, Some(b"k1"), Some(b"v3")), // abs 102 — kept
             ],
         );
-        let segs = vec![&seg0];
-        let out = rewrite_simple(dir.path(), &segs);
+        let segment_refs = vec![&first_segment];
+        let out = rewrite_simple(dir.path(), &segment_refs);
         let bytes = std::fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
         assert2::assert!(out.new_base_offset == Offset(100));
@@ -1126,8 +1127,8 @@ mod rewrite_tests {
             marker2.clone(),
         ];
         let seg = write_sealed_batches(dir.path(), &[data1, marker1, data2, marker2]);
-        let segs = vec![&seg];
-        let out = rewrite_simple(dir.path(), &segs);
+        let segment_refs = vec![&seg];
+        let out = rewrite_simple(dir.path(), &segment_refs);
 
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
@@ -1141,23 +1142,25 @@ mod rewrite_tests {
     #[test]
     fn rewrite_tombstone_gets_horizon_stamp() {
         let dir = tempfile::tempdir().unwrap();
-        let seg0 = write_sealed_segment(
+        let first_segment = write_sealed_segment(
             dir.path(),
             0,
             vec![make_record(0, Some(b"k1"), None)], // tombstone, newest for k1
         );
-        let segs = vec![&seg0];
-        let map = build_offset_map(&segs).unwrap();
-        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        let segment_refs = vec![&first_segment];
+        let map = build_offset_map(&segment_refs).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segment_refs, &map).unwrap();
         let now = 5_000i64;
         let ret = 50i64;
         let out = rewrite_segments(
             dir.path(),
-            &segs,
+            &segment_refs,
             &map,
             &txn,
-            now,
-            ret,
+            RewriteRetention {
+                now_ms: now,
+                delete_retention_ms: ret,
+            },
             &HashMap::new(),
             4096,
         )
@@ -1200,17 +1203,19 @@ mod rewrite_tests {
             ..RecordBatch::default()
         };
         let seg = write_sealed_batches(dir.path(), &[marker, data]);
-        let segs = vec![&seg];
-        let map = build_offset_map(&segs).unwrap();
-        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        let segment_refs = vec![&seg];
+        let map = build_offset_map(&segment_refs).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segment_refs, &map).unwrap();
         // now=200 >= horizon 100 → marker deleted.
         let out = rewrite_segments(
             dir.path(),
-            &segs,
+            &segment_refs,
             &map,
             &txn,
-            200,
-            50,
+            RewriteRetention {
+                now_ms: 200,
+                delete_retention_ms: 50,
+            },
             &HashMap::new(),
             4096,
         )
@@ -1256,13 +1261,24 @@ mod rewrite_tests {
             ..RecordBatch::default()
         };
         let seg = write_sealed_batches(dir.path(), &[data1, data2]);
-        let segs = vec![&seg];
-        let map = build_offset_map(&segs).unwrap();
-        let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+        let segment_refs = vec![&seg];
+        let map = build_offset_map(&segment_refs).unwrap();
+        let txn = CleanedTransactionMetadata::build(&segment_refs, &map).unwrap();
         let mut active = HashMap::new();
         active.insert(ProducerId(1000), Offset(0)); // pid 1000 active, last batch base 0
-        let out =
-            rewrite_segments(dir.path(), &segs, &map, &txn, 0, RET_MS, &active, 4096).unwrap();
+        let out = rewrite_segments(
+            dir.path(),
+            &segment_refs,
+            &map,
+            &txn,
+            RewriteRetention {
+                now_ms: 0,
+                delete_retention_ms: RET_MS,
+            },
+            &active,
+            4096,
+        )
+        .unwrap();
         let bytes = fs::read(&out.log_swap).unwrap();
         let batches = decode_all(&bytes);
         assert2::assert!(out.new_base_offset == Offset(0));
@@ -1320,8 +1336,8 @@ mod rewrite_tests {
             ..RecordBatch::default()
         };
         let seg = write_sealed_batches(dir.path(), &[data0, data1]);
-        let segs = vec![&seg];
-        let out = rewrite_simple(dir.path(), &segs);
+        let segment_refs = vec![&seg];
+        let out = rewrite_simple(dir.path(), &segment_refs);
 
         // The emptied batch is re-emitted as a bare header at base_offset 100.
         let bytes = fs::read(&out.log_swap).unwrap();
@@ -1437,7 +1453,6 @@ pub fn atomic_swap(
 }
 
 #[cfg(test)]
-#[allow(clippy::similar_names)]
 mod swap_tests {
     use assert2::check;
     use crabka_ids::Offset;
@@ -1454,31 +1469,33 @@ mod swap_tests {
         // then drop the segments before atomic_swap so their file handles
         // are closed. On Windows an open file handle prevents rename/delete.
         let rewrite = {
-            let seg0 = write_sealed_segment(
+            let first_segment = write_sealed_segment(
                 dir.path(),
                 0,
                 vec![make_record(0, Some(b"k1"), Some(b"v1"))],
             );
-            let seg1 = write_sealed_segment(
+            let second_segment = write_sealed_segment(
                 dir.path(),
                 10,
                 vec![make_record(0, Some(b"k1"), Some(b"v2"))],
             );
-            let segs = vec![&seg0, &seg1];
-            let map = build_offset_map(&segs).unwrap();
-            let txn = CleanedTransactionMetadata::build(&segs, &map).unwrap();
+            let segment_refs = vec![&first_segment, &second_segment];
+            let map = build_offset_map(&segment_refs).unwrap();
+            let txn = CleanedTransactionMetadata::build(&segment_refs, &map).unwrap();
             rewrite_segments(
                 dir.path(),
-                &segs,
+                &segment_refs,
                 &map,
                 &txn,
-                0,
-                1_000,
+                RewriteRetention {
+                    now_ms: 0,
+                    delete_retention_ms: 1_000,
+                },
                 &HashMap::new(),
                 4096,
             )
             .unwrap()
-            // seg0, seg1 dropped here — file handles closed
+            // first_segment, second_segment dropped here — file handles closed
         };
         atomic_swap(dir.path(), &[Offset(0), Offset(10)], &rewrite).unwrap();
 

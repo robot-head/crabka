@@ -44,7 +44,8 @@
 //! use crabka_ids::LeaderEpoch;
 //! use crabka_remote_storage::{
 //!     IndexType, LocalTieredStorage, LogSegmentData, RemoteLogSegmentId,
-//!     RemoteLogSegmentMetadata, RemoteLogSegmentState, RemoteStorageManager, TopicIdPartition,
+//!     RemoteLogSegmentDetails, RemoteLogSegmentMetadata, RemoteLogSegmentState,
+//!     RemoteStorageManager, TopicIdPartition,
 //! };
 //! use uuid::Uuid;
 //!
@@ -61,9 +62,11 @@
 //!     1_713_000_000_000,
 //!     1,
 //!     1_713_000_000_000,
-//!     1_048_576,
-//!     RemoteLogSegmentState::CopySegmentStarted,
-//!     leader_epochs,
+//!     RemoteLogSegmentDetails::new(
+//!         1_048_576,
+//!         RemoteLogSegmentState::CopySegmentStarted,
+//!         leader_epochs,
+//!     ),
 //! )?;
 //!
 //! // The broker fills these paths from a closed local log segment.
@@ -101,9 +104,9 @@ pub use gcs::GcsConfig;
 pub use inmemory::InmemoryRemoteLogMetadataManager;
 pub use local::LocalTieredStorage;
 pub use metadata::{
-    CustomMetadata, RemoteLogSegmentId, RemoteLogSegmentMetadata, RemoteLogSegmentMetadataUpdate,
-    RemoteLogSegmentState, RemotePartitionDeleteMetadata, RemotePartitionDeleteState,
-    TopicIdPartition,
+    CustomMetadata, RemoteLogSegmentDetails, RemoteLogSegmentId, RemoteLogSegmentMetadata,
+    RemoteLogSegmentMetadataUpdate, RemoteLogSegmentState, RemotePartitionDeleteMetadata,
+    RemotePartitionDeleteState, TopicIdPartition,
 };
 pub use metadata_manager::RemoteLogMetadataManager;
 pub use s3::{

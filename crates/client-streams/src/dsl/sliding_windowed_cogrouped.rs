@@ -105,9 +105,7 @@ where
                 store_for_reg.clone(),
                 ks.clone(),
                 vs.clone(),
-                size,
-                window_size,
-                grace,
+                (size, window_size, grace),
                 procs,
             );
             state.topology.mark_store_caching(&store_for_reg, caching);
@@ -115,8 +113,8 @@ where
         let merge_id = lower_cogroup::<K, VOut, Windowed<K>>(
             &self.builder,
             self.inputs,
-            store_name.clone(),
-            spec,
+            &store_name,
+            &spec,
             logging,
             registrar,
         );

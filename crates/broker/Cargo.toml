@@ -35,7 +35,6 @@ name = "crabka-broker"
 path = "src/bin/broker.rs"
 
 [dependencies]
-assert2 = { workspace = true }
 crabka-audit = { workspace = true }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-telemetry = { version = "0.3.8", path = "../telemetry" }
@@ -92,6 +91,7 @@ jsonpath-rust = { workspace = true }
 base64.workspace = true
 # Bounded decision cache for the OPA authorizer.
 lru.workspace = true
+num-traits.workspace = true
 # Zero-copy: cast remote-tier OffsetIndex/TimeIndex byte buffers
 # to typed entry slices instead of per-entry from_be_bytes() in a hot path.
 zerocopy.workspace = true
@@ -129,6 +129,7 @@ rcgen = { workspace = true }
 nix = { version = "0.31", default-features = false, features = ["zerocopy"] }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 # Trait mocks for the KIP-939 reaper orchestration unit tests
 # (`txn::coordinator::ReaperBackend`).
 mockall = { workspace = true }

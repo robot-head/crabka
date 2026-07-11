@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,10 +26,7 @@ pub struct DescribeShareGroupOffsetsResponse {
 impl Encode for DescribeShareGroupOffsetsResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -57,8 +54,7 @@ impl Encode for DescribeShareGroupOffsetsResponse {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
                 let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -73,10 +69,7 @@ impl Encode for DescribeShareGroupOffsetsResponse {
 impl Decode<'_> for DescribeShareGroupOffsetsResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -88,9 +81,7 @@ impl Decode<'_> for DescribeShareGroupOffsetsResponse {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(DescribeShareGroupOffsetsResponseGroup::decode(
-                        buf, version,
-                    )?);
+                    v.push(DescribeShareGroupOffsetsResponseGroup::decode(buf, version)?);
                 }
                 v
             };
@@ -127,11 +118,7 @@ impl Encode for DescribeShareGroupOffsetsResponseGroup {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.group_id);
-            } else {
-                put_string(buf, &self.group_id);
-            }
+            if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) }
         }
         if version >= 0 {
             {
@@ -161,16 +148,11 @@ impl Encode for DescribeShareGroupOffsetsResponseGroup {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.group_id)
-            } else {
-                string_len(&self.group_id)
-            };
+            n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) };
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -197,20 +179,14 @@ impl Decode<'_> for DescribeShareGroupOffsetsResponseGroup {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.group_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.topics = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(DescribeShareGroupOffsetsResponseTopic::decode(
-                        buf, version,
-                    )?);
+                    v.push(DescribeShareGroupOffsetsResponseTopic::decode(buf, version)?);
                 }
                 v
             };
@@ -219,11 +195,7 @@ impl Decode<'_> for DescribeShareGroupOffsetsResponseGroup {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -262,11 +234,7 @@ impl Encode for DescribeShareGroupOffsetsResponseTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.topic_name);
-            } else {
-                put_string(buf, &self.topic_name);
-            }
+            if flex { put_compact_string(buf, &self.topic_name) } else { put_string(buf, &self.topic_name) }
         }
         if version >= 0 {
             crate::primitives::uuid::put_uuid(buf, self.topic_id);
@@ -289,23 +257,15 @@ impl Encode for DescribeShareGroupOffsetsResponseTopic {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.topic_name)
-            } else {
-                string_len(&self.topic_name)
-            };
+            n += if flex { compact_string_len(&self.topic_name) } else { string_len(&self.topic_name) };
         }
         if version >= 0 {
             n += 16;
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -321,11 +281,7 @@ impl Decode<'_> for DescribeShareGroupOffsetsResponseTopic {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.topic_name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.topic_name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
@@ -335,9 +291,7 @@ impl Decode<'_> for DescribeShareGroupOffsetsResponseTopic {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(DescribeShareGroupOffsetsResponsePartition::decode(
-                        buf, version,
-                    )?);
+                    v.push(DescribeShareGroupOffsetsResponsePartition::decode(buf, version)?);
                 }
                 v
             };
@@ -360,9 +314,7 @@ impl DescribeShareGroupOffsetsResponseTopic {
             m.topic_id = crate::primitives::uuid::Uuid([1u8; 16]);
         }
         if version >= 0 {
-            m.partitions = vec![DescribeShareGroupOffsetsResponsePartition::populated(
-                version,
-            )];
+            m.partitions = vec![DescribeShareGroupOffsetsResponsePartition::populated(version)];
         }
         m
     }
@@ -386,7 +338,7 @@ impl Default for DescribeShareGroupOffsetsResponsePartition {
             lag: -1i64,
             error_code: 0i16,
             error_message: None,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -473,11 +425,7 @@ impl Decode<'_> for DescribeShareGroupOffsetsResponsePartition {
             out.error_code = get_i16(buf)?;
         }
         if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -515,7 +463,7 @@ impl DescribeShareGroupOffsetsResponsePartition {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("groups".to_string(), ::serde_json::Value::Array(vec![]));

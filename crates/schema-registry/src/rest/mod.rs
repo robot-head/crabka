@@ -15,6 +15,8 @@ use std::sync::Arc;
 
 use axum::{
     Router,
+    extract::{Path, Query, State},
+    response::Response,
     routing::{get, post},
 };
 
@@ -31,6 +33,48 @@ pub struct AppState {
 pub struct DeletedQ {
     #[serde(default)]
     pub deleted: bool,
+}
+
+fn schemas_types(state: State<AppState>) -> std::future::Ready<Response> {
+    std::future::ready(schemas::types(state))
+}
+
+fn list_schemas(state: State<AppState>, query: Query<DeletedQ>) -> std::future::Ready<Response> {
+    std::future::ready(schemas::list_schemas(state, query))
+}
+
+fn schema_versions(
+    state: State<AppState>,
+    id: Path<i32>,
+    query: Query<DeletedQ>,
+) -> std::future::Ready<Result<Response, SrError>> {
+    std::future::ready(schemas::get_by_id_versions(state, id, query))
+}
+
+fn list_subjects(state: State<AppState>, query: Query<DeletedQ>) -> std::future::Ready<Response> {
+    std::future::ready(subjects::list(state, query))
+}
+
+fn global_mode(state: State<AppState>) -> std::future::Ready<Response> {
+    std::future::ready(mode::get_global(state))
+}
+
+fn subject_mode(
+    state: State<AppState>,
+    subject: Path<String>,
+) -> std::future::Ready<Result<Response, SrError>> {
+    std::future::ready(mode::get_subject(state, subject))
+}
+
+fn global_config(state: State<AppState>) -> std::future::Ready<Response> {
+    std::future::ready(config::get_global(state))
+}
+
+fn subject_config(
+    state: State<AppState>,
+    subject: Path<String>,
+) -> std::future::Ready<Result<Response, SrError>> {
+    std::future::ready(config::get_subject(state, subject))
 }
 
 /// `latest` -> `None`; a positive integer -> `Some(n)`; else 42202.
@@ -54,20 +98,17 @@ pub fn router(state: AppState) -> Router {
             "/",
             get(|| async { response::ok_json(&serde_json::json!({})) }),
         )
-        .route("/schemas/types", get(schemas::types))
-        .route("/schemas", get(schemas::list_schemas))
+        .route("/schemas/types", get(schemas_types))
+        .route("/schemas", get(list_schemas))
         .route("/schemas/import", post(import::file_descriptor_set))
         .route("/schemas/ids/{id}", get(schemas::get_by_id))
-        .route(
-            "/schemas/ids/{id}/versions",
-            get(schemas::get_by_id_versions),
-        )
+        .route("/schemas/ids/{id}/versions", get(schema_versions))
         .route("/schemas/ids/{id}/schema", get(schemas::get_by_id_schema))
         .route(
             "/schemas/ids/{id}/subjects",
             get(schemas::get_by_id_subjects),
         )
-        .route("/subjects", get(subjects::list))
+        .route("/subjects", get(list_subjects))
         .route(
             "/subjects/{subject}",
             post(subjects::lookup).delete(delete::delete_subject),
@@ -88,17 +129,17 @@ pub fn router(state: AppState) -> Router {
             "/subjects/{subject}/versions/{version}/referencedby",
             get(subjects::referencedby),
         )
-        .route("/mode", get(mode::get_global).put(mode::put_global))
+        .route("/mode", get(global_mode).put(mode::put_global))
         .route(
             "/mode/{subject}",
-            get(mode::get_subject)
+            get(subject_mode)
                 .put(mode::put_subject)
                 .delete(mode::delete_subject),
         )
-        .route("/config", get(config::get_global).put(config::put_global))
+        .route("/config", get(global_config).put(config::put_global))
         .route(
             "/config/{subject}",
-            get(config::get_subject)
+            get(subject_config)
                 .put(config::put_subject)
                 .delete(config::delete_subject),
         )

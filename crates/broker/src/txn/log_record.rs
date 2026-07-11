@@ -268,7 +268,7 @@ pub(crate) fn decode_key(bytes: &[u8]) -> Result<String, BrokerError> {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -312,44 +312,35 @@ mod tests {
         }
     }
 
-    fn entry_projection(
-        e: &TxnEntry,
-    ) -> (
-        &str,
-        ProducerId,
-        i16,
-        TxnState,
-        i32,
-        &HashSet<TopicPartition>,
-        ProducerId,
-        ProducerId,
-        i64,
-        i64,
-    ) {
-        (
-            &e.transactional_id,
-            e.producer_id,
-            e.producer_epoch,
-            e.state,
-            e.txn_timeout_ms,
-            &e.partitions,
-            e.prev_producer_id,
-            e.next_producer_id,
-            e.last_update_ms,
-            e.start_ms,
-        )
-    }
-
     #[test]
     fn sample_bytes_decode() {
         let entry = decode_value(SAMPLE, "my-txn-id".into()).unwrap();
-        check!(entry_projection(&entry) == entry_projection(&sample_entry()));
+        check!(entry.producer_id == 0);
+        check!(entry.producer_epoch == 0);
+        check!(entry.txn_timeout_ms == 60_000);
+        check!(entry.state == TxnState::Ongoing);
+        check!(entry.prev_producer_id == -1);
+        check!(entry.next_producer_id == -1);
+        check!(entry.last_update_ms == SAMPLE_TS);
+        check!(entry.start_ms == SAMPLE_TS);
+        let expected: HashSet<TopicPartition> = [TopicPartition {
+            topic: "txtest".into(),
+            partition: PartitionIndex(0),
+        }]
+        .into_iter()
+        .collect();
+        check!(entry.partitions == expected);
     }
 
     #[test]
     fn sample_bytes_encode_byte_identical() {
         let encoded = encode_value(&sample_entry(), true);
-        assert2::assert!(encoded == SAMPLE);
+        assert!(
+            encoded == SAMPLE,
+            "encode_value did not byte-match SAMPLE\n  expected: {:02x?}\n  actual:   {:02x?}",
+            SAMPLE,
+            encoded
+        );
     }
 
     #[test]
@@ -383,11 +374,19 @@ mod tests {
         let first = encode_value(&entry, true);
         let decoded = decode_value(&first, "tid".into()).unwrap();
 
-        check!(entry_projection(&decoded) == entry_projection(&entry));
+        check!(decoded.producer_id == 42);
+        check!(decoded.producer_epoch == 7);
+        check!(decoded.state == TxnState::PrepareCommit);
+        check!(decoded.txn_timeout_ms == 30_000);
+        check!(decoded.prev_producer_id == 100);
+        check!(decoded.next_producer_id == 200);
+        check!(decoded.last_update_ms == 1_234_567);
+        check!(decoded.start_ms == 1_000_000);
+        check!(decoded.partitions == entry.partitions);
 
         // Re-encode is byte-identical (determinism).
         let second = encode_value(&decoded, true);
-        assert2::assert!(first == second);
+        assert!(first == second);
     }
 
     #[test]
@@ -414,21 +413,25 @@ mod tests {
 
         let encoded = encode_value(&entry, false);
         // version header is `00 00`.
-        assert2::assert!(encoded[0] == 0x00 && encoded[1] == 0x00);
+        assert!(encoded[0] == 0x00 && encoded[1] == 0x00);
 
         let decoded = decode_value(&encoded, "tid".into()).unwrap();
-        let mut expected = entry.clone();
-        expected.prev_producer_id = ProducerId(-1);
-        expected.next_producer_id = ProducerId(-1);
-        check!(entry_projection(&decoded) == entry_projection(&expected));
+        check!(decoded.producer_id == 9);
+        check!(decoded.state == TxnState::Ongoing);
+        check!(decoded.partitions == entry.partitions);
+        check!(decoded.last_update_ms == 111);
+        check!(decoded.start_ms == 222);
+        // v0 carries no tagged fields; bookkeeping ids default to -1.
+        check!(decoded.prev_producer_id == -1);
+        check!(decoded.next_producer_id == -1);
     }
 
     #[test]
     fn key_round_trip() {
         let encoded = encode_key("abc");
-        assert2::assert!(decode_key(&encoded).unwrap() == "abc");
+        assert!(decode_key(&encoded).unwrap() == "abc");
         // `00 00` version + int16 length (3) + bytes.
-        assert2::assert!(encoded == &[0x00, 0x00, 0x00, 0x03, b'a', b'b', b'c']);
+        assert!(encoded == &[0x00, 0x00, 0x00, 0x03, b'a', b'b', b'c']);
     }
 
     #[test]
@@ -457,15 +460,15 @@ mod tests {
 
         let a = make(&[("b", 2), ("a", 1), ("b", 0), ("a", 3)]);
         let b = make(&[("a", 3), ("b", 0), ("a", 1), ("b", 2)]);
-        assert2::assert!(encode_value(&a, true) == encode_value(&b, true));
-        assert2::assert!(encode_value(&a, false) == encode_value(&b, false));
+        assert!(encode_value(&a, true) == encode_value(&b, true));
+        assert!(encode_value(&a, false) == encode_value(&b, false));
     }
 
     #[test]
     fn decode_value_rejects_truncated_input() {
         // A prefix of the valid SAMPLE must error, not panic.
         for input in [&SAMPLE[..10], &SAMPLE[..1], &[][..]] {
-            assert2::assert!(decode_value(input, "t".into()).is_err());
+            assert!(decode_value(input, "t".into()).is_err());
         }
     }
 
@@ -475,14 +478,14 @@ mod tests {
         let mut bad = SAMPLE.to_vec();
         bad[0] = 0x00;
         bad[1] = 0x02; // version = 2
-        assert2::assert!(decode_value(&bad, "t".into()).is_err());
+        assert!(decode_value(&bad, "t".into()).is_err());
     }
 
     #[test]
     fn decode_value_rejects_trailing_bytes() {
         let mut extra = SAMPLE.to_vec();
         extra.push(0xff); // one trailing byte
-        assert2::assert!(decode_value(&extra, "t".into()).is_err());
+        assert!(decode_value(&extra, "t".into()).is_err());
     }
 
     #[test]
@@ -491,9 +494,9 @@ mod tests {
         // unknown version
         let mut bad = key.clone();
         bad[1] = 0x09;
-        assert2::assert!(decode_key(&bad).is_err());
+        assert!(decode_key(&bad).is_err());
         // truncated
-        assert2::assert!(decode_key(&key[..1]).is_err());
+        assert!(decode_key(&key[..1]).is_err());
     }
 
     #[test]
@@ -504,7 +507,8 @@ mod tests {
         for flexible in [false, true] {
             let bytes = encode_value(&e, flexible);
             let decoded = decode_value(&bytes, "tid".into()).expect("decode");
-            assert2::assert!(entry_projection(&decoded) == entry_projection(&e));
+            assert!(decoded.partitions.is_empty());
+            assert!(decoded.producer_id == 5);
         }
     }
 }

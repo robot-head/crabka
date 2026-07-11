@@ -51,7 +51,7 @@ mod tests {
     fn generates_uuid_when_file_absent() {
         let dir = tempfile::tempdir().unwrap();
         let id = load_or_generate(dir.path());
-        assert2::assert!(!id.is_nil());
+        assert!(!id.is_nil(), "generated UUID must not be nil");
     }
 
     #[test]
@@ -59,6 +59,6 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let id1 = load_or_generate(dir.path());
         let id2 = load_or_generate(dir.path());
-        assert2::assert!(id1 == id2);
+        assert_eq!(id1, id2, "UUID must be stable across reloads");
     }
 }

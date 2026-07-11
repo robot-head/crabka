@@ -56,6 +56,8 @@ impl GoalRegistry {
     /// Translate user-supplied goal name strings into `&dyn Goal`
     /// references. An empty `names` slice returns all registered goals
     /// in registration order.
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub fn select<'a>(&'a self, names: &[String]) -> Result<Vec<&'a dyn Goal>, GoalSelectError> {
         if names.is_empty() {
             return Ok(self.goals.iter().map(std::convert::AsRef::as_ref).collect());

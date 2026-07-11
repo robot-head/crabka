@@ -206,7 +206,7 @@ pub fn assign_nested_set(spans: &[InputSpan]) -> Vec<NestedSet> {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType;
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -247,13 +247,16 @@ mod tests {
             (COL_CHILD_COUNT, DataType::Int32),
             (COL_TRACE_DURATION, DataType::Int64),
         ] {
-            assert2::assert!(schema.column_with_name(col).unwrap().1.data_type() == &want);
+            assert!(
+                schema.column_with_name(col).unwrap().1.data_type() == &want,
+                "column: {col}"
+            );
         }
     }
 
     #[test]
     fn attr_prefix_matches_tempo_virtual_attribute_shape() {
-        assert2::assert!(ATTR_PREFIX == "attr.");
+        assert!(ATTR_PREFIX == "attr.");
     }
 
     #[test]
@@ -296,7 +299,7 @@ mod tests {
         let spans = vec![span(9, Some(99))];
         let ns = assign_nested_set(&spans);
         // dangling parent → root sentinel
-        assert2::assert!(
+        assert!(
             ns == vec![NestedSet {
                 left: 1,
                 right: 2,
@@ -309,7 +312,7 @@ mod tests {
     fn self_parented_span_keeps_input_order_root_position() {
         let spans = vec![span(1, Some(1)), span(2, None)];
         let ns = assign_nested_set(&spans);
-        assert2::assert!(
+        assert!(
             ns == vec![
                 NestedSet {
                     left: 1,
@@ -333,8 +336,8 @@ mod tests {
         let spans = vec![span(1, Some(2)), span(2, Some(1))];
         let ns = assign_nested_set(&spans);
         for entry in &ns {
-            assert2::assert!(entry.left > 0);
-            assert2::assert!(entry.left < entry.right);
+            assert!(entry.left > 0);
+            assert!(entry.left < entry.right);
         }
         check!(ns[0].parent_id == -1);
         check!(ns[1].parent_id == ns[0].left);
@@ -353,13 +356,13 @@ mod tests {
         ];
         let ns = assign_nested_set(&spans);
         // Pre-existing well-formed assignment is preserved.
-        assert2::assert!(ns[idx(&spans, 1)].left == 1);
-        assert2::assert!(ns[idx(&spans, 1)].parent_id == -1); // root: Tempo nestedSetParent sentinel
+        assert!(ns[idx(&spans, 1)].left == 1);
+        assert!(ns[idx(&spans, 1)].parent_id == -1); // root: Tempo nestedSetParent sentinel
         let root = ns[idx(&spans, 1)];
         let child = ns[idx(&spans, 4)];
-        assert2::assert!(root.left < child.left && child.right < root.right);
+        assert!(root.left < child.left && child.right < root.right);
         for entry in &ns {
-            assert2::assert!(entry.left < entry.right);
+            assert!(entry.left < entry.right);
         }
     }
 }

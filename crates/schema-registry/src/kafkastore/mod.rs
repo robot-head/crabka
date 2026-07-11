@@ -65,6 +65,8 @@ impl KafkaStore {
         fields(topic = %cfg.schemas_topic, bootstrap = %cfg.bootstrap),
         err
     )]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn start(
         cfg: &RegistryConfig,
         cancel: CancellationToken,
@@ -119,6 +121,8 @@ impl KafkaStore {
         ),
         err
     )]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn register(&self, req: RegisterSchema<'_>) -> Result<Registered, SrError> {
         let _gate = self.write_gate.lock().await;
         let RegisterSchema {
@@ -219,11 +223,15 @@ impl KafkaStore {
 
     /// Persist + apply a global compatibility level (stored, not enforced in
     /// current API surface).
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn set_global_compat(&self, level: String) -> Result<(), SrError> {
         self.set_compat(None, level).await
     }
 
     /// Persist + apply a per-subject compatibility level.
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn set_subject_compat(&self, subject: &str, level: String) -> Result<(), SrError> {
         self.set_compat(Some(subject), level).await
     }
@@ -232,6 +240,8 @@ impl KafkaStore {
     /// deleted level string (e.g. `"BACKWARD"`) or `None` if no per-subject
     /// override was set.
     #[tracing::instrument(level = "info", name = "kafkastore.delete_subject_compat", skip_all, fields(subject = %subject), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn delete_subject_compat(&self, subject: &str) -> Result<Option<String>, SrError> {
         let _gate = self.write_gate.lock().await;
         let current = self
@@ -277,6 +287,8 @@ impl KafkaStore {
 
     /// Soft-delete a version: re-emit its SCHEMA record with `deleted=true`.
     #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_version", skip_all, fields(subject = %subject, version = version.0), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn soft_delete_version(
         &self,
         subject: &str,
@@ -321,6 +333,8 @@ impl KafkaStore {
 
     /// Permanently delete a version (tombstone). Requires a prior soft delete.
     #[tracing::instrument(level = "info", name = "kafkastore.permanent_delete_version", skip_all, fields(subject = %subject, version), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn permanent_delete_version(
         &self,
         subject: &str,
@@ -364,6 +378,8 @@ impl KafkaStore {
 
     /// Soft-delete a subject (`DELETE_SUBJECT` marker). Returns the live versions.
     #[tracing::instrument(level = "info", name = "kafkastore.soft_delete_subject", skip_all, fields(subject = %subject), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn soft_delete_subject(&self, subject: &str) -> Result<Vec<SchemaVersion>, SrError> {
         let _gate = self.write_gate.lock().await;
         self.ensure_writable(subject)?;
@@ -404,6 +420,8 @@ impl KafkaStore {
     /// Permanently delete a subject (per-version tombstones). Requires a prior
     /// soft delete (no live versions remain).
     #[tracing::instrument(level = "info", name = "kafkastore.permanent_delete_subject", skip_all, fields(subject = %subject), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn permanent_delete_subject(
         &self,
         subject: &str,
@@ -448,6 +466,8 @@ impl KafkaStore {
 
     /// Set the global mode. `IMPORT` requires the registry to be empty.
     #[tracing::instrument(level = "info", name = "kafkastore.set_global_mode", skip_all, fields(mode = %mode), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn set_global_mode(&self, mode: String) -> Result<(), SrError> {
         if !VALID_MODES.contains(&mode.as_str()) {
             return Err(SrError::InvalidMode(mode));
@@ -468,6 +488,8 @@ impl KafkaStore {
 
     /// Set a per-subject mode. `IMPORT` requires the subject to have no versions.
     #[tracing::instrument(level = "info", name = "kafkastore.set_subject_mode", skip_all, fields(subject = %subject, mode = %mode), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn set_subject_mode(&self, subject: &str, mode: String) -> Result<(), SrError> {
         if !VALID_MODES.contains(&mode.as_str()) {
             return Err(SrError::InvalidMode(mode));
@@ -488,6 +510,8 @@ impl KafkaStore {
 
     /// Clear a per-subject mode override (MODE tombstone).
     #[tracing::instrument(level = "info", name = "kafkastore.clear_subject_mode", skip_all, fields(subject = %subject), err)]
+    /// # Errors
+    /// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
     pub async fn clear_subject_mode(&self, subject: &str) -> Result<(), SrError> {
         let _gate = self.write_gate.lock().await;
         let key = record::mode_key(Some(subject));

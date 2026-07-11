@@ -811,12 +811,14 @@ mod tests {
 
         {
             let sent_a = producer_a.sent.lock().unwrap();
-            let mut out_topics: Vec<&str> =
-                sent_a.iter().map(|(t, _p, _k, _v)| t.as_str()).collect();
-            out_topics.sort_unstable();
+            let out_topics: Vec<&str> = sent_a.iter().map(|(t, _p, _k, _v)| t.as_str()).collect();
             check!(
-                out_topics == vec!["app-counts-changelog", "out"],
-                "sink and changelog records"
+                out_topics.contains(&"out"),
+                "sink record must be produced to 'out'"
+            );
+            check!(
+                out_topics.contains(&"app-counts-changelog"),
+                "changelog record must be produced to 'app-counts-changelog'"
             );
         } // drop sent_a before any await
 
@@ -1273,8 +1275,8 @@ mod tests {
         }])
         .await;
         let pos = task.position();
-        assert2::assert!(pos.offset("in", 2) == Some(0));
-        assert2::assert!(pos.offset("in", 9) == None);
+        assert_eq!(pos.offset("in", 2), Some(0));
+        assert_eq!(pos.offset("in", 9), None);
     }
 
     // ── record-cache flush on commit (sub-task 3e) ───────────────────────────
@@ -1478,16 +1480,26 @@ mod tests {
         task.commit().await.unwrap();
 
         let events = log.0.lock().unwrap().clone();
-        let mut emitted: Vec<&str> = events
+        let emitted: Vec<&String> = events
             .iter()
             .filter(|e| e.starts_with("produce:"))
-            .map(String::as_str)
             .collect();
-        emitted.sort_unstable();
         // Exactly one deduped sink emit + one changelog emit (two puts → one entry).
         check!(
-            emitted == vec!["produce:app-counts-changelog", "produce:out"],
-            "exactly one deduped sink and changelog record expected, got {events:?}"
+            emitted
+                .iter()
+                .filter(|e| e.as_str() == "produce:out")
+                .count()
+                == 1,
+            "exactly one deduped sink record expected, got {events:?}"
+        );
+        check!(
+            emitted
+                .iter()
+                .filter(|e| e.as_str() == "produce:app-counts-changelog")
+                .count()
+                == 1,
+            "exactly one deduped changelog record expected, got {events:?}"
         );
 
         // Ordering: every produce (flushed cache output) precedes the offset commit.

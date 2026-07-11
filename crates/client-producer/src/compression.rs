@@ -42,6 +42,8 @@ impl Compression {
 
     /// Compress the encoded record body. Returns the byte payload that
     /// goes into the `RecordBatch.records_body` slot.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn compress(self, raw: &[u8]) -> Result<Bytes, ProducerError> {
         Ok(crabka_compression::compress(self.compression_type(), raw)?)
     }

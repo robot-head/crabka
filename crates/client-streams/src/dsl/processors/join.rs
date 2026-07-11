@@ -189,15 +189,13 @@ mod tests {
             _pd: PhantomData::<fn() -> (String, i64, i64, i64)>,
         };
 
-        for (name, key, value, expected) in [
-            ("table hit", "a", 1, Some(11)),
-            ("table miss", "b", 2, None),
-        ] {
-            check!(
-                run_one(&mut proc, &mut stores, key, value).await == expected,
-                "case {name}"
-            );
-        }
+        // hit: ("a", 1) — store has 10 → 1 + 10 = 11
+        let hit = run_one(&mut proc, &mut stores, "a", 1).await;
+        check!(hit == Some(11));
+
+        // miss: ("b", 2) — store has no "b" → NOT forwarded
+        let miss = run_one(&mut proc, &mut stores, "b", 2).await;
+        check!(miss == None);
     }
 
     #[tokio::test]
@@ -210,15 +208,13 @@ mod tests {
             _pd: PhantomData::<fn() -> (String, i64, i64, i64)>,
         };
 
-        for (name, key, value, expected) in [
-            ("table hit", "a", 1, Some(11)),
-            ("left miss", "b", 2, Some(2)),
-        ] {
-            check!(
-                run_one(&mut proc, &mut stores, key, value).await == expected,
-                "case {name}"
-            );
-        }
+        // hit: ("a", 1) → 1 + 10 = 11
+        let hit = run_one(&mut proc, &mut stores, "a", 1).await;
+        check!(hit == Some(11));
+
+        // miss: ("b", 2) — no table entry → joiner gets None → 2 + 0 = 2
+        let miss = run_one(&mut proc, &mut stores, "b", 2).await;
+        check!(miss == Some(2));
     }
 
     /// Versioned store "vt" with key "a": value 10 `valid_from=100`, value 20 `valid_from=200`.
@@ -290,16 +286,9 @@ mod tests {
             emit_on_miss: false,
             _pd: PhantomData::<fn() -> (String, i64, i64, i64)>,
         };
-        for (name, timestamp, expected) in [
-            ("first version", 150, Some(11)),
-            ("second version", 250, Some(21)),
-            ("before history", 50, None),
-        ] {
-            check!(
-                run_one_asof(&mut proc, &mut stores, "a", 1, timestamp).await == expected,
-                "case {name}"
-            );
-        }
+        check!(run_one_asof(&mut proc, &mut stores, "a", 1, 150).await == Some(11));
+        check!(run_one_asof(&mut proc, &mut stores, "a", 1, 250).await == Some(21));
+        check!(run_one_asof(&mut proc, &mut stores, "a", 1, 50).await == None);
     }
 
     #[tokio::test]

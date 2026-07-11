@@ -30,6 +30,8 @@ impl OverridesProvider {
     ///
     /// Tenant maps are partial by design: `#[serde(default)]` below represents
     /// sparse per-tenant overrides, not backwards-compatibility migration.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn from_yaml(yaml: &str) -> Result<Self, OverridesError> {
         let runtime: RuntimeFile =
             serde_yaml::from_str(yaml).map_err(|error| OverridesError::Yaml(error.to_string()))?;
@@ -127,6 +129,7 @@ fn merge_limits(base: &Limits, partial: &PartialLimits) -> Limits {
 
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -145,31 +148,29 @@ overrides:
     fn tenant_override_merges_over_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         let a = p.for_tenant("tenant-a");
-        assert2::assert!((a.ingestion_rate - 500.0).abs() < f64::EPSILON);
-        assert2::assert!(a.max_global_series_per_user == 1000);
-        assert2::assert!(a.max_label_name_length == Limits::default().max_label_name_length);
+        check!((a.ingestion_rate - 500.0).abs() < f64::EPSILON);
+        check!(a.max_global_series_per_user == 1000);
+        check!(a.max_label_name_length == Limits::default().max_label_name_length);
     }
 
     #[test]
     fn partial_override_keeps_other_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
         let b = p.for_tenant("tenant-b");
-        assert2::assert!(b.max_label_value_length == 64);
-        assert2::assert!(
-            (b.ingestion_rate - Limits::default().ingestion_rate).abs() < f64::EPSILON
-        );
+        assert!(b.max_label_value_length == 64);
+        assert!((b.ingestion_rate - Limits::default().ingestion_rate).abs() < f64::EPSILON);
     }
 
     #[test]
     fn parses_out_of_order_window_override() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
-        assert2::assert!(p.for_tenant("tenant-c").out_of_order_time_window_ms == 1500);
-        assert2::assert!(p.for_tenant("tenant-a").out_of_order_time_window_ms == 0);
+        assert!(p.for_tenant("tenant-c").out_of_order_time_window_ms == 1500);
+        assert!(p.for_tenant("tenant-a").out_of_order_time_window_ms == 0);
     }
 
     #[test]
     fn unlisted_tenant_gets_defaults() {
         let p = OverridesProvider::from_yaml(YAML).unwrap();
-        assert2::assert!(*p.for_tenant("tenant-z") == Limits::default());
+        assert!(*p.for_tenant("tenant-z") == Limits::default());
     }
 }

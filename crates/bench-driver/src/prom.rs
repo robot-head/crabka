@@ -4,6 +4,8 @@
 
 use std::{collections::BTreeMap, time::Duration};
 
+use crate::numeric::{nonnegative_f64_to_u64, to_f64};
+
 use anyhow::{Context, Result, anyhow};
 use serde::Deserialize;
 
@@ -20,6 +22,8 @@ pub struct PromClient {
 impl PromClient {
     /// `base_url` is the Prometheus root, e.g. `http://prom.monitoring.svc:9090`.
     /// No trailing slash required.
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn new(base_url: impl Into<String>) -> Result<Self> {
         let http = reqwest::Client::builder()
             .timeout(Duration::from_secs(15))
@@ -34,6 +38,8 @@ impl PromClient {
     /// Execute a `PromQL` instant query. Returns the first scalar value
     /// across all returned series, summed. Returns `None` when the result
     /// vector is empty.
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub async fn query_scalar_sum(&self, query: &str) -> Result<Option<f64>> {
         let url = format!("{}/api/v1/query", self.base_url);
         let body: PromResp = self
@@ -77,6 +83,8 @@ impl PromClient {
 
     /// Execute a `PromQL` range query, summing across all returned series per
     /// timestamp. Returns `(unix_seconds, value)` points on the step grid.
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub async fn query_range_sum(
         &self,
         query: &str,
@@ -122,14 +130,16 @@ impl PromClient {
             if let Some(vals) = &r.values {
                 for (ts, v) in vals {
                     if let Ok(parsed) = v.parse::<f64>() {
-                        *by_ts.entry((ts * 1000.0).round() as u64).or_insert(0.0) += parsed;
+                        *by_ts
+                            .entry(nonnegative_f64_to_u64((ts * 1000.0).round()))
+                            .or_insert(0.0) += parsed;
                     }
                 }
             }
         }
         Ok(by_ts
             .into_iter()
-            .map(|(ts_ms, v)| (ts_ms as f64 / 1000.0, v))
+            .map(|(ts_ms, v)| (to_f64(ts_ms) / 1000.0, v))
             .collect())
     }
 
@@ -137,6 +147,8 @@ impl PromClient {
     /// graphing values over the test. CPU is a 1-minute `rate()` (in cores),
     /// memory is the summed working set. Aligned onto a single `step_s` grid;
     /// `t_offset_ms` is relative to `start_s`.
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub async fn capture_resource_series(
         &self,
         stack: Stack,
@@ -161,18 +173,24 @@ impl PromClient {
             .await
             .unwrap_or_default();
 
-        let start_ms = (start_s * 1000.0).round() as u64;
+        let range_start_ms = nonnegative_f64_to_u64((start_s * 1000.0).round());
         let mut by_ts: BTreeMap<u64, (f64, u64)> = BTreeMap::new();
         for (ts, v) in cpu {
-            by_ts.entry((ts * 1000.0).round() as u64).or_default().0 = v;
+            by_ts
+                .entry(nonnegative_f64_to_u64((ts * 1000.0).round()))
+                .or_default()
+                .0 = v;
         }
         for (ts, v) in mem {
-            by_ts.entry((ts * 1000.0).round() as u64).or_default().1 = v as u64;
+            by_ts
+                .entry(nonnegative_f64_to_u64((ts * 1000.0).round()))
+                .or_default()
+                .1 = nonnegative_f64_to_u64(v);
         }
         Ok(by_ts
             .into_iter()
             .map(|(ts_ms, (cpu_cores, mem))| BrokerSample {
-                t_offset_ms: TimeOffsetMs(ts_ms.saturating_sub(start_ms)),
+                t_offset_ms: TimeOffsetMs(ts_ms.saturating_sub(range_start_ms)),
                 cpu_cores,
                 mem_working_set_bytes: mem,
             })
@@ -182,6 +200,8 @@ impl PromClient {
     /// Capture broker resource usage for the given stack over a window
     /// ending now. `window_s` should be slightly larger than the measured
     /// scenario duration so the `rate()` window doesn't tail off.
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub async fn capture_resource(
         &self,
         stack: Stack,
@@ -219,7 +239,8 @@ impl PromClient {
         );
 
         let broker_cpu_seconds = self.query_scalar_sum(&cpu_query).await?.unwrap_or(0.0);
-        let mem_working = self.query_scalar_sum(&rss_query).await?.unwrap_or(0.0) as u64;
+        let mem_working =
+            nonnegative_f64_to_u64(self.query_scalar_sum(&rss_query).await?.unwrap_or(0.0));
 
         let mut res = Resource {
             broker_cpu_seconds,
@@ -228,7 +249,7 @@ impl PromClient {
             jvm_nonheap_used_bytes: None,
             kafka_page_cache_approx_bytes: None,
             msgs_per_cpu_core: if broker_cpu_seconds > 0.0 {
-                msgs_produced.0 as f64 / broker_cpu_seconds
+                to_f64(msgs_produced.0) / broker_cpu_seconds
             } else {
                 0.0
             },
@@ -247,12 +268,13 @@ impl PromClient {
             let nonheap_q = format!(
                 "max_over_time(sum(jvm_memory_used_bytes{{namespace=\"{namespace}\",pod=~\"{pod_re}\",area=\"nonheap\"}})[{win}s:15s])"
             );
-            let heap = self.query_scalar_sum(&heap_q).await?.unwrap_or(0.0) as u64;
-            let nonheap = self.query_scalar_sum(&nonheap_q).await?.unwrap_or(0.0) as u64;
+            let heap = nonnegative_f64_to_u64(self.query_scalar_sum(&heap_q).await?.unwrap_or(0.0));
+            let nonheap =
+                nonnegative_f64_to_u64(self.query_scalar_sum(&nonheap_q).await?.unwrap_or(0.0));
             res.jvm_heap_used_bytes = Some(heap);
             res.jvm_nonheap_used_bytes = Some(nonheap);
-            res.kafka_page_cache_approx_bytes =
-                Some(mem_working as i64 - heap as i64 - nonheap as i64);
+            let page_cache = mem_working.saturating_sub(heap).saturating_sub(nonheap);
+            res.kafka_page_cache_approx_bytes = Some(i64::try_from(page_cache).unwrap_or(i64::MAX));
         }
 
         Ok(res)

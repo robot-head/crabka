@@ -5,7 +5,7 @@ static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 use std::{net::SocketAddr, process::ExitCode, sync::Arc, time::Duration};
 
 use arc_swap::ArcSwap;
-use clap::{ArgAction, Parser, ValueEnum};
+use clap::{ArgAction, Args, Parser, ValueEnum};
 use crabka_blockstore::{BlockStore, BlockWriter, PromotedSpanAttr, TraceIndex};
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_producer::Producer;
@@ -39,10 +39,6 @@ const WAL_FETCH_MAX_BYTES: i32 = 2 * 1024 * 1024;
 const WAL_FETCH_PARTITION_MAX_BYTES: i32 = 256 * 1024;
 
 #[derive(Debug, Parser)]
-#[expect(
-    clippy::struct_excessive_bools,
-    reason = "The role-selectable service CLI intentionally exposes independent feature flags"
-)]
 #[command(name = "crabka-traces")]
 #[command(about = "Tempo-compatible traces service for Crabka")]
 struct Cli {
@@ -95,12 +91,8 @@ struct Cli {
     #[arg(long)]
     #[arg(value_delimiter = ',')]
     histogram_buckets_ns: Option<Vec<f64>>,
-    #[arg(long)]
-    enable_target_info: bool,
-    #[arg(long)]
-    enable_status_message: bool,
-    #[arg(long)]
-    enable_messaging_system_latency: bool,
+    #[command(flatten)]
+    metrics: MetricsFlags,
     #[arg(long, default_value_t = 0)]
     compaction_start_ns: i64,
     #[arg(long, default_value_t = i64::MAX)]
@@ -137,6 +129,16 @@ struct Cli {
     max_decompressed_bytes: usize,
     #[arg(long)]
     config: Option<String>,
+}
+
+#[derive(Debug, Args)]
+struct MetricsFlags {
+    #[arg(long)]
+    enable_target_info: bool,
+    #[arg(long)]
+    enable_status_message: bool,
+    #[arg(long)]
+    enable_messaging_system_latency: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, ValueEnum)]
@@ -824,9 +826,9 @@ fn apply_metrics_generator_cli_overrides(cfg: &mut MetricsGenConfig, cli: &Cli) 
     if let Some(buckets) = &cli.histogram_buckets_ns {
         cfg.histogram_buckets_ns.clone_from(buckets);
     }
-    cfg.enable_target_info |= cli.enable_target_info;
-    cfg.enable_status_message |= cli.enable_status_message;
-    cfg.enable_messaging_system_latency |= cli.enable_messaging_system_latency;
+    cfg.enable_target_info |= cli.metrics.enable_target_info;
+    cfg.enable_status_message |= cli.metrics.enable_status_message;
+    cfg.enable_messaging_system_latency |= cli.metrics.enable_messaging_system_latency;
 }
 
 async fn wal_consumer(
@@ -1401,9 +1403,9 @@ mod tests {
 
         check!(
             (
-                cli.enable_target_info,
-                cli.enable_status_message,
-                cli.enable_messaging_system_latency,
+                cli.metrics.enable_target_info,
+                cli.metrics.enable_status_message,
+                cli.metrics.enable_messaging_system_latency,
             ) == (true, true, true)
         );
     }

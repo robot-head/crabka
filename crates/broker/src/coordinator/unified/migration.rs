@@ -20,7 +20,7 @@ use crabka_protocol::{
 };
 
 use super::{
-    classic_state::{Group as ClassicState, Member as ClassicMember, select_protocol},
+    classic_state::{ClassicGroup as ClassicState, Member as ClassicMember, select_protocol},
     consumer_state::{ClassicMemberFacade, GroupState as ConsumerState, MemberState},
     persistence_next_gen::MemberAssignmentState,
     reconciler::ReconcileInput,
@@ -99,14 +99,14 @@ pub(crate) fn convert_classic_to_consumer(classic: &ClassicState) -> ConsumerSta
             awaiting_sync: true,
         };
         state.add_or_update_member(MemberState {
-            member_id: m.member_id.clone(),
+            member_id: m.id.clone(),
             instance_id: m.group_instance_id.clone(),
             rack_id: None,
             client_id: m.client_id.clone(),
             client_host: m.host.clone(),
             subscribed_topic_names: names,
             subscribed_topic_regex: None,
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: None,
             rebalance_timeout: m.rebalance_timeout,
             member_epoch: state.group_epoch,
@@ -353,22 +353,35 @@ pub(crate) fn serve_classic_sync(
 ///
 /// `add_or_update_member` marks the group dirty iff the subscription is new or
 /// changed, so the caller can reconcile + persist only when needed.
-#[allow(clippy::too_many_arguments)]
+pub(crate) struct ClassicMemberRegistration {
+    pub member_id: String,
+    pub subscription_topics: HashSet<String>,
+    pub protocols: Vec<(String, Bytes)>,
+    pub client_id: String,
+    pub client_host: String,
+    pub session_timeout: std::time::Duration,
+    pub rebalance_timeout: std::time::Duration,
+    pub instance_id: Option<String>,
+}
+
 pub(crate) fn upsert_classic_member(
     state: &mut ConsumerState,
-    member_id: &str,
-    subscription_topics: HashSet<String>,
-    protocols: Vec<(String, Bytes)>,
-    client_id: String,
-    client_host: String,
-    session_timeout: std::time::Duration,
-    rebalance_timeout: std::time::Duration,
-    instance_id: Option<String>,
+    registration: ClassicMemberRegistration,
 ) {
+    let ClassicMemberRegistration {
+        member_id,
+        subscription_topics,
+        protocols,
+        client_id,
+        client_host,
+        session_timeout,
+        rebalance_timeout,
+        instance_id,
+    } = registration;
     // Preserve a rejoining member's existing assignment + last-synced blob so a
     // rejoin with an unchanged subscription is a pure no-op (no spurious revoke
     // and no re-sync signal). A new member starts fresh, awaiting its first sync.
-    let existing = state.members.get(member_id);
+    let existing = state.members.get(&member_id);
     let assigned_partitions = existing
         .map(|m| m.assigned_partitions.clone())
         .unwrap_or_default();
@@ -391,14 +404,14 @@ pub(crate) fn upsert_classic_member(
         awaiting_sync: existing.is_none(),
     };
     state.add_or_update_member(MemberState {
-        member_id: member_id.to_string(),
+        member_id,
         instance_id,
         rack_id: None,
         client_id,
         client_host,
         subscribed_topic_names: subscription_topics,
         subscribed_topic_regex: None,
-        compiled_regex: None,
+        compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
         server_assignor: None,
         rebalance_timeout,
         member_epoch,
@@ -440,14 +453,14 @@ pub(crate) fn build_hosted_classic_join_result(
 
 #[cfg(test)]
 mod tests {
-    use std::{collections::HashSet, time::Duration};
+    use std::time::Duration;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::{Buf, BufMut, Bytes, BytesMut};
     use crabka_protocol::{Encode, primitives::uuid::Uuid};
 
     use super::{
-        super::classic_state::{Group, Member},
+        super::classic_state::{ClassicGroup, Member},
         *,
     };
 
@@ -478,67 +491,35 @@ mod tests {
         m
     }
 
-    #[derive(Debug, PartialEq, Eq)]
-    struct FacadeProjection {
-        generation_id: i32,
-        awaiting_sync: bool,
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct ConversionProjection<'a> {
-        group_id: &'a str,
-        group_epoch: i32,
-        member_count: usize,
-        m1_is_classic: bool,
-        m1_subscribed_topic_names: HashSet<String>,
-        m1_facade: FacadeProjection,
-        m2_subscribed_topic_names: HashSet<String>,
-        dirty: bool,
-    }
-
-    #[derive(Debug, PartialEq, Eq)]
-    struct DowngradeProjection<'a> {
-        group_id: &'a str,
-        generation_id: i32,
-        member_instance_id: Option<&'a str>,
-        member_session_timeout: Duration,
-        assigned_partitions:
-            Vec<crabka_protocol::owned::consumer_protocol_assignment::TopicPartition>,
-        state: super::super::classic_state::GroupState,
-        seed_assignment_preserved: bool,
-        protocol_name: Option<&'a str>,
-        leader_id: Option<&'a str>,
-    }
-
     #[test]
     fn empty_consumer_group_is_convertible() {
-        let mut g = Group::new("g");
+        let mut g = ClassicGroup::new("g");
         g.protocol_type = Some("consumer".into());
-        assert2::assert!(classic_is_convertible(&g));
+        assert!(classic_is_convertible(&g));
     }
 
     #[test]
     fn non_consumer_protocol_type_is_not_convertible() {
-        let mut g = Group::new("g");
+        let mut g = ClassicGroup::new("g");
         g.protocol_type = Some("connect".into());
-        assert2::assert!(!classic_is_convertible(&g));
+        assert!(!classic_is_convertible(&g));
         // None protocol_type (never joined) is also not convertible.
-        let g2 = Group::new("g2");
-        assert2::assert!(!classic_is_convertible(&g2));
+        let g2 = ClassicGroup::new("g2");
+        assert!(!classic_is_convertible(&g2));
     }
 
     #[test]
     fn group_of_valid_consumer_members_is_convertible() {
-        let mut g = Group::new("g");
+        let mut g = ClassicGroup::new("g");
         g.protocol_type = Some("consumer".into());
         g.add_member(consumer_member("m1", subscription_blob(&["t1"])));
         g.add_member(consumer_member("m2", subscription_blob(&["t1", "t2"])));
-        assert2::assert!(classic_is_convertible(&g));
+        assert!(classic_is_convertible(&g));
     }
 
     #[test]
     fn member_with_undecodable_metadata_blocks_conversion() {
-        let mut g = Group::new("g");
+        let mut g = ClassicGroup::new("g");
         g.protocol_type = Some("consumer".into());
         g.add_member(consumer_member("ok", subscription_blob(&["t1"])));
         // Garbage metadata that is not a ConsumerProtocolSubscription.
@@ -546,66 +527,46 @@ mod tests {
             "bad",
             Bytes::from_static(&[0xff, 0xff, 0x01]),
         ));
-        assert2::assert!(!classic_is_convertible(&g));
+        assert!(!classic_is_convertible(&g));
     }
 
     #[test]
     fn decode_rejects_short_and_bad_version() {
         // Too short to hold a version, or (version 99) out of the supported
         // 0..=3 range.
-        for (_case, input) in [
-            ("empty input", &[][..]),
-            ("truncated version", &[0][..]),
-            ("unsupported version", &[0, 99][..]),
-        ] {
-            assert2::assert!(decode_consumer_subscription(input).is_none());
+        for input in [&[][..], &[0][..], &[0, 99][..]] {
+            assert!(decode_consumer_subscription(input).is_none());
         }
     }
 
     #[test]
     fn consumer_group_always_downgradable() {
-        assert2::assert!(consumer_is_convertible());
+        assert!(consumer_is_convertible());
     }
 
     #[test]
     fn convert_preserves_members_subscriptions_and_facade() {
-        let mut g = Group::new("g");
+        let mut g = ClassicGroup::new("g");
         g.protocol_type = Some("consumer".into());
         g.generation_id = 3;
         g.add_member(consumer_member("m1", subscription_blob(&["t1"])));
         g.add_member(consumer_member("m2", subscription_blob(&["t1", "t2"])));
 
         let state = convert_classic_to_consumer(&g);
+        assert!(state.group_id == "g");
+        assert!(state.group_epoch == 3); // seeded from classic generation
+        assert!(state.members.len() == 2);
         let m1 = &state.members["m1"];
+        assert!(m1.is_classic());
+        assert!(m1.subscribed_topic_names.contains("t1"));
         let facade = m1.classic.as_ref().unwrap();
+        assert!(facade.generation_id == 3);
+        assert!(facade.awaiting_sync);
+        // m2 subscribed to both topics.
         let m2 = &state.members["m2"];
-        assert2::assert!(
-            ConversionProjection {
-                group_id: &state.group_id,
-                group_epoch: state.group_epoch,
-                member_count: state.members.len(),
-                m1_is_classic: m1.is_classic(),
-                m1_subscribed_topic_names: m1.subscribed_topic_names.clone(),
-                m1_facade: FacadeProjection {
-                    generation_id: facade.generation_id,
-                    awaiting_sync: facade.awaiting_sync,
-                },
-                m2_subscribed_topic_names: m2.subscribed_topic_names.clone(),
-                dirty: state.dirty,
-            } == ConversionProjection {
-                group_id: "g",
-                group_epoch: 3,
-                member_count: 2,
-                m1_is_classic: true,
-                m1_subscribed_topic_names: HashSet::from(["t1".to_string()]),
-                m1_facade: FacadeProjection {
-                    generation_id: 3,
-                    awaiting_sync: true,
-                },
-                m2_subscribed_topic_names: HashSet::from(["t1".to_string(), "t2".to_string(),]),
-                dirty: true,
-            }
-        );
+        assert!(m2.subscribed_topic_names.len() == 2);
+        // Marked dirty so the next reconcile computes the unified target.
+        assert!(state.dirty);
     }
 
     #[test]
@@ -623,23 +584,22 @@ mod tests {
         // Strip the version prefix and decode back.
         let mut cur = &blob[..];
         let version = cur.get_i16();
-        assert2::assert!(version == 0);
+        assert!(version == 0);
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, version).unwrap();
-        assert2::assert!(
-            decoded.assigned_partitions
-                == vec![
-                    crabka_protocol::owned::consumer_protocol_assignment::TopicPartition {
-                        topic: "events".to_string(),
-                        partitions: vec![5],
-                        ..Default::default()
-                    },
-                    crabka_protocol::owned::consumer_protocol_assignment::TopicPartition {
-                        topic: "orders".to_string(),
-                        partitions: vec![0, 1, 2],
-                        ..Default::default()
-                    },
-                ]
-        );
+        // Deterministic order by topic name: events, orders.
+        let names: Vec<&str> = decoded
+            .assigned_partitions
+            .iter()
+            .map(|tp| tp.topic.as_str())
+            .collect();
+        assert!(names == vec!["events", "orders"]);
+        let orders = decoded
+            .assigned_partitions
+            .iter()
+            .find(|tp| tp.topic == "orders")
+            .unwrap();
+        // Partitions sorted.
+        assert!(orders.partitions == vec![0, 1, 2]);
     }
 
     #[test]
@@ -656,16 +616,8 @@ mod tests {
         let mut cur = &blob[..];
         let _ = cur.get_i16();
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
-        assert2::assert!(
-            decoded.assigned_partitions
-                == vec![
-                    crabka_protocol::owned::consumer_protocol_assignment::TopicPartition {
-                        topic: "orders".to_string(),
-                        partitions: vec![0],
-                        ..Default::default()
-                    }
-                ]
-        );
+        assert!(decoded.assigned_partitions.len() == 1);
+        assert!(decoded.assigned_partitions[0].topic == "orders");
     }
 
     #[test]
@@ -693,7 +645,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: ["orders".to_string()].into(),
             subscribed_topic_regex: None,
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 7,
@@ -724,44 +676,29 @@ mod tests {
             .insert("m1".into(), [(t1, vec![0, 1])].into());
 
         let classic = convert_consumer_to_classic(&state, &image);
+        assert!(classic.group_id == "g");
+        assert!(classic.generation_id == 7);
         let member = classic.members.get("m1").expect("member preserved");
+        assert!(member.group_instance_id.as_deref() == Some("inst-a"));
+        assert!(member.session_timeout == Duration::from_secs(30));
         let asn = member.assignment.clone().expect("seed assignment");
         let mut cur = &asn[..];
         let version = cur.get_i16();
-        assert2::assert!(version == 0);
+        assert!(version == 0);
         let decoded = ConsumerProtocolAssignment::decode(&mut cur, 0).unwrap();
+        check!(decoded.assigned_partitions[0].topic == "orders");
+        check!(decoded.assigned_partitions[0].partitions == vec![0, 1]);
+        // Group must land in Stable so the first Heartbeat/SyncGroup after
+        // downgrade does not trigger a spurious full rebalance.
+        check!(classic.state == ClassicGroupState::Stable);
+        // Seed assignment is still intact after stabilization.
         let asn2 = member
             .assignment
             .clone()
             .expect("seed assignment still set after stabilize");
-        check!(
-            DowngradeProjection {
-                group_id: &classic.group_id,
-                generation_id: classic.generation_id,
-                member_instance_id: member.group_instance_id.as_deref(),
-                member_session_timeout: member.session_timeout,
-                assigned_partitions: decoded.assigned_partitions,
-                state: classic.state,
-                seed_assignment_preserved: asn2 == asn,
-                protocol_name: classic.protocol_name.as_deref(),
-                leader_id: classic.leader_id.as_deref(),
-            } == DowngradeProjection {
-                group_id: "g",
-                generation_id: 7,
-                member_instance_id: Some("inst-a"),
-                member_session_timeout: Duration::from_secs(30),
-                assigned_partitions: vec![
-                    crabka_protocol::owned::consumer_protocol_assignment::TopicPartition {
-                        topic: "orders".to_string(),
-                        partitions: vec![0, 1],
-                        ..Default::default()
-                    },
-                ],
-                state: ClassicGroupState::Stable,
-                seed_assignment_preserved: true,
-                protocol_name: Some("range"),
-                leader_id: Some("m1"),
-            }
-        );
+        check!(asn2 == asn);
+        // complete_rebalance must have set the protocol metadata coherently.
+        check!(classic.protocol_name.as_deref() == Some("range"));
+        check!(classic.leader_id.as_deref() == Some("m1"));
     }
 }

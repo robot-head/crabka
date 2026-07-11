@@ -20,6 +20,9 @@ impl NativeResolver for AddressFallbackResolver {
     }
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn native_resolver_from_debuginfod_urls(
     urls: Vec<String>,
 ) -> Result<ChainedResolver, crate::ProfilesError> {
@@ -32,6 +35,9 @@ pub fn native_resolver_from_debuginfod_urls(
     Ok(ChainedResolver::new(resolvers))
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run(debuginfod_urls: Vec<String>) -> Result<(), crate::ProfilesError> {
     let _resolver = native_resolver_from_debuginfod_urls(debuginfod_urls.clone())?;
     tracing::info!(
@@ -54,6 +60,8 @@ fn build_label(request: &SymbolizeRequest) -> String {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
+
     use super::*;
 
     #[test]
@@ -66,8 +74,8 @@ mod tests {
             })
             .unwrap();
 
-        assert2::assert!(out[0].function.as_str() == "abc+0x42");
-        assert2::assert!(out[0].file.as_str() == "/bin/app");
+        assert!(out[0].function == "abc+0x42");
+        assert!(out[0].file == "/bin/app");
     }
 
     #[test]
@@ -86,7 +94,7 @@ mod tests {
             })
             .unwrap();
 
-        assert2::assert!(out[0].function.as_str() == "/missing/native+0x99");
-        assert2::assert!(out[0].file.as_str() == "/missing/native");
+        assert!(out[0].function == "/missing/native+0x99");
+        assert!(out[0].file == "/missing/native");
     }
 }

@@ -1,14 +1,13 @@
-#![allow(
-    clippy::default_trait_access,
-    clippy::needless_raw_string_hashes,
-    clippy::too_many_lines
-)]
-
 #[cfg(all(unix, feature = "heap-profiling"))]
 #[global_allocator]
 static ALLOC: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-use std::{net::SocketAddr, path::Path, sync::Arc, time::Duration};
+use std::{
+    net::SocketAddr,
+    path::Path,
+    sync::{Arc, Mutex},
+    time::Duration,
+};
 
 use clap::{Parser, ValueEnum};
 use crabka_blockstore::ProfileIndex;
@@ -21,7 +20,7 @@ use crabka_profiles::{
     distributor::{DistributorState, KafkaSink, serve},
     hot_store::{WalTailProfileStore, run_wal_tail},
     ingest::{RelabelConfig, TenantLimitConfig},
-    limits::OverridesProvider,
+    limits::{Limits, OverridesProvider},
     metrics::ServiceMetrics,
     query::{QuerierState, serve as serve_querier},
     query_frontend::FrontendConfig,
@@ -161,8 +160,8 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
                 sink: Arc::new(KafkaSink::new(Arc::new(producer))),
                 limits,
                 profile_overrides,
-                active_series: Default::default(),
-                ingestion_buckets: Default::default(),
+                active_series: Mutex::default(),
+                ingestion_buckets: Mutex::default(),
                 relabel: Vec::<RelabelConfig>::new(),
                 max_decompressed: 1 << 24,
                 metrics: metrics.clone(),
@@ -302,7 +301,7 @@ fn load_profiles_limits_overrides_config(
     path: Option<&Path>,
 ) -> Result<OverridesProvider, Box<dyn std::error::Error>> {
     let Some(path) = path else {
-        return Ok(OverridesProvider::new(Default::default()));
+        return Ok(OverridesProvider::new(Limits::default()));
     };
     let text = std::fs::read_to_string(path)?;
     Ok(OverridesProvider::from_yaml(&text)?)
@@ -320,7 +319,7 @@ fn spawn_wal_tail(cli: &Cli, hot: WalTailProfileStore) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use clap::Parser;
 
     use super::*;
@@ -329,14 +328,14 @@ mod tests {
     fn parses_distributor_target() {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "distributor"]).unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::Distributor));
+        assert!(matches!(cli.target, Target::Distributor));
     }
 
     #[test]
     fn parses_block_builder_target() {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "block-builder"]).unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::BlockBuilder));
+        assert!(matches!(cli.target, Target::BlockBuilder));
     }
 
     #[test]
@@ -352,15 +351,15 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(cli.block_builder_flush_records == 4096);
-        assert2::assert!(cli.block_builder_flush_max_age_ms == 60_000);
+        assert!(cli.block_builder_flush_records == 4096);
+        assert!(cli.block_builder_flush_max_age_ms == 60_000);
     }
 
     #[test]
     fn parses_querier_target() {
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::Querier));
+        assert!(matches!(cli.target, Target::Querier));
     }
 
     #[test]
@@ -374,8 +373,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::QueryFrontend));
-        assert2::assert!(cli.query_frontend_shard_ms == 30_000);
+        assert!(matches!(cli.target, Target::QueryFrontend));
+        assert!(cli.query_frontend_shard_ms == 30_000);
     }
 
     #[test]
@@ -389,7 +388,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(cli.query_wal_tail_group_id == "profiles-tail-a");
+        assert!(cli.query_wal_tail_group_id == "profiles-tail-a");
     }
 
     #[test]
@@ -403,7 +402,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(
+        assert!(
             cli.profiles_limits_overrides_config.as_deref() == Some(Path::new("overrides.yaml"))
         );
     }
@@ -419,7 +418,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(
+        assert!(
             cli.profiles_limits_overrides_config.as_deref() == Some(Path::new("overrides.yaml"))
         );
     }
@@ -435,8 +434,8 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::Compactor));
-        assert2::assert!(cli.compactor_max_blocks_per_job == 3);
+        assert!(matches!(cli.target, Target::Compactor));
+        assert!(cli.compactor_max_blocks_per_job == 3);
     }
 
     #[test]
@@ -450,7 +449,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(cli.compactor_downsample_resolution_ns == Some(60_000_000_000));
+        assert!(cli.compactor_downsample_resolution_ns == Some(60_000_000_000));
     }
 
     #[test]
@@ -459,7 +458,7 @@ mod tests {
         // explicitly opts in. The list must be empty when the flag is absent.
         let cli = Cli::try_parse_from(["crabka-profiles", "--target", "querier"]).unwrap();
 
-        assert2::assert!(cli.debuginfod_urls.is_empty());
+        assert!(cli.debuginfod_urls.is_empty());
     }
 
     #[test]
@@ -473,7 +472,7 @@ mod tests {
         ])
         .unwrap();
 
-        assert2::assert!(
+        assert!(
             cli.debuginfod_urls
                 == vec![
                     "http://one.example".to_string(),
@@ -507,8 +506,8 @@ mod tests {
 
         let config = load_tenant_limits_config(Some(&path)).unwrap();
 
-        assert2::assert!(config.default.max_label_names_per_series == 10);
-        assert2::assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
+        assert!(config.default.max_label_names_per_series == 10);
+        assert!(config.for_tenant("tenant-a").max_label_value_len == 3);
     }
 
     #[test]
@@ -517,18 +516,18 @@ mod tests {
         let path = dir.path().join("overrides.yaml");
         std::fs::write(
             &path,
-            r#"
+            r"
 overrides:
   tenant-a:
     max_query_length_secs: 30
     max_flamegraph_nodes_max: 512
-"#,
+",
         )
         .unwrap();
 
         let overrides = load_profiles_limits_overrides_config(Some(&path)).unwrap();
 
-        assert2::assert!(
+        assert!(
             *overrides.for_tenant("tenant-a")
                 == crabka_profiles::limits::Limits {
                     ingestion_rate_profiles_per_sec: 10_000.0,
@@ -552,6 +551,6 @@ overrides:
 
     #[test]
     fn rejects_unknown_target() {
-        assert2::assert!(Cli::try_parse_from(["crabka-profiles", "--target", "bogus"]).is_err());
+        assert!(Cli::try_parse_from(["crabka-profiles", "--target", "bogus"]).is_err());
     }
 }

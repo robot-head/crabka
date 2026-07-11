@@ -16,7 +16,7 @@ const STATE_TOPIC: &str = "crabka-replicator-offsets";
 /// target cluster.
 ///
 /// Each flow gets its own key (`flow_name`) within the shared compacted topic
-/// [`STATE_TOPIC`]. On restart, [`load`](Self::load) fetches the last value for
+/// the internal state topic. On restart, [`load`](Self::load) fetches the last value for
 /// that key, recovering the exact partition offsets the worker had reached.
 pub struct InternalTopicCheckpointStore {
     producer: crabka_client_producer::Producer,

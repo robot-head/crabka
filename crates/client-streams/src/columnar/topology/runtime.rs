@@ -32,10 +32,6 @@ fn to_consumed(partition: i32, batch: &FetchBatch) -> Vec<ConsumedRecord> {
 /// # Errors
 /// Returns a `StreamsClientError` if fetching, processing, producing, or flushing
 /// fails.
-#[allow(
-    clippy::too_many_arguments,
-    reason = "fetch/process/produce cycle needs topo + both I/O handles + (topic, partition, offset)"
-)]
 #[tracing::instrument(
     name = "streams.columnar.run_partition_once",
     level = "debug",
@@ -165,19 +161,15 @@ mod tests {
         let next = run_partition_once(&t, &fetcher, &producer, "in", 0, 0)
             .await
             .unwrap();
+        check!(next == 1);
         let sent = producer.sent.lock().unwrap();
+        check!(sent.len() == 1);
+        check!(sent[0].0 == "out");
         let back = PolarsIpcSerde
             .deserialize("", sent[0].2.as_ref().unwrap())
             .unwrap();
-        check!(
-            (
-                next,
-                sent.len(),
-                sent[0].0.as_str(),
-                back.height(),
-                *producer.flushed.lock().unwrap(),
-            ) == (1, 1, "out", 2, 1)
-        ); // amounts 5 and 9
+        check!(back.height() == 2); // amounts 5 and 9
+        check!(*producer.flushed.lock().unwrap() == 1);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

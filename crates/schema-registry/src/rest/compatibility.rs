@@ -37,6 +37,8 @@ pub struct VerboseQ {
     fields(subject = %subject, version = %version, verbose = q.verbose, schema_type = tracing::field::Empty, is_compatible = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn check(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,

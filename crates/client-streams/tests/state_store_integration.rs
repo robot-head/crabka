@@ -40,7 +40,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -57,7 +60,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 // ─── Counter processor ────────────────────────────────────────────────────────
@@ -228,8 +234,8 @@ async fn stateful_count_and_restart_restore() {
         .filter(|(k, _)| k == "b")
         .map(|(_, v)| *v)
         .collect();
-    assert2::assert!(a_counts == vec![1, 2]);
-    assert2::assert!(b_counts == vec![1]);
+    assert_eq!(a_counts, vec![1, 2], "a counts must be [1, 2]; got {got:?}");
+    assert_eq!(b_counts, vec![1], "b count must be [1]; got {got:?}");
 
     // ── 4. Close the first instance ───────────────────────────────────────────
     streams.close().await.unwrap();
@@ -272,7 +278,12 @@ async fn stateful_count_and_restart_restore() {
         .map(|(_, v)| *v)
         .next();
 
-    assert2::assert!(a_restart == Some(3));
+    assert_eq!(
+        a_restart,
+        Some(3),
+        "after restart-restore, 'a' count must be 3 (restore from changelog), \
+         not 1 (cold start); got {got2:?}",
+    );
 
     streams2.close().await.unwrap();
     broker.shutdown().await;

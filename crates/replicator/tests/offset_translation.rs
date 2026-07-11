@@ -18,7 +18,6 @@ use crabka_replicator::{
 };
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-#[allow(clippy::too_many_lines)]
 async fn offset_translation_never_skips_unreplicated_data() {
     // ------------------------------------------------------------------ setup
     let source = common::start_broker().await;
@@ -161,8 +160,8 @@ async fn offset_translation_never_skips_unreplicated_data() {
         .expect("no checkpoint found for (analytics, us-east.orders, 0)");
 
     // ------------------------------------------ count replicated records
-    #[allow(clippy::cast_possible_wrap)]
-    let replicated_count = common::count(&target.bootstrap, "us-east.orders").await as i64;
+    let replicated_count = i64::try_from(common::count(&target.bootstrap, "us-east.orders").await)
+        .expect("replicated record count fits in i64");
 
     println!(
         "[offset_translation] upstream={} downstream={} replicated={}",

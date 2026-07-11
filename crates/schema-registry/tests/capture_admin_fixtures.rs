@@ -20,8 +20,6 @@
 //!
 //! Re-running this test regenerates both fixture files verbatim.
 
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -175,7 +173,7 @@ impl Drop for ContainerGuard {
 // ── REST helpers ──────────────────────────────────────────────────────────────
 
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {
@@ -332,6 +330,20 @@ async fn run_admin_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_js
         "DELETE",
         "/subjects/d?permanent=true"
     );
+    results.extend(run_mode_lifecycle(http, base).await);
+    results
+}
+
+async fn run_mode_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_json::Value> {
+    let mut results = Vec::new();
+    macro_rules! step {
+        ($op:expr, $method:expr, $path:expr) => {
+            results.push(drive(http, base, $op, $method, $path, None).await)
+        };
+        ($op:expr, $method:expr, $path:expr, $body:expr) => {
+            results.push(drive(http, base, $op, $method, $path, Some($body)).await)
+        };
+    }
     // 16. Set subject `r` mode READONLY.
     step!(
         "mode_r_readonly",
@@ -378,7 +390,6 @@ async fn run_admin_lifecycle(http: &reqwest::Client, base: &str) -> Vec<serde_js
         "GET",
         "/subjects/i/versions/5/referencedby"
     );
-
     results
 }
 

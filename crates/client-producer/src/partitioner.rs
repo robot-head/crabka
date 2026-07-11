@@ -29,9 +29,8 @@ impl UniformStickyPartitioner {
             let h = murmur2(k);
             // Result is always in [0, num_partitions) which fits i32
             // because num_partitions: i32 and unsigned_abs() % u32 ≤ i32::MAX.
-            #[allow(clippy::cast_possible_wrap)]
-            let result = (h.unsigned_abs() % num_partitions.cast_unsigned()) as i32;
-            result
+            i32::try_from(h.unsigned_abs() % num_partitions.cast_unsigned())
+                .expect("partition index must fit in i32")
         } else {
             let mut s = self.sticky.lock().expect("sticky mutex poisoned");
             *s.entry(topic.to_string()).or_insert(0) % num_partitions
@@ -62,8 +61,10 @@ fn murmur2(data: &[u8]) -> i32 {
 
     let length = data.len();
     // Reference MurmurHash2 impl truncates length to u32 as part of the spec.
-    #[allow(clippy::cast_possible_truncation)]
-    let mut h: u32 = SEED ^ (length as u32);
+    let usize_u32_max = usize::try_from(u32::MAX).unwrap_or(usize::MAX);
+    let length_low =
+        u32::try_from(length & usize_u32_max).expect("masked Murmur2 input length must fit in u32");
+    let mut h: u32 = SEED ^ length_low;
 
     let chunks = data.chunks_exact(4);
     let remainder = chunks.remainder();

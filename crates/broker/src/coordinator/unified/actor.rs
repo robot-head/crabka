@@ -34,11 +34,11 @@ use tokio::{
 
 use super::{
     OffsetRecordBatchBuilder, classic_ops,
-    classic_state::{Group as ClassicState, GroupState as ClassicGroupState, OffsetEntry},
+    classic_state::{ClassicGroup as ClassicState, GroupState as ClassicGroupState, OffsetEntry},
     config::NextGenConfig,
     consumer_state::{GroupState, MemberState},
     first_join_member_id,
-    group::{Group, GroupKind},
+    group::{CoordinatorGroup, GroupKind},
     migration,
     offsets_log::OffsetsLog,
     persistence_next_gen::MemberAssignmentState,
@@ -68,16 +68,14 @@ const SESSION_EXPIRY_TICK_INTERVAL: Duration = Duration::from_secs(1);
 const FALLBACK_SESSION_TIMEOUT_MS: u64 = 30_000;
 
 /// [`FALLBACK_SESSION_TIMEOUT_MS`] as the persisted/wire `i32` field.
-#[allow(clippy::cast_possible_truncation)]
-const FALLBACK_SESSION_TIMEOUT_MS_I32: i32 = FALLBACK_SESSION_TIMEOUT_MS as i32;
+const FALLBACK_SESSION_TIMEOUT_MS_I32: i32 = 30_000;
 
 /// Fallback rebalance timeout (60 s, in ms) used when a persisted or requested
 /// `rebalance_timeout_ms` can't be represented in the target type.
 const FALLBACK_REBALANCE_TIMEOUT_MS: u64 = 60_000;
 
 /// [`FALLBACK_REBALANCE_TIMEOUT_MS`] as the persisted/wire `i32` field.
-#[allow(clippy::cast_possible_truncation)]
-const FALLBACK_REBALANCE_TIMEOUT_MS_I32: i32 = FALLBACK_REBALANCE_TIMEOUT_MS as i32;
+const FALLBACK_REBALANCE_TIMEOUT_MS_I32: i32 = 60_000;
 
 /// Fallback `heartbeat_interval_ms` (5 s — the KIP-848 default heartbeat
 /// interval) reported when the configured interval overflows the wire `i32`.
@@ -162,7 +160,7 @@ pub enum GroupActorMessage {
     // ── bootstrap / lifecycle ──
     Seed(super::GroupSeed),
     /// Replace this (classic) actor's whole `Group` with replayed state.
-    ClassicSeed(Box<Group>),
+    ClassicSeed(Box<CoordinatorGroup>),
     Shutdown(oneshot::Sender<()>),
 
     /// Test-only: flip the live `Group` to a fresh empty consumer group in
@@ -324,7 +322,7 @@ pub struct GroupActorHandle {
     /// Spawn-time protocol hint. Fixed for the actor's lifetime — a KIP-848 live
     /// migration can flip the group's kind in place after spawn, leaving this
     /// stale. It is therefore used ONLY for spawn-time wiring (the initial
-    /// `Group::new_classic`/`new_consumer`) and replay assertions; every
+    /// `CoordinatorGroup::new_classic`/`new_consumer`) and replay assertions; every
     /// routing/validation decision dispatches on the actor's LIVE `group.kind`
     /// inside the actor, never on this field.
     pub kind: GroupKindTag,
@@ -371,11 +369,395 @@ struct ParkedWaiters {
     followers: HashMap<String, oneshot::Sender<SyncResult>>,
 }
 
-#[allow(clippy::too_many_lines)]
-// one match arm per message variant; splitting hurts readability
-// cargo-mutants: long-lived actor orchestration over channels/timers; socket-free
-// state-transition helpers below carry the mutation-testable behavior.
-#[cfg_attr(test, mutants::skip)]
+#[derive(Clone, Copy)]
+struct ActorServices<'a> {
+    config: &'a NextGenConfig,
+    metadata: &'a dyn MetadataProvider,
+    offsets_log: &'a dyn OffsetsLog,
+    coordinator: &'a super::GroupCoordinator,
+}
+
+async fn handle_actor_heartbeat(
+    group: &mut CoordinatorGroup,
+    services: ActorServices<'_>,
+    request: ConsumerGroupHeartbeatRequest,
+    client_host: &str,
+    reply: oneshot::Sender<ConsumerGroupHeartbeatResponse>,
+) -> bool {
+    if group.is_classic() {
+        let convertible = group
+            .as_classic()
+            .is_some_and(migration::classic_is_convertible);
+        if !services.config.migration_policy.allows_upgrade() || !convertible {
+            let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                error_code: codes::GROUP_ID_NOT_FOUND,
+                ..Default::default()
+            });
+            return true;
+        }
+        let classic = group.as_classic().expect("classic kind");
+        let new_state = migration::convert_classic_to_consumer(classic);
+        let pending = migration::upgrade_pending_records(&new_state);
+        if flush_pending(
+            &new_state,
+            pending,
+            services.offsets_log,
+            services.coordinator,
+            chrono_now_ms(),
+        )
+        .await
+        .is_err()
+        {
+            let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                ..Default::default()
+            });
+            return false;
+        }
+        *group.kind_mut() = GroupKind::Consumer(new_state);
+    }
+
+    let Some(state) = group.as_consumer_mut() else {
+        let _ = reply.send(ConsumerGroupHeartbeatResponse {
+            error_code: codes::GROUP_ID_NOT_FOUND,
+            ..Default::default()
+        });
+        return true;
+    };
+    match handle_heartbeat(
+        state,
+        services.config,
+        services.metadata,
+        services.offsets_log,
+        services.coordinator,
+        &request,
+        client_host,
+    )
+    .await
+    {
+        Ok(response) => {
+            let _ = reply.send(response);
+        }
+        Err(error) => {
+            tracing::warn!(group_id = %group.group_id, %error,
+                "next-gen actor exiting after log-write failure");
+            let _ = reply.send(ConsumerGroupHeartbeatResponse {
+                error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
+                ..Default::default()
+            });
+            return false;
+        }
+    }
+    if let Err(error) = maybe_downgrade(
+        group,
+        services.config,
+        services.metadata,
+        services.offsets_log,
+        services.coordinator,
+    )
+    .await
+    {
+        tracing::warn!(group_id = %group.group_id, %error,
+            "next-gen actor exiting after downgrade log-write failure");
+        return false;
+    }
+    true
+}
+
+async fn handle_classic_join_message(
+    group: &mut CoordinatorGroup,
+    parked: &mut ParkedWaiters,
+    services: ActorServices<'_>,
+    request: JoinGroupRequest,
+    client_host: &str,
+    reply: oneshot::Sender<JoinResult>,
+) -> bool {
+    if let Some(state) = group.as_classic_mut() {
+        match classic_ops::handle_join(state, &request, client_host) {
+            classic_ops::JoinAction::Immediate(result) => {
+                let _ = reply.send(result);
+            }
+            classic_ops::JoinAction::Park => {
+                parked.joiners.insert(request.member_id, reply);
+            }
+            classic_ops::JoinAction::CompleteNow => {
+                parked.joiners.insert(request.member_id, reply);
+                complete_classic_rebalance(state, &mut parked.joiners, &mut parked.followers);
+            }
+        }
+        return true;
+    }
+    if group.as_consumer().is_some() {
+        return classic_join_hosted(
+            group,
+            services.config,
+            services.metadata,
+            services.offsets_log,
+            services.coordinator,
+            HostedJoin {
+                request: &request,
+                client_host,
+                reply,
+                now_ms: chrono_now_ms(),
+            },
+        )
+        .await
+        .is_ok();
+    }
+    let _ = reply.send(JoinResult {
+        error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
+        member_id: request.member_id,
+        ..JoinResult::default()
+    });
+    true
+}
+
+fn handle_classic_sync_message(
+    group: &mut CoordinatorGroup,
+    parked: &mut ParkedWaiters,
+    metadata: &dyn MetadataProvider,
+    request: SyncGroupRequest,
+    reply: oneshot::Sender<SyncResult>,
+) {
+    let Some(state) = group.as_classic_mut() else {
+        let result = group.as_consumer_mut().map_or_else(
+            || SyncResult {
+                error_code: codes::UNKNOWN_MEMBER_ID,
+                ..SyncResult::default()
+            },
+            |state| migration::serve_classic_sync(state, &request.member_id, &metadata.snapshot()),
+        );
+        let _ = reply.send(result);
+        return;
+    };
+    match classic_ops::handle_sync(state, &request) {
+        classic_ops::SyncAction::Immediate(result) => {
+            let _ = reply.send(result);
+        }
+        classic_ops::SyncAction::Park => {
+            parked.followers.insert(request.member_id, reply);
+        }
+        classic_ops::SyncAction::LeaderInstalled(result) => {
+            let _ = reply.send(result);
+            drain_parked_followers(state, &mut parked.followers);
+        }
+    }
+}
+
+async fn handle_actor_tick(
+    group: &mut CoordinatorGroup,
+    parked: &mut ParkedWaiters,
+    services: ActorServices<'_>,
+) -> bool {
+    let group_id = group.group_id.clone();
+    if let Some(state) = group.as_consumer_mut() {
+        if handle_session_tick(
+            state,
+            services.config,
+            services.metadata,
+            services.offsets_log,
+            services.coordinator,
+        )
+        .await
+        .is_err()
+        {
+            return false;
+        }
+        if let Err(error) = maybe_downgrade(
+            group,
+            services.config,
+            services.metadata,
+            services.offsets_log,
+            services.coordinator,
+        )
+        .await
+        {
+            tracing::warn!(%group_id, %error,
+                "next-gen actor exiting after tick downgrade log-write failure");
+            return false;
+        }
+    } else if let Some(state) = group.as_classic_mut() {
+        let dropped = state.expire_dead_members(Instant::now());
+        if !dropped.is_empty() {
+            tracing::info!(group = %group_id, ?dropped, "expired members; waking joiners");
+            drain_removed_classic_waiters(&dropped, &mut parked.joiners, &mut parked.followers);
+            maybe_complete_classic(state, &mut parked.joiners, &mut parked.followers);
+        }
+    }
+    true
+}
+
+fn validate_commit_message(
+    group: &CoordinatorGroup,
+    member_id: &str,
+    group_instance_id: Option<&str>,
+    generation_or_epoch: i32,
+) -> Result<(), ErrorCode> {
+    if let Some(state) = group.as_consumer() {
+        return state.validate_commit_decision(member_id, generation_or_epoch);
+    }
+    if let Some(state) = group.as_classic() {
+        return classic_ops::validate_commit(
+            state,
+            member_id,
+            group_instance_id,
+            generation_or_epoch,
+        )
+        .map_or(Ok(()), Err);
+    }
+    Ok(())
+}
+
+fn handle_classic_heartbeat_message(
+    group: &mut CoordinatorGroup,
+    metadata: &dyn MetadataProvider,
+    request: &HeartbeatRequest,
+) -> ErrorCode {
+    if let Some(state) = group.as_classic_mut() {
+        classic_ops::handle_heartbeat(state, request)
+    } else if let Some(state) = group.as_consumer_mut() {
+        migration::serve_classic_heartbeat(state, &request.member_id, &metadata.snapshot())
+    } else {
+        codes::UNKNOWN_MEMBER_ID
+    }
+}
+
+fn handle_classic_leave_message(
+    group: &mut CoordinatorGroup,
+    parked: &mut ParkedWaiters,
+    request: &LeaveGroupRequest,
+    version: i16,
+) -> Vec<MemberResponse> {
+    let Some(state) = group.as_classic_mut() else {
+        return Vec::new();
+    };
+    let before_members: Vec<String> = state.members.keys().cloned().collect();
+    let responses = classic_ops::handle_leave(state, request, version);
+    let removed: Vec<String> = before_members
+        .into_iter()
+        .filter(|member_id| !state.members.contains_key(member_id))
+        .collect();
+    drain_removed_classic_waiters(&removed, &mut parked.joiners, &mut parked.followers);
+    maybe_complete_classic(state, &mut parked.joiners, &mut parked.followers);
+    responses
+}
+
+fn inspect_any(group: &CoordinatorGroup, metadata: &dyn MetadataProvider) -> Option<GroupSnapshot> {
+    if let Some(state) = group.as_classic() {
+        Some(build_classic_view(state).snapshot())
+    } else {
+        group
+            .as_consumer()
+            .map(|state| build_consumer_snapshot(state, &metadata.snapshot()))
+    }
+}
+
+async fn handle_actor_message(
+    group: &mut CoordinatorGroup,
+    parked: &mut ParkedWaiters,
+    services: ActorServices<'_>,
+    message: GroupActorMessage,
+) -> bool {
+    match message {
+        GroupActorMessage::Heartbeat {
+            request,
+            client_host,
+            reply,
+        } => handle_actor_heartbeat(group, services, request, &client_host, reply).await,
+        GroupActorMessage::ValidateCommit {
+            member_id,
+            group_instance_id,
+            generation_or_epoch,
+            reply,
+        } => {
+            let result = validate_commit_message(
+                group,
+                &member_id,
+                group_instance_id.as_deref(),
+                generation_or_epoch,
+            );
+            let _ = reply.send(result);
+            true
+        }
+        GroupActorMessage::Describe { reply } => {
+            if let Some(state) = group.as_consumer() {
+                let _ = reply.send(build_describe(state));
+            }
+            true
+        }
+        GroupActorMessage::ClassicJoin {
+            req,
+            client_host,
+            reply,
+        } => handle_classic_join_message(group, parked, services, req, &client_host, reply).await,
+        GroupActorMessage::ClassicSync { req, reply } => {
+            handle_classic_sync_message(group, parked, services.metadata, req, reply);
+            true
+        }
+        GroupActorMessage::ClassicHeartbeat { req, reply } => {
+            let code = handle_classic_heartbeat_message(group, services.metadata, &req);
+            let _ = reply.send(code);
+            true
+        }
+        GroupActorMessage::ClassicLeave {
+            req,
+            version,
+            reply,
+        } => {
+            let responses = handle_classic_leave_message(group, parked, &req, version);
+            let _ = reply.send(responses);
+            true
+        }
+        GroupActorMessage::ClassicInspect { reply } => {
+            if let Some(state) = group.as_classic() {
+                let _ = reply.send(build_classic_view(state));
+            }
+            true
+        }
+        GroupActorMessage::InspectAny { reply } => {
+            if let Some(snapshot) = inspect_any(group, services.metadata) {
+                let _ = reply.send(snapshot);
+            }
+            true
+        }
+        GroupActorMessage::UpdateCommitted { entries, reply } => {
+            group.committed_offsets.extend(entries);
+            let _ = reply.send(());
+            true
+        }
+        GroupActorMessage::FetchCommitted { reply } => {
+            let _ = reply.send(group.committed_offsets.clone());
+            true
+        }
+        GroupActorMessage::RemoveCommitted { keys, reply } => {
+            for key in keys {
+                group.committed_offsets.remove(&key);
+            }
+            let _ = reply.send(());
+            true
+        }
+        GroupActorMessage::Seed(seed) => {
+            if let Some(state) = group.as_consumer_mut() {
+                apply_seed(state, seed);
+            }
+            true
+        }
+        GroupActorMessage::ClassicSeed(seeded) => {
+            *group = *seeded;
+            true
+        }
+        GroupActorMessage::Shutdown(reply) => {
+            let _ = reply.send(());
+            false
+        }
+        #[cfg(test)]
+        GroupActorMessage::TestForceConsumerKind => {
+            *group = CoordinatorGroup::new_consumer(group.group_id.clone());
+            true
+        }
+    }
+}
+
 async fn actor_loop(
     group_id: String,
     kind: GroupKindTag,
@@ -386,8 +768,8 @@ async fn actor_loop(
     mut rx: mpsc::Receiver<GroupActorMessage>,
 ) {
     let mut group = match kind {
-        GroupKindTag::Classic => Group::new_classic(group_id),
-        GroupKindTag::Consumer => Group::new_consumer(group_id),
+        GroupKindTag::Classic => CoordinatorGroup::new_classic(group_id),
+        GroupKindTag::Consumer => CoordinatorGroup::new_consumer(group_id),
     };
     let mut parked = ParkedWaiters::default();
     // A single 1-second session-expiry tick, kind-agnostic. The tick arm
@@ -411,327 +793,26 @@ async fn actor_loop(
         tokio::select! {
             msg = rx.recv() => {
                 let Some(msg) = msg else { break };
-                match msg {
-                    // ── next-gen ──
-                    GroupActorMessage::Heartbeat { request, client_host, reply } => {
-                        // KIP-848 live migration: a `ConsumerGroupHeartbeat` for a
-                        // classic group triggers an in-place UPGRADE to a next-gen
-                        // consumer group hosting the existing classic members,
-                        // provided the policy allows it and every classic member's
-                        // subscription survives translation. The upgrade batch is
-                        // atomic (k2 tombstone + full next-gen record set); the
-                        // reconcile + per-member target write happens on the
-                        // `handle_heartbeat` call below (the joining consumer's
-                        // first-join reconciles ALL members, classic facades
-                        // included, since the converted state is dirty).
-                        if group.is_classic() {
-                            let convertible = group
-                                .as_classic()
-                                .is_some_and(migration::classic_is_convertible);
-                            if config.migration_policy.allows_upgrade() && convertible {
-                                let classic = group.as_classic().expect("classic kind");
-                                let new_state = migration::convert_classic_to_consumer(classic);
-                                let pending = migration::upgrade_pending_records(&new_state);
-                                if flush_pending(
-                                    &new_state, pending, &*offsets_log, &coordinator,
-                                    chrono_now_ms(),
-                                )
-                                .await
-                                .is_err()
-                                {
-                                    let _ = reply.send(ConsumerGroupHeartbeatResponse {
-                                        error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
-                                        ..Default::default()
-                                    });
-                                    break;
-                                }
-                                *group.kind_mut() = GroupKind::Consumer(new_state);
-                            } else {
-                                // KIP-848 keeps an un-upgradable or policy-disallowed
-                                // classic group invisible to ConsumerGroupHeartbeat callers.
-                                let _ = reply.send(ConsumerGroupHeartbeatResponse {
-                                    error_code: codes::GROUP_ID_NOT_FOUND,
-                                    ..Default::default()
-                                });
-                                continue;
-                            }
-                        }
-                        let Some(state) = group.as_consumer_mut() else {
-                            let _ = reply.send(ConsumerGroupHeartbeatResponse {
-                                error_code: codes::GROUP_ID_NOT_FOUND,
-                                ..Default::default()
-                            });
-                            continue;
-                        };
-                        match handle_heartbeat(
-                            state, &config, &*metadata, &*offsets_log, &coordinator,
-                            &request, &client_host,
-                        ).await {
-                            Ok(resp) => { let _ = reply.send(resp); }
-                            Err(e) => {
-                                tracing::warn!(
-                                    group_id = %group.group_id, error = %e,
-                                    "next-gen actor exiting after log-write failure",
-                                );
-                                let _ = reply.send(ConsumerGroupHeartbeatResponse {
-                                    error_code: codes::COORDINATOR_LOAD_IN_PROGRESS,
-                                    ..Default::default()
-                                });
-                                break;
-                            }
-                        }
-                        // KIP-848 DOWNGRADE: only a leave can remove the last native
-                        // consumer member, but we re-check after every heartbeat;
-                        // maybe_downgrade is a cheap no-op while any native member
-                        // remains. The reply for this RPC is already sent above.
-                        if let Err(e) = maybe_downgrade(
-                            &mut group, &config, &*metadata, &*offsets_log, &coordinator,
-                        ).await {
-                            tracing::warn!(
-                                group_id = %group.group_id, error = %e,
-                                "next-gen actor exiting after downgrade log-write failure",
-                            );
-                            break;
-                        }
-                    }
-                    GroupActorMessage::ValidateCommit { member_id, group_instance_id, generation_or_epoch, reply } => {
-                        let result: Result<(), ErrorCode> = if let Some(s) = group.as_consumer() {
-                            s.validate_commit_decision(&member_id, generation_or_epoch)
-                        } else if let Some(s) = group.as_classic() {
-                            match classic_ops::validate_commit(s, &member_id, group_instance_id.as_deref(), generation_or_epoch) {
-                                None => Ok(()),
-                                Some(code) => Err(code),
-                            }
-                        } else {
-                            Ok(())
-                        };
-                        let _ = reply.send(result);
-                    }
-                    GroupActorMessage::Describe { reply } => {
-                        if let Some(state) = group.as_consumer() {
-                            let _ = reply.send(build_describe(state));
-                        }
-                    }
-
-                    // ── classic ──
-                    GroupActorMessage::ClassicJoin { req, client_host, reply } => {
-                        if let Some(state) = group.as_classic_mut() {
-                            match classic_ops::handle_join(state, &req, &client_host) {
-                                classic_ops::JoinAction::Immediate(result) => {
-                                    let _ = reply.send(result);
-                                }
-                                classic_ops::JoinAction::Park => {
-                                    parked.joiners.insert(req.member_id, reply);
-                                }
-                                classic_ops::JoinAction::CompleteNow => {
-                                    parked.joiners.insert(req.member_id, reply);
-                                    complete_classic_rebalance(
-                                        state,
-                                        &mut parked.joiners,
-                                        &mut parked.followers,
-                                    );
-                                }
-                            }
-                        } else if group.as_consumer().is_some() {
-                            // KIP-848 live migration: a classic member joins (or
-                            // rejoins) an upgraded consumer group. Upsert it into the
-                            // next-gen state; if its subscription is new/changed the
-                            // group is dirty → reconcile + persist the membership
-                            // change via the SAME path handle_heartbeat's first-join
-                            // uses (run_reconcile → advance_member_epoch →
-                            // snapshot_pending_after_change → flush_pending). Then
-                            // hand back a server-assigned single-member JoinGroup
-                            // result; the real assignment arrives on the next Sync.
-                            if classic_join_hosted(
-                                &mut group, &config, &*metadata, &*offsets_log,
-                                &coordinator, &req, &client_host, reply, chrono_now_ms(),
-                            )
-                            .await
-                            .is_err()
-                            {
-                                break;
-                            }
-                        } else {
-                            let _ = reply.send(JoinResult {
-                                error_code: codes::INCONSISTENT_GROUP_PROTOCOL,
-                                member_id: req.member_id,
-                                ..JoinResult::default()
-                            });
-                        }
-                    }
-                    GroupActorMessage::ClassicSync { req, reply } => {
-                        let Some(state) = group.as_classic_mut() else {
-                            // KIP-848 live migration: serve a hosted classic member's
-                            // SyncGroup off the reconciler's target, translated to a
-                            // ConsumerProtocolAssignment blob.
-                            if let Some(state) = group.as_consumer_mut() {
-                                let result = migration::serve_classic_sync(
-                                    state, &req.member_id, &metadata.snapshot(),
-                                );
-                                let _ = reply.send(result);
-                            } else {
-                                let _ = reply.send(SyncResult {
-                                    error_code: codes::UNKNOWN_MEMBER_ID,
-                                    ..SyncResult::default()
-                                });
-                            }
-                            continue;
-                        };
-                        match classic_ops::handle_sync(state, &req) {
-                            classic_ops::SyncAction::Immediate(result) => {
-                                let _ = reply.send(result);
-                            }
-                            classic_ops::SyncAction::Park => {
-                                parked.followers.insert(req.member_id, reply);
-                            }
-                            classic_ops::SyncAction::LeaderInstalled(result) => {
-                                let _ = reply.send(result);
-                                drain_parked_followers(state, &mut parked.followers);
-                            }
-                        }
-                    }
-                    GroupActorMessage::ClassicHeartbeat { req, reply } => {
-                        if let Some(state) = group.as_classic_mut() {
-                            let code = classic_ops::handle_heartbeat(state, &req);
-                            let _ = reply.send(code);
-                        } else if let Some(state) = group.as_consumer_mut() {
-                            // KIP-848 live migration: a classic member hosted in an
-                            // upgraded consumer group is served off the reconciler's
-                            // target. `REBALANCE_IN_PROGRESS` while its target differs
-                            // from what it last synced, else `NONE`.
-                            let code = migration::serve_classic_heartbeat(
-                                state, &req.member_id, &metadata.snapshot(),
-                            );
-                            let _ = reply.send(code);
-                        } else {
-                            let _ = reply.send(codes::UNKNOWN_MEMBER_ID);
-                        }
-                    }
-                    GroupActorMessage::ClassicLeave { req, version, reply } => {
-                        if let Some(state) = group.as_classic_mut() {
-                            let before_members: Vec<String> = state.members.keys().cloned().collect();
-                            let responses = classic_ops::handle_leave(state, &req, version);
-                            let removed: Vec<String> = before_members
-                                .into_iter()
-                                .filter(|member_id| !state.members.contains_key(member_id))
-                                .collect();
-                            drain_removed_classic_waiters(
-                                &removed,
-                                &mut parked.joiners,
-                                &mut parked.followers,
-                            );
-                            let _ = reply.send(responses);
-                            // A leave can make every survivor "joined this round"
-                            // true; complete the rebalance early if so (mirrors the
-                            // old `join_complete.notify_waiters()`).
-                            maybe_complete_classic(
-                                state,
-                                &mut parked.joiners,
-                                &mut parked.followers,
-                            );
-                        } else {
-                            let _ = reply.send(Vec::new());
-                        }
-                    }
-                    GroupActorMessage::ClassicInspect { reply } => {
-                        if let Some(state) = group.as_classic() {
-                            let _ = reply.send(build_classic_view(state));
-                        }
-                    }
-                    GroupActorMessage::InspectAny { reply } => {
-                        // Project the LIVE group into a `GroupSnapshot`. A classic
-                        // group reuses the exact projection `ClassicInspect` uses;
-                        // a consumer group (hosted-classic members included) is
-                        // projected with each member's reconciler target translated
-                        // to a `ConsumerProtocolAssignment` blob, so assigned
-                        // members report a non-empty assignment.
-                        if let Some(state) = group.as_classic() {
-                            let _ = reply.send(build_classic_view(state).snapshot());
-                        } else if let Some(state) = group.as_consumer() {
-                            let _ = reply.send(build_consumer_snapshot(state, &metadata.snapshot()));
-                        }
-                    }
-
-                    // ── committed offsets ──
-                    GroupActorMessage::UpdateCommitted { entries, reply } => {
-                        for (k, v) in entries {
-                            group.committed_offsets.insert(k, v);
-                        }
-                        let _ = reply.send(());
-                    }
-                    GroupActorMessage::FetchCommitted { reply } => {
-                        let _ = reply.send(group.committed_offsets.clone());
-                    }
-                    GroupActorMessage::RemoveCommitted { keys, reply } => {
-                        for k in &keys {
-                            group.committed_offsets.remove(k);
-                        }
-                        let _ = reply.send(());
-                    }
-
-                    // ── lifecycle ──
-                    GroupActorMessage::Seed(seed) => {
-                        if let Some(state) = group.as_consumer_mut() {
-                            apply_seed(state, seed);
-                        }
-                    }
-                    GroupActorMessage::ClassicSeed(seeded) => {
-                        group = *seeded;
-                    }
-                    GroupActorMessage::Shutdown(reply) => {
-                        let _ = reply.send(());
-                        break;
-                    }
-                    #[cfg(test)]
-                    GroupActorMessage::TestForceConsumerKind => {
-                        group = Group::new_consumer(group.group_id.clone());
-                    }
+                let services = ActorServices {
+                    config: &config,
+                    metadata: &*metadata,
+                    offsets_log: &*offsets_log,
+                    coordinator: &coordinator,
+                };
+                if !handle_actor_message(&mut group, &mut parked, services, msg).await {
+                    break;
                 }
             }
             () = &mut tick => {
-                // Dispatch on the LIVE `group.kind`; the captured spawn-time
-                // `kind` is not a reliable discriminator after migration.
-                let gid = group.group_id.clone();
-                if let Some(state) = group.as_consumer_mut() {
-                    if handle_session_tick(state, &config, &*metadata, &*offsets_log, &coordinator)
-                        .await
-                        .is_err()
-                    {
-                        break;
-                    }
-                    // KIP-848 DOWNGRADE: an eviction may have removed the last
-                    // native consumer member, leaving only hosted classic
-                    // members → flip back to classic in place.
-                    if let Err(e) = maybe_downgrade(
-                        &mut group, &config, &*metadata, &*offsets_log, &coordinator,
-                    ).await {
-                        tracing::warn!(
-                            group_id = %gid, error = %e,
-                            "next-gen actor exiting after tick downgrade log-write failure",
-                        );
-                        break;
-                    }
-                } else if let Some(state) = group.as_classic_mut() {
-                    let dropped = state.expire_dead_members(Instant::now());
-                        if !dropped.is_empty() {
-                            tracing::info!(
-                                group = %gid, dropped = ?dropped,
-                                "expired members; waking joiners",
-                            );
-                            drain_removed_classic_waiters(
-                                &dropped,
-                                &mut parked.joiners,
-                                &mut parked.followers,
-                            );
-                            maybe_complete_classic(
-                                state,
-                                &mut parked.joiners,
-                            &mut parked.followers,
-                        );
-                    }
+                let services = ActorServices {
+                    config: &config,
+                    metadata: &*metadata,
+                    offsets_log: &*offsets_log,
+                    coordinator: &coordinator,
+                };
+                if !handle_actor_tick(&mut group, &mut parked, services).await {
+                    break;
                 }
-                // Re-arm the next tick only after the body ran, so a slow tick
-                // never bursts (`MissedTickBehavior::Delay` cadence).
                 tick = sleeper.sleep_for_async(SESSION_EXPIRY_TICK_INTERVAL);
             }
             () = opt_sleep(deadline) => {
@@ -749,7 +830,7 @@ async fn actor_loop(
 }
 
 /// The classic rebalance-completion deadline, if a rebalance is open.
-fn classic_deadline(group: &Group) -> Option<Instant> {
+fn classic_deadline(group: &CoordinatorGroup) -> Option<Instant> {
     group.as_classic().and_then(|s| s.rebalance_deadline)
 }
 
@@ -866,7 +947,7 @@ fn build_classic_view(state: &ClassicState) -> ClassicView {
             .members
             .values()
             .map(|m| ClassicMemberView {
-                member_id: m.member_id.clone(),
+                member_id: m.id.clone(),
                 client_id: m.client_id.clone(),
                 host: m.host.clone(),
                 group_instance_id: m.group_instance_id.clone(),
@@ -930,8 +1011,9 @@ async fn handle_session_tick(
 /// every member's k5/k7/k8, and write the classic k2 `GroupMetadata`. Returns `Ok(true)` if a flip
 /// happened, `Ok(false)` if the conditions weren't met, `Err` on a log-write
 /// failure (the caller exits the actor loop).
+// TODO(kip-848): confirm exact downgrade trigger boundary against mirror.gcr.io/apache/kafka:4.0.0
 async fn maybe_downgrade(
-    group: &mut Group,
+    group: &mut CoordinatorGroup,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     offsets_log: &dyn OffsetsLog,
@@ -1022,7 +1104,7 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
             client_host: meta.client_host,
             subscribed_topic_names: sub,
             subscribed_topic_regex: meta.subscribed_topic_regex,
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: meta.server_assignor,
             rebalance_timeout: Duration::from_millis(
                 u64::try_from(meta.rebalance_timeout_ms.max(0))
@@ -1064,18 +1146,27 @@ fn apply_seed(state: &mut GroupState, seed: super::GroupSeed) {
 /// the member's next `SyncGroup`. Returns `Err` only on a log-write failure (so
 /// the actor exits), after replying with the same failure code the heartbeat
 /// path uses.
-#[allow(clippy::too_many_arguments)]
+struct HostedJoin<'a> {
+    request: &'a JoinGroupRequest,
+    client_host: &'a str,
+    reply: oneshot::Sender<JoinResult>,
+    now_ms: i64,
+}
+
 async fn classic_join_hosted(
-    group: &mut Group,
+    group: &mut CoordinatorGroup,
     config: &NextGenConfig,
     metadata: &dyn MetadataProvider,
     offsets_log: &dyn OffsetsLog,
     coordinator: &super::GroupCoordinator,
-    req: &JoinGroupRequest,
-    client_host: &str,
-    reply: oneshot::Sender<JoinResult>,
-    now_ms: i64,
+    hosted: HostedJoin<'_>,
 ) -> Result<(), crate::error::BrokerError> {
+    let HostedJoin {
+        request: req,
+        client_host,
+        reply,
+        now_ms,
+    } = hosted;
     // Decode the subscription from the first protocol whose metadata is a valid
     // `ConsumerProtocolSubscription` (mirrors `convert_classic_to_consumer`,
     // which derives topics from a member's selected protocol metadata). The
@@ -1107,14 +1198,16 @@ async fn classic_join_hosted(
         .expect("caller verified consumer kind");
     migration::upsert_classic_member(
         state,
-        &req.member_id,
-        topics,
-        protocols,
-        String::new(), // client_id is header-level only (matches classic_ops::handle_join)
-        client_host.to_string(),
-        session_timeout,
-        rebalance_timeout,
-        req.group_instance_id.clone(),
+        migration::ClassicMemberRegistration {
+            member_id: req.member_id.clone(),
+            subscription_topics: topics,
+            protocols,
+            client_id: String::new(), // header-level only (matches classic_ops::handle_join)
+            client_host: client_host.to_string(),
+            session_timeout,
+            rebalance_timeout,
+            instance_id: req.group_instance_id.clone(),
+        },
     );
     if state.dirty {
         run_reconcile(state, config, metadata);
@@ -1404,7 +1497,7 @@ fn build_member(
         client_host: host.into(),
         subscribed_topic_names: subs,
         subscribed_topic_regex: req.subscribed_topic_regex.clone(),
-        compiled_regex: None,
+        compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
         server_assignor: req.server_assignor.clone(),
         rebalance_timeout: Duration::from_millis(
             u64::try_from(req.rebalance_timeout_ms.max(0)).unwrap_or(FALLBACK_REBALANCE_TIMEOUT_MS),
@@ -1819,21 +1912,21 @@ pub(crate) fn full_pending_records(state: &super::consumer_state::GroupState) ->
 }
 
 /// Build a wire-faithful classic k2 `GroupMetadataValue` from a downgraded
-/// [`super::classic_state::Group`]. Every classic member is persisted with its
+/// [`super::classic_state::ClassicGroup`]. Every classic member is persisted with its
 /// `subscription` (the selected `protocol_metadata`) and `assignment` (the seed
 /// the downgrade computed from the next-gen target), so bootstrap replay
 /// reconstructs the classic group with its members and their assignments intact
 /// (see `apply_group_metadata` in `coordinator::bootstrap`). Used by the
 /// downgrade flip.
 pub(crate) fn classic_group_metadata_record(
-    state: &super::classic_state::Group,
+    state: &super::classic_state::ClassicGroup,
 ) -> crate::coordinator::unified::persistence::GroupMetadataValue {
     use crate::coordinator::unified::persistence::{GroupMetadataValue, MemberMetadata};
     let members = state
         .members
         .values()
         .map(|m| MemberMetadata {
-            member_id: m.member_id.clone(),
+            member_id: m.id.clone(),
             group_instance_id: m.group_instance_id.clone(),
             client_id: m.client_id.clone(),
             client_host: m.host.clone(),
@@ -1932,7 +2025,7 @@ mod consumer_group_composition_model;
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_log::Offset;
 
     use super::*;
@@ -1983,7 +2076,7 @@ mod tests {
 
     #[test]
     fn inconsistent_classic_completion_clears_deadline() {
-        use super::super::classic_state::{Group as ClassicState, Member};
+        use super::super::classic_state::{ClassicGroup as ClassicState, Member};
 
         let mut state = ClassicState::new("g");
         state.protocol_type = Some("consumer".into());
@@ -2008,7 +2101,7 @@ mod tests {
                 .checked_sub(Duration::from_secs(1))
                 .unwrap_or_else(Instant::now),
         );
-        assert2::assert!(state.state == ClassicGroupState::PreparingRebalance);
+        assert!(state.state == ClassicGroupState::PreparingRebalance);
 
         let (tx1, _rx1) = tokio::sync::oneshot::channel();
         let (tx2, _rx2) = tokio::sync::oneshot::channel();
@@ -2017,7 +2110,10 @@ mod tests {
 
         complete_classic_rebalance(&mut state, &mut joiners, &mut followers);
 
-        assert2::assert!(state.rebalance_deadline.is_none());
+        assert!(
+            state.rebalance_deadline.is_none(),
+            "a failed protocol vote must not leave an already-fired deadline armed"
+        );
     }
 
     #[tokio::test]
@@ -2102,11 +2198,14 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert2::assert!(resp.error_code == 0);
+        assert!(resp.error_code == 0);
         let batches = log.batches().await;
-        assert2::assert!(batches.len() == 1);
+        assert!(
+            batches.len() == 1,
+            "first join should write exactly one batch"
+        );
         // Minimum: k3 (group metadata) + k5 (member metadata) + k8 (current).
-        assert2::assert!(batches[0].records.len() >= 3);
+        assert!(batches[0].records.len() >= 3);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2134,13 +2233,9 @@ mod tests {
         // The join must succeed, echo the client-supplied member id, and
         // advance the epoch off 0. The client-id first-join takes the same
         // flush path as the empty-id case and persists exactly one batch.
-        check!(
-            (
-                resp.error_code,
-                resp.member_id.as_deref(),
-                resp.member_epoch >= 1,
-            ) == (codes::NONE, Some("client-uuid-1"), true)
-        );
+        check!(resp.error_code == 0);
+        check!(resp.member_id.as_deref() == Some("client-uuid-1"));
+        check!(resp.member_epoch >= 1);
         check!(log.batches().await.len() == 1);
     }
 
@@ -2166,7 +2261,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap().error_code == 0);
+        assert!(rx.await.unwrap().error_code == 0);
 
         // Same id re-sending epoch 0 is now a known member at a higher epoch →
         // stale, not a re-join.
@@ -2187,7 +2282,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap().error_code == codes::STALE_MEMBER_EPOCH);
+        assert!(rx.await.unwrap().error_code == codes::STALE_MEMBER_EPOCH);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2234,7 +2329,10 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
         let batches_after_steady = log.batches().await.len();
-        assert2::assert!(batches_after_steady == batches_after_join);
+        assert!(
+            batches_after_steady == batches_after_join,
+            "steady-state heartbeat should not write"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2278,9 +2376,12 @@ mod tests {
             .unwrap();
         let _ = rx.await.unwrap();
         let batches = log.batches().await;
-        assert2::assert!(batches.len() == pre_leave + 1);
+        assert!(batches.len() == pre_leave + 1);
         let leave_batch = &batches[batches.len() - 1];
-        assert2::assert!(leave_batch.records.iter().any(|r| r.value.is_none()));
+        assert!(
+            leave_batch.records.iter().any(|r| r.value.is_none()),
+            "leave batch must contain at least one tombstone"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2306,22 +2407,25 @@ mod tests {
             })
             .await;
         let resp = rx.await.unwrap();
-        assert2::assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
+        assert!(resp.error_code == codes::COORDINATOR_LOAD_IN_PROGRESS);
 
         // Wait for the actor to drain and drop its receiver.
         await_until("actor mpsc closed after exit", || handle.tx.is_closed()).await;
-        assert2::assert!(handle.tx.is_closed());
+        assert!(
+            handle.tx.is_closed(),
+            "actor mpsc should be closed after exit"
+        );
 
         // get_or_create should respawn a fresh actor.
         let fresh = coord.get_or_create_consumer("g");
-        assert2::assert!(!fresh.tx.is_closed());
+        assert!(!fresh.tx.is_closed());
     }
 
     #[test]
     fn pending_records_empty_yields_empty_batch() {
         let p = PendingRecords::default();
         let batch = p.into_batch("g", 0);
-        assert2::assert!(batch.records.is_empty());
+        assert!(batch.records.is_empty());
     }
 
     #[test]
@@ -2348,8 +2452,10 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
+        assert!(batch.records.len() == 3);
         let deltas: Vec<i32> = batch.records.iter().map(|r| r.offset_delta).collect();
-        assert2::assert!((deltas, batch.last_offset_delta) == (vec![0, 1, 2], 2));
+        assert!(deltas == vec![0, 1, 2]);
+        assert!(batch.last_offset_delta == 2);
     }
 
     #[test]
@@ -2359,7 +2465,8 @@ mod tests {
             ..Default::default()
         };
         let batch = p.into_batch("g", 0);
-        assert2::assert!((batch.records.len(), batch.records[0].value.is_none()) == (1, true));
+        assert!(batch.records.len() == 1);
+        assert!(batch.records[0].value.is_none());
     }
 
     /// Regression for the epoch double-bump: a single session-timeout
@@ -2402,7 +2509,7 @@ mod tests {
             .expect("50ms is always within Instant range");
         state.add_or_update_member(m);
         run_reconcile(&mut state, &config, &*metadata);
-        assert2::assert!(!state.dirty);
+        assert!(!state.dirty, "baseline must be clean before eviction");
         let epoch_before = state.group_epoch;
 
         // One eviction tick.
@@ -2410,8 +2517,14 @@ mod tests {
             .await
             .expect("tick should succeed");
 
-        assert2::assert!(state.members.is_empty());
-        assert2::assert!(state.group_epoch == epoch_before + 1);
+        assert!(
+            state.members.is_empty(),
+            "expired member must have been evicted"
+        );
+        assert!(
+            state.group_epoch == epoch_before + 1,
+            "a single eviction must advance the group epoch by exactly 1"
+        );
     }
 
     #[test]
@@ -2502,7 +2615,7 @@ mod tests {
                 },
             )]),
         };
-        assert2::assert!(seed == expected);
+        assert!(seed == expected);
     }
 
     // ---------------------------------------------------------------------
@@ -2543,7 +2656,7 @@ mod tests {
         state.members.insert("m1".into(), m);
 
         let picked = pick_assignor(&state, &config);
-        assert2::assert!(picked.name() == "uniform");
+        assert!(picked.name() == "uniform");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2585,8 +2698,11 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert2::assert!(resp.error_code == 0);
-        assert2::assert!(calls.load(Ordering::SeqCst) >= 1);
+        assert!(resp.error_code == 0);
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "custom assignor must be invoked at least once",
+        );
     }
 
     // ── classic actor arms + coordinator admin surface ──────────────
@@ -2614,7 +2730,7 @@ mod tests {
             .await
             .unwrap();
         let r = rx.await.unwrap();
-        assert2::assert!(r.error_code == codes::MEMBER_ID_REQUIRED);
+        assert!(r.error_code == codes::MEMBER_ID_REQUIRED);
 
         // ClassicInspect → empty view.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2624,7 +2740,7 @@ mod tests {
             .await
             .unwrap();
         let view = rx.await.unwrap();
-        assert2::assert!((view.group_id.as_str(), view.members.is_empty()) == ("g", true));
+        assert!(view.group_id == "g" && view.members.is_empty());
 
         // Admin surface lists/describes the classic group, then deletes it (empty).
         let listed = coord.list_groups().await;
@@ -2668,15 +2784,7 @@ mod tests {
             .await
             .unwrap();
         let committed = rx.await.unwrap();
-        let entry = committed.get(&("t".to_string(), 0)).unwrap();
-        assert2::assert!(
-            (
-                entry.offset,
-                entry.leader_epoch,
-                entry.metadata.as_str(),
-                entry.commit_timestamp_ms,
-            ) == (Offset(42), 1, "", 0)
-        );
+        assert!(committed.get(&("t".to_string(), 0)).unwrap().offset == 42);
 
         // Classic offset-commit validate: a simple consumer (no member/instance)
         // is allowed. `ValidateCommit` dispatches on the live (classic) kind.
@@ -2691,7 +2799,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap() == Ok(()));
+        assert!(rx.await.unwrap() == Ok(()));
 
         // Classic Heartbeat for an unknown member on an empty group.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2708,7 +2816,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap() == codes::UNKNOWN_MEMBER_ID);
+        assert!(rx.await.unwrap() == codes::UNKNOWN_MEMBER_ID);
 
         // RemoveCommitted clears the entry.
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -2727,7 +2835,7 @@ mod tests {
             .send(GroupActorMessage::FetchCommitted { reply: tx })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap().is_empty());
+        assert!(rx.await.unwrap().is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2735,8 +2843,8 @@ mod tests {
         use std::time::Duration;
 
         use super::super::{
-            classic_state::{Group as ClassicState, Member, OffsetEntry},
-            group::{Group, GroupKind},
+            classic_state::{ClassicGroup as ClassicState, Member, OffsetEntry},
+            group::{CoordinatorGroup, GroupKind},
         };
         let (coord, _log) = make_coordinator();
 
@@ -2749,7 +2857,7 @@ mod tests {
             Duration::from_mins(1),
             vec![("range".into(), bytes::Bytes::new())],
         ));
-        let group = Box::new(Group {
+        let group = Box::new(CoordinatorGroup {
             group_id: "g".into(),
             kind: GroupKind::Classic(cs),
             committed_offsets: [(
@@ -2773,18 +2881,9 @@ mod tests {
             .send(GroupActorMessage::FetchCommitted { reply: tx })
             .await
             .unwrap();
-        let committed = rx.await.unwrap();
-        let entry = committed.get(&("t".to_string(), 0)).unwrap();
-        assert2::assert!(
-            (
-                entry.offset,
-                entry.leader_epoch,
-                entry.metadata.as_str(),
-                entry.commit_timestamp_ms,
-            ) == (Offset(7), 0, "", 0)
-        );
+        assert!(rx.await.unwrap().get(&("t".to_string(), 0)).unwrap().offset == 7);
         // Non-empty group cannot be deleted.
-        assert2::assert!(
+        assert!(
             coord.delete_group("g").await == Err(crate::coordinator::DeleteGroupError::NonEmpty)
         );
     }
@@ -2798,11 +2897,11 @@ mod tests {
         // Consumer owns "c" → a classic get-or-create returns that same actor.
         let c_consumer = coord.get_or_create_consumer("c");
         let c_classic = coord.get_or_create_classic("c");
-        assert2::assert!(Arc::ptr_eq(&c_consumer, &c_classic));
+        assert!(Arc::ptr_eq(&c_consumer, &c_classic));
         // Classic owns "k" → a consumer get-or-create returns that same actor.
         let k_classic = coord.get_or_create_classic("k");
         let k_consumer = coord.get_or_create_consumer("k");
-        assert2::assert!(Arc::ptr_eq(&k_classic, &k_consumer));
+        assert!(Arc::ptr_eq(&k_classic, &k_consumer));
     }
 
     /// KIP-848 live migration: the tick must dispatch on the LIVE `group.kind`,
@@ -2861,7 +2960,7 @@ mod tests {
         })
         .await
         .unwrap();
-        assert2::assert!(parked);
+        assert!(parked, "actor should park on the session-expiry tick sleep");
 
         timeline.advance(SESSION_EXPIRY_TICK_INTERVAL);
 
@@ -2871,8 +2970,8 @@ mod tests {
         })
         .await
         .unwrap();
-        assert2::assert!(reparked);
-        assert2::assert!(!handle.tx.is_closed());
+        assert!(reparked, "actor should re-park after processing the tick");
+        assert!(!handle.tx.is_closed());
     }
 
     /// KIP-848 upgrade trigger: a `ConsumerGroupHeartbeat` for a *classic* group
@@ -2882,8 +2981,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn consumer_heartbeat_upgrades_a_classic_group() {
         use super::super::{
-            classic_state::{Group as ClassicState, Member},
-            group::{Group, GroupKind},
+            classic_state::{ClassicGroup as ClassicState, Member},
+            group::{CoordinatorGroup, GroupKind},
         };
 
         let (coord, log) = make_coordinator_with_topic("t", 2);
@@ -2903,7 +3002,7 @@ mod tests {
             std::time::Duration::from_mins(1),
             vec![("range".into(), subscription_blob(&["t"]))],
         ));
-        let group = Box::new(Group {
+        let group = Box::new(CoordinatorGroup {
             group_id: "g".into(),
             kind: GroupKind::Classic(cs),
             committed_offsets: HashMap::new(),
@@ -2930,7 +3029,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert2::assert!(resp.error_code == codes::NONE);
+        assert!(resp.error_code == codes::NONE);
 
         // Describe now reports 2 members: the hosted classic member and the new
         // native consumer member.
@@ -2944,9 +3043,9 @@ mod tests {
         // The hosted classic member must survive the upgrade, the new native
         // consumer member must be present, and the upgrade batch tombstoned
         // the classic k2 GroupMetadata record.
-        let mut member_kinds: Vec<bool> = describe.members.iter().map(|m| m.is_classic).collect();
-        member_kinds.sort_unstable();
-        check!(member_kinds == vec![false, true]);
+        check!(describe.members.len() == 2);
+        check!(describe.members.iter().any(|m| m.is_classic));
+        check!(describe.members.iter().any(|m| !m.is_classic));
         check!(log.has_classic_group_metadata_tombstone("g").await);
     }
 
@@ -2989,8 +3088,8 @@ mod tests {
     /// this returns, the group is consumer-kind and `m-classic` has a target.
     async fn seed_and_upgrade(coord: &Arc<GroupCoordinator>, topic: &str) -> Arc<GroupActorHandle> {
         use super::super::{
-            classic_state::{Group as ClassicState, Member},
-            group::{Group, GroupKind},
+            classic_state::{ClassicGroup as ClassicState, Member},
+            group::{CoordinatorGroup, GroupKind},
         };
 
         let mut cs = ClassicState::new("g");
@@ -3004,7 +3103,7 @@ mod tests {
             std::time::Duration::from_mins(1),
             vec![("range".into(), subscription_blob(&[topic]))],
         ));
-        let group = Box::new(Group {
+        let group = Box::new(CoordinatorGroup {
             group_id: "g".into(),
             kind: GroupKind::Classic(cs),
             committed_offsets: HashMap::new(),
@@ -3032,7 +3131,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert2::assert!(resp.error_code == codes::NONE);
+        assert!(resp.error_code == codes::NONE);
 
         // The native heartbeat minted a transient consumer member to drive the
         // upgrade. Have it leave so the group hosts only the classic member(s)
@@ -3053,7 +3152,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap().error_code == codes::NONE);
+        assert!(rx.await.unwrap().error_code == codes::NONE);
         handle
     }
 
@@ -3139,20 +3238,17 @@ mod tests {
 
         // 1. Heartbeat: the upgrade gave m-classic a target that differs from
         //    its (empty) last-synced assignment → it owes a re-sync.
-        assert2::assert!(
-            classic_heartbeat(&handle, "m-classic").await == codes::REBALANCE_IN_PROGRESS
+        assert!(
+            classic_heartbeat(&handle, "m-classic").await == codes::REBALANCE_IN_PROGRESS,
+            "post-upgrade heartbeat must signal a re-sync"
         );
 
         // 2. JoinGroup (rejoin of the existing member, unchanged subscription):
         //    success, server-assigned single-member view at group_epoch, self leader.
         let join = classic_join(&handle, "m-classic", "t").await;
-        check!(
-            (
-                join.error_code,
-                join.leader.as_str(),
-                join.member_id.as_str(),
-            ) == (codes::NONE, "m-classic", "m-classic")
-        );
+        check!(join.error_code == codes::NONE);
+        check!(join.leader.as_str() == "m-classic");
+        check!(join.member_id.as_str() == "m-classic");
         // Generation equals the group epoch (read it back from Describe).
         let (tx, rx) = tokio::sync::oneshot::channel();
         handle
@@ -3161,23 +3257,28 @@ mod tests {
             .await
             .unwrap();
         let describe = rx.await.unwrap();
-        assert2::assert!(join.generation_id == describe.group_epoch);
+        assert!(join.generation_id == describe.group_epoch);
 
         // 3. SyncGroup: returns the translated target assignment for "t".
         let sync = classic_sync(&handle, "m-classic", join.generation_id).await;
-        assert2::assert!(
-            (sync.error_code, sync.protocol_type.as_deref()) == (codes::NONE, Some("consumer"))
-        );
+        assert!(sync.error_code == codes::NONE);
+        assert!(sync.protocol_type.as_deref() == Some("consumer"));
         let asn = decode_assignment(&sync.assignment);
         let t_assign = asn
             .assigned_partitions
             .iter()
             .find(|tp| tp.topic == "t")
             .expect("assignment contains topic t");
-        assert2::assert!(!t_assign.partitions.is_empty());
+        assert!(
+            !t_assign.partitions.is_empty(),
+            "m-classic must own partitions of t"
+        );
 
         // 4. Heartbeat again: now in sync → NONE.
-        assert2::assert!(classic_heartbeat(&handle, "m-classic").await == codes::NONE);
+        assert!(
+            classic_heartbeat(&handle, "m-classic").await == codes::NONE,
+            "after sync the member is in sync → NONE"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -3197,7 +3298,8 @@ mod tests {
 
         // A brand-new classic member m2 joins the already-upgraded group.
         let join2 = classic_join(&handle, "m2", "t").await;
-        assert2::assert!((join2.error_code, join2.leader.as_str()) == (codes::NONE, "m2"));
+        assert!(join2.error_code == codes::NONE);
+        assert!(join2.leader == "m2");
 
         // Both members re-sync at the (new) group epoch to pick up the
         // rebalanced two-way split.
@@ -3210,9 +3312,8 @@ mod tests {
         let epoch = rx.await.unwrap().group_epoch;
         let sync_c = classic_sync(&handle, "m-classic", epoch).await;
         let sync2 = classic_sync(&handle, "m2", epoch).await;
-        for (_case, sync) in [("hosted classic", &sync_c), ("new classic", &sync2)] {
-            assert2::assert!(sync.error_code == codes::NONE);
-        }
+        assert!(sync_c.error_code == codes::NONE);
+        assert!(sync2.error_code == codes::NONE);
 
         // Collect each member's partitions of "t".
         let parts = |s: &SyncResult| -> Vec<i32> {
@@ -3225,15 +3326,21 @@ mod tests {
         };
         let p_c = parts(&sync_c);
         let p_2 = parts(&sync2);
-        assert2::assert!(!p_2.is_empty());
+        assert!(!p_2.is_empty(), "the new member must receive an assignment");
 
         // Disjoint, and together cover {0, 1}.
         let set_c: std::collections::HashSet<i32> = p_c.iter().copied().collect();
         let set_2: std::collections::HashSet<i32> = p_2.iter().copied().collect();
-        assert2::assert!(set_c.is_disjoint(&set_2));
+        assert!(
+            set_c.is_disjoint(&set_2),
+            "the two members must hold disjoint partitions"
+        );
         let mut union: Vec<i32> = set_c.union(&set_2).copied().collect();
         union.sort_unstable();
-        assert2::assert!(union == vec![0, 1]);
+        assert!(
+            union == vec![0, 1],
+            "the union of partitions must be {{0, 1}}"
+        );
     }
 
     /// KIP-848 DOWNGRADE trigger: a consumer group that hosts a classic member
@@ -3244,8 +3351,8 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn last_consumer_member_leaving_downgrades_to_classic() {
         use super::super::{
-            classic_state::{Group as ClassicState, Member},
-            group::{Group, GroupKind},
+            classic_state::{ClassicGroup as ClassicState, Member},
+            group::{CoordinatorGroup, GroupKind},
         };
 
         // Default policy is Bidirectional → downgrade is allowed.
@@ -3263,7 +3370,7 @@ mod tests {
             std::time::Duration::from_mins(1),
             vec![("range".into(), subscription_blob(&["t"]))],
         ));
-        let group = Box::new(Group {
+        let group = Box::new(CoordinatorGroup {
             group_id: "g".into(),
             kind: GroupKind::Classic(cs),
             committed_offsets: HashMap::new(),
@@ -3291,7 +3398,7 @@ mod tests {
             .await
             .unwrap();
         let resp = rx.await.unwrap();
-        assert2::assert!(resp.error_code == codes::NONE);
+        assert!(resp.error_code == codes::NONE);
         let native_id = resp.member_id.expect("native member id");
 
         // The native consumer member leaves (member_epoch == -1). It was the
@@ -3311,7 +3418,7 @@ mod tests {
             })
             .await
             .unwrap();
-        assert2::assert!(rx.await.unwrap().error_code == codes::NONE);
+        assert!(rx.await.unwrap().error_code == codes::NONE);
 
         // The group is now classic again. `describe_group` only returns
         // classic groups; it must surface "g" with the hosted classic member
@@ -3326,9 +3433,8 @@ mod tests {
         // record (which would otherwise survive log compaction and resurrect
         // the group as next-gen), and wrote a classic k2 GroupMetadata
         // (non-tombstone) for "g".
-        let mut member_ids: Vec<&str> = snap.members.iter().map(|m| m.member_id.as_str()).collect();
-        member_ids.sort_unstable();
-        check!(member_ids == vec!["m-classic"]);
+        check!(snap.members.len() == 1);
+        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
         check!(log.has_next_gen_group_metadata_tombstone("g").await);
         check!(log.has_next_gen_target_metadata_tombstone("g").await);
         check!(log_has_classic_group_metadata_write(&log, "g").await);
@@ -3364,18 +3470,16 @@ mod tests {
         // an assigned hosted-classic member has non-empty assignment bytes.
         // generation_id mirrors the group epoch (the next-gen analogue of a
         // classic group's generation) and must have advanced off 0.
+        check!(snap.group_id.as_str() == "g");
+        check!(!snap.members.is_empty());
+        check!(snap.members.iter().any(|m| m.member_id == "m-classic"));
+        check!(snap.protocol_type.as_deref() == Some("consumer"));
         check!(
-            (
-                snap.group_id.as_str(),
-                snap.members.is_empty(),
-                snap.members.iter().any(|m| m.member_id == "m-classic"),
-                snap.protocol_type.as_deref(),
-                snap.members
-                    .iter()
-                    .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty()),
-                snap.generation_id >= 1,
-            ) == ("g", false, true, Some("consumer"), true, true)
+            snap.members
+                .iter()
+                .any(|m| m.member_id == "m-classic" && !m.assignment.is_empty())
         );
+        check!(snap.generation_id >= 1);
 
         // `list_groups` produces the wire `group_type="classic"` rows; an
         // upgraded (consumer-kind) group is NOT a classic row, so it does not
@@ -3383,8 +3487,14 @@ mod tests {
         // `consumer_group_ids()` tagged `group_type="consumer"` (so it is neither
         // double-counted nor mislabeled). Assert both halves of that contract.
         let listed = coord.list_groups().await;
-        assert2::assert!(!listed.iter().any(|s| s.group_id == "g"));
-        assert2::assert!(coord.consumer_group_ids().contains(&"g".to_string()));
+        assert!(
+            !listed.iter().any(|s| s.group_id == "g"),
+            "an upgraded consumer group must not be reported as a classic row"
+        );
+        assert!(
+            coord.consumer_group_ids().contains(&"g".to_string()),
+            "the upgraded consumer group must be listed for the wire `consumer` pass"
+        );
     }
 
     /// `true` iff some appended record WRITES (non-null value) a classic k2
@@ -3428,8 +3538,8 @@ mod tests {
         instance_id: Option<&str>,
     ) -> Arc<GroupActorHandle> {
         use super::super::{
-            classic_state::{Group as ClassicState, Member},
-            group::{Group, GroupKind},
+            classic_state::{ClassicGroup as ClassicState, Member},
+            group::{CoordinatorGroup, GroupKind},
         };
 
         let mut cs = ClassicState::new("g");
@@ -3446,7 +3556,7 @@ mod tests {
             )
             .with_instance_id(instance_id.map(str::to_string)),
         );
-        let group = Box::new(Group {
+        let group = Box::new(CoordinatorGroup {
             group_id: "g".into(),
             kind: GroupKind::Classic(cs),
             committed_offsets: HashMap::new(),
@@ -3567,7 +3677,7 @@ mod tests {
         // A native consumer "c1" heartbeats → in-place UPGRADE; the group is now
         // consumer-kind and hosts both m1 (classic facade) and c1.
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(up.error_code == codes::NONE);
+        assert!(up.error_code == codes::NONE);
         let c1 = up.member_id.expect("native member id");
         let describe = {
             let (tx, rx) = tokio::sync::oneshot::channel();
@@ -3578,19 +3688,25 @@ mod tests {
                 .unwrap();
             rx.await.unwrap()
         };
-        assert2::assert!(describe.members.len() == 2);
+        assert!(
+            describe.members.len() == 2,
+            "upgraded group hosts both m1 and c1"
+        );
 
         // c1 leaves (member_epoch -1). It was the only native member → DOWNGRADE
         // back to classic.
         let leave = consumer_heartbeat(&handle, &c1, -1, None).await;
-        assert2::assert!(leave.error_code == codes::NONE);
+        assert!(leave.error_code == codes::NONE);
 
         // The group is classic again, with m1 restored and still assigned.
         let snap = coord
             .describe_group("g")
             .await
             .expect("group downgraded back to classic");
-        assert2::assert!(snap.members.iter().any(|m| m.member_id == "m1"));
+        assert!(
+            snap.members.iter().any(|m| m.member_id == "m1"),
+            "m1 must survive the upgrade→downgrade round trip"
+        );
         let m1 = snap
             .members
             .iter()
@@ -3617,7 +3733,10 @@ mod tests {
             .expect("decoded assignment must contain topic t");
         let mut parts = tp.partitions.clone();
         parts.sort_unstable();
-        assert2::assert!(parts == vec![0, 1]);
+        assert!(
+            parts == vec![0, 1],
+            "m1 (sole surviving member) must own BOTH partitions after the downgrade re-reconcile; got {parts:?}"
+        );
     }
 
     /// Scenario 2: KIP-345 static identity must survive both flips. A classic
@@ -3635,10 +3754,10 @@ mod tests {
         // Upgrade via a native consumer heartbeat, then downgrade by having that
         // native member leave.
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(up.error_code == codes::NONE);
+        assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert2::assert!(leave.error_code == codes::NONE);
+        assert!(leave.error_code == codes::NONE);
 
         // The group is classic again; the restored member must still carry the
         // static identity (convert_classic_to_consumer maps instance_id and
@@ -3649,7 +3768,10 @@ mod tests {
             .iter()
             .find(|m| m.member_id == "m1")
             .expect("m1 restored as a classic member");
-        assert2::assert!(m1.group_instance_id.as_deref() == Some("inst-a"));
+        assert!(
+            m1.group_instance_id.as_deref() == Some("inst-a"),
+            "the static identity must survive both flips"
+        );
     }
 
     /// Scenario 3: under `Disabled` policy a classic group stays classic — a
@@ -3664,13 +3786,22 @@ mod tests {
 
         // A native consumer heartbeat must be rejected (no upgrade is allowed).
         let resp = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(resp.error_code != codes::NONE);
-        assert2::assert!(resp.error_code == codes::GROUP_ID_NOT_FOUND);
+        assert!(
+            resp.error_code != codes::NONE,
+            "Disabled policy must reject the upgrade heartbeat"
+        );
+        assert!(
+            resp.error_code == codes::GROUP_ID_NOT_FOUND,
+            "an un-upgradable classic group surfaces as GROUP_ID_NOT_FOUND"
+        );
 
         // The group is untouched: still classic, still hosting m1.
         let view = classic_inspect(&handle).await;
-        assert2::assert!(view.members.iter().any(|m| m.member_id == "m1"));
-        assert2::assert!(handle.kind == GroupKindTag::Classic);
+        assert!(
+            view.members.iter().any(|m| m.member_id == "m1"),
+            "the group must remain classic with m1 intact"
+        );
+        assert!(handle.kind == GroupKindTag::Classic);
     }
 
     /// Scenario 4: committed offsets live on the kind-agnostic `Group` container
@@ -3707,19 +3838,21 @@ mod tests {
 
         // Upgrade → the offset must still be readable.
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(up.error_code == codes::NONE);
+        assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let after_upgrade = fetch_committed(&handle).await;
-        assert2::assert!(
-            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99))
+        assert!(
+            after_upgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99)),
+            "committed offset must survive the upgrade"
         );
 
         // Downgrade → the offset must STILL be there.
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert2::assert!(leave.error_code == codes::NONE);
+        assert!(leave.error_code == codes::NONE);
         let after_downgrade = fetch_committed(&handle).await;
-        assert2::assert!(
-            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99))
+        assert!(
+            after_downgrade.get(&("t".to_string(), 0)).map(|e| e.offset) == Some(Offset(99)),
+            "committed offset must survive the downgrade too"
         );
     }
 
@@ -3746,15 +3879,18 @@ mod tests {
         // SPAWN the actor as a consumer group: the first RPC is a native
         // ConsumerGroupHeartbeat, so the handle's spawn-time `kind == Consumer`.
         let handle = coord.get_or_create_consumer("g");
-        assert2::assert!(handle.kind == GroupKindTag::Consumer);
+        assert!(
+            handle.kind == GroupKindTag::Consumer,
+            "the group must be spawned consumer-kind"
+        );
 
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(up.error_code == codes::NONE);
+        assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
 
         // A CLASSIC member joins the (consumer-kind) group as a hosted member.
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert2::assert!(join.error_code == codes::NONE);
+        assert!(join.error_code == codes::NONE);
 
         // The native consumer member leaves (member_epoch -1). It was the only
         // native member and a hosted classic member remains → DOWNGRADE in
@@ -3764,7 +3900,7 @@ mod tests {
         // more message (the `classic_inspect` below) to be sure the in-place
         // flip has completed before validating.
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert2::assert!(leave.error_code == codes::NONE);
+        assert!(leave.error_code == codes::NONE);
 
         // The hosted classic member was re-expressed as a classic member. Read
         // the restored classic generation it must commit against. This
@@ -3774,8 +3910,14 @@ mod tests {
         let view = classic_inspect(&handle).await;
         // The handle's spawn-time `kind` is unchanged (and stale) — validation
         // must NOT consult it.
-        assert2::assert!(handle.kind == GroupKindTag::Consumer);
-        assert2::assert!(view.members.iter().any(|m| m.member_id == "m-classic"));
+        assert!(
+            handle.kind == GroupKindTag::Consumer,
+            "spawn-time kind unchanged"
+        );
+        assert!(
+            view.members.iter().any(|m| m.member_id == "m-classic"),
+            "the hosted classic member must survive the downgrade"
+        );
         let generation = view.generation_id;
 
         // Prove the fix at the routing boundary `offset_commit::validate` uses:
@@ -3795,7 +3937,11 @@ mod tests {
             .await
             .unwrap();
         let result = rx.await.unwrap();
-        assert2::assert!(result == Ok(()));
+        assert!(
+            result == Ok(()),
+            "ValidateCommit must dispatch on the live (classic) kind and accept \
+             the downgraded member (got {result:?})"
+        );
     }
 
     /// Regression (user-requested): a group that downgraded in place becomes
@@ -3814,14 +3960,14 @@ mod tests {
 
         // SPAWN consumer-kind; host a classic member; downgrade.
         let handle = coord.get_or_create_consumer("g");
-        assert2::assert!(handle.kind == GroupKindTag::Consumer);
+        assert!(handle.kind == GroupKindTag::Consumer);
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(up.error_code == codes::NONE);
+        assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let join = classic_join(&handle, "m-classic", "t").await;
-        assert2::assert!(join.error_code == codes::NONE);
+        assert!(join.error_code == codes::NONE);
         let leave = consumer_heartbeat(&handle, &native, -1, None).await;
-        assert2::assert!(leave.error_code == codes::NONE);
+        assert!(leave.error_code == codes::NONE);
 
         // Barrier: only a classic-kind group answers `ClassicInspect`, so this
         // round-trip guarantees the downgrade completed. The lone hosted classic
@@ -3842,10 +3988,16 @@ mod tests {
         // Drain the last hosted classic member so the group is empty, then it
         // must be deletable.
         let resp = classic_leave(&handle, "m-classic").await;
-        assert2::assert!(!resp.is_empty());
+        assert!(!resp.is_empty());
         let view = classic_inspect(&handle).await;
-        assert2::assert!(view.members.is_empty());
-        assert2::assert!(coord.delete_group("g").await == Ok(()));
+        assert!(
+            view.members.is_empty(),
+            "the group must be empty after the classic member leaves"
+        );
+        assert!(
+            coord.delete_group("g").await == Ok(()),
+            "an empty downgraded group must be deletable"
+        );
     }
 
     /// Regression (user-requested): an UPGRADED group runs the consumer epoch
@@ -3866,15 +4018,15 @@ mod tests {
         // a native consumer heartbeat in. The handle's spawn-time `kind` stays
         // the stale `Classic`.
         let handle = seed_classic_member(&coord, "m1", "t", None);
-        assert2::assert!(handle.kind == GroupKindTag::Classic);
+        assert!(handle.kind == GroupKindTag::Classic);
         let up = consumer_heartbeat(&handle, "", 0, Some("t")).await;
-        assert2::assert!(up.error_code == codes::NONE);
+        assert!(up.error_code == codes::NONE);
         let native = up.member_id.expect("native member id");
         let current_epoch = up.member_epoch;
 
         // The handle's spawn-time kind is the stale `Classic`; validation must
         // not consult it — it must run the consumer epoch fence.
-        assert2::assert!(handle.kind == GroupKindTag::Classic);
+        assert!(handle.kind == GroupKindTag::Classic);
 
         let cases = [
             // STALE epoch (< current) → STALE_MEMBER_EPOCH.
@@ -3884,9 +4036,12 @@ mod tests {
             // The current epoch is accepted.
             (current_epoch, Ok(()), "current"),
         ];
-        for (epoch, want, _label) in cases {
+        for (epoch, want, label) in cases {
             let got = validate_commit(&handle, &native, epoch).await;
-            assert2::assert!(got == want);
+            assert!(
+                got == want,
+                "an upgraded group must run the consumer epoch fence ({label}, epoch {epoch}); got {got:?}"
+            );
         }
     }
 
@@ -3914,13 +4069,9 @@ mod tests {
         let step = step_heartbeat(&mut group, &config, &metadata, &req, "", Instant::now());
         // First join succeeds, advances to group epoch 1, targets all
         // partitions of "t", and must persist records.
-        check!(
-            (
-                step.response.error_code,
-                step.response.member_epoch,
-                &group.target.per_member["m1"][&topic_id],
-                step.pending.is_empty(),
-            ) == (codes::NONE, 1, &vec![0, 1], false)
-        );
+        check!(step.response.error_code == 0);
+        check!(step.response.member_epoch == 1);
+        check!(group.target.per_member["m1"][&topic_id].clone() == vec![0, 1]);
+        check!(!step.pending.is_empty());
     }
 }

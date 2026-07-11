@@ -47,6 +47,8 @@ impl WalHead {
     }
 
     /// Apply one decoded metrics WAL record into the shared hot head.
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn apply_wal_record(&self, record: &WalRecord) {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         Arc::make_mut(&mut *guard).apply_wal_record(record);
@@ -54,6 +56,8 @@ impl WalHead {
 
     /// Apply one decoded metrics WAL record and advance the offset watermarks
     /// for `partition` to include `offset`.
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn apply_wal_record_at(
         &self,
         record: &WalRecord,
@@ -67,6 +71,8 @@ impl WalHead {
     }
 
     /// Apply decoded metrics WAL records in log order.
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn apply_wal_records<'a>(&self, records: impl IntoIterator<Item = &'a WalRecord>) {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         Arc::make_mut(&mut *guard).apply_wal_records(records);
@@ -77,7 +83,9 @@ impl WalHead {
     /// Returns how many samples and series were evicted. Offset watermarks are
     /// left untouched. The returned stats are advisory (metrics/tests); pruning
     /// for the side effect of bounding memory and discarding them is valid.
-    #[allow(clippy::must_use_candidate)]
+    #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn prune(&self, now_ms: i64) -> PruneStats {
         let mut guard = self.inner.write().expect("wal head lock poisoned");
         Arc::make_mut(&mut *guard).prune(now_ms)
@@ -85,6 +93,8 @@ impl WalHead {
 
     /// The lowest WAL offset materialized in the head for `partition`.
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn low_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.inner
             .read()
@@ -94,6 +104,8 @@ impl WalHead {
 
     /// The highest WAL offset materialized in the head for `partition`.
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn high_water_offset(&self, partition: PartitionIndex) -> Option<Offset> {
         self.inner
             .read()
@@ -103,6 +115,8 @@ impl WalHead {
 
     /// Snapshot of all per-partition WAL offset watermarks.
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn watermarks(&self) -> BTreeMap<PartitionIndex, PartitionWatermark> {
         self.inner
             .read()
@@ -113,6 +127,8 @@ impl WalHead {
 
     /// The retention window in milliseconds.
     #[must_use]
+    /// # Panics
+    /// Panics if shared metric state is poisoned or validated series data is missing an index entry required by the operation.
     pub fn retention_ms(&self) -> i64 {
         self.inner
             .read()

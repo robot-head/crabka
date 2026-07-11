@@ -18,6 +18,9 @@ impl IngestEnforcer {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn check_span_rate(
         &self,
         limits: &Limits,
@@ -61,6 +64,9 @@ impl IngestEnforcer {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn check_trace_size(limits: &Limits, spans_in_trace: u64) -> Result<(), LimitError> {
         let limit = limits.max_spans_per_trace;
         if limit != 0 && spans_in_trace > limit {
@@ -75,6 +81,9 @@ impl IngestEnforcer {
     /// Enforce the per-attribute byte cap. Each entry is `(key, value_bytes)`
     /// where `value_bytes` is the value's TRUE encoded byte length (so callers
     /// must measure `Bytes`/`Int`/`Double` values, not stringify them).
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn check_attributes(limits: &Limits, attrs: &[(String, u64)]) -> Result<(), LimitError> {
         let limit = limits.max_attribute_bytes;
         if limit == 0 {
@@ -93,6 +102,9 @@ impl IngestEnforcer {
 pub struct QueryEnforcer;
 
 impl QueryEnforcer {
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn check_search_limit(limits: &Limits, requested: u64) -> Result<(), LimitError> {
         let limit = limits.max_traces_per_search;
         if limit != 0 && requested > limit {
@@ -101,6 +113,9 @@ impl QueryEnforcer {
         Ok(())
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn check_search_duration(
         limits: &Limits,
         start_ns: i64,

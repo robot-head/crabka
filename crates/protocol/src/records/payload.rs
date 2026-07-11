@@ -35,7 +35,7 @@ pub enum RecordsPayload {
     Legacy(Bytes),
     /// Zero-copy fetch (Increments D + E): the records run lives in segment
     /// `.log` files and is `sendfile(2)`d straight to a plaintext socket —
-    /// never materialized in userspace. One [`FileRegion`] per contributing
+    /// never materialized in userspace. One [`crate::records::FileRegion`] per contributing
     /// segment. `encode_to` falls back to `pread` + `put_slice` (used on TLS /
     /// non-sendfile platforms and for `encoded_len` agreement). Gated on the
     /// SENDFILE alias (Linux + Apple + FreeBSD/DragonFly) because it only exists
@@ -55,6 +55,8 @@ pub enum RecordsPayload {
 impl RecordsPayload {
     /// Construct from raw records-field bytes. When the bytes look like v2,
     /// decode *every* batch in the field; otherwise keep as opaque legacy.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
         if looks_like_v2(&bytes) {
             let mut cur: &[u8] = &bytes;
@@ -93,6 +95,8 @@ impl RecordsPayload {
     /// `encoded_len` agreement): it `pread`s each region out of the segment
     /// file and copies it into `buf`. The zero-copy `sendfile` path in the
     /// broker never calls this — it consumes the `FileRegion`s directly.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         match self {
             Self::V2(batches) => {
@@ -201,6 +205,8 @@ impl RecordsPayload {
     /// invalid `batch_length` (`RecordParse`) is corruption and still errors —
     /// legitimate Kafka truncation always preserves a valid `batch_length` prefix,
     /// so it can only manifest as the too-short variants.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_fetch_bytes(bytes: Bytes) -> Result<Self, RecordsError> {
         if !looks_like_v2(&bytes) {
             return Ok(Self::Legacy(bytes));
@@ -223,6 +229,8 @@ impl RecordsPayload {
     /// records fields in **response** messages. Consumes the whole sliced
     /// field buffer (the caller has already framed it) and parses leniently
     /// via [`from_fetch_bytes`](Self::from_fetch_bytes).
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn decode_lenient<B: Buf>(
         buf: &mut B,
         _version: i16,
@@ -278,6 +286,8 @@ pub enum RecordsPayloadBorrowed<'a> {
 }
 
 impl<'a> RecordsPayloadBorrowed<'a> {
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn from_slice(bytes: &'a [u8]) -> Result<Self, RecordsError> {
         if looks_like_v2(bytes) {
             let mut cur: &'a [u8] = bytes;
@@ -306,6 +316,8 @@ impl<'a> RecordsPayloadBorrowed<'a> {
         }
     }
 
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn encode_to<B: BufMut>(&self, buf: &mut B) -> Result<(), RecordsError> {
         match self {
             Self::V2(batches) => {
@@ -324,6 +336,8 @@ impl<'a> RecordsPayloadBorrowed<'a> {
     }
 
     /// Convert to the owned flavor, performing any necessary buffer copies.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn to_owned(&self) -> Result<RecordsPayload, RecordsError> {
         match self {
             Self::V2(batches) => {

@@ -205,6 +205,8 @@ impl Forwarder {
     /// retries / re-resolves to the (possibly new) owner; an owner authorization
     /// denial (HTTP 403) becomes a non-retriable `Unauthorized`.
     #[tracing::instrument(skip_all)]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn forward(
         &self,
         owner_addr: &str,

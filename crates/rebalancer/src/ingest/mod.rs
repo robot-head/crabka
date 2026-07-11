@@ -91,6 +91,8 @@ impl Ingester {
 }
 
 #[tracing::instrument(level = "info", skip_all, err)]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn snapshot_once(client: &Client) -> Result<ClusterState, anyhow::Error> {
     let md = admin_client::fetch_metadata(client).await?;
     let dc = admin_client::fetch_describe_cluster(client).await?;

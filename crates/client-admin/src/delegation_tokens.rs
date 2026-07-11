@@ -40,6 +40,8 @@ impl AdminClient {
     ///
     /// `renewers` items are `"User:bob"` form; entries without a `:`
     /// are interpreted with type `"User"`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn create_delegation_token_as_owner(
         &mut self,
         owner_principal_name: &str,
@@ -57,6 +59,8 @@ impl AdminClient {
     /// KIP-48 renew: bump the token's `expiry_timestamp_ms` capped by
     /// `max_timestamp_ms`. `renew_period_ms = -1` tells the broker to
     /// use its configured default. Returns the new expiry.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn renew_delegation_token(&mut self, hmac: &[u8]) -> Result<i64, AdminError> {
         let req = build_renew_delegation_token(hmac);
         let resp = self.conn.send(req).await?;
@@ -68,6 +72,8 @@ impl AdminClient {
 
     /// KIP-48 expire: tombstone the token immediately
     /// (`expiry_time_period_ms = -1`).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn expire_delegation_token(&mut self, hmac: &[u8]) -> Result<(), AdminError> {
         let req = build_expire_delegation_token(hmac);
         let resp = self.conn.send(req).await?;
@@ -80,6 +86,8 @@ impl AdminClient {
     /// KIP-48 describe filtered to a single owner. `owner_principal` is
     /// a canonical `"Type:Name"` string (e.g. `"User:alice"`); entries
     /// without a `:` default to type `"User"`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_delegation_tokens_owned_by(
         &mut self,
         owner_principal: &str,

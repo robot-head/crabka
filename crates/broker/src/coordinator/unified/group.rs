@@ -16,7 +16,7 @@
 use std::collections::HashMap;
 
 pub(crate) use crate::coordinator::unified::{
-    classic_state::{Group as ClassicState, OffsetEntry},
+    classic_state::{ClassicGroup as ClassicState, OffsetEntry},
     consumer_state::GroupState as ConsumerState,
 };
 
@@ -32,8 +32,7 @@ pub enum GroupKind {
 
 /// A consumer group in the unified coordinator.
 #[derive(Debug)]
-#[allow(clippy::struct_field_names)]
-pub struct Group {
+pub struct CoordinatorGroup {
     pub group_id: String,
     pub kind: GroupKind,
     /// Committed offsets (`__consumer_offsets` k0/k1). Protocol-agnostic — a
@@ -44,7 +43,7 @@ pub struct Group {
     pub committed_offsets: HashMap<(String, i32), OffsetEntry>,
 }
 
-impl Group {
+impl CoordinatorGroup {
     /// A fresh, empty classic group.
     pub fn new_classic(group_id: impl Into<String>) -> Self {
         let group_id = group_id.into();
@@ -118,7 +117,7 @@ mod tests {
 
     #[test]
     fn classic_container_exposes_classic_state_only() {
-        let mut g = Group::new_classic("g");
+        let mut g = CoordinatorGroup::new_classic("g");
         check!(g.is_classic());
         check!(!g.is_consumer());
         check!(g.as_classic().is_some());
@@ -129,7 +128,7 @@ mod tests {
 
     #[test]
     fn consumer_container_exposes_consumer_state_only() {
-        let mut g = Group::new_consumer("g");
+        let mut g = CoordinatorGroup::new_consumer("g");
         check!(g.is_consumer());
         check!(!g.is_classic());
         check!(g.as_consumer().is_some());

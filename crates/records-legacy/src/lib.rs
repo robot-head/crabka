@@ -1,14 +1,3 @@
-#![allow(
-    // Wire-format I/O: casting between length-bearing usize/i32/i64 is
-    // pervasive and bounded by Kafka's own field widths.
-    clippy::cast_possible_truncation,
-    clippy::cast_possible_wrap,
-    clippy::cast_sign_loss,
-    // Doc comments reference Kafka jargon (MessageSet, RecordBatch) that
-    // is sometimes used as English nouns rather than identifiers.
-    clippy::doc_markdown,
-)]
-
 //! Apache Kafka legacy (v0/v1) `MessageSet` codec, with bridges to and from
 //! the v2 `RecordBatch` types in [`crabka_protocol`].
 //!
@@ -17,7 +6,7 @@
 //! timestamp per message (KIP-32). Compression in both is signalled in
 //! the low 3 bits of the per-message `attributes` byte, with the
 //! compressed payload appearing as a single outer message whose `value`
-//! is a nested (uncompressed) MessageSet.
+//! is a nested (uncompressed) `MessageSet`.
 //!
 //! [Kafka protocol docs]: https://kafka.apache.org/protocol.html#messageset
 //!
@@ -32,7 +21,7 @@
 //!   `crabka_protocol::records::RecordBatch`. Use these from the Fetch
 //!   (down-conversion) and Produce (up-conversion) handlers.
 //!
-//! ## Encode and decode a v1 MessageSet
+//! ## Encode and decode a v1 `MessageSet`
 //!
 //! ```rust
 //! use bytes::{Bytes, BytesMut};

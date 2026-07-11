@@ -178,6 +178,9 @@ pub fn router(state: Arc<DistributorState>) -> Router {
 }
 
 /// Serve the distributor until cancelled.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn serve(
     addr: SocketAddr,
     state: Arc<DistributorState>,
@@ -198,6 +201,9 @@ pub async fn serve(
 }
 
 /// Serve the OTLP/gRPC trace receiver until cancelled.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn serve_otlp_grpc(
     addr: SocketAddr,
     state: Arc<DistributorState>,
@@ -212,6 +218,9 @@ pub async fn serve_otlp_grpc(
 }
 
 /// Serve the Jaeger API v2 gRPC trace receiver until cancelled.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn serve_jaeger_grpc(
     addr: SocketAddr,
     state: Arc<DistributorState>,
@@ -226,6 +235,9 @@ pub async fn serve_jaeger_grpc(
 }
 
 /// Serve the Jaeger compact-Thrift UDP receiver until cancelled.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn serve_jaeger_compact_udp(
     addr: SocketAddr,
     state: Arc<DistributorState>,
@@ -611,6 +623,9 @@ impl DistributorState {
 }
 
 /// Validate decoded spans against per-tenant structural limits.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn validate(spans: &[Span], limits: &TenantLimits) -> Result<(), TracesError> {
     if spans.len() > limits.max_spans_per_request {
         return Err(TracesError::Limit(format!(
@@ -758,6 +773,9 @@ fn grpc_status_from_error(err: &TracesError) -> GrpcStatus {
 /// Per-partition ordering and idempotent sequencing are unaffected (the sender
 /// still drains each partition in order with one batch in flight); traces carry
 /// no cross-span WAL-order dependency (the block-builder regroups by `trace_id`).
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn produce_spans(
     sink: &dyn WalSink,
     tenant: &str,

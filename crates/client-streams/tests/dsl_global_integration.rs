@@ -42,7 +42,10 @@ async fn finalize_streams_version(client: &Client) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert_eq!(
+        resp.error_code, 0,
+        "streams.version finalize failed: {resp:?}"
+    );
 }
 
 async fn create_topic(client: &Client, topic: &str, partitions: i32) {
@@ -59,7 +62,10 @@ async fn create_topic(client: &Client, topic: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert_eq!(
+        resp.topics[0].error_code, 0,
+        "topic create failed: {resp:?}"
+    );
 }
 
 // ─── DSL global-table join topology ────────────────────────────────────────────
@@ -238,8 +244,15 @@ async fn global_table_join_reads_all_partitions() {
     // k1's value "a" joins partition-0 global "A" → "a-A".
     // k2's value "b" joins partition-1 global "B" → "b-B" (proves bootstrap read
     // partition 1, not just partition 0).
-    assert2::assert!(got.contains(&("k1".to_string(), "a-A".to_string())));
-    assert2::assert!(got.contains(&("k2".to_string(), "b-B".to_string())));
+    assert!(
+        got.contains(&("k1".to_string(), "a-A".to_string())),
+        "expected (k1, a-A) from partition-0 global value; got {got:?}",
+    );
+    assert!(
+        got.contains(&("k2".to_string(), "b-B".to_string())),
+        "expected (k2, b-B) from partition-1 global value \
+         (proves bootstrap read ALL partitions); got {got:?}",
+    );
 
     streams.close().await.unwrap();
     broker.shutdown().await;

@@ -5,10 +5,6 @@
 //! 0 and restarting; `NOT_LEADER_FOR_PARTITION` by returning so the
 //! supervisor's next reconcile re-evaluates.
 
-// `log_config` is a conventional field name; the "ends with struct name" lint
-// is a false positive here.
-#![allow(clippy::struct_field_names)]
-
 use std::{path::PathBuf, sync::Arc, time::Duration};
 
 use crabka_client_core::{ClientError, Connection, ConnectionOptions};
@@ -17,7 +13,7 @@ use crabka_log::{Log, LogConfig, Offset};
 use crabka_protocol::{
     owned::{
         fetch_request::{FetchPartition, FetchRequest, FetchTopic, ReplicaState},
-        fetch_response::FetchResponse,
+        fetch_response::{FetchResponse, PartitionData},
         offset_for_leader_epoch_request::{
             OffsetForLeaderEpochRequest, OffsetForLeaderPartition, OffsetForLeaderTopic,
         },
@@ -85,7 +81,7 @@ pub(crate) struct Config {
     pub leader_port: u16,
     pub partitions: Arc<PartitionRegistry>,
     pub log_dirs: Vec<PathBuf>,
-    pub log_config: LogConfig,
+    pub log_settings: LogConfig,
     pub client_id: String,
     pub shutdown: CancellationToken,
     /// Shared outbound dialer. Connects through TLS + SASL when the
@@ -150,7 +146,7 @@ fn ensure_local_partition(cfg: &Config) -> Result<(), String> {
                 crate::log_dir::place_partition_dir(&cfg.log_dirs, &cfg.topic, cfg.partition.get());
             std::fs::create_dir_all(&dir).map_err(|e| format!("mkdir: {e}"))?;
             let log =
-                Log::open(&dir, cfg.log_config.clone()).map_err(|e| format!("Log::open: {e}"))?;
+                Log::open(&dir, cfg.log_settings.clone()).map_err(|e| format!("Log::open: {e}"))?;
             let owning_dir = dir
                 .parent()
                 .expect("placed partition dir always has a parent log.dir")
@@ -358,7 +354,7 @@ fn became_partition_leader(cfg: &Config) -> bool {
         == Some(cfg.node_id)
 }
 
-#[allow(clippy::too_many_lines)] // KIP-320 in-band truncation + KIP-101 epoch fence add match arms
+// KIP-320 in-band truncation + KIP-101 epoch fence add match arms
 async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
     // The replicator only ever requests one (topic, partition) per Fetch.
     // Match by either `topic` (v ≤ 12) or `topic_id` (v ≥ 13) so that
@@ -369,18 +365,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
     // Take `resp` BY VALUE and resolve the matching partition by *mutable*
     // reference so the record batches can be moved out (via `records.take()`)
     // and handed to the writer without a deep clone per batch.
-    let Some(part_resp) = resp
-        .responses
-        .iter_mut()
-        .find(|t| {
-            t.topic == cfg.topic || (cfg.topic_id != WireUuid::ZERO && t.topic_id == cfg.topic_id)
-        })
-        .and_then(|t| {
-            t.partitions
-                .iter_mut()
-                .find(|p| p.partition_index == cfg.partition)
-        })
-    else {
+    let Some(part_resp) = find_partition_response(&mut resp, cfg) else {
         return LoopAction::Continue;
     };
 
@@ -468,50 +453,7 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             part.set_follower_hw(Offset(part_resp.high_watermark)).await;
             LoopAction::Continue
         }
-        codes::OFFSET_OUT_OF_RANGE => {
-            // The leader reports its current `log_start_offset` in the
-            // partition response. We MUST reset our local log to that
-            // value, not to 0: the leader may have moved its log_start
-            // forward past records this follower never saw (retention
-            // happened, etc.), and re-fetching from 0 would just bounce
-            // off the same `OFFSET_OUT_OF_RANGE` forever. `reset_to`
-            // drops every existing segment and creates a fresh active
-            // segment at `leader_log_start`, after which the next loop
-            // iteration's `log_end_offset()` equals `leader_log_start`
-            // and the fetch lands inside the leader's retained range.
-            // Stale-response guard: never reset from a Fetch response if we have
-            // since become this partition's leader (see `became_partition_leader`).
-            if became_partition_leader(cfg) {
-                warn!(topic = %cfg.topic, partition = cfg.partition.get(),
-                    "replicator: skipping out_of_range reset — this broker is now the partition leader (stale fetch response)");
-                return LoopAction::StopNotLeader;
-            }
-            let leader_log_start = part_resp.log_start_offset;
-            warn!(
-                topic = %cfg.topic,
-                partition = cfg.partition.get(),
-                leader_log_start,
-                "replicator.out_of_range; resetting local log to leader log_start"
-            );
-            if let Some(part) = cfg.partitions.get(&cfg.topic, cfg.partition) {
-                // Wrap the wire `i64` into `Offset` for the log-layer call.
-                match part.reset_to(Offset(leader_log_start)).await {
-                    Ok(()) => {
-                        // The log restarts empty at leader_log_start; drop
-                        // idempotent-producer dedup entries at/above it so a
-                        // retried batch re-appends instead of stalling its
-                        // acks=all HW gate against a vanished offset.
-                        cfg.producer_state
-                            .truncate(&cfg.topic, cfg.partition, leader_log_start)
-                            .await;
-                    }
-                    Err(e) => {
-                        warn!(error = %e, "replicator: reset_to(leader_log_start) failed");
-                    }
-                }
-            }
-            LoopAction::Continue
-        }
+        codes::OFFSET_OUT_OF_RANGE => handle_offset_out_of_range(part_resp, cfg).await,
         codes::UNKNOWN_TOPIC_OR_PARTITION => {
             // Leader hasn't materialized its side yet
             // (CreateTopics-vs-replicator race).
@@ -558,6 +500,53 @@ async fn handle_response(mut resp: FetchResponse, cfg: &Config) -> LoopAction {
             LoopAction::Continue
         }
     }
+}
+
+fn find_partition_response<'a>(
+    response: &'a mut FetchResponse,
+    cfg: &Config,
+) -> Option<&'a mut PartitionData> {
+    response
+        .responses
+        .iter_mut()
+        .find(|topic| {
+            topic.topic == cfg.topic
+                || (cfg.topic_id != WireUuid::ZERO && topic.topic_id == cfg.topic_id)
+        })?
+        .partitions
+        .iter_mut()
+        .find(|partition| partition.partition_index == cfg.partition)
+}
+
+async fn handle_offset_out_of_range(
+    partition_response: &PartitionData,
+    cfg: &Config,
+) -> LoopAction {
+    if became_partition_leader(cfg) {
+        warn!(topic = %cfg.topic, partition = cfg.partition.get(),
+            "replicator: skipping out_of_range reset — this broker is now the partition leader (stale fetch response)");
+        return LoopAction::StopNotLeader;
+    }
+    let leader_log_start = partition_response.log_start_offset;
+    warn!(
+        topic = %cfg.topic,
+        partition = cfg.partition.get(),
+        leader_log_start,
+        "replicator.out_of_range; resetting local log to leader log_start"
+    );
+    if let Some(partition) = cfg.partitions.get(&cfg.topic, cfg.partition) {
+        match partition.reset_to(Offset(leader_log_start)).await {
+            Ok(()) => {
+                cfg.producer_state
+                    .truncate(&cfg.topic, cfg.partition, leader_log_start)
+                    .await;
+            }
+            Err(error) => {
+                warn!(error = %error, "replicator: reset_to(leader_log_start) failed");
+            }
+        }
+    }
+    LoopAction::Continue
 }
 
 /// On `FENCED_LEADER_EPOCH` or `UNKNOWN_LEADER_EPOCH`, call
@@ -757,6 +746,7 @@ mod tests {
         net::SocketAddr,
     };
 
+    use assert2::assert;
     use crabka_metadata::{
         MetadataImage, MetadataRecord, PartitionRecord, TopicConfigRecord, TopicRecord,
     };
@@ -909,7 +899,7 @@ mod tests {
             leader_port: 9,
             partitions: Arc::new(PartitionRegistry::new()),
             log_dirs: vec![log_dir.path().to_path_buf()],
-            log_config: LogConfig::default(),
+            log_settings: LogConfig::default(),
             client_id: "replica-test".into(),
             shutdown: CancellationToken::new(),
             inter_broker_client: Arc::new(crate::network::client::InterBrokerClient::new(
@@ -947,7 +937,7 @@ mod tests {
 
     #[test]
     fn fetch_max_bytes_is_one_mebibyte() {
-        assert2::assert!(FETCH_MAX_BYTES == 1_048_576);
+        assert!(FETCH_MAX_BYTES == 1_048_576);
     }
 
     #[test]
@@ -991,7 +981,7 @@ mod tests {
             },
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(req == expected);
+        assert!(req == expected);
     }
 
     #[test]
@@ -1001,14 +991,15 @@ mod tests {
 
         let req = build_fetch_request(&cfg, Offset(0), FETCH_MAX_BYTES);
 
-        assert2::assert!((req.replica_id, req.replica_state.replica_id) == (-1, -1));
+        assert!(req.replica_id == -1);
+        assert!(req.replica_state.replica_id == -1);
     }
 
     #[test]
     fn offset_epoch_request_and_connection_options_preserve_identity_fields() {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
         let opts = connection_options(&cfg.client_id);
-        assert2::assert!(opts.client_id == "replica-test");
+        assert!(opts.client_id == "replica-test");
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
         let expected = OffsetForLeaderEpochRequest {
@@ -1025,7 +1016,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(req == expected);
+        assert!(req == expected);
     }
 
     #[test]
@@ -1035,7 +1026,7 @@ mod tests {
 
         let req = build_offset_for_leader_epoch_request(&cfg, 7);
 
-        assert2::assert!(req.replica_id == -1);
+        assert!(req.replica_id == -1);
     }
 
     #[test]
@@ -1055,7 +1046,10 @@ mod tests {
             ),
         ];
         for (current, cap, want) in cases {
-            assert2::assert!(next_reconnect_delay(current, cap) == want);
+            assert!(
+                next_reconnect_delay(current, cap) == want,
+                "current {current:?} cap {cap:?}"
+            );
         }
     }
 
@@ -1064,7 +1058,10 @@ mod tests {
         let cases = [(NODE_ID, true), (LEADER_ID, false)];
         for (leader, want) in cases {
             let (cfg, _log_dir) = test_config(image_with_leader(leader));
-            assert2::assert!(became_partition_leader(&cfg) == want);
+            assert!(
+                became_partition_leader(&cfg) == want,
+                "metadata leader {leader}"
+            );
         }
     }
 
@@ -1073,7 +1070,7 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_leader(LEADER_ID));
         cfg.throttle_state.follower_in.set_rate_with_burst(1234, 0);
 
-        assert2::assert!(
+        assert!(
             follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
         );
     }
@@ -1082,7 +1079,7 @@ mod tests {
     fn follower_partition_fetch_cap_ignores_zero_rate_throttle() {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
 
-        assert2::assert!(
+        assert!(
             follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(FETCH_MAX_BYTES)
         );
     }
@@ -1092,7 +1089,7 @@ mod tests {
         let (cfg, _log_dir) = test_config(image_with_follower_throttle("*"));
         cfg.throttle_state.follower_in.set_rate_with_burst(1024, 0);
 
-        assert2::assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
+        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Sleep);
     }
 
     #[test]
@@ -1102,7 +1099,7 @@ mod tests {
             .follower_in
             .set_rate_with_burst(1234, 1234);
 
-        assert2::assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
+        assert!(follower_partition_fetch_cap(&cfg) == FetchThrottleDecision::Fetch(1234));
     }
 
     #[tokio::test]
@@ -1114,7 +1111,7 @@ mod tests {
             partition_response(PARTITION, codes::NOT_LEADER_OR_FOLLOWER),
         );
 
-        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1126,7 +1123,7 @@ mod tests {
             partition_response(PARTITION, codes::NOT_LEADER_OR_FOLLOWER),
         );
 
-        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1138,7 +1135,7 @@ mod tests {
             partition_response(PARTITION + 1, codes::NOT_LEADER_OR_FOLLOWER),
         );
 
-        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::Continue);
+        assert!(handle_response(resp, &cfg).await == LoopAction::Continue);
     }
 
     #[tokio::test]
@@ -1159,7 +1156,7 @@ mod tests {
             },
         );
 
-        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1171,7 +1168,7 @@ mod tests {
             partition_response(PARTITION, codes::OFFSET_OUT_OF_RANGE),
         );
 
-        assert2::assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
+        assert!(handle_response(resp, &cfg).await == LoopAction::StopNotLeader);
     }
 
     #[tokio::test]
@@ -1182,7 +1179,7 @@ mod tests {
 
         run(cfg).await;
 
-        assert2::assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
+        assert!(partitions.contains(TOPIC, PartitionIndex(PARTITION)));
     }
 
     #[tokio::test]
@@ -1192,7 +1189,7 @@ mod tests {
 
         let err = run_inner(&cfg).await.unwrap_err();
 
-        assert2::assert!(err == "cancelled");
+        assert!(err == "cancelled");
     }
 
     #[tokio::test]
@@ -1205,6 +1202,9 @@ mod tests {
 
         let err = handle_epoch_fence(&cfg).await.unwrap_err();
 
-        assert2::assert!(err.contains("handle_epoch_fence: connect"));
+        assert!(
+            err.contains("handle_epoch_fence: connect"),
+            "unexpected error: {err}"
+        );
     }
 }

@@ -134,6 +134,8 @@ impl<'a> Reader<'a> {
 ///
 /// Returns [`KeytabError::BadMagic`] if the file header is wrong, or
 /// [`KeytabError::Truncated`] if any entry runs past the end of the buffer.
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn parse_keytab(bytes: &[u8]) -> Result<Vec<KeytabKey>, KeytabError> {
     let mut reader = Reader::new(bytes);
 

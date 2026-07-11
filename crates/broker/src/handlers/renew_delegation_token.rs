@@ -115,6 +115,7 @@ fn err_response(code: i16) -> RenewDelegationTokenResponse {
 mod tests {
     use std::{collections::HashSet, sync::Arc, time::Duration};
 
+    use assert2::assert;
     use crabka_raft::ControllerHandle;
     use crabka_security::{AuthMethod, KafkaPrincipal, Principal, SaslMechanism};
     use tempfile::TempDir;
@@ -145,7 +146,7 @@ mod tests {
         let mut rx = handle.watch_leader();
         let deadline = std::time::Instant::now() + Duration::from_secs(5);
         while rx.borrow().is_none() {
-            assert2::assert!(std::time::Instant::now() < deadline);
+            assert!(std::time::Instant::now() < deadline, "no leader in 5s");
             let _ = tokio::time::timeout(Duration::from_millis(100), rx.changed()).await;
         }
         handle
@@ -171,10 +172,8 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn seed_token(
-        controller: &ControllerHandle,
-        token_id: &str,
+        target: (&ControllerHandle, &str),
         hmac: Vec<u8>,
         owner: KafkaPrincipal,
         renewers: Vec<KafkaPrincipal>,
@@ -182,6 +181,7 @@ mod tests {
         expiry_ms: i64,
         max_ms: i64,
     ) {
+        let (controller, token_id) = target;
         let rec = DelegationTokenRecord {
             token_id: token_id.into(),
             owner,
@@ -205,7 +205,7 @@ mod tests {
         let dir = TempDir::new().unwrap();
         let controller = test_controller(dir.path().into()).await;
         let resp = handle(&req, &auth, None, 1_000, &*controller, &empty_super_users()).await;
-        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_AUTH_DISABLED);
         controller.cancel().await;
     }
 
@@ -217,8 +217,7 @@ mod tests {
         let hmac = vec![0xAA; 32];
         let now = now_ms();
         seed_token(
-            &controller,
-            "tok-1",
+            (&controller, "tok-1"),
             hmac.clone(),
             kp("alice"),
             vec![],
@@ -242,15 +241,19 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert2::assert!(resp.error_code == 0);
+        assert!(resp.error_code == 0);
         // expiry should be roughly now + 1h (within a small slop window).
         let slop = 60_000;
         let target = now_ms() + 3_600_000;
-        assert2::assert!((resp.expiry_timestamp_ms - target).abs() < slop);
+        assert!(
+            (resp.expiry_timestamp_ms - target).abs() < slop,
+            "expiry {} far from {target}",
+            resp.expiry_timestamp_ms
+        );
         // Persisted in image.
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-1").expect("present");
-        assert2::assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
+        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -262,8 +265,7 @@ mod tests {
         let hmac = vec![0xA1; 32];
         let now = now_ms();
         seed_token(
-            &controller,
-            "tok-default-renew",
+            (&controller, "tok-default-renew"),
             hmac.clone(),
             kp("alice"),
             vec![],
@@ -289,9 +291,13 @@ mod tests {
         )
         .await;
 
-        assert2::assert!(resp.error_code == 0);
+        assert!(resp.error_code == 0);
         let target = now_ms() + default_period;
-        assert2::assert!((resp.expiry_timestamp_ms - target).abs() < 60_000);
+        assert!(
+            (resp.expiry_timestamp_ms - target).abs() < 60_000,
+            "expiry {} far from {target}",
+            resp.expiry_timestamp_ms
+        );
         controller.cancel().await;
     }
 
@@ -303,8 +309,7 @@ mod tests {
         let hmac = vec![0xBB; 32];
         let now = now_ms();
         seed_token(
-            &controller,
-            "tok-2",
+            (&controller, "tok-2"),
             hmac.clone(),
             kp("alice"),
             vec![kp("bob")],
@@ -328,8 +333,8 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert2::assert!(resp.error_code == 0);
-        assert2::assert!(resp.expiry_timestamp_ms > now + 30_000);
+        assert!(resp.error_code == 0);
+        assert!(resp.expiry_timestamp_ms > now + 30_000);
         controller.cancel().await;
     }
 
@@ -352,7 +357,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_NOT_FOUND);
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_NOT_FOUND);
         controller.cancel().await;
     }
 
@@ -364,8 +369,7 @@ mod tests {
         let hmac = vec![0xCC; 32];
         let now = now_ms();
         seed_token(
-            &controller,
-            "tok-3",
+            (&controller, "tok-3"),
             hmac.clone(),
             kp("alice"),
             vec![kp("bob")],
@@ -389,7 +393,7 @@ mod tests {
             &empty_super_users(),
         )
         .await;
-        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
         controller.cancel().await;
     }
 
@@ -409,8 +413,7 @@ mod tests {
         // Token owned by `alice`, no renewers — operator (`admin`) is
         // neither, but it IS in `super_users`, so renew must succeed.
         seed_token(
-            &controller,
-            "tok-super",
+            (&controller, "tok-super"),
             hmac.clone(),
             kp("alice"),
             vec![],
@@ -434,11 +437,14 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert2::assert!(resp.error_code == 0);
+        assert!(
+            resp.error_code == 0,
+            "super-user must be able to renew any token regardless of owner/renewers"
+        );
         // Persisted in image with the new expiry.
         let img = controller.current_image();
         let stored = img.delegation_token_by_id("tok-super").expect("present");
-        assert2::assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
+        assert!(stored.expiry_timestamp_ms == resp.expiry_timestamp_ms);
         controller.cancel().await;
     }
 
@@ -454,8 +460,7 @@ mod tests {
         let hmac = vec![0xEE; 32];
         let now = now_ms();
         seed_token(
-            &controller,
-            "tok-eve",
+            (&controller, "tok-eve"),
             hmac.clone(),
             kp("alice"),
             vec![kp("bob")],
@@ -481,7 +486,7 @@ mod tests {
             &super_users_with(&["admin"]),
         )
         .await;
-        assert2::assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
+        assert!(resp.error_code == crate::codes::DELEGATION_TOKEN_OWNER_MISMATCH);
         controller.cancel().await;
     }
 }

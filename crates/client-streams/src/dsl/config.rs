@@ -119,19 +119,18 @@ impl<KS, V1S, V2S> From<(KS, V1S, V2S)> for StreamJoined<KS, V1S, V2S> {
 /// serde plus the per-side value serdes (`value1` for this/left side, `value2`
 /// for the other/right side). The two join-window stores are registered with
 /// `key_serde` + the matching value serde, mirroring JVM `StreamJoined.with`.
-#[allow(clippy::struct_field_names)] // key/value serdes mirror JVM `StreamJoined`
 #[derive(Debug, Clone, Copy)]
 pub struct StreamJoined<KS, V1S, V2S> {
-    pub(crate) key_serde: KS,
-    pub(crate) value1_serde: V1S,
-    pub(crate) value2_serde: V2S,
+    pub(crate) key: KS,
+    pub(crate) left_value: V1S,
+    pub(crate) right_value: V2S,
 }
 impl<KS, V1S, V2S> StreamJoined<KS, V1S, V2S> {
     pub fn with(key_serde: KS, value1_serde: V1S, value2_serde: V2S) -> Self {
         Self {
-            key_serde,
-            value1_serde,
-            value2_serde,
+            key: key_serde,
+            left_value: value1_serde,
+            right_value: value2_serde,
         }
     }
 }
@@ -200,19 +199,15 @@ mod tests {
     #[test]
     fn grouped_materialized_repartitioned_carry_serdes_and_names() {
         let g = Grouped::with(StringSerde, I64Serde).with_name("g1");
+        check!(g.name.as_deref() == Some("g1"));
         let m = Materialized::with(StringSerde, I64Serde).as_store("counts");
+        check!(m.store_name.as_deref() == Some("counts"));
+        check!(m.logging);
         let r = Repartitioned::with(StringSerde, I64Serde)
             .with_name("rp")
             .num_partitions(4);
-        check!(
-            (
-                g.name.as_deref(),
-                m.store_name.as_deref(),
-                m.logging,
-                r.name.as_deref(),
-                r.partitions,
-            ) == (Some("g1"), Some("counts"), true, Some("rp"), Some(4))
-        );
+        check!(r.name.as_deref() == Some("rp"));
+        check!(r.partitions == Some(4));
     }
 
     #[test]
@@ -226,16 +221,16 @@ mod tests {
     #[test]
     fn joined_carries_grace_and_name() {
         let j = Joined::with_grace_period(5_000).as_named("jb");
-        check!(
-            (j.grace_ms, j.name.as_deref(), Joined::default().grace_ms)
-                == (Some(5_000), Some("jb"), None)
-        );
+        check!(j.grace_ms == Some(5_000));
+        check!(j.name.as_deref() == Some("jb"));
+        check!(Joined::default().grace_ms == None);
     }
 
     #[test]
     fn materialized_as_versioned_sets_config() {
         let m = Materialized::with(StringSerde, I64Serde).as_versioned("vstore", 600_000);
+        check!(m.store_name.as_deref() == Some("vstore"));
         let vc = m.versioned.expect("versioned config");
-        check!((m.store_name.as_deref(), vc.history_retention_ms) == (Some("vstore"), 600_000));
+        check!(vc.history_retention_ms == 600_000);
     }
 }

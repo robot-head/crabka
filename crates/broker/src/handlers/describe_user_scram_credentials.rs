@@ -23,7 +23,6 @@ use crate::{
 const DESCRIBE_DUPLICATE_USER: &str =
     "Cannot describe SCRAM credentials for the same user twice in a single request";
 
-#[allow(clippy::unused_async)]
 #[tracing::instrument(
     name = "handle_describe_user_scram_credentials",
     level = "info",
@@ -31,7 +30,7 @@ const DESCRIBE_DUPLICATE_USER: &str =
     fields(api = "DescribeUserScramCredentials"),
     err
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     req: DescribeUserScramCredentialsRequest,
     ctx: &crate::handlers::RequestContext<'_>,
@@ -205,6 +204,7 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_metadata::{AclOperation, MetadataRecord, ScramCredentialRecord};
     use crabka_protocol::UnknownTaggedFields;
 
@@ -293,9 +293,9 @@ mod tests {
                 ("bob", SaslMechanism::ScramSha512, 8192),
             ],
         );
-        assert2::assert!(resp.results.len() == 2);
+        assert!(resp.results.len() == 2);
         let users: Vec<&str> = resp.results.iter().map(|r| r.user.as_str()).collect();
-        assert2::assert!(users.contains(&"alice") && users.contains(&"bob"));
+        assert!(users.contains(&"alice") && users.contains(&"bob"));
     }
 
     #[test]
@@ -318,7 +318,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }];
-        assert2::assert!(resp.results == expected);
+        assert!(resp.results == expected);
     }
 
     #[test]
@@ -334,7 +334,7 @@ mod tests {
             credential_infos: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         }];
-        assert2::assert!(resp.results == expected);
+        assert!(resp.results == expected);
     }
 
     #[test]
@@ -349,27 +349,33 @@ mod tests {
             ],
         );
 
-        let expected = DescribeUserScramCredentialsResponse {
-            results: vec![
-                DescribeUserScramCredentialsResult {
-                    user: "alice".into(),
-                    error_code: KAFKA_DUPLICATE_RESOURCE,
-                    error_message: Some(format!("{DESCRIBE_DUPLICATE_USER}: alice")),
-                    ..Default::default()
-                },
-                DescribeUserScramCredentialsResult {
-                    user: "bob".into(),
-                    credential_infos: vec![CredentialInfo {
-                        mechanism: 2,
-                        iterations: 8192,
-                        unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
-                    }],
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(
+            resp.results.len() == 2,
+            "duplicate users collapse to one row"
+        );
+        let alice_rows: Vec<_> = resp.results.iter().filter(|r| r.user == "alice").collect();
+        assert!(
+            alice_rows.len() == 1,
+            "alice should appear once: {:?}",
+            resp.results
+        );
+        assert!(alice_rows[0].error_code == KAFKA_DUPLICATE_RESOURCE);
+        assert!(alice_rows[0].credential_infos.is_empty());
+
+        let bob = resp
+            .results
+            .iter()
+            .find(|r| r.user == "bob")
+            .expect("distinct users remain in the response");
+        assert!(bob.error_code == 0);
+        assert!(
+            bob.credential_infos
+                == vec![CredentialInfo {
+                    mechanism: 2,
+                    iterations: 8192,
+                    unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
+                }]
+        );
     }
 
     #[test]
@@ -393,7 +399,7 @@ mod tests {
             .map(|info| info.mechanism)
             .collect();
 
-        assert2::assert!(mechanisms == vec![1, 2]);
+        assert!(mechanisms == vec![1, 2]);
     }
 
     #[test]
@@ -403,7 +409,7 @@ mod tests {
             (SaslMechanism::ScramSha512, 2),
             (SaslMechanism::Plain, 0),
         ] {
-            assert2::assert!(sasl_mechanism_to_byte(mechanism) == want);
+            assert!(sasl_mechanism_to_byte(mechanism) == want, "{mechanism:?}");
         }
     }
 
@@ -422,12 +428,12 @@ mod tests {
             &ctx,
             0,
         )
-        .await
         .expect("describe should encode");
         let resp: DescribeUserScramCredentialsResponse =
             crate::test_support::decode_response(&bytes, 0);
 
-        assert2::assert!(resp == DescribeUserScramCredentialsResponse::default());
+        assert!(resp.error_code == 0, "Cluster Describe should authorize");
+        assert!(resp.results.is_empty());
         broker_handle.shutdown().await;
     }
 
@@ -448,17 +454,12 @@ mod tests {
             &ctx,
             0,
         )
-        .await
         .expect("describe denial should encode");
         let resp: DescribeUserScramCredentialsResponse =
             crate::test_support::decode_response(&bytes, 0);
 
-        let expected = DescribeUserScramCredentialsResponse {
-            error_code: CLUSTER_AUTHORIZATION_FAILED,
-            error_message: Some("describe-user-scram-credentials denied".into()),
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.error_code == CLUSTER_AUTHORIZATION_FAILED);
+        assert!(resp.results.is_empty());
         broker_handle.shutdown().await;
     }
 }

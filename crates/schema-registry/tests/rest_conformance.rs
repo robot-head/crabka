@@ -147,7 +147,6 @@ fn sorted_string_array(v: &serde_json::Value) -> Vec<String> {
 // ── the test ─────────────────────────────────────────────────────────────────
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)]
 async fn rest_conformance_vs_cp_fixtures() {
     // Schema strings verbatim from the fixture README.
     // NOTE: the PROTOBUF schema registered by cp-schema-registry is normalised

@@ -1,20 +1,16 @@
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
-#![allow(clippy::type_complexity)]
-
-//! Broker-side integration tests for KIP-599 controller_mutation_rate.
+//! Broker-side integration tests for KIP-599 `controller_mutation_rate`.
 //!
 //! Tests:
 //! 1. `controller_mutation_rate_throttles_create_topics` — Set rate=2.0 for alice;
-//!    create topic with 10 partitions; assert throttle_time_ms > 0 AND wall ≥800ms.
+//!    create topic with 10 partitions; assert `throttle_time_ms` > 0 AND wall ≥800ms.
 //! 2. `unthrottled_create_topics_unaffected` — No quota; create topic; assert
-//!    throttle_time_ms == 0.
+//!    `throttle_time_ms` == 0.
 //! 3. `controller_mutation_rate_throttles_delete_topics` — Pre-create topic with 10
-//!    partitions; set rate=2.0 for alice; alice deletes; assert throttle_time_ms > 0.
+//!    partitions; set rate=2.0 for alice; alice deletes; assert `throttle_time_ms` > 0.
 
 use std::{io, net::SocketAddr};
 
-use assert2::check;
+use assert2::{assert, check};
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_metadata::{
@@ -36,6 +32,10 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+type QuotaEntity = Vec<(String, Option<String>)>;
+type QuotaOperations = Vec<(String, f64, bool)>;
+type QuotaEntries = Vec<(QuotaEntity, QuotaOperations)>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -191,18 +191,20 @@ async fn start_single_broker_sasl_plaintext_with_users(
 // Wire driver for AlterClientQuotas. Copied from `client_quotas.rs`.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `AlterClientQuotas` (api_key=49) over a SASL/PLAIN connection.
+/// Drive `AlterClientQuotas` (`api_key=49`) over a SASL/PLAIN connection.
 async fn drive_alter_client_quotas_sasl(
     addr: SocketAddr,
     user: &str,
     pass: &str,
-    entries: Vec<(Vec<(String, Option<String>)>, Vec<(String, f64, bool)>)>,
+    entries: QuotaEntries,
     validate_only: bool,
 ) -> Vec<(Vec<(String, Option<String>)>, i16)> {
     use crabka_protocol::owned::{
         alter_client_quotas_request::{AlterClientQuotasRequest, EntityData, EntryData, OpData},
         alter_client_quotas_response::AlterClientQuotasResponse,
     };
+
+    const VERSION: i16 = 1; // flexible
 
     let req = AlterClientQuotasRequest {
         entries: entries
@@ -231,8 +233,6 @@ async fn drive_alter_client_quotas_sasl(
         validate_only,
         ..Default::default()
     };
-
-    const VERSION: i16 = 1; // flexible
 
     let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
         .await
@@ -264,7 +264,7 @@ async fn drive_alter_client_quotas_sasl(
 // Wire drivers for CreateTopics and DeleteTopics.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `CreateTopics` (api_key=19) over a SASL/PLAIN connection.
+/// Drive `CreateTopics` (`api_key=19`) over a SASL/PLAIN connection.
 /// Returns `(throttle_time_ms, per-topic error_code)` from the first result.
 async fn drive_create_topics_sasl(
     addr: SocketAddr,
@@ -303,11 +303,11 @@ async fn drive_create_topics_sasl(
     let resp =
         CreateTopicsResponse::decode(&mut cur, VERSION).expect("decode CreateTopicsResponse");
 
-    let err_code = resp.topics.first().map(|t| t.error_code).unwrap_or(-1);
+    let err_code = resp.topics.first().map_or(-1, |t| t.error_code);
     (resp.throttle_time_ms, err_code)
 }
 
-/// Drive `DeleteTopics` (api_key=20) over a SASL/PLAIN connection.
+/// Drive `DeleteTopics` (`api_key=20`) over a SASL/PLAIN connection.
 /// Returns `(throttle_time_ms, per-topic error_code)` from the first result.
 async fn drive_delete_topics_sasl(
     addr: SocketAddr,
@@ -342,7 +342,7 @@ async fn drive_delete_topics_sasl(
     let resp =
         DeleteTopicsResponse::decode(&mut cur, VERSION).expect("decode DeleteTopicsResponse");
 
-    let err_code = resp.responses.first().map(|r| r.error_code).unwrap_or(-1);
+    let err_code = resp.responses.first().map_or(-1, |r| r.error_code);
     (resp.throttle_time_ms, err_code)
 }
 
@@ -352,7 +352,7 @@ async fn drive_delete_topics_sasl(
 
 /// Test 1: Set `controller_mutation_rate=2.0` for alice; create topic with 10
 /// partitions (mutations=10, burst=2, overage=8 → delay=4s capped at 1s).
-/// Assert throttle_time_ms > 0 AND wall ≥ 800ms.
+/// Assert `throttle_time_ms` > 0 AND wall ≥ 800ms.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controller_mutation_rate_throttles_create_topics() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -389,7 +389,7 @@ async fn controller_mutation_rate_throttles_create_topics() {
         false,
     )
     .await;
-    assert2::assert!(alter[0].1 == 0);
+    assert!(alter[0].1 == 0, "alter should succeed");
 
     // Wait until the controller_mutation_rate quota is committed to this
     // broker's metadata image. The CreateTopics handler reads the rate
@@ -423,7 +423,7 @@ async fn controller_mutation_rate_throttles_create_topics() {
     );
 }
 
-/// Test 2: No quota configured; create topic; assert throttle_time_ms == 0.
+/// Test 2: No quota configured; create topic; assert `throttle_time_ms` == 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn unthrottled_create_topics_unaffected() {
     let (handle, _dir, addr) =
@@ -434,12 +434,12 @@ async fn unthrottled_create_topics_unaffected() {
 
     let (throttle_ms, err_code) =
         drive_create_topics_sasl(addr, "admin", "admin-secret", "unthrottled-topic", 10).await;
-    assert2::assert!(err_code == 0);
-    assert2::assert!(throttle_ms == 0);
+    assert!(err_code == 0);
+    assert!(throttle_ms == 0);
 }
 
 /// Test 3: Pre-create topic as admin (no quota); set rate=2.0 for alice;
-/// alice deletes; assert throttle_time_ms > 0.
+/// alice deletes; assert `throttle_time_ms` > 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn controller_mutation_rate_throttles_delete_topics() {
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -474,7 +474,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
 
     // Pre-create topic as admin (no quota for admin) with 10 partitions.
     let (_, ec) = drive_create_topics_sasl(addr, "admin", "admin-secret", "to-delete", 10).await;
-    assert2::assert!(ec == 0);
+    assert!(ec == 0);
 
     // Grant alice Topic Delete on "to-delete".
     let alice_delete_acl = MetadataRecord::V1AccessControlEntry(AclEntry {
@@ -511,7 +511,7 @@ async fn controller_mutation_rate_throttles_delete_topics() {
         false,
     )
     .await;
-    assert2::assert!(alter[0].1 == 0);
+    assert!(alter[0].1 == 0);
     // Wait for alice's controller_mutation_rate quota to land in the image
     // before deleting; DeleteTopics reads the rate from the image on consume.
     handle
@@ -524,6 +524,9 @@ async fn controller_mutation_rate_throttles_delete_topics() {
 
     let (throttle_ms, err_code) =
         drive_delete_topics_sasl(addr, "alice", "alice-secret", "to-delete").await;
-    assert2::assert!(err_code == 0);
-    assert2::assert!(throttle_ms > 0);
+    assert!(err_code == 0);
+    assert!(
+        throttle_ms > 0,
+        "expected throttle_time_ms > 0, got {throttle_ms}"
+    );
 }

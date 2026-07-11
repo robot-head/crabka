@@ -98,6 +98,8 @@ impl SchemaRegistryClient {
     ///
     /// Returns [`CodecError::Registry`] if `base_url` is not a valid URL or
     /// the underlying HTTP client cannot be built.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub fn new(base_url: &str) -> Result<Self, CodecError> {
         let base = Url::parse(base_url)
             .map_err(|e| CodecError::Registry(format!("invalid schema registry URL: {e}")))?;
@@ -114,6 +116,8 @@ impl SchemaRegistryClient {
     ///
     /// Returns the assigned schema id.  If the schema is already registered
     /// the registry returns the existing id.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn register(
         &self,
         subject: &str,
@@ -168,6 +172,8 @@ impl SchemaRegistryClient {
     ///
     /// Results are cached in [`Self::by_id`] indefinitely (schema ids are
     /// immutable once assigned).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn schema_by_id(&self, id: i32) -> Result<(String, SchemaFormat), CodecError> {
         // Cache hit — return clone without network.
         if let Some(entry) = self.by_id.get(&id) {
@@ -212,6 +218,8 @@ impl SchemaRegistryClient {
     ///
     /// Results are cached in [`Self::by_subject_latest`] and re-fetched after
     /// a TTL to pick up new versions.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn latest(&self, subject: &str) -> Result<(i32, String, SchemaFormat), CodecError> {
         // Check cache: if the subject entry is fresh AND by_id has the schema, return it.
         if let Some(entry) = self.by_subject_latest.get(subject) {

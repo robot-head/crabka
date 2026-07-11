@@ -60,6 +60,8 @@ pub trait ConnectorConfig: Sized {
     fn config_def() -> ConfigDef;
 
     /// Build the typed config from validated, resolved values.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     fn from_resolved(config: &ResolvedConfig) -> ConfigResult<Self>;
 }
 
@@ -69,6 +71,8 @@ pub trait FromResolvedValue: Sized {
     const KIND: ConfigKind;
 
     /// Read `key` from `config`.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     fn from_resolved_value(config: &ResolvedConfig, key: &str) -> ConfigResult<Self>;
 }
 
@@ -186,8 +190,13 @@ impl FromResolvedValue for f32 {
                 expected: "float in range for f32",
             });
         }
-        #[allow(clippy::cast_possible_truncation)]
-        Ok(value as f32)
+        value
+            .to_string()
+            .parse::<f32>()
+            .map_err(|_| ConfigError::WrongType {
+                key: key.into(),
+                expected: "float in range for f32",
+            })
     }
 }
 

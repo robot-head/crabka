@@ -79,13 +79,14 @@ pub struct CertificateAuthorityStatus {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn defaults_match_strimzi() {
         let d = CertificateAuthority::default();
-        assert2::assert!(
+        assert!(
             d == CertificateAuthority {
                 generate_certificate_authority: true,
                 validity_days: 365,
@@ -95,30 +96,25 @@ mod tests {
     }
 
     #[test]
-    fn certificate_authority_deserialization_cases() {
-        for (_name, json, expected) in [
-            (
-                "empty object uses defaults",
-                serde_json::json!({}),
-                CertificateAuthority::default(),
-            ),
-            (
-                "bring-your-own CA",
-                serde_json::json!({
-                    "generateCertificateAuthority": false,
-                    "validityDays": 90,
-                    "renewalDays": 7,
-                }),
-                CertificateAuthority {
-                    generate_certificate_authority: false,
-                    validity_days: 90,
-                    renewal_days: 7,
-                },
-            ),
-        ] {
-            assert2::assert!(
-                serde_json::from_value::<CertificateAuthority>(json).expect("parse") == expected
-            );
-        }
+    fn deserialize_empty_object_uses_defaults() {
+        let v: CertificateAuthority = serde_json::from_value(serde_json::json!({})).expect("parse");
+        assert!(v == CertificateAuthority::default());
+    }
+
+    #[test]
+    fn byo_round_trips() {
+        let v: CertificateAuthority = serde_json::from_value(serde_json::json!({
+            "generateCertificateAuthority": false,
+            "validityDays": 90,
+            "renewalDays": 7,
+        }))
+        .expect("parse");
+        assert!(
+            v == CertificateAuthority {
+                generate_certificate_authority: false,
+                validity_days: 90,
+                renewal_days: 7,
+            }
+        );
     }
 }

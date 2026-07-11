@@ -49,6 +49,8 @@ impl Spool {
         fields(dir = %dir.display(), max_bytes, count = tracing::field::Empty, bytes = tracing::field::Empty),
         err
     )]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn open(dir: &Path, max_bytes: u64) -> Result<Self, AuditError> {
         std::fs::create_dir_all(dir).map_err(io)?;
         let path = dir.join(SPOOL_FILE);
@@ -106,6 +108,8 @@ impl Spool {
         fields(class = ?record.class, value_bytes = record.value.len(), count = self.count.0),
         err
     )]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn append(&mut self, record: &AuditRecord) -> Result<bool, AuditError> {
         let frame = encode_frame(record);
         let frame_len = SpoolBytes(u64::try_from(frame.len()).unwrap_or(u64::MAX));
@@ -161,12 +165,16 @@ impl Spool {
     }
 
     /// Read every record from the start of the spool, in order.
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn read_all(&self) -> Result<Vec<AuditRecord>, AuditError> {
         Ok(self.scan()?.0)
     }
 
     /// Replace the spool contents with exactly `remaining`, atomically.
     #[tracing::instrument(level = "debug", skip_all, fields(remaining = remaining.len()), err)]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn rewrite(&mut self, remaining: &[AuditRecord]) -> Result<(), AuditError> {
         let tmp = self.path.with_extension("spool.tmp");
         {
@@ -197,6 +205,8 @@ impl Spool {
 
     /// Clear the spool.
     #[tracing::instrument(level = "debug", skip_all, fields(count = self.count.0, bytes = self.bytes.0), err)]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn truncate(&mut self) -> Result<(), AuditError> {
         self.file.set_len(0).map_err(io)?;
         self.file.seek(SeekFrom::Start(0)).map_err(io)?;
@@ -209,6 +219,8 @@ impl Spool {
     /// `(next_seq, head)` implied by the last chained (non-checkpoint) record,
     /// or `None` if the spool has no chained records.
     #[tracing::instrument(level = "debug", skip_all, fields(count = self.count.0), err)]
+    /// # Errors
+    /// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
     pub fn resume_point(&self) -> Result<Option<(u64, [u8; 32])>, AuditError> {
         let records = self.read_all()?;
         Ok(records

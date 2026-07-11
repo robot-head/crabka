@@ -71,12 +71,16 @@ pub struct WalRecord {
 
 impl WalRecord {
     /// Encode via `serde-wincode`, matching the codebase metadata-record codec.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn encode(&self) -> Result<Vec<u8>, WalError> {
         <serde_wincode::SerdeCompat<WalRecord> as wincode::Serialize>::serialize(self)
             .map_err(|error| WalError::Encode(error.to_string()))
     }
 
     /// Decode a [`WalRecord`] from its `serde-wincode` bytes.
+    /// # Errors
+    /// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
     pub fn decode(bytes: &[u8]) -> Result<Self, WalError> {
         <serde_wincode::SerdeCompat<WalRecord> as wincode::Deserialize>::deserialize(bytes)
             .map_err(|error| WalError::Decode(error.to_string()))
@@ -108,6 +112,7 @@ pub fn partition_key(tenant: &str, fp: u64) -> Bytes {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::{BucketSpan, ResetHint};
@@ -152,7 +157,7 @@ mod tests {
         let bytes = rec.encode().unwrap();
         let back = WalRecord::decode(&bytes).unwrap();
 
-        assert2::assert!(back == rec);
+        assert!(back == rec);
     }
 
     #[test]
@@ -174,7 +179,7 @@ mod tests {
         let bytes = rec.encode().unwrap();
         let back = WalRecord::decode(&bytes).unwrap();
 
-        assert2::assert!(back == rec);
+        assert!(back == rec);
     }
 
     #[test]
@@ -193,7 +198,7 @@ mod tests {
         let bytes = rec.encode().unwrap();
         let back = WalRecord::decode(&bytes).unwrap();
 
-        assert2::assert!(back == rec);
+        assert!(back == rec);
     }
 
     #[test]
@@ -211,7 +216,7 @@ mod tests {
         let mut b = a.clone();
         b.labels = vec![("b".into(), "2".into()), ("a".into(), "1".into())];
 
-        assert2::assert!(a.series_fingerprint() == b.series_fingerprint());
+        assert!(a.series_fingerprint() == b.series_fingerprint());
     }
 
     #[test]
@@ -220,7 +225,7 @@ mod tests {
         let k2 = partition_key("t", 42);
         let k3 = partition_key("t", 43);
 
-        assert2::assert!(k1 == k2);
-        assert2::assert!(k1 != k3);
+        assert!(k1 == k2);
+        assert!(k1 != k3);
     }
 }

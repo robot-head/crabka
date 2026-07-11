@@ -118,6 +118,7 @@ fn error(code: i16) -> ConsumerGroupHeartbeatResponse {
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use bytes::BytesMut;
     use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
     use crabka_protocol::Encode;
@@ -166,25 +167,25 @@ mod tests {
     #[test]
     fn group_version_gate_distinguishes_disabled_and_enabled_images() {
         let fresh = MetadataImage::new(uuid::Uuid::nil());
-        assert2::assert!(group_version_disabled(&fresh));
+        assert!(group_version_disabled(&fresh));
 
         let enabled = image_with_group_version(1);
-        assert2::assert!(!group_version_disabled(&enabled));
+        assert!(!group_version_disabled(&enabled));
 
         let disabled = image_with_group_version(0);
-        assert2::assert!(group_version_disabled(&disabled));
+        assert!(group_version_disabled(&disabled));
     }
 
     #[test]
     fn next_gen_config_gate_inverts_enabled_flag() {
-        assert2::assert!(!next_gen_config_disabled(true));
-        assert2::assert!(next_gen_config_disabled(false));
+        assert!(!next_gen_config_disabled(true));
+        assert!(next_gen_config_disabled(false));
     }
 
     #[test]
     fn error_response_preserves_error_code() {
         let resp = error(codes::GROUP_AUTHORIZATION_FAILED);
-        assert2::assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
     }
 
     use super::*;
@@ -207,7 +208,7 @@ mod tests {
 
         let ctx = crate::test_support::request_context(&principal, &peer, "consumer-client");
 
-        assert2::assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let bytes = crate::handlers::encode_response(
             &error(codes::GROUP_AUTHORIZATION_FAILED),
@@ -220,7 +221,7 @@ mod tests {
             consumer_group_heartbeat_response::MAX_VERSION,
         )
         .unwrap();
-        assert2::assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
     }
 
     #[test]
@@ -230,7 +231,7 @@ mod tests {
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
         let ctx = crate::test_support::request_context(&principal, &peer, "consumer-client");
 
-        assert2::assert!(!group_read_denied(
+        assert!(!group_read_denied(
             &crate::authorizer::AllowAllAuthorizer,
             &image,
             &ctx,
@@ -254,7 +255,10 @@ mod tests {
             .expect("ConsumerGroupHeartbeat handler");
         let resp = decode_response(&bytes);
 
-        assert2::assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(
+            resp.error_code == codes::GROUP_AUTHORIZATION_FAILED,
+            "{resp:?}"
+        );
 
         broker_handle.shutdown().await;
     }

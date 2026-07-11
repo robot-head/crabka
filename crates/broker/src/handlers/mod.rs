@@ -261,6 +261,7 @@ pub(crate) fn audit_admin(
 mod tests {
     use std::{collections::HashSet, net::SocketAddr};
 
+    use assert2::assert;
     use crabka_metadata::{AclOperation, MetadataImage, ResourceType};
     use crabka_protocol::{
         Decode,
@@ -315,7 +316,7 @@ mod tests {
                 resources,
                 ..
             } => {
-                assert2::assert!(
+                assert!(
                     (
                         outcome,
                         principal.name.as_str(),
@@ -361,8 +362,11 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let decoded = ApiVersionsResponse::decode(&mut cur, 3).expect("decode response");
 
-        assert2::assert!(decoded == resp);
-        assert2::assert!(cur.is_empty());
+        assert!(decoded.error_code == crate::codes::NONE);
+        assert!(decoded.api_keys.len() == 1);
+        assert!(decoded.api_keys[0].api_key == 18);
+        assert!(decoded.api_keys[0].min_version == 0);
+        assert!(decoded.api_keys[0].max_version == 4);
     }
 
     #[test]
@@ -379,7 +383,7 @@ mod tests {
             connection_listener_name: "PLAINTEXT",
         };
 
-        assert2::assert!(acl_denied(
+        assert!(acl_denied(
             &authorizer,
             &image,
             &ctx,

@@ -764,7 +764,6 @@ struct AvgPartialRecordingExecutor {
 
 #[async_trait]
 impl RangeQueryExecutor for AvgPartialRecordingExecutor {
-    #[allow(clippy::match_same_arms)]
     async fn execute_range_query(
         &self,
         _tenant: &str,
@@ -777,10 +776,9 @@ impl RangeQueryExecutor for AvgPartialRecordingExecutor {
 
         let shard = query.shard.expect("avg partial query shard");
         let value = match (query.query.as_str(), shard.index) {
-            ("sum(up)", 1) => 2.0,
+            ("sum(up)", 1) | ("count(up)", 2) => 2.0,
             ("sum(up)", 2) => 10.0,
             ("count(up)", 1) => 1.0,
-            ("count(up)", 2) => 2.0,
             _ => {
                 return Err(PromqlError::Plan(format!(
                     "unexpected avg partial query: {query:?}"

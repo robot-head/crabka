@@ -147,7 +147,6 @@ where
     /// JVM `processEarly`: handles records with `t < W`.
     ///
     /// The combined window `[0, W]` absorbs all early records. Scan `[0, t+1]`.
-    #[allow(clippy::too_many_lines, clippy::collapsible_if)]
     async fn process_early(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -196,10 +195,10 @@ where
         }
 
         // If no straddle found as right_win_agg but combined has ts > t, use it.
-        if right_win_agg.is_none() {
-            if let Some((cts, ref cagg)) = combined {
-                right_win_agg = (cts > t).then(|| (cts, cagg.clone()));
-            }
+        if right_win_agg.is_none()
+            && let Some((cts, ref cagg)) = combined
+        {
+            right_win_agg = (cts > t).then(|| (cts, cagg.clone()));
         }
 
         // Emit straddling windows (ascending ws order), gated on close_time.
@@ -238,31 +237,31 @@ where
         // createWindows (JVM processEarly order: current right → prev right → combined)
 
         // Create current record's right window [t+1, t+1+W] if not already present.
-        if !right_win_already_created {
-            if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
-                let rws = t + 1;
-                let rwe = rws + w;
-                if rwe >= close_time {
-                    {
-                        let store = ctx
-                            .get_window_store::<K, VA>(&self.store_name)
-                            .expect("window store not found");
-                        store.put(key.clone(), rws, ragg.clone(), rts).await;
-                    }
-                    if self.emit.is_on_update() {
-                        self.forwarder.maybe_forward_change(
-                            ctx,
-                            Windowed {
-                                key: key.clone(),
-                                window: Window {
-                                    start: rws,
-                                    end: rwe,
-                                },
+        if !right_win_already_created
+            && let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t)
+        {
+            let rws = t + 1;
+            let rwe = rws + w;
+            if rwe >= close_time {
+                {
+                    let store = ctx
+                        .get_window_store::<K, VA>(&self.store_name)
+                        .expect("window store not found");
+                    store.put(key.clone(), rws, ragg.clone(), rts).await;
+                }
+                if self.emit.is_on_update() {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: rws,
+                                end: rwe,
                             },
-                            Change::update(None, ragg),
-                            rts,
-                        );
-                    }
+                        },
+                        Change::update(None, ragg),
+                        rts,
+                    );
                 }
             }
         }
@@ -336,7 +335,6 @@ where
     /// JVM `processInOrder`: handles records with `t >= W`.
     ///
     /// Scan `[max(0, t-2W), t+1]` in ascending windowStart order.
-    #[allow(clippy::too_many_lines, clippy::collapsible_if)]
     async fn process_normal(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<VA>>,
@@ -503,31 +501,31 @@ where
         }
 
         // 3. Current record's right window [t+1, t+1+W].
-        if !right_win_already_created {
-            if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
-                let rws = t + 1;
-                let rwe = rws + w;
-                if rwe >= close_time {
-                    {
-                        let store = ctx
-                            .get_window_store::<K, VA>(&self.store_name)
-                            .expect("window store not found");
-                        store.put(key.clone(), rws, ragg.clone(), rts).await;
-                    }
-                    if self.emit.is_on_update() {
-                        self.forwarder.maybe_forward_change(
-                            ctx,
-                            Windowed {
-                                key: key.clone(),
-                                window: Window {
-                                    start: rws,
-                                    end: rwe,
-                                },
+        if !right_win_already_created
+            && let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t)
+        {
+            let rws = t + 1;
+            let rwe = rws + w;
+            if rwe >= close_time {
+                {
+                    let store = ctx
+                        .get_window_store::<K, VA>(&self.store_name)
+                        .expect("window store not found");
+                    store.put(key.clone(), rws, ragg.clone(), rts).await;
+                }
+                if self.emit.is_on_update() {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: rws,
+                                end: rwe,
                             },
-                            Change::update(None, ragg),
-                            rts,
-                        );
-                    }
+                        },
+                        Change::update(None, ragg),
+                        rts,
+                    );
                 }
             }
         }
@@ -659,7 +657,6 @@ where
     V: std::any::Any + Send + Sync + Clone,
     R: Fn(&V, &V) -> V + Send + Sync + 'static,
 {
-    #[allow(clippy::too_many_lines, clippy::collapsible_if)]
     async fn process_early(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -702,10 +699,10 @@ where
             }
         }
 
-        if right_win_agg.is_none() {
-            if let Some((cts, ref cagg)) = combined {
-                right_win_agg = (cts > t).then(|| (cts, cagg.clone()));
-            }
+        if right_win_agg.is_none()
+            && let Some((cts, ref cagg)) = combined
+        {
+            right_win_agg = (cts > t).then(|| (cts, cagg.clone()));
         }
 
         // Straddle updates.
@@ -744,31 +741,31 @@ where
         // createWindows (JVM processEarly order: current right → prev right → combined)
 
         // Current record's right window.
-        if !right_win_already_created {
-            if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
-                let rws = t + 1;
-                let rwe = rws + w;
-                if rwe >= close_time {
-                    {
-                        let store = ctx
-                            .get_window_store::<K, V>(&self.store_name)
-                            .expect("window store not found");
-                        store.put(key.clone(), rws, ragg.clone(), rts).await;
-                    }
-                    if self.emit.is_on_update() {
-                        self.forwarder.maybe_forward_change(
-                            ctx,
-                            Windowed {
-                                key: key.clone(),
-                                window: Window {
-                                    start: rws,
-                                    end: rwe,
-                                },
+        if !right_win_already_created
+            && let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t)
+        {
+            let rws = t + 1;
+            let rwe = rws + w;
+            if rwe >= close_time {
+                {
+                    let store = ctx
+                        .get_window_store::<K, V>(&self.store_name)
+                        .expect("window store not found");
+                    store.put(key.clone(), rws, ragg.clone(), rts).await;
+                }
+                if self.emit.is_on_update() {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: rws,
+                                end: rwe,
                             },
-                            Change::update(None, ragg),
-                            rts,
-                        );
-                    }
+                        },
+                        Change::update(None, ragg),
+                        rts,
+                    );
                 }
             }
         }
@@ -841,7 +838,6 @@ where
         }
     }
 
-    #[allow(clippy::too_many_lines, clippy::collapsible_if)]
     async fn process_normal(
         &mut self,
         ctx: &mut ProcessorContext<'_, '_, Windowed<K>, Change<V>>,
@@ -997,31 +993,31 @@ where
         }
 
         // 3. Current record's right window.
-        if !right_win_already_created {
-            if let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t) {
-                let rws = t + 1;
-                let rwe = rws + w;
-                if rwe >= close_time {
-                    {
-                        let store = ctx
-                            .get_window_store::<K, V>(&self.store_name)
-                            .expect("window store not found");
-                        store.put(key.clone(), rws, ragg.clone(), rts).await;
-                    }
-                    if self.emit.is_on_update() {
-                        self.forwarder.maybe_forward_change(
-                            ctx,
-                            Windowed {
-                                key: key.clone(),
-                                window: Window {
-                                    start: rws,
-                                    end: rwe,
-                                },
+        if !right_win_already_created
+            && let Some((rts, ragg)) = right_win_agg.filter(|(rts, _)| *rts > t)
+        {
+            let rws = t + 1;
+            let rwe = rws + w;
+            if rwe >= close_time {
+                {
+                    let store = ctx
+                        .get_window_store::<K, V>(&self.store_name)
+                        .expect("window store not found");
+                    store.put(key.clone(), rws, ragg.clone(), rts).await;
+                }
+                if self.emit.is_on_update() {
+                    self.forwarder.maybe_forward_change(
+                        ctx,
+                        Windowed {
+                            key: key.clone(),
+                            window: Window {
+                                start: rws,
+                                end: rwe,
                             },
-                            Change::update(None, ragg),
-                            rts,
-                        );
-                    }
+                        },
+                        Change::update(None, ragg),
+                        rts,
+                    );
                 }
             }
         }
@@ -1085,19 +1081,21 @@ mod tests {
         store::{registry::StoreRegistry, window::WindowBytesStore},
     };
 
-    #[allow(clippy::type_complexity)]
+    type CountProcessor = KStreamSlidingWindowAggregateProcessor<
+        String,
+        String,
+        i64,
+        fn() -> i64,
+        fn(&String, &String, i64) -> i64,
+    >;
+    type WindowChanges = Vec<(Window, Option<i64>, Option<i64>)>;
+
     async fn run(
-        proc: &mut KStreamSlidingWindowAggregateProcessor<
-            String,
-            String,
-            i64,
-            fn() -> i64,
-            fn(&String, &String, i64) -> i64,
-        >,
+        proc: &mut CountProcessor,
         stores: &mut StoreRegistry,
         key: &str,
         ts: i64,
-    ) -> Vec<(Window, Option<i64>, Option<i64>)> {
+    ) -> WindowChanges {
         let children = [0usize];
         let mut buffer: VecDeque<(usize, ErasedRecord)> = VecDeque::new();
         let mut output = Vec::new();
@@ -1148,14 +1146,7 @@ mod tests {
         s
     }
 
-    #[allow(clippy::type_complexity)]
-    fn count_proc() -> KStreamSlidingWindowAggregateProcessor<
-        String,
-        String,
-        i64,
-        fn() -> i64,
-        fn(&String, &String, i64) -> i64,
-    > {
+    fn count_proc() -> CountProcessor {
         KStreamSlidingWindowAggregateProcessor {
             store_name: "w".into(),
             windows: SlidingWindows::of_time_difference_with_no_grace(10),
@@ -1176,7 +1167,10 @@ mod tests {
         let mut stores = store();
         let mut p = count_proc();
         let out = run(&mut p, &mut stores, "a", 20).await;
-        assert2::assert!(out.contains(&(Window { start: 10, end: 20 }, None, Some(1))));
+        assert!(
+            out.contains(&(Window { start: 10, end: 20 }, None, Some(1))),
+            "expected left window [10,20]=1, got {out:?}"
+        );
     }
 
     /// Second record at t=25 creates left window `[15,25]`. The prior record at
@@ -1188,7 +1182,10 @@ mod tests {
         let mut p = count_proc();
         let _ = run(&mut p, &mut stores, "a", 20).await;
         let out = run(&mut p, &mut stores, "a", 25).await;
-        assert2::assert!(out.contains(&(Window { start: 15, end: 25 }, None, Some(2))));
+        assert!(
+            out.contains(&(Window { start: 15, end: 25 }, None, Some(2))),
+            "expected left window [15,25]=2, got {out:?}"
+        );
     }
 
     /// Record at `t=3` with `W=10` (so `t < W`): exercises `process_early`.
@@ -1199,9 +1196,15 @@ mod tests {
         let mut p = count_proc();
         let out = run(&mut p, &mut stores, "a", 3).await;
         // process_early: combined window [0, W=10] is created/updated.
-        assert2::assert!(out.contains(&(Window { start: 0, end: 10 }, None, Some(1))));
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, None, Some(1))),
+            "expected combined window [0,10]=1 for early t=3, got {out:?}"
+        );
         // No left window for early records (ws = t-W = -7 < 0, not created).
-        assert2::assert!(!out.iter().any(|(w, _, _)| w.start < 0));
+        assert!(
+            !out.iter().any(|(w, _, _)| w.start < 0),
+            "unexpected negative-start window in early path: {out:?}"
+        );
     }
 
     /// A second EARLY record (`t=6 < W=10`) after a first early record (`t=3`)
@@ -1217,22 +1220,21 @@ mod tests {
         let out = run(&mut p, &mut stores, "a", 6).await;
 
         // Combined window [0,10] now counts both records.
-        assert2::assert!(out.contains(&(Window { start: 0, end: 10 }, Some(1), Some(2))));
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, Some(1), Some(2))),
+            "expected combined [0,10] old=1 new=2, got {out:?}"
+        );
         // Previous record (t=3) right window [4, 14] created with count=1.
-        assert2::assert!(out.contains(&(Window { start: 4, end: 14 }, None, Some(1))));
+        assert!(
+            out.contains(&(Window { start: 4, end: 14 }, None, Some(1))),
+            "expected previous-record right window [4,14]=1, got {out:?}"
+        );
     }
 
     /// Build a count processor in emit-on-close mode with a generous grace so
     /// freshly-created left windows (which end exactly at stream-time) stay open
     /// until a far-future record forces them closed.
-    #[allow(clippy::type_complexity)]
-    fn count_proc_close() -> KStreamSlidingWindowAggregateProcessor<
-        String,
-        String,
-        i64,
-        fn() -> i64,
-        fn(&String, &String, i64) -> i64,
-    > {
+    fn count_proc_close() -> CountProcessor {
         let mut p = count_proc();
         p.windows = SlidingWindows::of_time_difference_and_grace(10, 100);
         p.emit = crate::dsl::emit::EmitStrategy::on_window_close();
@@ -1253,9 +1255,15 @@ mod tests {
         // window open (close_time = stream_time - 100 is far below any window
         // end), so emit-on-close must forward NOTHING here.
         let out1 = run(&mut p, &mut stores, "a", 10).await;
-        assert2::assert!(out1.is_empty());
+        assert!(
+            out1.is_empty(),
+            "emit-on-close must not forward on update (ts=10), got {out1:?}"
+        );
         let out2 = run(&mut p, &mut stores, "a", 12).await;
-        assert2::assert!(out2.is_empty());
+        assert!(
+            out2.is_empty(),
+            "emit-on-close must not forward on update (ts=12), got {out2:?}"
+        );
 
         // Snapshot which windows are present in the store and have closed by the
         // time stream-time jumps to 1000 (close_time = 1000 - grace(100) = 900,
@@ -1271,7 +1279,10 @@ mod tests {
                 .map(|(_, ws, _, v)| (ws, v))
                 .collect()
         };
-        assert2::assert!(!expected.is_empty());
+        assert!(
+            !expected.is_empty(),
+            "test setup: expected some closed windows in the store"
+        );
 
         // Far-future record closes all the earlier windows.
         let out3 = run(&mut p, &mut stores, "a", 1000).await;
@@ -1282,20 +1293,38 @@ mod tests {
         // assert about the windows we snapshotted as closed pre-jump.
         let mut emitted: std::collections::HashMap<i64, i64> = std::collections::HashMap::new();
         for (win, old, new) in &out3 {
-            assert2::assert!(*old == None);
-            assert2::assert!(win.end == win.start + w);
+            assert_eq!(
+                *old, None,
+                "final emission must have old=None, got {out3:?}"
+            );
+            assert_eq!(
+                win.end,
+                win.start + w,
+                "sliding window end must be start + W, got {out3:?}"
+            );
             if win.end <= close_time {
                 let prev = emitted.insert(win.start, new.expect("final has Some value"));
-                assert2::assert!(prev.is_none());
+                assert!(
+                    prev.is_none(),
+                    "window start={} emitted twice as final, got {out3:?}",
+                    win.start
+                );
             }
         }
 
         // Every snapshotted closed window must have been emitted with its stored
         // aggregate value.
         for (ws, v) in &expected {
-            assert2::assert!(emitted.get(ws) == Some(v));
+            assert_eq!(
+                emitted.get(ws),
+                Some(v),
+                "window start={ws} expected final value {v}, emitted map {emitted:?}, raw {out3:?}"
+            );
         }
-        assert2::assert!(!emitted.is_empty());
+        assert!(
+            !emitted.is_empty(),
+            "expected at least one final emission after close, got {out3:?}"
+        );
     }
 
     // ── Reduce processor unit tests ─────────────────────────────────────────
@@ -1331,7 +1360,6 @@ mod tests {
 
     /// Helper that runs one record through the reduce processor and returns the
     /// raw output as `Vec<(Window, Option<String>, Option<String>)>`.
-    #[allow(clippy::type_complexity)]
     async fn run_reduce(
         proc: &mut KStreamSlidingWindowReduceProcessor<
             String,
@@ -1388,7 +1416,10 @@ mod tests {
         let mut stores = str_store();
         let mut p = reduce_proc();
         let out = run_reduce(&mut p, &mut stores, "a", "v", 20).await;
-        assert2::assert!(out.contains(&(Window { start: 10, end: 20 }, None, Some("v".into()))));
+        assert!(
+            out.contains(&(Window { start: 10, end: 20 }, None, Some("v".into()))),
+            "expected left window [10,20]=\"v\", got {out:?}"
+        );
     }
 
     /// Second record at t=25 reduces the left window `[15,25]`. The prior
@@ -1400,7 +1431,10 @@ mod tests {
         let mut p = reduce_proc();
         let _ = run_reduce(&mut p, &mut stores, "a", "v", 20).await;
         let out = run_reduce(&mut p, &mut stores, "a", "v", 25).await;
-        assert2::assert!(out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))));
+        assert!(
+            out.contains(&(Window { start: 15, end: 25 }, None, Some("v|v".into()))),
+            "expected left window [15,25]=\"v|v\", got {out:?}"
+        );
     }
 
     /// First reduce record at `t=3` (`t < W=10`) drives the reduce
@@ -1411,8 +1445,14 @@ mod tests {
         let mut stores = str_store();
         let mut p = reduce_proc();
         let out = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
-        assert2::assert!(out.contains(&(Window { start: 0, end: 10 }, None, Some("v".into()))));
-        assert2::assert!(!out.iter().any(|(w, _, _)| w.start < 0));
+        assert!(
+            out.contains(&(Window { start: 0, end: 10 }, None, Some("v".into()))),
+            "expected combined [0,10]=\"v\" for early t=3, got {out:?}"
+        );
+        assert!(
+            !out.iter().any(|(w, _, _)| w.start < 0),
+            "no negative-start window in the early path: {out:?}"
+        );
     }
 
     /// A second EARLY reduce record (`t=6`) folds into the combined window
@@ -1425,13 +1465,19 @@ mod tests {
         let _ = run_reduce(&mut p, &mut stores, "a", "v", 3).await;
         let out = run_reduce(&mut p, &mut stores, "a", "v", 6).await;
 
-        assert2::assert!(out.contains(&(
-            Window { start: 0, end: 10 },
-            Some("v".into()),
-            Some("v|v".into())
-        )));
+        assert!(
+            out.contains(&(
+                Window { start: 0, end: 10 },
+                Some("v".into()),
+                Some("v|v".into())
+            )),
+            "expected combined [0,10] old=\"v\" new=\"v|v\", got {out:?}"
+        );
         // Previous record (t=3) right window [4,14] seeded with the current value.
-        assert2::assert!(out.contains(&(Window { start: 4, end: 14 }, None, Some("v".into()))));
+        assert!(
+            out.contains(&(Window { start: 4, end: 14 }, None, Some("v".into()))),
+            "expected previous-record right window [4,14]=\"v\", got {out:?}"
+        );
     }
 
     /// Emit-on-close reduce variant of `sliding_count_emit_final_emits_only_on_close`:
@@ -1455,9 +1501,15 @@ mod tests {
         // grace=100 keeps every window open (close_time = stream_time - 100 is far
         // below any window end), so emit-on-close must forward NOTHING here.
         let out1 = run_reduce(&mut p, &mut stores, "a", "p", 10).await;
-        assert2::assert!(out1.is_empty());
+        assert!(
+            out1.is_empty(),
+            "emit-on-close must not forward on update (ts=10), got {out1:?}"
+        );
         let out2 = run_reduce(&mut p, &mut stores, "a", "q", 12).await;
-        assert2::assert!(out2.is_empty());
+        assert!(
+            out2.is_empty(),
+            "emit-on-close must not forward on update (ts=12), got {out2:?}"
+        );
 
         // Snapshot the windows that will have closed once stream-time jumps to
         // 1000 (close_time = 1000 - grace(100) = 900; windows with end <= 900).
@@ -1472,26 +1524,47 @@ mod tests {
                 .map(|(_, ws, _, v)| (ws, v))
                 .collect()
         };
-        assert2::assert!(!expected.is_empty());
+        assert!(
+            !expected.is_empty(),
+            "test setup: expected some closed windows in the store"
+        );
 
         // Far-future record closes all the earlier windows.
         let out3 = run_reduce(&mut p, &mut stores, "a", "r", 1000).await;
 
         let mut emitted: std::collections::HashMap<i64, String> = std::collections::HashMap::new();
         for (win, old, new) in &out3 {
-            assert2::assert!(*old == None);
-            assert2::assert!(win.end == win.start + w);
+            assert_eq!(
+                *old, None,
+                "final emission must have old=None, got {out3:?}"
+            );
+            assert_eq!(
+                win.end,
+                win.start + w,
+                "sliding window end must be start + W, got {out3:?}"
+            );
             if win.end <= close_time {
                 let prev = emitted.insert(win.start, new.clone().expect("final has Some value"));
-                assert2::assert!(prev.is_none());
+                assert!(
+                    prev.is_none(),
+                    "window start={} emitted twice as final, got {out3:?}",
+                    win.start
+                );
             }
         }
 
         // Every snapshotted closed window must have been emitted with its stored
         // reduced value.
         for (ws, v) in &expected {
-            assert2::assert!(emitted.get(ws) == Some(v));
+            assert_eq!(
+                emitted.get(ws),
+                Some(v),
+                "window start={ws} expected final value {v:?}, emitted map {emitted:?}, raw {out3:?}"
+            );
         }
-        assert2::assert!(!emitted.is_empty());
+        assert!(
+            !emitted.is_empty(),
+            "expected at least one final emission after close, got {out3:?}"
+        );
     }
 }

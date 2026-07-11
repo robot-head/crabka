@@ -94,7 +94,9 @@ pub(crate) fn field_filter_expression_to_pipeline_stage(
 
             PipelineStage::FieldFilterChain(FieldFilterChain::new(first, flat_rest))
         }
-        expression => PipelineStage::FieldFilterExpression(expression),
+        expression @ FieldFilterExpression::Group(_) => {
+            PipelineStage::FieldFilterExpression(expression)
+        }
     }
 }
 
@@ -149,6 +151,8 @@ impl FieldFilter {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(op = ?op), err)]
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn try_new(
         name: impl Into<String>,
         op: ComparisonOp,
@@ -176,22 +180,25 @@ impl FieldFilter {
                 if !fields.contains_key(&self.name) {
                     return false;
                 }
-                match candidate.parse::<f64>() {
-                    Ok(candidate) => self.op.compare_numbers(candidate, *expected),
-                    Err(_) => {
-                        insert_extracted_field(fields, "__error__", "LabelFilterErr".to_string());
-                        insert_extracted_field(
-                            fields,
-                            "__error_details__",
-                            format!(r#"strconv.ParseFloat: parsing "{candidate}": invalid syntax"#),
-                        );
-                        true
-                    }
+                if let Ok(candidate) = candidate.parse::<f64>() {
+                    self.op.compare_numbers(candidate, *expected)
+                } else {
+                    insert_extracted_field(fields, "__error__", "LabelFilterErr".to_string());
+                    insert_extracted_field(
+                        fields,
+                        "__error_details__",
+                        format!(r#"strconv.ParseFloat: parsing "{candidate}": invalid syntax"#),
+                    );
+                    true
                 }
             }
             FieldValue::Duration(expected) => parse_prometheus_duration_literal(&candidate)
                 .is_some_and(|candidate| {
-                    self.op.compare_numbers(candidate as f64, *expected as f64)
+                    num_traits::ToPrimitive::to_f64(&candidate)
+                        .zip(num_traits::ToPrimitive::to_f64(expected))
+                        .is_some_and(|(candidate, expected)| {
+                            self.op.compare_numbers(candidate, expected)
+                        })
                 }),
             FieldValue::Bytes(expected) => parse_bytes_literal(&candidate)
                 .is_some_and(|candidate| self.op.compare_numbers(candidate, *expected)),
@@ -293,6 +300,8 @@ pub struct LineFilter {
 
 impl LineFilter {
     #[tracing::instrument(level = "debug", skip_all, fields(op = ?op), err)]
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(op: LineFilterOp, pattern: impl Into<String>) -> Result<Self, ParseError> {
         let filter = Self {
             op,
@@ -304,6 +313,8 @@ impl LineFilter {
     }
 
     #[tracing::instrument(level = "debug", skip_all, fields(op = ?op), err)]
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn ip(op: LineFilterOp, pattern: impl Into<String>) -> Result<Self, ParseError> {
         let pattern = pattern.into();
         let filter = Self {
@@ -370,6 +381,8 @@ pub struct IpMatcher {
 
 impl IpMatcher {
     #[tracing::instrument(level = "debug", skip_all, fields(pattern = %pattern), err)]
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn parse(pattern: &str) -> Result<Self, ParseError> {
         let range = if let Some((start, end)) = pattern.split_once('-') {
             IpRange::range(parse_ip_addr(start)?, parse_ip_addr(end)?)?
@@ -556,12 +569,8 @@ mod tests {
     fn field_filter_matches_returns_candidate_result() {
         let filter = number_filter("status", ComparisonOp::GreaterEqual, 500.0);
 
-        for (_name, status, expected) in [
-            ("boundary matches", "500", true),
-            ("below boundary does not match", "499", false),
-        ] {
-            assert2::assert!(filter.matches(&labels(&[("status", status)])) == expected);
-        }
+        assert!(filter.matches(&labels(&[("status", "500")])));
+        assert!(!filter.matches(&labels(&[("status", "499")])));
     }
 
     #[test]
@@ -585,7 +594,7 @@ mod tests {
             ([("status", "200"), ("level", "warn")], true),
             ([("status", "200"), ("level", "info")], false),
         ] {
-            assert2::assert!(expression.matches(&labels(&pairs)) == expected);
+            assert_eq!(expression.matches(&labels(&pairs)), expected, "{pairs:?}");
         }
     }
 
@@ -597,15 +606,9 @@ mod tests {
             vec![(FieldFilterLogicOp::And, rest_filter.clone())],
         );
 
-        for (_name, path, expected) in [
-            ("non-health path", "/checkout", true),
-            ("excluded health path", "/health", false),
-        ] {
-            assert2::assert!(
-                chain.matches(&labels(&[("status", "500"), ("path", path)])) == expected
-            );
-        }
-        assert2::assert!(chain.rest() == &[(FieldFilterLogicOp::And, rest_filter)]);
+        assert!(chain.matches(&labels(&[("status", "500"), ("path", "/checkout")])));
+        assert!(!chain.matches(&labels(&[("status", "500"), ("path", "/health")])));
+        assert_eq!(chain.rest(), &[(FieldFilterLogicOp::And, rest_filter)]);
     }
 
     #[test]
@@ -623,7 +626,10 @@ mod tests {
                 FieldValue::Ip(IpMatcher::parse("192.168.1.1").unwrap()),
             ),
         ] {
-            assert2::assert!(FieldFilter::try_new(name, op, value.clone()).is_err());
+            assert!(
+                FieldFilter::try_new(name, op, value.clone()).is_err(),
+                "{name} {op:?} {value:?}"
+            );
         }
     }
 
@@ -645,7 +651,11 @@ mod tests {
             (ComparisonOp::LessEqual, 500.0, 500.0, true),
             (ComparisonOp::LessEqual, 501.0, 500.0, false),
         ] {
-            assert2::assert!(op.compare_numbers(candidate, expected) == result);
+            assert_eq!(
+                op.compare_numbers(candidate, expected),
+                result,
+                "{candidate} {op:?} {expected}"
+            );
         }
     }
 
@@ -664,18 +674,22 @@ mod tests {
             (ComparisonOp::LessEqual, "m", "m", true),
             (ComparisonOp::LessEqual, "n", "m", false),
         ] {
-            assert2::assert!(op.compare_strings(candidate, expected) == result);
+            assert_eq!(
+                op.compare_strings(candidate, expected),
+                result,
+                "{candidate} {op:?} {expected}"
+            );
         }
     }
 
     #[test]
     fn line_filter_reports_ip_matcher_mode() {
-        assert2::assert!(
+        assert!(
             !LineFilter::new(LineFilterOp::Contains, "error")
                 .unwrap()
                 .is_ip_matcher()
         );
-        assert2::assert!(
+        assert!(
             LineFilter::ip(LineFilterOp::Contains, "192.168.1.0/24")
                 .unwrap()
                 .is_ip_matcher()
@@ -684,15 +698,15 @@ mod tests {
 
     #[test]
     fn line_filter_validation_rejects_invalid_regex_and_ip_ops() {
-        assert2::assert!(LineFilter::new(LineFilterOp::Regex, "[").is_err());
-        assert2::assert!(LineFilter::ip(LineFilterOp::Regex, "192.168.1.1").is_err());
+        assert!(LineFilter::new(LineFilterOp::Regex, "[").is_err());
+        assert!(LineFilter::ip(LineFilterOp::Regex, "192.168.1.1").is_err());
     }
 
     #[test]
     fn ip_matcher_returns_original_pattern() {
         let matcher = IpMatcher::parse("192.168.1.0/24").unwrap();
 
-        assert2::assert!(matcher.pattern() == "192.168.1.0/24");
+        assert_eq!(matcher.pattern(), "192.168.1.0/24");
     }
 
     #[test]
@@ -702,27 +716,24 @@ mod tests {
             "192.168.1.1-2001:db8::1",
             "192.168.1.1/33",
         ] {
-            assert2::assert!(IpMatcher::parse(pattern).is_err());
+            assert!(IpMatcher::parse(pattern).is_err(), "{pattern}");
         }
     }
 
     #[test]
     fn ip_matcher_accepts_single_address_ranges_and_host_prefixes() {
-        for (_name, matcher) in [
-            (
-                "single-address range",
-                IpMatcher::parse("192.168.1.1-192.168.1.1").unwrap(),
-            ),
-            ("host prefix", IpMatcher::parse("192.168.1.1/32").unwrap()),
-        ] {
-            assert2::assert!(matcher.matches_ip_text("192.168.1.1"));
-            assert2::assert!(!matcher.matches_ip_text("192.168.1.2"));
-        }
+        let range = IpMatcher::parse("192.168.1.1-192.168.1.1").unwrap();
+        assert!(range.matches_ip_text("192.168.1.1"));
+        assert!(!range.matches_ip_text("192.168.1.2"));
+
+        let cidr = IpMatcher::parse("192.168.1.1/32").unwrap();
+        assert!(cidr.matches_ip_text("192.168.1.1"));
+        assert!(!cidr.matches_ip_text("192.168.1.2"));
     }
 
     #[test]
     fn line_pattern_matches_wildcard_only_pattern() {
-        assert2::assert!(line_matches_pattern("anything", "<_>"));
-        assert2::assert!(!line_matches_pattern("anything", ""));
+        assert!(line_matches_pattern("anything", "<_>"));
+        assert!(!line_matches_pattern("anything", ""));
     }
 }

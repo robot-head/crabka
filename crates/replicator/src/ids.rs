@@ -15,7 +15,7 @@
 //! value is a bare `i64`, and silently corrupts offset translation. Wrapping each
 //! meaning in its own type turns those swaps into compile errors.
 //!
-//! The MM2 wire codec ([`crate::mm2::Writer`] / [`crate::mm2::Reader`]) still
+//! The internal MM2 wire codec (`Writer` / `Reader`) still
 //! reads and writes raw `i64`/`i32`, so byte-exactness with the JVM MM2 codecs is
 //! preserved: these newtypes wrap only the in-memory domain values and unwrap via
 //! `.0` at the codec boundary.

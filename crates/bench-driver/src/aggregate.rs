@@ -9,6 +9,8 @@
 
 use std::collections::BTreeMap;
 
+use crate::numeric::to_f64;
+
 use crate::{
     ids::TimeOffsetMs,
     scenario::{BrokerSample, RunOutput, Sample, Stack},
@@ -44,11 +46,11 @@ pub fn stat(values: &[f64]) -> Stat {
     if n == 0 {
         return Stat::default();
     }
-    let mean = values.iter().sum::<f64>() / n as f64;
+    let mean = values.iter().sum::<f64>() / to_f64(n);
     let stddev = if n < 2 {
         0.0
     } else {
-        let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (n as f64 - 1.0);
+        let var = values.iter().map(|v| (v - mean).powi(2)).sum::<f64>() / (to_f64(n) - 1.0);
         var.sqrt()
     };
     Stat { mean, stddev, n }
@@ -116,7 +118,7 @@ pub fn scalar_metrics() -> Vec<ScalarMetric> {
             label: "Broker working set",
             unit: "MiB",
             higher_better: false,
-            extract: |r| r.resource.mem_cgroup_working_set_bytes as f64 / 1_048_576.0,
+            extract: |r| to_f64(r.resource.mem_cgroup_working_set_bytes) / 1_048_576.0,
         },
     ]
 }
@@ -218,7 +220,7 @@ fn broker_ts_metrics() -> Vec<(&'static str, BrokerExtract)> {
     vec![
         ("broker_cpu_cores", |b| b.cpu_cores),
         ("broker_mem_working_set_mb", |b| {
-            b.mem_working_set_bytes as f64 / 1_048_576.0
+            to_f64(b.mem_working_set_bytes) / 1_048_576.0
         }),
     ]
 }

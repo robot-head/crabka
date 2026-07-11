@@ -255,8 +255,7 @@ impl MetadataImage {
         };
         let raw = self.broker_config(node_id)?.get(key)?;
         let v: i64 = raw.parse().ok()?;
-        #[allow(clippy::cast_sign_loss)]
-        if v < 0 { None } else { Some(v as u64) }
+        u64::try_from(v).ok()
     }
 
     /// Override map for a single KIP-714 client-metrics subscription.
@@ -484,7 +483,7 @@ impl MetadataImage {
     /// in the controller before submitting to Raft. Apply must never
     /// fail on a committed entry.
     #[tracing::instrument(level = "info", skip_all, fields(record = record_variant(rec)))]
-    #[allow(clippy::too_many_lines)] // exhaustive match over MetadataRecord
+    // exhaustive match over MetadataRecord
     pub fn apply(&mut self, rec: &MetadataRecord) {
         match rec {
             MetadataRecord::V1Topic(t) => {
@@ -863,6 +862,9 @@ impl MetadataImage {
     /// Synchronous pre-validation: returns `Ok` if the record would be a
     /// no-conflict apply, otherwise the appropriate error. Used by
     /// `Controller::submit_change` before forwarding to openraft.
+    ///
+    /// # Errors
+    /// Returns the conflict that would prevent the record from being applied.
     #[tracing::instrument(level = "debug", skip_all, fields(record = record_variant(rec)), err)]
     pub fn validate(&self, rec: &MetadataRecord) -> Result<(), MetadataError> {
         match rec {
@@ -1063,21 +1065,9 @@ mod tests {
         assert2::assert!(MetadataImage::from_records(cid, &image.to_records()) == image);
     }
 
-    /// Exercises every stored variant the image can hold (the 9
-    /// state-producing records), plus tombstones whose effects must NOT
-    /// leak into the snapshot. The round-trip must reproduce the image
-    /// exactly.
-    #[test]
-    #[allow(clippy::too_many_lines)] // exhaustive fixture over every stored variant
-    fn to_records_round_trips_all_variants() {
-        use crabka_security::{KafkaPrincipal, SaslMechanism};
-
-        let cid = Uuid::new_v4();
-        let mut image = MetadataImage::new(cid);
-
-        // Brokers (one survives, one is unregistered → must not reappear).
-        image.apply(&MetadataRecord::V1BrokerRegistration(
-            BrokerRegistrationRecord {
+    fn apply_broker_fixture(image: &mut MetadataImage) {
+        for record in [
+            MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: NodeId(1),
                 broker_epoch: 0,
                 incarnation_id: Uuid::nil(),
@@ -1090,10 +1080,8 @@ mod tests {
                     port: 9093,
                     protocol: crabka_security::ListenerProtocol::SaslSsl,
                 }],
-            },
-        ));
-        image.apply(&MetadataRecord::V1BrokerRegistration(
-            BrokerRegistrationRecord {
+            }),
+            MetadataRecord::V1BrokerRegistration(BrokerRegistrationRecord {
                 node_id: NodeId(2),
                 broker_epoch: 0,
                 incarnation_id: Uuid::nil(),
@@ -1101,28 +1089,45 @@ mod tests {
                 port: 9092,
                 rack: None,
                 endpoints: vec![],
-            },
-        ));
-        image.apply(&MetadataRecord::V1UnregisterBroker(
-            crate::records::UnregisterBrokerRecord { node_id: NodeId(2) },
-        ));
+            }),
+            MetadataRecord::V1UnregisterBroker(crate::records::UnregisterBrokerRecord {
+                node_id: NodeId(2),
+            }),
+            MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: NodeId(1),
+                config_name: "leader.replication.throttled.rate".into(),
+                config_value: Some("2048".into()),
+            }),
+            MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: NodeId(1),
+                config_name: "follower.replication.throttled.rate".into(),
+                config_value: Some("4096".into()),
+            }),
+            MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
+                node_id: NodeId(1),
+                config_name: "follower.replication.throttled.rate".into(),
+                config_value: None,
+            }),
+        ] {
+            image.apply(&record);
+        }
+    }
 
-        // Broker configs: one set survives, one deleted-back-to-empty.
-        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: NodeId(1),
-            config_name: "leader.replication.throttled.rate".into(),
-            config_value: Some("2048".into()),
-        }));
-        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: NodeId(1),
-            config_name: "follower.replication.throttled.rate".into(),
-            config_value: Some("4096".into()),
-        }));
-        image.apply(&MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
-            node_id: NodeId(1),
-            config_name: "follower.replication.throttled.rate".into(),
-            config_value: None,
-        }));
+    /// Exercises every stored variant the image can hold (the 9
+    /// state-producing records), plus tombstones whose effects must NOT
+    /// leak into the snapshot. The round-trip must reproduce the image
+    /// exactly.
+    #[test]
+    // exhaustive fixture over every stored variant
+    fn to_records_round_trips_all_variants() {
+        use crabka_security::{KafkaPrincipal, SaslMechanism};
+
+        let cid = Uuid::new_v4();
+        let mut image = MetadataImage::new(cid);
+
+        // One broker survives and one is unregistered; one config survives
+        // and one is deleted back to empty.
+        apply_broker_fixture(&mut image);
 
         // Topics + partitions (one topic deleted → topic, partitions and
         // its config must vanish).

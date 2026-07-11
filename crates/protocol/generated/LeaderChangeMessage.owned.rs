@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -22,9 +23,7 @@ pub struct LeaderChangeMessage {
 impl Encode for LeaderChangeMessage {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "LeaderChangeMessage version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("LeaderChangeMessage version out of range"));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -66,22 +65,15 @@ impl Encode for LeaderChangeMessage {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.voters).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.voters).len(), flex);
                 let body: usize = (self.voters).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.granting_voters).len(),
-                    flex,
-                );
-                let body: usize = (self.granting_voters)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.granting_voters).len(), flex);
+                let body: usize = (self.granting_voters).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -95,9 +87,7 @@ impl Encode for LeaderChangeMessage {
 impl Decode<'_> for LeaderChangeMessage {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "LeaderChangeMessage version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("LeaderChangeMessage version out of range"));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -112,9 +102,7 @@ impl Decode<'_> for LeaderChangeMessage {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::leader_change_message::voter::Voter::decode(
-                        buf, version,
-                    )?);
+                    v.push(super::common::leader_change_message::voter::Voter::decode(buf, version)?);
                 }
                 v
             };
@@ -124,9 +112,7 @@ impl Decode<'_> for LeaderChangeMessage {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::common::leader_change_message::voter::Voter::decode(
-                        buf, version,
-                    )?);
+                    v.push(super::common::leader_change_message::voter::Voter::decode(buf, version)?);
                 }
                 v
             };
@@ -152,8 +138,7 @@ impl LeaderChangeMessage {
             m.voters = vec![super::common::leader_change_message::voter::Voter::populated(version)];
         }
         if version >= 0 {
-            m.granting_voters =
-                vec![super::common::leader_change_message::voter::Voter::populated(version)];
+            m.granting_voters = vec![super::common::leader_change_message::voter::Voter::populated(version)];
         }
         m
     }
@@ -162,14 +147,11 @@ impl LeaderChangeMessage {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("version".to_string(), ::serde_json::json!(0));
     obj.insert("leaderId".to_string(), ::serde_json::json!(0));
     obj.insert("voters".to_string(), ::serde_json::Value::Array(vec![]));
-    obj.insert(
-        "grantingVoters".to_string(),
-        ::serde_json::Value::Array(vec![]),
-    );
+    obj.insert("grantingVoters".to_string(), ::serde_json::Value::Array(vec![]));
     ::serde_json::Value::Object(obj)
 }

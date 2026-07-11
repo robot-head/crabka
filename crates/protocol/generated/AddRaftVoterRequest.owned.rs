@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_bool, get_i32, get_u16, put_bool, put_i32, put_u16};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -33,20 +33,17 @@ impl Default for AddRaftVoterRequest {
             cluster_id: None,
             timeout_ms: 0i32,
             voter_id: 0i32,
-            voter_directory_id: Default::default(),
+            voter_directory_id: crate::primitives::uuid::Uuid::default(),
             listeners: Vec::new(),
             ack_when_committed: true,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl Encode for AddRaftVoterRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -103,12 +100,8 @@ impl Encode for AddRaftVoterRequest {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.listeners).len(), flex);
-                let body: usize = (self.listeners)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.listeners).len(), flex);
+                let body: usize = (self.listeners).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -125,19 +118,12 @@ impl Encode for AddRaftVoterRequest {
 impl Decode<'_> for AddRaftVoterRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.cluster_id = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.cluster_id = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 0 {
             out.timeout_ms = get_i32(buf)?;
@@ -204,18 +190,10 @@ impl Encode for Listener {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 0;
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.name);
-            } else {
-                put_string(buf, &self.name);
-            }
+            if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) }
         }
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.host);
-            } else {
-                put_string(buf, &self.host);
-            }
+            if flex { put_compact_string(buf, &self.host) } else { put_string(buf, &self.host) }
         }
         if version >= 0 {
             put_u16(buf, self.port);
@@ -230,18 +208,10 @@ impl Encode for Listener {
         let flex = version >= 0;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.name)
-            } else {
-                string_len(&self.name)
-            };
+            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
         }
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.host)
-            } else {
-                string_len(&self.host)
-            };
+            n += if flex { compact_string_len(&self.host) } else { string_len(&self.host) };
         }
         if version >= 0 {
             n += 2;
@@ -258,18 +228,10 @@ impl Decode<'_> for Listener {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
-            out.host = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.host = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.port = get_u16(buf)?;
@@ -306,16 +268,10 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("clusterId".to_string(), ::serde_json::Value::Null);
     obj.insert("timeoutMs".to_string(), ::serde_json::json!(0));
     obj.insert("voterId".to_string(), ::serde_json::json!(0));
-    obj.insert(
-        "voterDirectoryId".to_string(),
-        ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()),
-    );
+    obj.insert("voterDirectoryId".to_string(), ::serde_json::Value::String("AAAAAAAAAAAAAAAAAAAAAA".to_string()));
     obj.insert("listeners".to_string(), ::serde_json::Value::Array(vec![]));
     if version >= 1 {
-        obj.insert(
-            "ackWhenCommitted".to_string(),
-            ::serde_json::Value::Bool(true),
-        );
+        obj.insert("ackWhenCommitted".to_string(), ::serde_json::Value::Bool(true));
     }
     ::serde_json::Value::Object(obj)
 }

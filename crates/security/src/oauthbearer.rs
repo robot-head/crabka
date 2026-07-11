@@ -353,8 +353,7 @@ fn numeric_date_ms(claims: &Value, key: &str) -> Option<i64> {
     // Fractional NumericDate (rare): truncate to whole milliseconds.
     let ms = v.as_f64()? * 1000.0;
     if ms.is_finite() {
-        #[allow(clippy::cast_possible_truncation)]
-        Some(ms as i64)
+        ms.trunc().to_string().parse().ok()
     } else {
         None
     }

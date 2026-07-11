@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -24,21 +25,17 @@ impl Default for AssignReplicasToDirsRequest {
             broker_id: 0i32,
             broker_epoch: -1i64,
             directories: Vec::new(),
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl AssignReplicasToDirsRequest {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest {
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest {
         crate::owned::assign_replicas_to_dirs_request::AssignReplicasToDirsRequest {
             broker_id: (self.broker_id),
             broker_epoch: (self.broker_epoch),
-            directories: (self.directories)
-                .iter()
-                .map(DirectoryData::to_owned)
-                .collect(),
+            directories: (self.directories).iter().map(DirectoryData::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -46,10 +43,7 @@ impl AssignReplicasToDirsRequest {
 impl Encode for AssignReplicasToDirsRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -83,12 +77,8 @@ impl Encode for AssignReplicasToDirsRequest {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.directories).len(), flex);
-                let body: usize = (self.directories)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.directories).len(), flex);
+                let body: usize = (self.directories).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -102,10 +92,7 @@ impl Encode for AssignReplicasToDirsRequest {
 impl<'de> DecodeBorrow<'de> for AssignReplicasToDirsRequest {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -148,13 +135,15 @@ impl AssignReplicasToDirsRequest {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct DirectoryData {
     pub id: crate::primitives::uuid::Uuid,
     pub topics: Vec<TopicData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl DirectoryData {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::DirectoryData {
         crate::owned::assign_replicas_to_dirs_request::DirectoryData {
             id: (self.id),
@@ -191,8 +180,7 @@ impl Encode for DirectoryData {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -241,20 +229,19 @@ impl DirectoryData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct TopicData {
     pub topic_id: crate::primitives::uuid::Uuid,
     pub partitions: Vec<PartitionData>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl TopicData {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::TopicData {
         crate::owned::assign_replicas_to_dirs_request::TopicData {
             topic_id: (self.topic_id),
-            partitions: (self.partitions)
-                .iter()
-                .map(PartitionData::to_owned)
-                .collect(),
+            partitions: (self.partitions).iter().map(PartitionData::to_owned).collect(),
             unknown_tagged_fields: self.unknown_tagged_fields.clone(),
         }
     }
@@ -287,12 +274,8 @@ impl Encode for TopicData {
         }
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -340,12 +323,14 @@ impl TopicData {
         m
     }
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct PartitionData {
     pub partition_index: i32,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PartitionData {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::assign_replicas_to_dirs_request::PartitionData {
         crate::owned::assign_replicas_to_dirs_request::PartitionData {
             partition_index: (self.partition_index),

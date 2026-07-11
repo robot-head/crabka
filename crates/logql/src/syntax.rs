@@ -14,47 +14,65 @@ use crate::{
 };
 
 #[tracing::instrument(level = "info", skip_all, fields(query = %input), err)]
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_query(input: &str) -> Result<StreamQuery, ParseError> {
     Parser::new(input).parse()
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(query = %input), err)]
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_query(input: &str) -> Result<MetricQuery, ParseError> {
     Parser::new(input).parse_metric()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_label_replace_query(input: &str) -> Result<MetricLabelReplace, ParseError> {
     Parser::new(input).parse_metric_label_replace()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_label_join_query(input: &str) -> Result<MetricLabelJoin, ParseError> {
     Parser::new(input).parse_metric_label_join()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_scalar_comparison_query(
     input: &str,
 ) -> Result<MetricScalarComparison, ParseError> {
     Parser::new(input).parse_metric_scalar_comparison()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_scalar_arithmetic_query(
     input: &str,
 ) -> Result<MetricScalarArithmetic, ParseError> {
     Parser::new(input).parse_metric_scalar_arithmetic()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_binary_arithmetic_query(
     input: &str,
 ) -> Result<MetricBinaryArithmetic, ParseError> {
     Parser::new(input).parse_metric_binary_arithmetic()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_binary_comparison_query(
     input: &str,
 ) -> Result<MetricBinaryComparison, ParseError> {
     Parser::new(input).parse_metric_binary_comparison()
 }
 
+/// # Errors
+/// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
 pub fn parse_metric_binary_set_query(input: &str) -> Result<MetricBinarySet, ParseError> {
     Parser::new(input).parse_metric_binary_set()
 }
@@ -306,7 +324,7 @@ impl<'a> Parser<'a> {
     }
 
     fn parse(mut self) -> Result<StreamQuery, ParseError> {
-        let query = self.parse_stream_query()?;
+        let query = self.parse_stream_query(false)?;
         self.skip_ws();
         if self.pos == self.input.len() {
             Ok(query)
@@ -549,40 +567,37 @@ impl<'a> Parser<'a> {
     fn parse_metric_scalar_comparison(mut self) -> Result<MetricScalarComparison, ParseError> {
         self.skip_ws();
         let start = self.pos;
-        let comparison = match self.parse_scalar_literal_text() {
-            Ok(scalar) => {
-                self.skip_ws();
-                let op = self.parse_comparison_op()?;
-                self.skip_ws();
-                let bool_modifier = self.consume_keyword("bool");
-                let metric_query_text = self.input[self.pos..].trim().to_string();
-                if metric_query_text.is_empty() {
-                    return Err(self.error("expected metric expression"));
-                }
-                self.pos = self.input.len();
-                MetricScalarComparison {
-                    query: parse_metric_subexpression(&metric_query_text)?,
-                    op,
-                    bool_modifier,
-                    scalar,
-                    scalar_on_left: true,
-                }
+        let comparison = if let Ok(scalar) = self.parse_scalar_literal_text() {
+            self.skip_ws();
+            let op = self.parse_comparison_op()?;
+            self.skip_ws();
+            let bool_modifier = self.consume_keyword("bool");
+            let metric_query_text = self.input[self.pos..].trim().to_string();
+            if metric_query_text.is_empty() {
+                return Err(self.error("expected metric expression"));
             }
-            Err(_) => {
-                self.pos = start;
-                let metric_query_text = self.parse_metric_expression_argument()?;
-                let query = parse_metric_subexpression(&metric_query_text)?;
-                let op = self.parse_comparison_op()?;
-                self.skip_ws();
-                let bool_modifier = self.consume_keyword("bool");
-                let scalar = self.parse_scalar_literal_text()?;
-                MetricScalarComparison {
-                    query,
-                    op,
-                    bool_modifier,
-                    scalar,
-                    scalar_on_left: false,
-                }
+            self.pos = self.input.len();
+            MetricScalarComparison {
+                query: parse_metric_subexpression(&metric_query_text)?,
+                op,
+                bool_modifier,
+                scalar,
+                scalar_on_left: true,
+            }
+        } else {
+            self.pos = start;
+            let metric_query_text = self.parse_metric_expression_argument()?;
+            let query = parse_metric_subexpression(&metric_query_text)?;
+            let op = self.parse_comparison_op()?;
+            self.skip_ws();
+            let bool_modifier = self.consume_keyword("bool");
+            let scalar = self.parse_scalar_literal_text()?;
+            MetricScalarComparison {
+                query,
+                op,
+                bool_modifier,
+                scalar,
+                scalar_on_left: false,
             }
         };
         self.skip_ws();
@@ -596,35 +611,32 @@ impl<'a> Parser<'a> {
     fn parse_metric_scalar_arithmetic(mut self) -> Result<MetricScalarArithmetic, ParseError> {
         self.skip_ws();
         let start = self.pos;
-        let arithmetic = match self.parse_scalar_literal_text() {
-            Ok(scalar) => {
-                self.skip_ws();
-                let Some(op) = self.parse_arithmetic_op() else {
-                    return Err(self.error("expected metric arithmetic operator"));
-                };
-                let metric_query_text = self.input[self.pos..].trim().to_string();
-                if metric_query_text.is_empty() {
-                    return Err(self.error("expected metric expression"));
-                }
-                self.pos = self.input.len();
-                MetricScalarArithmetic {
-                    query: parse_metric_subexpression(&metric_query_text)?,
-                    op,
-                    scalar,
-                    scalar_on_left: true,
-                }
+        let arithmetic = if let Ok(scalar) = self.parse_scalar_literal_text() {
+            self.skip_ws();
+            let Some(op) = self.parse_arithmetic_op() else {
+                return Err(self.error("expected metric arithmetic operator"));
+            };
+            let metric_query_text = self.input[self.pos..].trim().to_string();
+            if metric_query_text.is_empty() {
+                return Err(self.error("expected metric expression"));
             }
-            Err(_) => {
-                self.pos = start;
-                let (metric_query_text, op) = self.parse_metric_arithmetic_argument()?;
-                let query = parse_metric_subexpression(&metric_query_text)?;
-                let scalar = self.parse_scalar_literal_text()?;
-                MetricScalarArithmetic {
-                    query,
-                    op,
-                    scalar,
-                    scalar_on_left: false,
-                }
+            self.pos = self.input.len();
+            MetricScalarArithmetic {
+                query: parse_metric_subexpression(&metric_query_text)?,
+                op,
+                scalar,
+                scalar_on_left: true,
+            }
+        } else {
+            self.pos = start;
+            let (metric_query_text, op) = self.parse_metric_arithmetic_argument()?;
+            let query = parse_metric_subexpression(&metric_query_text)?;
+            let scalar = self.parse_scalar_literal_text()?;
+            MetricScalarArithmetic {
+                query,
+                op,
+                scalar,
+                scalar_on_left: false,
             }
         };
         self.skip_ws();
@@ -950,7 +962,7 @@ impl<'a> Parser<'a> {
     fn parse_scalar_literal_text(&mut self) -> Result<String, ParseError> {
         self.skip_ws();
         let start = self.pos;
-        if matches!(self.peek(), Some('+') | Some('-')) {
+        if matches!(self.peek(), Some('+' | '-')) {
             self.pos = self.pos.saturating_add(1);
         }
 
@@ -974,9 +986,9 @@ impl<'a> Parser<'a> {
             return Err(self.error("expected scalar literal"));
         }
 
-        if matches!(self.peek(), Some('e') | Some('E')) {
+        if matches!(self.peek(), Some('e' | 'E')) {
             self.pos = self.pos.saturating_add(1);
-            if matches!(self.peek(), Some('+') | Some('-')) {
+            if matches!(self.peek(), Some('+' | '-')) {
                 self.pos = self.pos.saturating_add(1);
             }
             let exponent_start = self.pos;
@@ -1223,7 +1235,7 @@ impl<'a> Parser<'a> {
         })
     }
 
-    fn parse_stream_query(&mut self) -> Result<StreamQuery, ParseError> {
+    fn parse_stream_query(&mut self, stop_before_range: bool) -> Result<StreamQuery, ParseError> {
         self.skip_ws();
         self.expect('{')?;
         let matchers = self.parse_matchers()?;
@@ -1233,6 +1245,9 @@ impl<'a> Parser<'a> {
         let mut pipeline = Vec::new();
         loop {
             self.skip_ws();
+            if stop_before_range && matches!(self.peek(), Some('[')) {
+                break;
+            }
             if self.pos == self.input.len() {
                 break;
             }
@@ -1394,7 +1409,7 @@ impl<'a> Parser<'a> {
         }
         if self.consume_keyword("json") {
             self.skip_ws();
-            if self.pos < self.input.len() && !matches!(self.peek(), Some('|') | Some('[')) {
+            if self.pos < self.input.len() && !matches!(self.peek(), Some('|' | '[')) {
                 return Ok(PipelineStage::Parser(ParserStage::JsonSelected(
                     self.parse_json_parser_config()?,
                 )));
@@ -1405,7 +1420,7 @@ impl<'a> Parser<'a> {
             self.skip_ws();
             let (strict, keep_empty) = self.parse_logfmt_parser_flags();
             self.skip_ws();
-            if self.pos < self.input.len() && !matches!(self.peek(), Some('|') | Some('[')) {
+            if self.pos < self.input.len() && !matches!(self.peek(), Some('|' | '[')) {
                 return Ok(PipelineStage::Parser(ParserStage::LogfmtSelected(
                     self.parse_logfmt_parser_config(strict, keep_empty)?,
                 )));
@@ -1488,7 +1503,7 @@ impl<'a> Parser<'a> {
             let destination = self.parse_ident()?;
             self.expect('=')?;
             self.skip_ws();
-            let assignment = if matches!(self.peek(), Some('"') | Some('`')) {
+            let assignment = if matches!(self.peek(), Some('"' | '`')) {
                 LabelFormatAssignment::template(destination, self.parse_quoted()?)?
             } else {
                 LabelFormatAssignment::rename(destination, self.parse_ident()?)?
@@ -1628,11 +1643,10 @@ impl<'a> Parser<'a> {
                 FieldFilterLogicOp::And
             } else if self.consume_keyword("or") {
                 FieldFilterLogicOp::Or
-            } else if self.consume(",") {
-                FieldFilterLogicOp::And
-            } else if self
-                .peek()
-                .is_some_and(|ch| is_ident_start(ch) || ch == '(')
+            } else if self.consume(",")
+                || self
+                    .peek()
+                    .is_some_and(|ch| is_ident_start(ch) || ch == '(')
             {
                 FieldFilterLogicOp::And
             } else {
@@ -1677,7 +1691,7 @@ impl<'a> Parser<'a> {
             self.expect(')')?;
             return Ok(FieldValue::Ip(IpMatcher::parse(&pattern)?));
         }
-        if matches!(self.peek(), Some('"') | Some('`')) {
+        if matches!(self.peek(), Some('"' | '`')) {
             return Ok(FieldValue::String(self.parse_quoted()?));
         }
 

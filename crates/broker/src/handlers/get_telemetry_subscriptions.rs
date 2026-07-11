@@ -22,7 +22,6 @@ use crate::{
     handlers::context::TelemetryContext,
 };
 
-#[allow(clippy::unused_async)] // signature symmetry with other inline-intercept handlers
 #[tracing::instrument(
     name = "handle_get_telemetry_subscriptions",
     level = "info",
@@ -30,7 +29,7 @@ use crate::{
     fields(api = "GetTelemetrySubscriptions", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,

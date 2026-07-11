@@ -61,8 +61,7 @@ fn is_internal_topic(name: &str) -> bool {
 // Read-only handler — never suspends. The `async fn` shape matches the
 // other inline-intercept handlers (DescribeCluster, DescribeGroups) so
 // dispatch.rs can call it through one `await`.
-#[allow(clippy::unused_async)]
-#[allow(clippy::too_many_lines)] // ACL preamble + pagination + cursor logic
+// ACL preamble + pagination + cursor logic
 #[tracing::instrument(
     name = "handle_describe_topic_partitions",
     level = "info",
@@ -70,7 +69,7 @@ fn is_internal_topic(name: &str) -> bool {
     fields(api = "DescribeTopicPartitions", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -87,28 +86,7 @@ pub(crate) async fn handle(
     // if some don't exist (those rows carry UNKNOWN_TOPIC_OR_PARTITION).
     // Fetch-all (empty `topics`): walk every topic from the image,
     // alphabetical for deterministic pagination.
-    let named = !req.topics.is_empty();
-    let mut ordered_names: Vec<String> = if named {
-        req.topics.iter().map(|t| t.name.clone()).collect()
-    } else {
-        let mut all: Vec<String> = image.topics().map(|t| t.name.clone()).collect();
-        all.sort();
-        all
-    };
-
-    // ── 2. Apply request Cursor: skip topics before `cursor.topic_name`. ─
-    let cursor_partition: i32 = match &req.cursor {
-        Some(c) => {
-            // Drop every name strictly before the cursor's topic. If the
-            // cursor's topic isn't in the list, we keep walking from
-            // wherever the binary partition lands — matches the JVM's
-            // "lower bound" behavior on out-of-set cursors.
-            let drop_until = c.topic_name.as_str();
-            ordered_names.retain(|n| n.as_str() >= drop_until);
-            c.partition_index
-        }
-        None => 0,
-    };
+    let (named, ordered_names, cursor_partition) = resolve_names(&image, &req);
 
     // ── 3. Batch-authorize Describe on all candidate topics. ───────────
     let acl_by_name = authorize_topics(
@@ -140,15 +118,7 @@ pub(crate) async fn handle(
             == AuthorizationResult::Allow;
         if !allowed {
             if named {
-                topics_out.push(DescribeTopicPartitionsResponseTopic {
-                    error_code: codes::TOPIC_AUTHORIZATION_FAILED,
-                    name: Some(name.clone()),
-                    topic_id: WireUuid::ZERO,
-                    is_internal: false,
-                    partitions: Vec::new(),
-                    topic_authorized_operations: i32::MIN,
-                    ..Default::default()
-                });
+                topics_out.push(error_topic(name, codes::TOPIC_AUTHORIZATION_FAILED));
             }
             // Fetch-all Deny: silently omit so the broker doesn't leak
             // topic existence to unauthorized clients.
@@ -158,15 +128,7 @@ pub(crate) async fn handle(
 
         let topic = image.topic(name);
         let Some(t) = topic else {
-            topics_out.push(DescribeTopicPartitionsResponseTopic {
-                error_code: codes::UNKNOWN_TOPIC_OR_PARTITION,
-                name: Some(name.clone()),
-                topic_id: WireUuid::ZERO,
-                is_internal: false,
-                partitions: Vec::new(),
-                topic_authorized_operations: i32::MIN,
-                ..Default::default()
-            });
+            topics_out.push(error_topic(name, codes::UNKNOWN_TOPIC_OR_PARTITION));
             first_topic_partition_offset = 0;
             continue;
         };
@@ -194,36 +156,7 @@ pub(crate) async fn handle(
                 next_partition_index = p.partition;
                 break;
             }
-            row_partitions.push(DescribeTopicPartitionsResponsePartition {
-                error_code: codes::NONE,
-                partition_index: p.partition,
-                leader_id: i32::try_from(p.leader.0).unwrap_or(i32::MAX),
-                leader_epoch: p.leader_epoch.0,
-                replica_nodes: p
-                    .replicas
-                    .iter()
-                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
-                    .collect(),
-                isr_nodes: p
-                    .isr
-                    .iter()
-                    .map(|&r| i32::try_from(r.0).unwrap_or(i32::MAX))
-                    .collect(),
-                // ELR / last-known-ELR: the schema marks both
-                // `nullableVersions: 0+` and `default: null`, but the
-                // Kafka 3.8 admin client's
-                // `DescribeTopicPartitionsResponse.partitionToTopicPartitionInfo`
-                // calls `.stream()` on the decoded list without a null
-                // guard — i.e. a null value NPEs the client. Real
-                // Kafka brokers emit empty lists rather than null;
-                // mirror that to stay compatible. A null value produces
-                // "Cannot invoke java.util.List.stream() because
-                // the return value of …eligibleLeaderReplicas() is null".
-                eligible_leader_replicas: Some(Vec::new()),
-                last_known_elr: Some(Vec::new()),
-                offline_replicas: Vec::new(),
-                ..Default::default()
-            });
+            row_partitions.push(partition_response(p));
             emitted_partitions += 1;
         }
 
@@ -267,10 +200,68 @@ pub(crate) async fn handle(
     crate::handlers::encode_response(&resp, version)
 }
 
+fn partition_response(
+    partition: &crabka_metadata::PartitionRecord,
+) -> DescribeTopicPartitionsResponsePartition {
+    DescribeTopicPartitionsResponsePartition {
+        error_code: codes::NONE,
+        partition_index: partition.partition,
+        leader_id: i32::try_from(partition.leader.0).unwrap_or(i32::MAX),
+        leader_epoch: partition.leader_epoch.0,
+        replica_nodes: partition
+            .replicas
+            .iter()
+            .map(|&replica| i32::try_from(replica.0).unwrap_or(i32::MAX))
+            .collect(),
+        isr_nodes: partition
+            .isr
+            .iter()
+            .map(|&replica| i32::try_from(replica.0).unwrap_or(i32::MAX))
+            .collect(),
+        // Kafka clients assume these nullable lists are present.
+        eligible_leader_replicas: Some(Vec::new()),
+        last_known_elr: Some(Vec::new()),
+        offline_replicas: Vec::new(),
+        ..Default::default()
+    }
+}
+
+fn error_topic(name: &str, error_code: i16) -> DescribeTopicPartitionsResponseTopic {
+    DescribeTopicPartitionsResponseTopic {
+        error_code,
+        name: Some(name.to_string()),
+        topic_id: WireUuid::ZERO,
+        is_internal: false,
+        partitions: Vec::new(),
+        topic_authorized_operations: i32::MIN,
+        ..Default::default()
+    }
+}
+
+fn resolve_names(
+    image: &crabka_metadata::MetadataImage,
+    req: &DescribeTopicPartitionsRequest,
+) -> (bool, Vec<String>, i32) {
+    let named = !req.topics.is_empty();
+    let mut ordered_names: Vec<String> = if named {
+        req.topics.iter().map(|topic| topic.name.clone()).collect()
+    } else {
+        let mut all_topics: Vec<_> = image.topics().map(|topic| topic.name.clone()).collect();
+        all_topics.sort();
+        all_topics
+    };
+    let cursor_partition = req.cursor.as_ref().map_or(0, |cursor| {
+        ordered_names.retain(|candidate| candidate.as_str() >= cursor.topic_name.as_str());
+        cursor.partition_index
+    });
+    (named, ordered_names, cursor_partition)
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_metadata::{MetadataRecord, NodeId, PartitionRecord, TopicRecord};
 
     use super::*;
@@ -341,9 +332,7 @@ mod tests {
             ..Default::default()
         });
 
-        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
-            .await
-            .expect("handle");
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx).expect("handle");
         let resp = decode_response(&bytes);
 
         let topic = resp
@@ -356,7 +345,11 @@ mod tests {
             .iter()
             .find(|p| p.partition_index == 0)
             .expect("partition 0 row");
-        assert2::assert!(part.leader_epoch == 9);
+        assert!(
+            part.leader_epoch == 9,
+            "response must echo the image leader_epoch (9), got {}",
+            part.leader_epoch
+        );
         broker_handle.shutdown().await;
     }
 
@@ -372,7 +365,7 @@ mod tests {
             // No accidental prefix matching.
             ("__consumer_offsets-2", false),
         ] {
-            assert2::assert!(is_internal_topic(name) == want);
+            assert!(is_internal_topic(name) == want, "{name}");
         }
     }
 }

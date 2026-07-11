@@ -78,8 +78,15 @@ impl InterBrokerCredentials {
 ///
 /// Build directly when embedding the broker as a library, or via the
 /// `crabka-broker` binary's clap CLI in production.
+#[derive(Debug, Clone, Copy)]
+pub struct BrokerFeatureFlags {
+    pub oauthbearer_jwks_ignore_key_use: bool,
+    pub auto_leader_rebalance_enable: bool,
+    pub transaction_two_phase_commit_enable: bool,
+}
+
 #[derive(Debug, Clone)]
-#[allow(clippy::struct_excessive_bools)] // a broad config struct; flags are independent knobs
+// a broad config struct; flags are independent knobs
 pub struct BrokerConfig {
     /// Broker id reported in `Metadata` responses. Default: 1.
     pub broker_id: i32,
@@ -146,7 +153,7 @@ pub struct BrokerConfig {
 
     /// UUID identifying this specific broker process invocation. Persisted in
     /// `{log_dir}/incarnation_id` and reloaded on restart. Populated before
-    /// self-registration by [`crate::incarnation::load_or_generate`].
+    /// self-registration by the internal `load_or_generate` helper.
     /// Tests generate a random UUID per call via [`Self::for_tests`].
     pub incarnation_id: uuid::Uuid,
 
@@ -324,26 +331,8 @@ pub struct BrokerConfig {
     /// 1 second; we default to 1 second too.
     pub oauthbearer_jwks_min_on_demand_pause: std::time::Duration,
 
-    /// When true, the refresher's JWKS parser keeps keys
-    /// regardless of `use` value (default behavior filters out `use=enc`).
-    pub oauthbearer_jwks_ignore_key_use: bool,
-
-    /// KIP-460 auto preferred-replica election. When true, a background
-    /// task on the controller leader periodically scans partitions and
-    /// re-elects the preferred replica as leader when it's alive + in
-    /// ISR. Matches Kafka's `auto.leader.rebalance.enable`.
-    pub auto_leader_rebalance_enable: bool,
-
-    /// KIP-939: cluster-wide gate for two-phase-commit (2PC) participation.
-    /// When `false` (the default, matching Kafka's
-    /// `transaction.two.phase.commit.enable`), an `InitProducerId` carrying
-    /// `enable2Pc=true` is rejected with `TRANSACTIONAL_ID_AUTHORIZATION_FAILED`
-    /// regardless of ACLs. When `true`, a producer additionally holding the
-    /// `TWO_PHASE_COMMIT` ACL on its transactional id may open a transaction
-    /// that the coordinator never auto-aborts on timeout (the external
-    /// transaction manager owns the commit/abort decision). Settable via
-    /// `[server_properties] "transaction.two.phase.commit.enable"`.
-    pub transaction_two_phase_commit_enable: bool,
+    /// Independent compatibility and protocol feature gates.
+    pub features: BrokerFeatureFlags,
 
     /// KIP-98 / KIP-939: how often the idle-transaction reaper scans for
     /// `Ongoing` transactions whose timeout has elapsed and aborts them (2PC
@@ -403,7 +392,7 @@ pub struct BrokerConfig {
 
     /// Optional OTLP endpoint for KIP-714 client metrics forwarding.
     /// Populated by binaries from their parsed runtime configuration rather
-    /// than read from the environment inside [`Broker::start`].
+    /// than read from the environment while the broker starts.
     pub client_metrics_otlp_endpoint: Option<String>,
 
     /// KIP-227: maximum number of incremental-fetch sessions kept in the
@@ -713,6 +702,8 @@ impl BrokerConfig {
     /// Helpful for tests: a config that listens on an OS-assigned port
     /// under a tempdir.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn for_tests(log_dir: PathBuf) -> Self {
         let listen_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
         let controller_addr: SocketAddr = "127.0.0.1:0".parse().expect("static");
@@ -775,9 +766,7 @@ impl BrokerConfig {
                 std::sync::atomic::AtomicI64::new(0),
             ),
             oauthbearer_jwks_min_on_demand_pause: DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE,
-            oauthbearer_jwks_ignore_key_use: false,
-            auto_leader_rebalance_enable: false, // tests opt in explicitly
-            transaction_two_phase_commit_enable: false, // tests opt in explicitly
+            features: test_feature_flags(),
             // Reaper disabled in tests; suites that exercise it set it low.
             txn_abort_cleanup_interval: std::time::Duration::ZERO,
             next_gen_consumer_group: Box::new(
@@ -1000,10 +989,6 @@ impl BrokerConfig {
 }
 
 impl Default for BrokerConfig {
-    #[allow(
-        clippy::too_many_lines,
-        reason = "BrokerConfig::default intentionally enumerates every runtime knob in one place."
-    )]
     fn default() -> Self {
         let addr: SocketAddr = "127.0.0.1:9092".parse().expect("hard-coded valid addr");
         let controller_addr: SocketAddr = "127.0.0.1:9093".parse().expect("hard-coded valid addr");
@@ -1027,12 +1012,8 @@ impl Default for BrokerConfig {
             heartbeat_interval_ms: DEFAULT_HEARTBEAT_INTERVAL_MS,
             heartbeat_timeout_ms: DEFAULT_HEARTBEAT_TIMEOUT_MS,
             replica_lag_time_max_ms: DEFAULT_REPLICA_LAG_TIME_MAX_MS,
-            controller_election_timeout: std::time::Duration::from_millis(
-                DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS,
-            ),
-            controller_heartbeat_interval: std::time::Duration::from_millis(
-                DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS,
-            ),
+            controller_election_timeout: duration_ms(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS),
+            controller_heartbeat_interval: duration_ms(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS),
             metadata_max_bytes_between_snapshots: DEFAULT_METADATA_MAX_BYTES_BETWEEN_SNAPSHOTS,
             metadata_max_snapshot_interval: DEFAULT_METADATA_MAX_SNAPSHOT_INTERVAL,
             metadata_snapshot_interval_records: DEFAULT_METADATA_SNAPSHOT_INTERVAL_RECORDS,
@@ -1063,15 +1044,10 @@ impl Default for BrokerConfig {
                 std::sync::atomic::AtomicI64::new(0),
             ),
             oauthbearer_jwks_min_on_demand_pause: DEFAULT_JWKS_MIN_ON_DEMAND_PAUSE,
-            oauthbearer_jwks_ignore_key_use: false,
-            auto_leader_rebalance_enable: true,
-            // KIP-939: 2PC participation is opt-in, matching Kafka's default.
-            transaction_two_phase_commit_enable: false,
+            features: default_feature_flags(),
             // KIP-98/KIP-939 idle-transaction reaper cadence (Kafka's
             // `transaction.abort.timed.out.transaction.cleanup.interval.ms`).
-            txn_abort_cleanup_interval: std::time::Duration::from_millis(
-                DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS,
-            ),
+            txn_abort_cleanup_interval: duration_ms(DEFAULT_TXN_ABORT_CLEANUP_INTERVAL_MS),
             next_gen_consumer_group: Box::new(
                 crate::coordinator::unified::config::NextGenConfig::default(),
             ),
@@ -1088,7 +1064,7 @@ impl Default for BrokerConfig {
             leader_imbalance_per_broker_percentage: DEFAULT_LEADER_IMBALANCE_PER_BROKER_PERCENTAGE,
             #[cfg(any(test, feature = "test-helpers"))]
             cleaner_interval_override: None,
-            tls_reload_interval: std::time::Duration::from_millis(DEFAULT_TLS_RELOAD_INTERVAL_MS),
+            tls_reload_interval: duration_ms(DEFAULT_TLS_RELOAD_INTERVAL_MS),
             // Default to `None` so multi-broker library users (and
             // multi-broker tests) don't race on a fixed port. The
             // `crabka-broker` binary opts in to `Some(0.0.0.0:9404)`
@@ -1115,9 +1091,7 @@ impl Default for BrokerConfig {
             // Tiered storage off by default. Operators enable it
             // via `[remote_storage] storage_dir` in `broker.toml`.
             remote_storage_backend: None,
-            remote_log_manager_interval: std::time::Duration::from_millis(
-                DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS,
-            ),
+            remote_log_manager_interval: duration_ms(DEFAULT_REMOTE_LOG_MANAGER_INTERVAL_MS),
             // Production default: topic-backed RLMM. `bootstrap` and
             // `snapshot_dir` are empty; the broker derives them at startup.
             remote_log_metadata: RlmmKind::TopicBacked(KafkaRlmmConfig::default()),
@@ -1134,8 +1108,29 @@ impl Default for BrokerConfig {
     }
 }
 
+const fn duration_ms(milliseconds: u64) -> std::time::Duration {
+    std::time::Duration::from_millis(milliseconds)
+}
+
+const fn test_feature_flags() -> BrokerFeatureFlags {
+    BrokerFeatureFlags {
+        oauthbearer_jwks_ignore_key_use: false,
+        auto_leader_rebalance_enable: false,
+        transaction_two_phase_commit_enable: false,
+    }
+}
+
+const fn default_feature_flags() -> BrokerFeatureFlags {
+    BrokerFeatureFlags {
+        oauthbearer_jwks_ignore_key_use: false,
+        auto_leader_rebalance_enable: true,
+        transaction_two_phase_commit_enable: false,
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    use assert2::{assert, check};
 
     use super::*;
     use crate::BrokerError as BrokerStartError;
@@ -1143,34 +1138,24 @@ mod tests {
     #[test]
     fn production_default_selects_topic_backed_rlmm() {
         let c = BrokerConfig::default();
-        assert2::assert!(matches!(c.remote_log_metadata, RlmmKind::TopicBacked(_)));
+        assert!(matches!(c.remote_log_metadata, RlmmKind::TopicBacked(_)));
     }
 
     #[test]
     fn test_default_selects_in_memory_rlmm() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert2::assert!(matches!(c.remote_log_metadata, RlmmKind::InMemory));
+        assert!(matches!(c.remote_log_metadata, RlmmKind::InMemory));
     }
 
     #[test]
     fn kafka_rlmm_config_default_has_sane_topic_settings() {
         let c = KafkaRlmmConfig::default();
-        assert2::assert!(
-            (
-                c.num_partitions,
-                c.replication,
-                c.bootstrap,
-                c.snapshot_dir,
-                c.snapshot_interval,
-            ) == (
-                50,
-                3,
-                String::new(),
-                std::path::PathBuf::new(),
-                DEFAULT_RLMM_SNAPSHOT_INTERVAL,
-            )
-        );
-        assert2::assert!(c.security.is_none());
+        check!(c.num_partitions == 50);
+        check!(c.replication == 3);
+        check!(c.bootstrap.is_empty());
+        check!(c.snapshot_dir == std::path::PathBuf::new());
+        check!(c.snapshot_interval == DEFAULT_RLMM_SNAPSHOT_INTERVAL);
+        check!(c.security.is_none());
     }
 
     #[test]
@@ -1183,13 +1168,8 @@ mod tests {
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert2::assert!(
-            (c.snapshot_interval, c.snapshot_dir)
-                == (
-                    std::time::Duration::from_mins(1),
-                    std::path::PathBuf::from("/data/remote-log-metadata"),
-                )
-        );
+        assert!(c.snapshot_interval == std::time::Duration::from_mins(1));
+        assert!(c.snapshot_dir == std::path::PathBuf::from("/data/remote-log-metadata"));
     }
 
     #[test]
@@ -1202,7 +1182,7 @@ mod tests {
             snapshot_dir: std::path::PathBuf::from("/data/remote-log-metadata"),
             security: None,
         };
-        assert2::assert!(c.security.is_none());
+        assert!(c.security.is_none());
     }
 
     /// A well-formed two-listener config used as the base for validation
@@ -1236,14 +1216,14 @@ mod tests {
     #[test]
     fn accepts_distinct_listener_bind_addresses() {
         let c = base();
-        assert2::assert!(c.validate().is_ok());
+        assert!(c.validate().is_ok());
     }
 
     #[test]
     fn rejects_bind_collision() {
         let mut c = base();
         c.listeners[1].bind_addr = c.listeners[0].bind_addr;
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerStartError::ListenerConflict { .. })
         ));
@@ -1253,7 +1233,7 @@ mod tests {
     fn rejects_missing_inter_broker_listener() {
         let mut c = base();
         c.inter_broker_listener_name = "NONESUCH".to_string();
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerStartError::InvalidInterBrokerListener { .. })
         ));
@@ -1263,7 +1243,7 @@ mod tests {
     fn rejects_sasl_listener_without_mechanisms() {
         let mut c = base();
         c.enabled_sasl_mechanisms.clear();
-        assert2::assert!(c.validate().is_err());
+        assert!(c.validate().is_err());
     }
 
     #[test]
@@ -1275,41 +1255,41 @@ mod tests {
     #[test]
     fn defaults_listen_on_localhost_9092() {
         let c = BrokerConfig::default();
-        assert2::assert!((c.listen_addr.port(), c.broker_id) == (9092, 1));
+        assert!(c.listen_addr.port() == 9092);
+        assert!(c.broker_id == 1);
     }
 
     #[test]
     fn for_tests_uses_port_0() {
         let c = BrokerConfig::for_tests(PathBuf::from("/tmp"));
-        assert2::assert!(c.listen_addr.port() == 0);
+        assert!(c.listen_addr.port() == 0);
     }
 
     #[test]
     fn defaults_use_conservative_raft_timings() {
         let c = BrokerConfig::default();
-        assert2::assert!(
-            (
-                c.controller_election_timeout,
-                c.controller_heartbeat_interval,
-            ) == (
-                std::time::Duration::from_millis(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS),
-                std::time::Duration::from_millis(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS),
-            )
+        assert!(
+            c.controller_election_timeout
+                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_ELECTION_TIMEOUT_MS)
+        );
+        assert!(
+            c.controller_heartbeat_interval
+                == std::time::Duration::from_millis(DEFAULT_CONTROLLER_HEARTBEAT_INTERVAL_MS)
         );
     }
 
     #[test]
     fn default_metadata_snapshot_interval() {
         let cfg = BrokerConfig::default();
-        assert2::assert!(cfg.metadata_snapshot_interval_records == 10_000);
+        assert!(cfg.metadata_snapshot_interval_records == 10_000);
     }
 
     #[test]
     fn for_tests_uses_20_mib_metadata_snapshot_threshold() {
         let cfg = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
         let mib = 1024 * 1024;
-        assert2::assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
-        assert2::assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
+        assert!(cfg.metadata_max_bytes_between_snapshots == 20 * mib);
+        assert!(cfg.metadata_max_bytes_between_snapshots / mib == 20);
     }
 
     #[test]
@@ -1318,20 +1298,20 @@ mod tests {
         // Short enough that a 3-broker test can detect a dead leader and
         // re-elect within a few hundred ms — the failover tests
         // need failover well under their 10s producer timeout.
-        assert2::assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
-        assert2::assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
+        assert!(c.controller_election_timeout <= std::time::Duration::from_millis(750));
+        assert!(c.controller_heartbeat_interval <= std::time::Duration::from_millis(200));
     }
 
     #[test]
     fn defaults_use_bootstrap_mode() {
         let c = BrokerConfig::default();
-        assert2::assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
+        assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
     }
 
     #[test]
     fn for_tests_uses_bootstrap_mode() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert2::assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
+        assert!(c.bootstrap_mode == BootstrapMode::Bootstrap);
     }
 
     #[test]
@@ -1341,19 +1321,20 @@ mod tests {
         let mut c = BrokerConfig::for_tests(primary.clone());
         c.extra_log_dirs = vec![extra.clone(), primary.clone(), extra.clone()];
 
-        assert2::assert!(c.all_log_dirs() == vec![primary, extra]);
+        assert!(c.all_log_dirs() == vec![primary, extra]);
     }
 
     #[test]
     fn defaults_to_combined_roles() {
         let d = BrokerConfig::default();
-        assert2::assert!(
+        assert!(
             (d.is_controller(), d.is_broker(), d.roles)
-                == (true, true, vec![NodeRole::Controller, NodeRole::Broker])
+                == (true, true, vec![NodeRole::Controller, NodeRole::Broker]),
+            "default node is a combined controller+broker with the combined role set"
         );
 
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert2::assert!(t.is_controller() && t.is_broker());
+        assert!(t.is_controller() && t.is_broker());
     }
 
     #[test]
@@ -1362,7 +1343,8 @@ mod tests {
             roles: vec![NodeRole::Controller],
             ..BrokerConfig::default()
         };
-        assert2::assert!((c.is_controller(), c.is_broker()) == (true, false));
+        assert!(c.is_controller());
+        assert!(!c.is_broker());
     }
 
     #[test]
@@ -1371,7 +1353,8 @@ mod tests {
             roles: vec![NodeRole::Broker],
             ..BrokerConfig::default()
         };
-        assert2::assert!((c.is_broker(), c.is_controller()) == (true, false));
+        assert!(c.is_broker());
+        assert!(!c.is_controller());
     }
 
     #[test]
@@ -1380,7 +1363,7 @@ mod tests {
             roles: vec![],
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(c.validate(), Err(BrokerError::EmptyRoles)));
+        assert!(matches!(c.validate(), Err(BrokerError::EmptyRoles)));
     }
 
     #[test]
@@ -1393,7 +1376,7 @@ mod tests {
             controller_quorum_voters: vec![(NodeId(1), "127.0.0.1:9093".to_string())],
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerError::NonControllerIsVoter {
                 node_id: crabka_raft::NodeId(1)
@@ -1415,7 +1398,7 @@ mod tests {
             ..BrokerConfig::default()
         };
         // Registration is gated on is_broker(); a controller-only node skips it.
-        assert2::assert!(!c.is_broker());
+        assert!(!c.is_broker());
     }
 
     #[test]
@@ -1425,7 +1408,7 @@ mod tests {
             ..BrokerConfig::default()
         };
         // Partition scan/recovery is gated on is_broker().
-        assert2::assert!(!c.is_broker());
+        assert!(!c.is_broker());
     }
 
     #[test]
@@ -1435,7 +1418,7 @@ mod tests {
             tls_config: None,
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(c.validate(), Err(BrokerError::Tls(_))));
+        assert!(matches!(c.validate(), Err(BrokerError::Tls(_))));
     }
 
     #[test]
@@ -1445,7 +1428,7 @@ mod tests {
             enabled_sasl_mechanisms: vec![],
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerError::SaslListenerNoMechanisms { .. })
         ));
@@ -1495,7 +1478,7 @@ mod tests {
             gssapi: None,
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerError::GssapiConfigMissing)
         ));
@@ -1504,19 +1487,15 @@ mod tests {
     #[test]
     fn auto_leader_rebalance_defaults_to_true_in_default() {
         let c = BrokerConfig::default();
-        assert2::assert!(
-            (
-                c.auto_leader_rebalance_enable,
-                c.leader_imbalance_check_interval_secs,
-                c.leader_imbalance_per_broker_percentage,
-            ) == (true, 300, 10)
-        );
+        check!(c.features.auto_leader_rebalance_enable);
+        check!(c.leader_imbalance_check_interval_secs == 300);
+        check!(c.leader_imbalance_per_broker_percentage == 10);
     }
 
     #[test]
     fn auto_leader_rebalance_defaults_to_false_in_for_tests() {
         let c = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        assert2::assert!(!c.auto_leader_rebalance_enable);
+        assert!(!c.features.auto_leader_rebalance_enable);
     }
 
     #[test]
@@ -1525,7 +1504,7 @@ mod tests {
             leader_imbalance_check_interval_secs: 0,
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceInterval { value: 0 })
         ));
@@ -1537,7 +1516,7 @@ mod tests {
             leader_imbalance_per_broker_percentage: 101,
             ..BrokerConfig::default()
         };
-        assert2::assert!(matches!(
+        assert!(matches!(
             c.validate(),
             Err(BrokerError::InvalidLeaderRebalanceThreshold { value: 101 })
         ));
@@ -1557,9 +1536,10 @@ mod tests {
     #[test]
     fn rack_and_selector_default_off() {
         let c = BrokerConfig::default();
+        assert!(c.rack == None);
+        assert!(c.replica_selector == crate::replica_selector::ReplicaSelectorKind::Leader);
         let t = BrokerConfig::for_tests(std::path::PathBuf::from("/tmp"));
-        let expected = (None, crate::replica_selector::ReplicaSelectorKind::Leader);
-        assert2::assert!((c.rack, c.replica_selector) == expected);
-        assert2::assert!((t.rack, t.replica_selector) == expected);
+        assert!(t.rack == None);
+        assert!(t.replica_selector == crate::replica_selector::ReplicaSelectorKind::Leader);
     }
 }

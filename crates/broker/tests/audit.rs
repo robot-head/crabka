@@ -33,8 +33,13 @@ async fn audit_topic_exists_after_startup() {
         .expect("__crabka_audit not in Metadata response");
 
     assert2::check!(
-        (topic.error_code, topic.partitions.is_empty()) == (0, false),
-        "unexpected audit topic metadata: {topic:?}"
+        topic.error_code == 0,
+        "unexpected error code: {}",
+        topic.error_code
+    );
+    assert2::check!(
+        !topic.partitions.is_empty(),
+        "__crabka_audit has no partitions"
     );
 
     p.broker.shutdown().await;

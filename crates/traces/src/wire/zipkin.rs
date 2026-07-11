@@ -79,6 +79,9 @@ fn zipkin_status(tags: &BTreeMap<String, String>) -> (StatusCode, String) {
 }
 
 /// Decode a Zipkin v2 JSON span array.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_zipkin(body: &[u8]) -> Result<Vec<Span>, WireError> {
     let raw: Vec<ZipkinSpan> =
         serde_json::from_slice(body).map_err(|err| WireError::Decode(err.to_string()))?;

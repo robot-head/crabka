@@ -182,11 +182,9 @@ fn unauthorized(st: &AuthState) -> Response {
 /// [`OAuthBearerValidator::validate`]. Falls back to `0` on clock anomalies.
 fn now_ms() -> i64 {
     use std::time::{SystemTime, UNIX_EPOCH};
-    SystemTime::now().duration_since(UNIX_EPOCH).map_or(0, |d| {
-        #[allow(clippy::cast_possible_truncation)]
-        let ms = d.as_millis().min(i64::MAX as u128) as i64;
-        ms
-    })
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| i64::try_from(d.as_millis()).unwrap_or(i64::MAX))
 }
 
 #[cfg(test)]

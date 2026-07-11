@@ -8,6 +8,8 @@ use crate::ProtocolError;
 /// Implementations must produce bytes that are byte-equal to the upstream JVM
 /// `kafka-clients` implementation for the same `(message_type, version, value)`.
 pub trait Encode {
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError>;
 
     /// Size in bytes that `encode` will write. Must equal the actual count.
@@ -20,12 +22,16 @@ pub trait Encode {
 /// Owned-flavor types implement `Decode<'de>` for any `'de` (their output is `'static`).
 /// Borrowed-flavor types implement `Decode<'de>` where `Self: 'de`.
 pub trait Decode<'de>: Sized {
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError>;
 }
 
 /// Like `Decode`, but for borrowed (zero-copy) flavors. Requires a contiguous
 /// buffer because borrowed values reference slices of it.
 pub trait DecodeBorrow<'de>: Sized + 'de {
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError>;
 }
 

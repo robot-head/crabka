@@ -53,7 +53,7 @@ use tokio::sync::{Mutex, Notify};
 use tokio_util::sync::CancellationToken;
 
 use crate::{
-    accumulator::{Accumulator, InProgressBatch, PendingRecord},
+    accumulator::{AccumulatorMap, InProgressBatch, PendingRecord},
     compression::Compression,
     error::ProducerError,
     partitioner::UniformStickyPartitioner,
@@ -145,7 +145,7 @@ const _: [(); 1] = [(); MAX_IN_FLIGHT_PER_PARTITION];
 
 /// All the bits of state the sender task needs. The builder constructs
 /// one of these, hands it to [`run`], and drops it.
-#[allow(clippy::type_complexity)] // accumulators map mirrors the Producer field; alias deferred.
+// accumulators map mirrors the Producer field; alias deferred.
 pub(crate) struct SenderConfig {
     /// Broker-facing transport (real `Client` in production, a deterministic
     /// in-process broker model in tests). See [`crate::transport`].
@@ -173,7 +173,7 @@ pub(crate) struct SenderConfig {
     /// Shared null-key sticky partitioner. Rotated when the sender seals a
     /// topic batch so subsequent keyless records fan out across partitions.
     pub partitioner: Arc<UniformStickyPartitioner>,
-    pub accumulators: Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>,
+    pub accumulators: AccumulatorMap,
     pub next_seq: Arc<DashMap<(String, i32), i32>>,
     pub state: Arc<AtomicU8>,
     pub wake_rx: tokio::sync::mpsc::Receiver<()>,
@@ -1322,9 +1322,6 @@ mod harness {
         producer::{STATE_ACTIVE, STATE_FENCED, TopicMetadata},
         transactional::TxnState,
     };
-
-    /// Per-`(topic, partition)` accumulator map (mirrors the production type).
-    type AccumulatorMap = Arc<DashMap<(String, i32), Arc<Mutex<Accumulator>>>>;
 
     /// Adapter so a sender can own a `Box<dyn ProduceTransport>` while the test
     /// keeps a clone of the same `Arc<MockTransport>` to inspect.

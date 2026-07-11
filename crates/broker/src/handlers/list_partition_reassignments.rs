@@ -1,7 +1,5 @@
 //! `ListPartitionReassignments` (`api_key` 46, KIP-455).
 
-#![allow(clippy::cast_possible_truncation, clippy::unused_async)]
-
 use bytes::Bytes;
 use crabka_metadata::{PartitionRecord, ResourceType};
 use crabka_protocol::{
@@ -28,7 +26,7 @@ use crate::{
     fields(api = "ListPartitionReassignments"),
     err
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     req: ListPartitionReassignmentsRequest,
     ctx: &crate::handlers::RequestContext<'_>,
@@ -84,9 +82,9 @@ pub(crate) async fn handle(
             .or_default()
             .push(OngoingPartitionReassignment {
                 partition_index: pr.partition,
-                replicas: pr.replicas.iter().map(|n| n.0 as i32).collect(),
-                adding_replicas: pr.adding_replicas.iter().map(|n| n.0 as i32).collect(),
-                removing_replicas: pr.removing_replicas.iter().map(|n| n.0 as i32).collect(),
+                replicas: wire_node_ids(&pr.replicas),
+                adding_replicas: wire_node_ids(&pr.adding_replicas),
+                removing_replicas: wire_node_ids(&pr.removing_replicas),
                 ..Default::default()
             });
     }
@@ -108,6 +106,13 @@ pub(crate) async fn handle(
     encode_response(&resp, api_version)
 }
 
+fn wire_node_ids(nodes: &[crabka_metadata::NodeId]) -> Vec<i32> {
+    nodes
+        .iter()
+        .map(|node| i32::try_from(node.0).unwrap_or(i32::MAX))
+        .collect()
+}
+
 fn encode_response<R: Encode>(
     resp: &R,
     api_version: i16,
@@ -123,6 +128,7 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_metadata::{MetadataRecord, NodeId, TopicRecord};
     use crabka_protocol::owned::list_partition_reassignments_request::ListPartitionReassignmentsTopics;
     use uuid::Uuid;
@@ -185,7 +191,6 @@ mod tests {
             &ctx,
             VERSION,
         )
-        .await
         .expect("handle");
         let resp = decode_response(&bytes);
 
@@ -196,7 +201,7 @@ mod tests {
             topics: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -223,7 +228,6 @@ mod tests {
             &ctx,
             VERSION,
         )
-        .await
         .expect("handle");
         let resp = decode_response(&bytes);
 
@@ -244,7 +248,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 }

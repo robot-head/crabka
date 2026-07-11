@@ -121,6 +121,7 @@ pub(crate) async fn handle(
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::{UnknownTaggedFields, owned::share_group_describe_response};
     use crabka_security::Principal;
 
@@ -202,7 +203,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -240,7 +241,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

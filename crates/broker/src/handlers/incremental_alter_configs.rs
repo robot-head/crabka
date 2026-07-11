@@ -68,7 +68,6 @@ fn validate_broker_config_value(name: &str, value: &str) -> Result<(), String> {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_incremental_alter_configs",
     level = "info",
@@ -90,167 +89,7 @@ pub(crate) async fn handle(
     let mut responses: Vec<AlterConfigsResourceResponse> = Vec::with_capacity(req.resources.len());
 
     for resource in req.resources {
-        let mut out = AlterConfigsResourceResponse {
-            resource_type: resource.resource_type,
-            resource_name: resource.resource_name.clone(),
-            error_code: codes::NONE,
-            error_message: None,
-            ..Default::default()
-        };
-
-        // ── ACL preamble ────────────────────────────────────────
-        // Per-resource authorization based on resource_type.
-        // Topic (2) → AlterConfigs on Topic(resource_name) → TOPIC_AUTHORIZATION_FAILED on Deny.
-        // Broker (4) → AlterConfigs on Cluster("kafka-cluster") → CLUSTER_AUTHORIZATION_FAILED on Deny.
-        // Other resource types are unsupported (INVALID_RESOURCE_TYPE) — checked after ACL.
-        let acl_result = match resource.resource_type {
-            RESOURCE_TYPE_TOPIC => broker.config.authorizer.authorize(
-                &*image,
-                &AuthorizationRequest {
-                    principal: ctx.principal,
-                    host: ctx.peer,
-                    resource_type: ResourceType::Topic,
-                    resource_name: &resource.resource_name,
-                    operation: AclOperation::AlterConfigs,
-                },
-            ),
-            RESOURCE_TYPE_BROKER | RESOURCE_TYPE_CLIENT_METRICS => {
-                broker.config.authorizer.authorize(
-                    &*image,
-                    &AuthorizationRequest {
-                        principal: ctx.principal,
-                        host: ctx.peer,
-                        resource_type: ResourceType::Cluster,
-                        resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-                        operation: AclOperation::AlterConfigs,
-                    },
-                )
-            }
-            _ => {
-                out.error_code = codes::INVALID_RESOURCE_TYPE;
-                out.error_message = Some(format!(
-                    "resource_type={} not supported",
-                    resource.resource_type
-                ));
-                responses.push(out);
-                continue;
-            }
-        };
-        if acl_result == AuthorizationResult::Deny {
-            out.error_code = match resource.resource_type {
-                RESOURCE_TYPE_TOPIC => codes::TOPIC_AUTHORIZATION_FAILED,
-                _ => codes::CLUSTER_AUTHORIZATION_FAILED,
-            };
-            responses.push(out);
-            continue;
-        }
-
-        // After ACL pass: dispatch by resource type.
-        let mut to_submit: Vec<MetadataRecord> = Vec::new();
-
-        match resource.resource_type {
-            RESOURCE_TYPE_TOPIC => {
-                if image.topic(&resource.resource_name).is_none() {
-                    out.error_code = codes::UNKNOWN_TOPIC_OR_PARTITION;
-                    out.error_message = Some(format!("unknown topic `{}`", resource.resource_name));
-                    responses.push(out);
-                    continue;
-                }
-
-                // Start from the current overrides; apply each op in order.
-                let mut merged = image
-                    .topic_config(&resource.resource_name)
-                    .cloned()
-                    .unwrap_or_default();
-                let mut validation_err: Option<String> = None;
-                for cfg in &resource.configs {
-                    match cfg.config_operation {
-                        OP_SET => {
-                            let value = cfg.value.clone().unwrap_or_default();
-                            if let Err(reason) =
-                                config_keys::validate_topic_config(&cfg.name, &value)
-                            {
-                                validation_err = Some(reason);
-                                break;
-                            }
-                            merged.insert(cfg.name.clone(), value);
-                        }
-                        OP_DELETE => {
-                            if !config_keys::is_recognized(&cfg.name) {
-                                validation_err =
-                                    Some(format!("unrecognized config key `{}`", cfg.name));
-                                break;
-                            }
-                            merged.remove(&cfg.name);
-                        }
-                        op => {
-                            validation_err = Some(format!(
-                                "config_operation={op} (APPEND/SUBTRACT) not supported for key \
-                                 `{}` — only SET and DELETE are honored on this broker",
-                                cfg.name
-                            ));
-                            break;
-                        }
-                    }
-                }
-                if let Some(reason) = validation_err {
-                    out.error_code = codes::INVALID_CONFIG;
-                    out.error_message = Some(reason);
-                    responses.push(out);
-                    continue;
-                }
-
-                to_submit.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
-                    topic: resource.resource_name.clone(),
-                    overrides: merged,
-                }));
-            }
-            RESOURCE_TYPE_BROKER => {
-                handle_broker_scoped(&resource, &image, &mut out, &mut to_submit);
-                if out.error_code != codes::NONE {
-                    responses.push(out);
-                    continue;
-                }
-            }
-            RESOURCE_TYPE_CLIENT_METRICS => {
-                handle_client_metrics_scoped(&resource, &image, &mut out, &mut to_submit);
-                if out.error_code != codes::NONE {
-                    responses.push(out);
-                    continue;
-                }
-            }
-            _ => {
-                // Already handled by the ACL match above (unreachable), but be
-                // explicit for exhaustiveness.
-                out.error_code = codes::INVALID_RESOURCE_TYPE;
-                out.error_message = Some(format!(
-                    "resource_type={} not supported",
-                    resource.resource_type
-                ));
-                responses.push(out);
-                continue;
-            }
-        }
-
-        if req.validate_only {
-            // Validation pass already happened above (per-config loop). Nothing
-            // to submit; the response already carries the per-resource result
-            // (NONE if all configs validated, INVALID_CONFIG with reason on any
-            // rejection). This matches Apache Kafka's --dry-run behavior.
-            responses.push(out);
-            continue;
-        }
-        match broker.controller.submit_change(to_submit).await {
-            Ok(()) => {}
-            Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
-                out.error_code = codes::NOT_CONTROLLER;
-            }
-            Err(e) => {
-                tracing::error!(error = %e, "IncrementalAlterConfigs submit_change failed");
-                out.error_code = codes::UNKNOWN_SERVER_ERROR;
-            }
-        }
-        responses.push(out);
+        responses.push(process_resource(broker, &image, ctx, resource, req.validate_only).await);
     }
 
     let resp = IncrementalAlterConfigsResponse {
@@ -259,6 +98,169 @@ pub(crate) async fn handle(
         ..Default::default()
     };
     crate::handlers::encode_response(&resp, version)
+}
+
+async fn process_resource(
+    broker: &Broker,
+    image: &MetadataImage,
+    ctx: &crate::handlers::RequestContext<'_>,
+    resource: AlterConfigsResource,
+    validate_only: bool,
+) -> AlterConfigsResourceResponse {
+    let mut out = AlterConfigsResourceResponse {
+        resource_type: resource.resource_type,
+        resource_name: resource.resource_name.clone(),
+        error_code: codes::NONE,
+        error_message: None,
+        ..Default::default()
+    };
+
+    // ── ACL preamble ────────────────────────────────────────
+    // Per-resource authorization based on resource_type.
+    // Topic (2) → AlterConfigs on Topic(resource_name) → TOPIC_AUTHORIZATION_FAILED on Deny.
+    // Broker (4) → AlterConfigs on Cluster("kafka-cluster") → CLUSTER_AUTHORIZATION_FAILED on Deny.
+    // Other resource types are unsupported (INVALID_RESOURCE_TYPE) — checked after ACL.
+    let acl_result = match resource.resource_type {
+        RESOURCE_TYPE_TOPIC => broker.config.authorizer.authorize(
+            image,
+            &AuthorizationRequest {
+                principal: ctx.principal,
+                host: ctx.peer,
+                resource_type: ResourceType::Topic,
+                resource_name: &resource.resource_name,
+                operation: AclOperation::AlterConfigs,
+            },
+        ),
+        RESOURCE_TYPE_BROKER | RESOURCE_TYPE_CLIENT_METRICS => broker.config.authorizer.authorize(
+            image,
+            &AuthorizationRequest {
+                principal: ctx.principal,
+                host: ctx.peer,
+                resource_type: ResourceType::Cluster,
+                resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
+                operation: AclOperation::AlterConfigs,
+            },
+        ),
+        _ => {
+            out.error_code = codes::INVALID_RESOURCE_TYPE;
+            out.error_message = Some(format!(
+                "resource_type={} not supported",
+                resource.resource_type
+            ));
+            return out;
+        }
+    };
+    if acl_result == AuthorizationResult::Deny {
+        out.error_code = match resource.resource_type {
+            RESOURCE_TYPE_TOPIC => codes::TOPIC_AUTHORIZATION_FAILED,
+            _ => codes::CLUSTER_AUTHORIZATION_FAILED,
+        };
+        return out;
+    }
+
+    // After ACL pass: dispatch by resource type.
+    let mut to_submit: Vec<MetadataRecord> = Vec::new();
+
+    match resource.resource_type {
+        RESOURCE_TYPE_TOPIC => match topic_config_record(&resource, image) {
+            Ok(record) => to_submit.push(record),
+            Err((code, message)) => {
+                out.error_code = code;
+                out.error_message = Some(message);
+                return out;
+            }
+        },
+        RESOURCE_TYPE_BROKER => {
+            handle_broker_scoped(&resource, image, &mut out, &mut to_submit);
+            if out.error_code != codes::NONE {
+                return out;
+            }
+        }
+        RESOURCE_TYPE_CLIENT_METRICS => {
+            handle_client_metrics_scoped(&resource, image, &mut out, &mut to_submit);
+            if out.error_code != codes::NONE {
+                return out;
+            }
+        }
+        _ => {
+            // Already handled by the ACL match above (unreachable), but be
+            // explicit for exhaustiveness.
+            out.error_code = codes::INVALID_RESOURCE_TYPE;
+            out.error_message = Some(format!(
+                "resource_type={} not supported",
+                resource.resource_type
+            ));
+            return out;
+        }
+    }
+
+    if validate_only {
+        // Validation pass already happened above (per-config loop). Nothing
+        // to submit; the response already carries the per-resource result
+        // (NONE if all configs validated, INVALID_CONFIG with reason on any
+        // rejection). This matches Apache Kafka's --dry-run behavior.
+        return out;
+    }
+    match broker.controller.submit_change(to_submit).await {
+        Ok(()) => {}
+        Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
+            out.error_code = codes::NOT_CONTROLLER;
+        }
+        Err(e) => {
+            tracing::error!(error = %e, "IncrementalAlterConfigs submit_change failed");
+            out.error_code = codes::UNKNOWN_SERVER_ERROR;
+        }
+    }
+    out
+}
+
+fn topic_config_record(
+    resource: &AlterConfigsResource,
+    image: &MetadataImage,
+) -> Result<MetadataRecord, (i16, String)> {
+    if image.topic(&resource.resource_name).is_none() {
+        return Err((
+            codes::UNKNOWN_TOPIC_OR_PARTITION,
+            format!("unknown topic `{}`", resource.resource_name),
+        ));
+    }
+    let mut merged = image
+        .topic_config(&resource.resource_name)
+        .cloned()
+        .unwrap_or_default();
+    for config in &resource.configs {
+        match config.config_operation {
+            OP_SET => {
+                let value = config.value.clone().unwrap_or_default();
+                config_keys::validate_topic_config(&config.name, &value)
+                    .map_err(|reason| (codes::INVALID_CONFIG, reason))?;
+                merged.insert(config.name.clone(), value);
+            }
+            OP_DELETE => {
+                if !config_keys::is_recognized(&config.name) {
+                    return Err((
+                        codes::INVALID_CONFIG,
+                        format!("unrecognized config key `{}`", config.name),
+                    ));
+                }
+                merged.remove(&config.name);
+            }
+            operation => {
+                return Err((
+                    codes::INVALID_CONFIG,
+                    format!(
+                        "config_operation={operation} (APPEND/SUBTRACT) not supported for key \
+                         `{}` — only SET and DELETE are honored on this broker",
+                        config.name
+                    ),
+                ));
+            }
+        }
+    }
+    Ok(MetadataRecord::V1TopicConfig(TopicConfigRecord {
+        topic: resource.resource_name.clone(),
+        overrides: merged,
+    }))
 }
 
 fn handle_broker_scoped(
@@ -386,6 +388,7 @@ fn handle_client_metrics_scoped(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -393,36 +396,36 @@ mod tests {
     fn topic_throttle_config_value_validated() {
         // Verify ThrottledReplicas::parse rejects malformed input that
         // the validator delegates to.
-        assert2::assert!(crate::throttle::ThrottledReplicas::parse("not-a-pair").is_err());
-        assert2::assert!(crate::throttle::ThrottledReplicas::parse("0:bad").is_err());
+        assert!(crate::throttle::ThrottledReplicas::parse("not-a-pair").is_err());
+        assert!(crate::throttle::ThrottledReplicas::parse("0:bad").is_err());
     }
 
     #[test]
     fn broker_scoped_rate_config_accepted() {
-        assert2::assert!(is_known_broker_config(
+        assert!(is_known_broker_config(
             crate::throttle::LEADER_THROTTLED_RATE_KEY
         ));
-        assert2::assert!(is_known_broker_config(
+        assert!(is_known_broker_config(
             crate::throttle::FOLLOWER_THROTTLED_RATE_KEY
         ));
     }
 
     #[test]
     fn broker_scoped_unknown_config_rejected() {
-        assert2::assert!(!is_known_broker_config("not.a.real.config"));
-        assert2::assert!(validate_broker_config_value("not.a.real.config", "1024").is_err());
+        assert!(!is_known_broker_config("not.a.real.config"));
+        assert!(validate_broker_config_value("not.a.real.config", "1024").is_err());
     }
 
     #[test]
     fn broker_scoped_invalid_value_rejected() {
-        assert2::assert!(
+        assert!(
             validate_broker_config_value(
                 crate::throttle::LEADER_THROTTLED_RATE_KEY,
                 "not-a-number"
             )
             .is_err()
         );
-        assert2::assert!(
+        assert!(
             validate_broker_config_value(crate::throttle::LEADER_THROTTLED_RATE_KEY, "1024")
                 .is_ok()
         );
@@ -485,8 +488,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::INVALID_REQUEST);
-        assert2::assert!(to_submit.is_empty());
+        assert!(out.error_code == codes::INVALID_REQUEST);
+        assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -496,7 +499,7 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::INVALID_REQUEST);
+        assert!(out.error_code == codes::INVALID_REQUEST);
     }
 
     #[test]
@@ -506,8 +509,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::INVALID_CONFIG);
-        assert2::assert!(to_submit.is_empty());
+        assert!(out.error_code == codes::INVALID_CONFIG);
+        assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -523,13 +526,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::NONE);
+        assert!(out.error_code == codes::NONE);
         let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
             node_id: crabka_audit::NodeId(1),
             config_name: crate::throttle::LEADER_THROTTLED_RATE_KEY.to_string(),
             config_value: Some("2048".to_string()),
         })];
-        assert2::assert!(to_submit == expected);
+        assert!(to_submit == expected);
     }
 
     #[test]
@@ -542,13 +545,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::NONE);
+        assert!(out.error_code == codes::NONE);
         let expected = vec![MetadataRecord::V1BrokerConfig(BrokerConfigRecord {
             node_id: crabka_audit::NodeId(1),
             config_name: crate::throttle::FOLLOWER_THROTTLED_RATE_KEY.to_string(),
             config_value: None,
         })];
-        assert2::assert!(to_submit == expected);
+        assert!(to_submit == expected);
     }
 
     #[test]
@@ -564,8 +567,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_broker_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::INVALID_CONFIG);
-        assert2::assert!(to_submit.is_empty());
+        assert!(out.error_code == codes::INVALID_CONFIG);
+        assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -594,17 +597,15 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::NONE);
-        let expected = vec![MetadataRecord::V1ClientMetricsConfig(
-            crabka_metadata::ClientMetricsConfigRecord {
-                name: "sub-a".into(),
-                configs: std::collections::BTreeMap::from([
-                    ("interval.ms".into(), "60000".into()),
-                    ("metrics".into(), "org.apache.kafka.consumer.".into()),
-                ]),
-            },
-        )];
-        assert2::assert!(to_submit == expected);
+        assert!(out.error_code == codes::NONE);
+        assert!(to_submit.len() == 1);
+        match &to_submit[0] {
+            MetadataRecord::V1ClientMetricsConfig(rec) => {
+                assert!(rec.name == "sub-a");
+                assert!(rec.configs.get("interval.ms").map(String::as_str) == Some("60000"));
+            }
+            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
+        }
     }
 
     #[test]
@@ -625,8 +626,8 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::INVALID_CONFIG);
-        assert2::assert!(to_submit.is_empty());
+        assert!(out.error_code == codes::INVALID_CONFIG);
+        assert!(to_submit.is_empty());
     }
 
     #[test]
@@ -657,13 +658,13 @@ mod tests {
         let mut out = AlterConfigsResourceResponse::default();
         let mut to_submit = Vec::new();
         handle_client_metrics_scoped(&resource, &img, &mut out, &mut to_submit);
-        assert2::assert!(out.error_code == codes::NONE);
-        let expected = vec![MetadataRecord::V1ClientMetricsConfig(
-            ClientMetricsConfigRecord {
-                name: "sub-a".into(),
-                configs: std::collections::BTreeMap::from([("metrics".into(), "a.".into())]),
-            },
-        )];
-        assert2::assert!(to_submit == expected);
+        assert!(out.error_code == codes::NONE);
+        match &to_submit[0] {
+            MetadataRecord::V1ClientMetricsConfig(rec) => {
+                assert!(!rec.configs.contains_key("interval.ms"));
+                assert!(rec.configs.get("metrics").map(String::as_str) == Some("a."));
+            }
+            other => panic!("expected V1ClientMetricsConfig, got {other:?}"),
+        }
     }
 }

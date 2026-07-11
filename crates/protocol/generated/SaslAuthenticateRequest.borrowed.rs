@@ -9,15 +9,18 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct SaslAuthenticateRequest<'a> {
     pub auth_bytes: &'a [u8],
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl SaslAuthenticateRequest<'_> {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
         crate::owned::sasl_authenticate_request::SaslAuthenticateRequest {
             auth_bytes: Bytes::copy_from_slice(self.auth_bytes),
@@ -28,18 +31,11 @@ impl SaslAuthenticateRequest<'_> {
 impl Encode for SaslAuthenticateRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            if flex {
-                put_compact_bytes(buf, self.auth_bytes);
-            } else {
-                put_bytes(buf, self.auth_bytes);
-            }
+            if flex { put_compact_bytes(buf, self.auth_bytes) } else { put_bytes(buf, self.auth_bytes) }
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -52,9 +48,7 @@ impl Encode for SaslAuthenticateRequest<'_> {
         let mut n: usize = 0;
         if version >= 0 {
             n += if flex {
-                crate::primitives::varint::uvarint_len(
-                    u32::try_from((self.auth_bytes).len() + 1).unwrap(),
-                ) + (self.auth_bytes).len()
+                crate::primitives::varint::uvarint_len(u32::try_from((self.auth_bytes).len() + 1).unwrap()) + (self.auth_bytes).len()
             } else {
                 4 + (self.auth_bytes).len()
             };
@@ -69,19 +63,12 @@ impl Encode for SaslAuthenticateRequest<'_> {
 impl<'de> DecodeBorrow<'de> for SaslAuthenticateRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.auth_bytes = if flex {
-                get_compact_bytes_borrowed(buf)?
-            } else {
-                get_bytes_borrowed(buf)?
-            };
+            out.auth_bytes = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;

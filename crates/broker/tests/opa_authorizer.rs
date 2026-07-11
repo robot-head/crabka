@@ -2,12 +2,11 @@
 // body-analysis bug that already fires on `tests/acl_handlers.rs` and
 // `tests/throttle.rs`). Disable pedantic locally; the rest of the
 // workspace still enforces the full pedantic gate.
-#![allow(clippy::pedantic)]
 
 //! End-to-end OPA authorizer enforcement via the
 //! wire path.
 //!
-//! Two integration tests boot a single-broker SASL_PLAINTEXT cluster
+//! Two integration tests boot a single-broker `SASL_PLAINTEXT` cluster
 //! wired with an [`OpaAuthorizer`] pointed at a `wiremock::MockServer`.
 //! The mock is configured to return either `{"result": false}` or
 //! `{"result": true}` for every `POST`, and the tests assert that the
@@ -29,6 +28,7 @@
 
 use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{
     Broker, BrokerConfig, BrokerHandle, authorizer::opa::OpaAuthorizer, config::ListenerSpec,
@@ -73,7 +73,7 @@ const PRODUCE_VERSION: i16 = 11;
 // Cluster bring-up.
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Boot a single-broker SASL_PLAINTEXT cluster whose `BrokerConfig.authorizer`
+/// Boot a single-broker `SASL_PLAINTEXT` cluster whose `BrokerConfig.authorizer`
 /// is an [`OpaAuthorizer`] pointed at `opa_url`. `admin` is registered as a
 /// super-user in BOTH the authorizer (so it bypasses the OPA HTTP call) AND
 /// `BrokerConfig.super_users` (so broker-level super-user checks accept it).
@@ -331,7 +331,12 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
     let resp = drive_create_topics_as_plain(addr, "admin", b"admin-secret", req)
         .await
         .expect("CreateTopics as super-user must round-trip");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1, "one topic in response");
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Wait (event-driven, on `handle`) until `topic`/partition-0's local
@@ -339,7 +344,7 @@ async fn create_topic_as_admin(addr: SocketAddr, name: &str) {
 ///
 /// The local writer materialising implies the raft commit-then-apply gap
 /// between `CreateTopics` returning and the partition appearing in the
-/// broker's MetadataImage has closed. Before that point the authorizer can
+/// broker's `MetadataImage` has closed. Before that point the authorizer can
 /// find no matching topic resource and denies alice's Write with
 /// `TOPIC_AUTHORIZATION_FAILED`; once the topic is applied, the check flows
 /// through OPA (which allows). Waiting on the same handle removes that race
@@ -410,13 +415,16 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
 
     handle.shutdown().await;
 
+    assert!(resp.responses.len() == 1, "one topic in response");
+    assert!(
+        resp.responses[0].partition_responses.len() == 1,
+        "one partition row in response"
+    );
     let p = &resp.responses[0].partition_responses[0];
-    assert2::assert!(
-        (
-            resp.responses.len(),
-            resp.responses[0].partition_responses.len(),
-            p.error_code,
-        ) == (1, 1, ERR_TOPIC_AUTHORIZATION_FAILED)
+    assert!(
+        p.error_code == ERR_TOPIC_AUTHORIZATION_FAILED,
+        "OPA denied alice's Write on blocked-topic, expected \
+         TOPIC_AUTHORIZATION_FAILED (29), got {p:?}"
     );
 }
 
@@ -429,7 +437,7 @@ async fn produce_blocked_by_opa_returns_topic_authorization_failed() {
 /// `produce_when_partition_ready` waits (event-driven, via the broker
 /// handle) for the partition's local writer to materialise — closing the
 /// raft commit-then-apply gap between `CreateTopics` returning and the
-/// partition appearing in the local MetadataImage — before the single
+/// partition appearing in the local `MetadataImage` — before the single
 /// Produce, so no fixed sleep is needed.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn produce_allowed_by_opa_succeeds() {
@@ -451,12 +459,15 @@ async fn produce_allowed_by_opa_succeeds() {
 
     handle.shutdown().await;
 
+    assert!(resp.responses.len() == 1, "one topic in response");
+    assert!(
+        resp.responses[0].partition_responses.len() == 1,
+        "one partition row in response"
+    );
     let p = &resp.responses[0].partition_responses[0];
-    assert2::assert!(
-        (
-            resp.responses.len(),
-            resp.responses[0].partition_responses.len(),
-            p.error_code,
-        ) == (1, 1, 0)
+    assert!(
+        p.error_code == 0,
+        "OPA allowed alice's Write on permitted-topic, expected \
+         error_code=0, got {p:?}"
     );
 }

@@ -231,6 +231,1650 @@ pub struct Broker {
     handlers: DispatchRegistry,
 }
 
+struct StartupTransport {
+    tls_dynamic: Option<Arc<crabka_security::DynamicServerConfig>>,
+    ktls_enabled: bool,
+    inter_broker_client: Arc<crate::network::client::InterBrokerClient>,
+}
+
+struct RaftTransport {
+    controller_cell: Arc<tokio::sync::OnceCell<Arc<crabka_raft::ControllerHandle>>>,
+    handshake: Option<Arc<dyn crabka_raft::RaftListenerHandshake>>,
+    dialer: Option<Arc<dyn crabka_raft::OutboundDialer>>,
+}
+
+fn prepare_raft_transport(
+    config: &BrokerConfig,
+    tls_dynamic: Option<&Arc<crabka_security::DynamicServerConfig>>,
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+) -> RaftTransport {
+    let controller_cell = Arc::new(tokio::sync::OnceCell::new());
+    let handshake =
+        if config.controller_listener_protocol == crabka_security::ListenerProtocol::Plaintext {
+            tracing::warn!(
+                "controller listener is PLAINTEXT: raft/controller RPCs are unauthenticated"
+            );
+            None
+        } else {
+            let tls_acceptor =
+                tls_dynamic.map(|dynamic| tokio_rustls::TlsAcceptor::from(dynamic.current()));
+            let handshake = crate::raft_handshake::BrokerRaftHandshake {
+                tls_acceptor,
+                plain_credentials: config.plain_credentials.clone(),
+                enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
+                protocol: config.controller_listener_protocol,
+                controller: Arc::clone(&controller_cell),
+                authorizer: Arc::clone(&config.authorizer),
+            };
+            Some(Arc::new(handshake) as Arc<dyn crabka_raft::RaftListenerHandshake>)
+        };
+    let server_name = config
+        .controller_server_name
+        .clone()
+        .unwrap_or_else(|| "localhost".to_owned());
+    let dialer = Arc::new(crate::network::client::InterBrokerDialer::new(
+        Arc::clone(inter_broker_client),
+        config.controller_listener_protocol,
+        server_name,
+    )) as Arc<dyn crabka_raft::OutboundDialer>;
+    RaftTransport {
+        controller_cell,
+        handshake,
+        dialer: Some(dialer),
+    }
+}
+
+fn prepare_initial_voters(
+    config: &BrokerConfig,
+    bootstrap_records: &mut Vec<crabka_metadata::MetadataRecord>,
+) -> crabka_metadata::VoterSet {
+    let mut voters = crate::bootstrap::initial_voters(bootstrap_records);
+    if !voters.is_empty() || config.controller_quorum_voters.is_empty() {
+        return voters;
+    }
+    voters = static_controller_voter_set(
+        &config.controller_quorum_voters,
+        config.node_id,
+        config.directory_id,
+        config.controller_listen_addr,
+    );
+    tracing::info!(
+        node_id = config.node_id.0,
+        voter_count = config.controller_quorum_voters.len(),
+        mode = ?config.bootstrap_mode,
+        "deriving static KIP-595 voters from controller_quorum_voters"
+    );
+    bootstrap_records.extend(crabka_metadata::bootstrap_feature_records(
+        crabka_metadata::metadata_version::METADATA_VERSION_MAX,
+    ));
+    voters
+}
+
+async fn start_metadata_source(
+    config: &BrokerConfig,
+    bootstrap_records: &mut Vec<crabka_metadata::MetadataRecord>,
+    controller_listener: Option<tokio::net::TcpListener>,
+    transport: RaftTransport,
+) -> Result<Arc<dyn crate::metadata_source::MetadataSource>, BrokerError> {
+    let RaftTransport {
+        controller_cell,
+        handshake,
+        dialer,
+    } = transport;
+    if config.is_controller() {
+        let controller_config = crabka_raft::ControllerConfig {
+            node_id: config.node_id,
+            bootstrap_servers: config.bootstrap_servers.clone(),
+            directory_id: config.directory_id,
+            auto_join: config.auto_join,
+            observer_lag_bound: config.observer_lag_bound,
+            initial_voters: prepare_initial_voters(config, bootstrap_records),
+            controller_listen_addr: config.controller_listen_addr,
+            log_dir: config.log_dir.join("__cluster_metadata"),
+            election_timeout: config.controller_election_timeout,
+            heartbeat_interval: config.controller_heartbeat_interval,
+            client_id: format!("crabka-broker-{}-controller", config.broker_id),
+            bootstrap_mode: config.bootstrap_mode,
+            cluster_id: config.cluster_id,
+            dialer,
+            handshake,
+            max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
+            max_snapshot_interval: config.metadata_max_snapshot_interval,
+            snapshot_interval_records: config.metadata_snapshot_interval_records,
+        };
+        let controller = Arc::new(
+            crabka_raft::Controller::start_with_listener(controller_config, controller_listener)
+                .await
+                .map_err(|error| BrokerError::Startup(error.to_string()))?,
+        );
+        let _ = controller_cell.set(Arc::clone(&controller));
+        return Ok(controller as Arc<dyn crate::metadata_source::MetadataSource>);
+    }
+
+    drop(controller_listener);
+    let dialer = dialer.expect("broker-only node requires a raft dialer");
+    let observer = crate::metadata_observer::MetadataObserver::start(
+        crate::metadata_observer::ObserverConfig {
+            voters: config.controller_quorum_voters.clone(),
+            dialer: Arc::clone(&dialer),
+            client_id: format!("crabka-broker-{}-observer", config.broker_id),
+            cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
+            max_bytes: OBSERVER_FETCH_MAX_BYTES,
+            poll_interval: OBSERVER_POLL_INTERVAL,
+            sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
+        },
+    );
+    let forwarder = crate::metadata_source::QuorumForwarder {
+        voters: config.controller_quorum_voters.clone(),
+        dialer,
+        client_id: format!("crabka-broker-{}-writer", config.broker_id),
+        leader: observer.watch_leader(),
+    };
+    Ok(Arc::new(crate::metadata_source::ObserverSource::new(
+        observer,
+        Arc::new(forwarder),
+    )))
+}
+
+fn spawn_auto_join(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+) {
+    if !config.is_controller() {
+        return;
+    }
+    let listener_protocol = config
+        .effective_listeners()
+        .iter()
+        .find(|listener| listener.name == config.inter_broker_listener_name)
+        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
+            listener.protocol
+        });
+    tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
+        auto_join: config.auto_join,
+        node_id: config.node_id,
+        directory_id: config.directory_id,
+        cluster_id: config.cluster_id,
+        bootstrap_servers: config.bootstrap_servers.clone(),
+        listener_protocol,
+        controller: Arc::clone(controller),
+        inter_broker_client: Arc::clone(inter_broker_client),
+    }));
+}
+
+async fn wait_for_metadata_leader(
+    controller: &dyn crate::metadata_source::MetadataSource,
+) -> Result<(), BrokerError> {
+    let mut leaders = controller.watch_leader();
+    let deadline = std::time::Instant::now() + STARTUP_LEADER_WAIT_TIMEOUT;
+    while leaders.borrow().is_none() {
+        if std::time::Instant::now() > deadline {
+            return Err(BrokerError::Startup(format!(
+                "no leader elected within {STARTUP_LEADER_WAIT_TIMEOUT:?}"
+            )));
+        }
+        let _ =
+            tokio::time::timeout(std::time::Duration::from_millis(100), leaders.changed()).await;
+    }
+    Ok(())
+}
+
+async fn register_broker(
+    config: &mut BrokerConfig,
+    controller: &dyn crate::metadata_source::MetadataSource,
+) -> Result<(), BrokerError> {
+    if !config.is_broker() {
+        return Ok(());
+    }
+    config.incarnation_id = crate::incarnation::load_or_generate(&config.log_dir);
+    let endpoints = config
+        .effective_listeners()
+        .iter()
+        .map(|listener| {
+            let (host, port) = parse_advertised_host_port(&listener.advertised);
+            crabka_metadata::BrokerEndpoint {
+                name: listener.name.clone(),
+                host,
+                port,
+                protocol: listener.protocol,
+            }
+        })
+        .collect();
+    let registration = crabka_metadata::MetadataRecord::V1BrokerRegistration(
+        crabka_metadata::BrokerRegistrationRecord {
+            node_id: config.node_id,
+            broker_epoch: 0,
+            incarnation_id: config.incarnation_id,
+            host: config
+                .advertised_listener
+                .split(':')
+                .next()
+                .unwrap_or("127.0.0.1")
+                .to_owned(),
+            port: config.listen_addr.port(),
+            rack: config.rack.clone(),
+            endpoints,
+        },
+    );
+    let backoff = exponential_backoff::Backoff::new(
+        SELF_REGISTRATION_MAX_ATTEMPTS,
+        SELF_REGISTRATION_BACKOFF_MIN,
+        Some(SELF_REGISTRATION_BACKOFF_MAX),
+    );
+    for (attempt_index, delay) in backoff.into_iter().enumerate() {
+        match controller.submit_change(vec![registration.clone()]).await {
+            Ok(()) => return Ok(()),
+            Err(error) => match delay {
+                Some(delay) => {
+                    tracing::warn!(attempt = attempt_index + 1, %error, "registration retry");
+                    tokio::time::sleep(delay).await;
+                }
+                None => {
+                    return Err(BrokerError::Startup(format!(
+                        "self-registration failed after {} attempts: {error}",
+                        attempt_index + 1
+                    )));
+                }
+            },
+        }
+    }
+    Ok(())
+}
+
+async fn submit_bootstrap_records(
+    config: &BrokerConfig,
+    controller: &dyn crate::metadata_source::MetadataSource,
+    mut records: Vec<crabka_metadata::MetadataRecord>,
+) -> Result<(), BrokerError> {
+    if !matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
+        return Ok(());
+    }
+    records.retain(|record| {
+        !matches!(
+            record,
+            crabka_metadata::MetadataRecord::V1Voters(_)
+                | crabka_metadata::MetadataRecord::V1KRaftVersion(_)
+        )
+    });
+    if records.is_empty() {
+        return Ok(());
+    }
+    tracing::info!(count = records.len(), "submitting bootstrap records");
+    controller
+        .submit_change(records)
+        .await
+        .map_err(|error| BrokerError::Replication(format!("bootstrap submit failed: {error}")))
+}
+
+struct StorageStartup {
+    log_dir_status: crate::log_dir_status::LogDirRegistry,
+    log_dir_ids: crate::log_dir_id::LogDirIds,
+    partitions: Arc<PartitionRegistry>,
+    producer_state: Arc<crate::producer_state::ProducerState>,
+    group_coordinator: Arc<crate::coordinator::GroupCoordinator>,
+    producer_ids: Arc<crate::producer_id_manager::ProducerIdManager>,
+}
+
+async fn recover_storage_and_groups(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+) -> Result<StorageStartup, BrokerError> {
+    let log_dirs = config.all_log_dirs();
+    let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&log_dirs);
+    let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&log_dirs);
+    let partitions = Arc::new(PartitionRegistry::new());
+    let producer_state = Arc::new(crate::producer_state::ProducerState::new());
+    if config.is_broker() {
+        let scan_dirs = log_dir_status.online_subset(&log_dirs);
+        for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
+            let directory = log_dir::partition_dir(&owning_dir, &topic, partition_id);
+            let log = crabka_log::Log::open(&directory, config.log_config.clone())?;
+            let partition = spawn_partition(
+                topic.clone(),
+                PartitionIndex(partition_id),
+                owning_dir,
+                log,
+                log_dir_status.clone(),
+                Arc::clone(&producer_state),
+            );
+            partitions.insert(topic, PartitionIndex(partition_id), partition);
+        }
+    }
+    let offsets_log = Arc::new(
+        crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(Arc::clone(
+            &partitions,
+        )),
+    );
+    let group_coordinator = Arc::new(crate::coordinator::GroupCoordinator::new(
+        config.next_gen_consumer_group.as_ref().clone(),
+        config.share_group.as_ref().clone(),
+        Arc::new(crate::coordinator::unified::ImageMetadataProvider {
+            controller: Arc::clone(controller),
+        }),
+        offsets_log,
+        config.streams_group.as_ref().clone(),
+    ));
+    let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
+    crate::coordinator::bootstrap::bootstrap(
+        config,
+        controller,
+        &partitions,
+        &group_coordinator,
+        &log_dir_status,
+        &producer_state,
+    )
+    .await?;
+    crate::coordinator::bootstrap::bootstrap_audit_topic(config, controller).await?;
+    Ok(StorageStartup {
+        log_dir_status,
+        log_dir_ids,
+        partitions,
+        producer_state,
+        group_coordinator,
+        producer_ids,
+    })
+}
+
+struct CoordinatorStartup {
+    txn_coordinator: Arc<crate::txn::coordinator::TxnCoordinator>,
+    share_coordinator: Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
+    share_partition_leaders: Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
+}
+
+async fn start_coordinators(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    partitions: &Arc<PartitionRegistry>,
+    group_coordinator: &Arc<crate::coordinator::GroupCoordinator>,
+    producer_ids: &Arc<crate::producer_id_manager::ProducerIdManager>,
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+) -> CoordinatorStartup {
+    let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
+        config.node_id,
+        Arc::clone(partitions),
+        Arc::clone(producer_ids),
+    ));
+    if let Err(error) = txn_coordinator.recover(&controller.current_image()).await {
+        tracing::warn!(%error, "transaction coordinator recovery error");
+    }
+    let share_coordinator = Arc::new(
+        crate::share_coordinator::coordinator::ShareCoordinator::new(
+            config.node_id,
+            Arc::clone(partitions),
+            (*config.share_coordinator).clone(),
+        ),
+    );
+    if let Err(error) = share_coordinator.recover(&controller.current_image()).await {
+        tracing::warn!(%error, "share coordinator recovery error");
+    }
+    let listener_protocol = config
+        .effective_listeners()
+        .iter()
+        .find(|listener| listener.name == config.inter_broker_listener_name)
+        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
+            listener.protocol
+        });
+    let share_persister = Arc::new(
+        crate::share_coordinator::persister_client::SharePersister::new(
+            config.node_id,
+            Arc::clone(&share_coordinator),
+            Arc::clone(controller),
+            Arc::clone(inter_broker_client),
+            listener_protocol,
+            config.inter_broker_listener_name.clone(),
+        ),
+    );
+    group_coordinator.set_share_persister(Arc::clone(&share_persister));
+    group_coordinator.set_metadata_source(Arc::clone(controller));
+    let share_partition_leaders = Arc::new(
+        crate::share_partition::manager::SharePartitionLeaderManager::new(
+            config.node_id,
+            Arc::clone(partitions),
+            Arc::clone(controller),
+            Arc::clone(&share_persister),
+            Arc::new((*config.share_group).clone()),
+        ),
+    );
+    share_partition_leaders.spawn_lock_sweeper();
+    CoordinatorStartup {
+        txn_coordinator,
+        share_coordinator,
+        share_partition_leaders,
+    }
+}
+
+fn audit_signer(config: &BrokerConfig) -> Option<Arc<dyn crabka_audit::SigningKeyProvider>> {
+    let (Some(path), Some(key_id)) = (&config.audit_signing_key_path, &config.audit_signing_key_id)
+    else {
+        tracing::info!("no audit signing key configured; checkpoints disabled");
+        return None;
+    };
+    match crabka_audit::FileEd25519Signer::from_pkcs8_file(path, key_id.clone()) {
+        Ok(signer) => Some(Arc::new(signer)),
+        Err(error) => {
+            tracing::error!(%error, "failed to load audit signing key; checkpoints disabled");
+            None
+        }
+    }
+}
+
+fn open_audit_spool(config: &BrokerConfig) -> Option<crabka_audit::Spool> {
+    let directory = if config.audit_spool_dir.is_absolute() {
+        config.audit_spool_dir.clone()
+    } else {
+        config.log_dir.join(&config.audit_spool_dir)
+    };
+    match crabka_audit::Spool::open(&directory, config.audit_spool_max_bytes) {
+        Ok(spool) => Some(spool),
+        Err(error) => {
+            tracing::error!(%error, "failed to open audit spool; spooling disabled");
+            None
+        }
+    }
+}
+
+fn spawn_audit_metrics(
+    stats: Arc<crabka_audit::AuditStats>,
+    log: Arc<crabka_audit::AuditLog>,
+    metrics: crate::metrics::BrokerMetrics,
+) {
+    tokio::spawn(async move {
+        let mut previous = (0, 0, 0);
+        let mut tick = tokio::time::interval(AUDIT_STATS_POLL_INTERVAL);
+        loop {
+            tick.tick().await;
+            let current = (
+                stats.spooled(),
+                stats.replayed(),
+                stats.dropped() + log.dropped(),
+            );
+            metrics
+                .audit_records_spooled_total
+                .inc_by(current.0 - previous.0);
+            metrics
+                .audit_records_replayed_total
+                .inc_by(current.1 - previous.1);
+            metrics
+                .audit_records_dropped_total
+                .inc_by(current.2 - previous.2);
+            previous = current;
+            metrics
+                .audit_spool_depth
+                .set(i64::try_from(stats.depth()).unwrap_or(i64::MAX));
+            metrics
+                .audit_spool_bytes
+                .set(i64::try_from(stats.spool_bytes()).unwrap_or(i64::MAX));
+        }
+    });
+}
+
+fn start_audit_pipeline(
+    config: &mut BrokerConfig,
+    controller: &dyn crate::metadata_source::MetadataSource,
+    partitions: &Arc<PartitionRegistry>,
+    metrics: &crate::metrics::BrokerMetrics,
+) -> (Option<PartitionIndex>, Arc<crabka_audit::AuditLog>) {
+    if !config.audit_enabled {
+        return (None, crabka_audit::AuditLog::disabled());
+    }
+    let image = controller.current_image();
+    let led_partition = (0_i32..)
+        .map_while(|index| {
+            image
+                .partition(&config.audit_topic, index)
+                .map(|record| (index, record))
+        })
+        .find(|(_, record)| record.leader == config.node_id)
+        .map(|(index, _)| PartitionIndex(index));
+    let (log, receiver) = crabka_audit::AuditLog::new(AUDIT_EVENT_QUEUE_CAPACITY);
+    if let Some(partition_index) = led_partition {
+        let sink = Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
+            Arc::clone(partitions),
+            config.audit_topic.clone(),
+            partition_index,
+            metrics.clone(),
+        ));
+        let spool = open_audit_spool(config);
+        let resume = spool
+            .as_ref()
+            .and_then(|spool| spool.resume_point().ok().flatten())
+            .or_else(|| {
+                partitions
+                    .get(&config.audit_topic, partition_index)
+                    .and_then(|partition| {
+                        crate::audit_recovery::recover_from_partition_tail(&partition)
+                    })
+            });
+        let chain = resume.map_or_else(crabka_audit::ChainState::new, |(sequence, head)| {
+            crabka_audit::ChainState::resume(sequence, head)
+        });
+        let stats = Arc::new(crabka_audit::AuditStats::new());
+        let writer = crabka_audit::AuditWriter::new(
+            receiver,
+            crabka_audit::AuditWriterParams {
+                sink,
+                product: Broker::audit_product(),
+                signer: audit_signer(config),
+                checkpoint_every_n: config.audit_checkpoint_every_n,
+                checkpoint_every: std::time::Duration::from_secs(
+                    config.audit_checkpoint_every_secs,
+                ),
+                chain,
+                spool,
+                stats: Arc::clone(&stats),
+                replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
+                sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
+            },
+        );
+        tokio::spawn(writer.run());
+        spawn_audit_metrics(stats, log.clone(), metrics.clone());
+    } else {
+        tracing::warn!("no audit partition led by this broker; audit records will drop");
+    }
+    config.authorizer = Arc::new(crate::audit_authorizer::AuditingAuthorizer::new(
+        Arc::clone(&config.authorizer),
+        log.clone(),
+    ));
+    (led_partition, log)
+}
+
+fn spawn_broker_gauge_updater(
+    partitions: Arc<PartitionRegistry>,
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    node_id: crabka_metadata::NodeId,
+    metrics: crate::metrics::BrokerMetrics,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(GAUGE_POLL_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                () = shutdown.cancelled() => return,
+            }
+            let led = partitions
+                .arcs()
+                .iter()
+                .filter(|partition| {
+                    partition
+                        .current_leader
+                        .load(std::sync::atomic::Ordering::Acquire)
+                        == node_id
+                })
+                .count();
+            metrics
+                .partitions_led
+                .set(i64::try_from(led).unwrap_or(i64::MAX));
+            metrics
+                .partitions_total
+                .set(i64::try_from(partitions.len()).unwrap_or(i64::MAX));
+            let image = controller.current_image();
+            let alive = liveness.alive_snapshot().await;
+            let minimum_isr: std::collections::HashMap<&str, usize> = image
+                .topics()
+                .map(|topic| {
+                    let minimum = image
+                        .topic_config(&topic.name)
+                        .and_then(|config| config.get(crate::config_keys::MIN_INSYNC_REPLICAS))
+                        .and_then(|value| value.parse().ok())
+                        .unwrap_or(1);
+                    (topic.name.as_str(), minimum)
+                })
+                .collect();
+            let mut health = (0_usize, 0_usize, 0_usize);
+            for partition in image.all_partitions() {
+                if partition.leader == node_id {
+                    health.0 += usize::from(partition.isr.len() < partition.replicas.len());
+                    let minimum = minimum_isr
+                        .get(partition.topic.as_str())
+                        .copied()
+                        .unwrap_or(1);
+                    health.1 += usize::from(partition.isr.len() < minimum);
+                }
+                health.2 += usize::from(
+                    partition.replicas.contains(&node_id) && !alive.contains(&partition.leader.0),
+                );
+            }
+            metrics
+                .under_replicated_partitions
+                .set(i64::try_from(health.0).unwrap_or(i64::MAX));
+            metrics
+                .under_min_isr_partition_count
+                .set(i64::try_from(health.1).unwrap_or(i64::MAX));
+            metrics
+                .offline_partitions_count
+                .set(i64::try_from(health.2).unwrap_or(i64::MAX));
+            let is_controller = controller
+                .watch_leader()
+                .borrow()
+                .is_some_and(|leader| leader == node_id);
+            metrics
+                .active_controller
+                .set(i64::from(u8::from(is_controller)));
+        }
+    });
+}
+
+fn spawn_liveness_ticker(
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    node_id: crabka_metadata::NodeId,
+    metrics: crate::metrics::BrokerMetrics,
+    recovery: crate::unclean_recovery::UncleanRecoveryHandle,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(LIVENESS_TICK_INTERVAL);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {}
+                () = shutdown.cancelled() => return,
+            }
+            for transition in liveness.tick().await {
+                use crate::heartbeat::controller_state::LivenessTransition::{
+                    AliveToDead, DeadToAlive,
+                };
+                match transition {
+                    AliveToDead(broker_id) => {
+                        if let Err(error) = crate::leader_election::on_broker_dead(
+                            &controller,
+                            node_id,
+                            crabka_raft::NodeId(broker_id),
+                            &liveness,
+                            &metrics,
+                            &recovery,
+                        )
+                        .await
+                        {
+                            tracing::warn!(broker = broker_id, %error, "broker-death election failed");
+                        }
+                    }
+                    DeadToAlive(broker_id) => crate::leader_election::on_broker_alive(
+                        &controller,
+                        node_id,
+                        crabka_raft::NodeId(broker_id),
+                        &liveness,
+                    ),
+                }
+            }
+        }
+    });
+}
+
+fn spawn_leadership_watcher(
+    controller: Arc<dyn crate::metadata_source::MetadataSource>,
+    liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    node_id: crabka_metadata::NodeId,
+    metrics: crate::metrics::BrokerMetrics,
+    shutdown: CancellationToken,
+) {
+    let mut leaders = controller.watch_leader();
+    let mut previous = *leaders.borrow();
+    tokio::spawn(async move {
+        loop {
+            tokio::select! {
+                _ = leaders.changed() => {}
+                () = shutdown.cancelled() => return,
+            }
+            let current = *leaders.borrow();
+            if current != previous {
+                metrics.controller_leader_changes_total.inc();
+                previous = current;
+            }
+            if current == Some(node_id) {
+                let broker_ids: Vec<u64> = controller
+                    .current_image()
+                    .brokers()
+                    .map(|broker| broker.node_id.0)
+                    .collect();
+                liveness.seed_brokers(broker_ids).await;
+            }
+        }
+    });
+}
+
+struct LivenessStartup {
+    liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    want_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    unclean_recovery: crate::unclean_recovery::UncleanRecoveryHandle,
+}
+
+fn start_liveness_services(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+    listener_protocol: crabka_security::ListenerProtocol,
+    metrics: &crate::metrics::BrokerMetrics,
+    shutdown: &CancellationToken,
+    log_dirs: (
+        &crate::log_dir_status::LogDirRegistry,
+        &crate::log_dir_id::LogDirIds,
+    ),
+) -> LivenessStartup {
+    let liveness = Arc::new(
+        crate::heartbeat::controller_state::ControllerLivenessState::new(
+            std::time::Duration::from_millis(config.heartbeat_timeout_ms),
+        ),
+    );
+    let (want_shutdown, want_shutdown_rx) = tokio::sync::watch::channel(false);
+    let (should_shutdown, _) = tokio::sync::watch::channel(false);
+    let want_shutdown = Arc::new(want_shutdown);
+    let should_shutdown = Arc::new(should_shutdown);
+    tokio::spawn(crate::heartbeat::client::run(
+        crate::heartbeat::client::Config {
+            broker_id: config.broker_id,
+            interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
+            controller: Arc::clone(controller),
+            shutdown: shutdown.child_token(),
+            inter_broker_client: Arc::clone(inter_broker_client),
+            inter_broker_listener_protocol: listener_protocol,
+            inter_broker_listener_name: config.inter_broker_listener_name.clone(),
+            want_shutdown: want_shutdown_rx,
+            should_shutdown: Arc::clone(&should_shutdown),
+            log_dir_status: log_dirs.0.clone(),
+            log_dir_ids: log_dirs.1.clone(),
+            all_log_dirs: config.all_log_dirs(),
+            supervisor_shutdown: shutdown.clone(),
+        },
+    ));
+    let unclean_recovery = crate::unclean_recovery::UncleanRecoveryManager::spawn(
+        Arc::clone(controller),
+        Arc::clone(&liveness),
+        config.node_id,
+        Arc::clone(inter_broker_client),
+        listener_protocol,
+        metrics.clone(),
+        shutdown.child_token(),
+    );
+    spawn_liveness_ticker(
+        Arc::clone(controller),
+        Arc::clone(&liveness),
+        config.node_id,
+        metrics.clone(),
+        unclean_recovery.clone(),
+        shutdown.child_token(),
+    );
+    spawn_leadership_watcher(
+        Arc::clone(controller),
+        Arc::clone(&liveness),
+        config.node_id,
+        metrics.clone(),
+        shutdown.child_token(),
+    );
+    LivenessStartup {
+        liveness,
+        want_shutdown,
+        should_shutdown,
+        unclean_recovery,
+    }
+}
+
+struct ObservabilityStartup {
+    metrics_bound_addr: Option<std::net::SocketAddr>,
+    client_metrics: Arc<crate::client_metrics::ClientMetrics>,
+}
+
+async fn start_observability(
+    config: &BrokerConfig,
+    metrics: &crate::metrics::BrokerMetrics,
+    shutdown: &CancellationToken,
+) -> Result<ObservabilityStartup, BrokerError> {
+    let metrics_bound_addr = if let Some(address) = config.metrics_listen_addr {
+        Some(
+            crate::metrics_server::run(
+                address,
+                Arc::clone(&metrics.registry),
+                shutdown.child_token(),
+            )
+            .await
+            .map_err(BrokerError::Io)?,
+        )
+    } else {
+        None
+    };
+    let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
+        crate::client_metrics::DEFAULT_TELEMETRY_MAX_BYTES,
+        config.client_metrics_otlp_endpoint.clone(),
+    ));
+    metrics.registry.lock().await.register_collector(Box::new(
+        crate::client_metrics::prometheus_sink::SharedClientMetricsCollector(
+            client_metrics.prometheus.clone(),
+        ),
+    ));
+    let eviction_metrics = Arc::clone(&client_metrics);
+    let eviction_shutdown = shutdown.child_token();
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(CLIENT_METRICS_EVICTION_TICK);
+        loop {
+            tokio::select! {
+                () = eviction_shutdown.cancelled() => return,
+                _ = tick.tick() => eviction_metrics.manager.evict_stale(
+                    CLIENT_METRICS_STALE_PUSH_INTERVALS,
+                    CLIENT_METRICS_STALE_FLOOR,
+                ),
+            }
+        }
+    });
+    Ok(ObservabilityStartup {
+        metrics_bound_addr,
+        client_metrics,
+    })
+}
+
+fn spawn_storage_security_maintenance(
+    config: &BrokerConfig,
+    partitions: &Arc<PartitionRegistry>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    metrics: &crate::metrics::BrokerMetrics,
+    shutdown: &CancellationToken,
+) -> Option<JoinHandle<()>> {
+    tokio::spawn(crate::isr_maintenance::run(
+        crate::isr_maintenance::Config {
+            node_id: config.node_id,
+            partitions: Arc::clone(partitions),
+            controller: Arc::clone(controller),
+            replica_lag_time_max: std::time::Duration::from_millis(config.replica_lag_time_max_ms),
+            broker_id: config.broker_id,
+            shutdown: shutdown.child_token(),
+            metrics: metrics.clone(),
+        },
+    ));
+    let disk_scanner = (config.partition_disk_scan_interval_secs > 0).then(|| {
+        let scanner = crate::disk_scanner::DiskScanner {
+            log_dirs: config.all_log_dirs(),
+            interval: std::time::Duration::from_secs(config.partition_disk_scan_interval_secs),
+            metrics: metrics.clone(),
+            shutdown: shutdown.child_token(),
+        };
+        tokio::spawn(scanner.run())
+    });
+    if let Some(endpoint) = config.oauthbearer_jwks_endpoint.clone()
+        && let Some(handle) = config.oauthbearer_validator.jwks_handle()
+    {
+        let signal_rx = config
+            .oauthbearer_jwks_signal_rx
+            .lock()
+            .unwrap()
+            .take()
+            .expect("signed validator must park its JWKS signal receiver");
+        let refresher = crate::oauth_jwks::JwksRefresher {
+            endpoint,
+            handle,
+            interval: config.oauthbearer_jwks_refresh_interval,
+            shutdown: shutdown.child_token(),
+            tls_trust: config.oauthbearer_idp_tls_trust.clone(),
+            signal_rx,
+            min_on_demand_pause: config.oauthbearer_jwks_min_on_demand_pause,
+            last_successful_fetch_ms: Arc::clone(&config.oauthbearer_jwks_last_successful_fetch_ms),
+            last_on_demand_refresh_ms: Arc::clone(
+                &config.oauthbearer_jwks_last_on_demand_refresh_ms,
+            ),
+            ignore_key_use: config.features.oauthbearer_jwks_ignore_key_use,
+            sleeper: Arc::new(qubit_clock::sleep::SystemSleeper::new()),
+        };
+        tokio::spawn(refresher.run());
+    }
+    disk_scanner
+}
+
+fn spawn_producer_expiry(
+    producer_state: Arc<crate::producer_state::ProducerState>,
+    shutdown: CancellationToken,
+) {
+    tokio::spawn(async move {
+        let mut tick = tokio::time::interval(std::time::Duration::from_mins(10));
+        tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+        loop {
+            tokio::select! {
+                _ = tick.tick() => {
+                    producer_state
+                        .expire_older_than(crate::time_util::now_ms(), 86_400_000)
+                        .await;
+                }
+                () = shutdown.cancelled() => return,
+            }
+        }
+    });
+}
+
+fn cleaner_config(config: &BrokerConfig) -> crate::cleaner::CleanerConfig {
+    let default = crate::cleaner::CleanerConfig::default();
+    #[cfg(any(test, feature = "test-helpers"))]
+    {
+        let mut configured = default;
+        if let Some(interval) = config.cleaner_interval_override {
+            configured.interval = interval;
+        }
+        configured
+    }
+    #[cfg(not(any(test, feature = "test-helpers")))]
+    {
+        let _ = config;
+        default
+    }
+}
+
+fn spawn_cluster_data_maintenance(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    liveness: &Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    partitions: &Arc<PartitionRegistry>,
+    producer_state: &Arc<crate::producer_state::ProducerState>,
+    metrics: &crate::metrics::BrokerMetrics,
+    shutdown: &CancellationToken,
+) {
+    if config.features.auto_leader_rebalance_enable {
+        let adapter: Arc<dyn crate::leader_rebalance::ControllerLike> =
+            Arc::new(ControllerAdapter {
+                handle: Arc::clone(controller),
+                node_id: config.node_id,
+            });
+        tokio::spawn(crate::leader_rebalance::run(
+            adapter,
+            Arc::clone(liveness),
+            crate::leader_rebalance::AutoRebalanceConfig {
+                check_interval: std::time::Duration::from_secs(
+                    config.leader_imbalance_check_interval_secs,
+                ),
+                imbalance_threshold_pct: config.leader_imbalance_per_broker_percentage,
+            },
+            shutdown.child_token(),
+        ));
+    }
+    let reassignment: Arc<dyn crate::reassignment::ReassignmentController> =
+        Arc::new(ReassignmentControllerAdapter {
+            handle: Arc::clone(controller),
+            node_id: config.node_id,
+        });
+    tokio::spawn(crate::reassignment::run(
+        reassignment,
+        Arc::clone(liveness),
+        shutdown.child_token(),
+    ));
+    spawn_producer_expiry(Arc::clone(producer_state), shutdown.child_token());
+    tokio::spawn(crate::cleaner::run(
+        Arc::clone(partitions),
+        config.node_id,
+        cleaner_config(config),
+        shutdown.child_token(),
+        metrics.clone(),
+    ));
+}
+
+fn kafka_swap_kickoff(config: &BrokerConfig) -> Option<KafkaSwapKickoff> {
+    let crate::config::RlmmKind::TopicBacked(metadata_config) = &config.remote_log_metadata else {
+        return None;
+    };
+    let listeners = config.effective_listeners();
+    let inter_broker = listeners
+        .iter()
+        .find(|listener| listener.name == config.inter_broker_listener_name);
+    let protocol = inter_broker.map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
+        listener.protocol
+    });
+    let advertised_host = inter_broker.map_or_else(
+        || "localhost".to_owned(),
+        |listener| parse_advertised_host_port(&listener.advertised).0,
+    );
+    let security = (protocol.requires_tls() || protocol.requires_sasl()).then(|| {
+        let tls = protocol.requires_tls().then(|| {
+            config
+                .tls_config
+                .as_ref()
+                .map(|tls| crabka_client_core::security::TlsConnectorConfig {
+                    trust_roots_pem: tls.trust_roots_path.clone(),
+                    server_name: advertised_host.clone(),
+                    client_identity: None,
+                })
+        });
+        Box::new(crabka_client_core::security::ClientSecurity {
+            protocol,
+            tls: tls.flatten(),
+            sasl: config
+                .inter_broker_credentials
+                .as_ref()
+                .map(crate::network::client::to_client_creds),
+            sasl_host: protocol.requires_sasl().then(|| advertised_host.clone()),
+        })
+    });
+    let bootstrap = if !metadata_config.bootstrap.is_empty() {
+        metadata_config.bootstrap.clone()
+    } else if security.is_some() {
+        inter_broker.map_or_else(
+            || loopback_bootstrap(config.listen_addr),
+            |listener| listener.advertised.clone(),
+        )
+    } else {
+        loopback_bootstrap(config.listen_addr)
+    };
+    Some(KafkaSwapKickoff {
+        cfg: crate::config::KafkaRlmmConfig {
+            bootstrap,
+            num_partitions: metadata_config.num_partitions,
+            replication: metadata_config.replication,
+            snapshot_interval: metadata_config.snapshot_interval,
+            snapshot_dir: if metadata_config.snapshot_dir.as_os_str().is_empty() {
+                config.log_dir.join("remote-log-metadata")
+            } else {
+                metadata_config.snapshot_dir.clone()
+            },
+            security,
+        },
+        broker_id: config.broker_id,
+    })
+}
+
+struct RemoteStorageStartup {
+    reader: Option<Arc<crate::remote_reader::RemoteReader>>,
+    swap_target: Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+}
+
+fn start_remote_storage(
+    config: &BrokerConfig,
+    partitions: &Arc<PartitionRegistry>,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    shutdown: &CancellationToken,
+) -> Result<RemoteStorageStartup, BrokerError> {
+    let Some(backend) = config.remote_storage_backend.clone() else {
+        return Ok(RemoteStorageStartup {
+            reader: None,
+            swap_target: None,
+        });
+    };
+    let storage: Arc<dyn crabka_remote_storage::RemoteStorageManager> = match backend {
+        crate::config::RemoteStorageBackend::Local { dir } => {
+            Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir))
+        }
+        crate::config::RemoteStorageBackend::S3(s3) => Arc::new(
+            crabka_remote_storage::S3RemoteStorage::from_s3_config(&s3).map_err(|error| {
+                BrokerError::Startup(format!("remote_storage.s3 builder failed: {error}"))
+            })?,
+        ),
+        crate::config::RemoteStorageBackend::Gcs(gcs) => Arc::new(
+            crabka_remote_storage::S3RemoteStorage::from_gcs_config(&gcs).map_err(|error| {
+                BrokerError::Startup(format!("remote_storage.gcs builder failed: {error}"))
+            })?,
+        ),
+    };
+    let (metadata, swap_target): (
+        Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
+        Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+    ) = match &config.remote_log_metadata {
+        crate::config::RlmmKind::TopicBacked(_) => {
+            let not_ready = Arc::new(crabka_remote_storage_topic::NotReadyRlmm::new());
+            let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(not_ready));
+            (swap.clone(), Some(swap))
+        }
+        crate::config::RlmmKind::InMemory => (
+            Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new()),
+            None,
+        ),
+    };
+    tokio::spawn(crate::remote_log_manager::run(
+        crate::remote_log_manager::RemoteLogManagerContext {
+            partitions: Arc::clone(partitions),
+            controller: Arc::clone(controller),
+            rsm: Arc::clone(&storage),
+            rlmm: Arc::clone(&metadata),
+            node_id: config.node_id,
+            broker_id: config.broker_id,
+        },
+        crate::remote_log_manager::RemoteLogManagerConfig {
+            interval: config.remote_log_manager_interval,
+        },
+        shutdown.child_token(),
+    ));
+    Ok(RemoteStorageStartup {
+        reader: Some(Arc::new(crate::remote_reader::RemoteReader::new(
+            storage, metadata,
+        ))),
+        swap_target,
+    })
+}
+
+struct RuntimeCaches {
+    fetch_sessions: Arc<crate::fetch_session::FetchSessionCache>,
+    quota_buckets: Arc<crate::quota::QuotaBuckets>,
+}
+
+fn start_runtime_watchers(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    tls_dynamic: Option<&Arc<crabka_security::DynamicServerConfig>>,
+    throttle_state: &Arc<crate::throttle::ThrottleState>,
+    txn_coordinator: &Arc<crate::txn::coordinator::TxnCoordinator>,
+    shutdown: &CancellationToken,
+) -> RuntimeCaches {
+    if let (Some(dynamic), Some(tls_config)) = (tls_dynamic.cloned(), config.tls_config.clone()) {
+        tokio::spawn(crate::tls_reload::run(
+            dynamic,
+            tls_config,
+            config.tls_reload_interval,
+            shutdown.child_token(),
+        ));
+    }
+    let throttle_watcher: Arc<dyn crate::throttle::ImageWatcher> =
+        Arc::new(ThrottleControllerAdapter {
+            handle: Arc::clone(controller),
+        });
+    tokio::spawn(crate::throttle::run(
+        throttle_watcher,
+        config.node_id,
+        Arc::clone(throttle_state),
+        shutdown.child_token(),
+    ));
+    let fetch_sessions = Arc::new(crate::fetch_session::FetchSessionCache::new(
+        config.max_incremental_fetch_session_cache_slots,
+    ));
+    let quota_buckets = Arc::new(crate::quota::QuotaBuckets::new());
+    let quota_watcher: Arc<dyn crate::quota::ImageWatcher> = Arc::new(QuotaControllerAdapter {
+        handle: Arc::clone(controller),
+    });
+    tokio::spawn(crate::quota::run(
+        quota_watcher,
+        Arc::clone(&quota_buckets),
+        shutdown.child_token(),
+    ));
+    if config.delegation_token_secret_key.is_some() {
+        let interval = std::time::Duration::from_millis(
+            u64::try_from(config.delegation_token_expiry_check_interval_ms).unwrap_or(
+                u64::try_from(crate::config::DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS)
+                    .unwrap_or(3_600_000),
+            ),
+        );
+        let token_controller: Arc<dyn crate::delegation_token_cleanup::DelegationTokenController> =
+            Arc::new(DelegationTokenCleanupControllerAdapter {
+                handle: Arc::clone(controller),
+            });
+        tokio::spawn(crate::delegation_token_cleanup::run(
+            token_controller,
+            interval,
+            shutdown.child_token(),
+        ));
+    }
+    if !config.txn_abort_cleanup_interval.is_zero() {
+        tokio::spawn(crate::txn::expiration::run(
+            Arc::clone(txn_coordinator),
+            Arc::clone(controller),
+            config.txn_abort_cleanup_interval,
+            shutdown.child_token(),
+        ));
+    }
+    RuntimeCaches {
+        fetch_sessions,
+        quota_buckets,
+    }
+}
+
+struct ListenerStartup {
+    bound: Vec<(crate::config::ListenerSpec, TcpListener, SocketAddr)>,
+    listen_addr: SocketAddr,
+    future_logs: Arc<DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>>,
+}
+
+async fn bind_listeners_and_recover_moves(
+    config: &mut BrokerConfig,
+    mut supplied_listener: Option<TcpListener>,
+    partitions: &Arc<PartitionRegistry>,
+) -> Result<ListenerStartup, BrokerError> {
+    let listener_specs = config.effective_listeners();
+    let mut bound = Vec::with_capacity(listener_specs.len());
+    for spec in listener_specs {
+        let listener = match supplied_listener.take_if(|listener| {
+            listener
+                .local_addr()
+                .is_ok_and(|addr| addr == spec.bind_addr)
+        }) {
+            Some(listener) => listener,
+            None => TcpListener::bind(spec.bind_addr).await?,
+        };
+        let address = listener.local_addr()?;
+        bound.push((spec, listener, address));
+    }
+    let listen_addr = bound
+        .iter()
+        .find(|(spec, _, _)| spec.name == config.inter_broker_listener_name)
+        .map_or(bound[0].2, |(_, _, address)| *address);
+    if config.advertised_listener.ends_with(":0")
+        && let Some((host, _)) = config.advertised_listener.rsplit_once(':')
+    {
+        config.advertised_listener = format!("{host}:{}", listen_addr.port());
+    }
+    let future_logs = Arc::new(DashMap::new());
+    for log_dir in config.all_log_dirs() {
+        for (topic, partition_id) in log_dir::scan_future(&log_dir).unwrap_or_default() {
+            let partition = PartitionIndex(partition_id);
+            if !partitions.contains(&topic, partition) {
+                let path = log_dir::future_partition_dir(&log_dir, &topic, partition_id);
+                if let Err(error) = std::fs::remove_dir_all(&path) {
+                    tracing::warn!(path = %path.display(), %error, "failed to remove stranded future log");
+                }
+                continue;
+            }
+            if let Err(error) = crate::future_log::resume_move(
+                partitions,
+                &future_logs,
+                &log_dir,
+                &config.log_config,
+                &topic,
+                partition,
+            ) {
+                tracing::warn!(%topic, partition = partition_id, ?error,
+                    "failed to resume interrupted log-dir move");
+            }
+        }
+    }
+    Ok(ListenerStartup {
+        bound,
+        listen_addr,
+        future_logs,
+    })
+}
+
+fn spawn_listener_tasks(
+    broker: &Arc<Broker>,
+    bound: Vec<(crate::config::ListenerSpec, TcpListener, SocketAddr)>,
+) -> (CancellationToken, Vec<JoinHandle<()>>) {
+    let shutdown = CancellationToken::new();
+    let tasks = bound
+        .into_iter()
+        .map(|(spec, listener, _)| {
+            tokio::spawn(accept_loop(
+                Arc::clone(broker),
+                listener,
+                spec,
+                shutdown.clone(),
+            ))
+        })
+        .collect();
+    (shutdown, tasks)
+}
+
+async fn emit_broker_started(broker: &Broker, audit_partition: Option<PartitionIndex>) {
+    let Some(partition_index) = audit_partition else {
+        return;
+    };
+    let topic = broker.config.audit_topic.clone();
+    let partitions = Arc::clone(&broker.partitions);
+    let _ = tokio::time::timeout(AUDIT_PARTITION_WAIT_TIMEOUT, async move {
+        while !partitions.contains(&topic, partition_index) {
+            tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        }
+    })
+    .await;
+    broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
+        kind: crabka_audit::LifecycleKind::BrokerStarted,
+        node_id: i64::from(broker.config.broker_id),
+        time_ms: crate::time_util::now_ms(),
+    });
+}
+
+fn spawn_rlmm_bootstrap(
+    broker: &Arc<Broker>,
+    swap_target: Option<&Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+    kickoff: Option<&KafkaSwapKickoff>,
+    shutdown: &CancellationToken,
+) {
+    let (Some(swap), Some(kickoff)) = (swap_target, kickoff) else {
+        return;
+    };
+    let future = bootstrap_topic_rlmm(
+        Arc::clone(swap),
+        kickoff.clone(),
+        tokio::runtime::Handle::current(),
+        broker.metrics.clone(),
+        broker.config.node_id,
+        broker.controller.watch_image(),
+        shutdown.clone(),
+    );
+    let shutdown = shutdown.clone();
+    tokio::spawn(async move {
+        tokio::select! {
+            () = shutdown.cancelled() => tracing::debug!("RLMM bootstrap cancelled"),
+            () = future => {}
+        }
+    });
+}
+
+async fn start_metadata_phase(
+    config: &mut BrokerConfig,
+    controller_listener: Option<TcpListener>,
+    tls_dynamic: Option<&Arc<crabka_security::DynamicServerConfig>>,
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+) -> Result<Arc<dyn crate::metadata_source::MetadataSource>, BrokerError> {
+    let transport = prepare_raft_transport(config, tls_dynamic, inter_broker_client);
+    let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
+    let controller = start_metadata_source(
+        config,
+        &mut bootstrap_records,
+        controller_listener,
+        transport,
+    )
+    .await?;
+    spawn_auto_join(config, &controller, inter_broker_client);
+    wait_for_metadata_leader(&*controller).await?;
+    register_broker(config, &*controller).await?;
+    submit_bootstrap_records(config, &*controller, bootstrap_records).await?;
+    Ok(controller)
+}
+
+type BrokerCoordinatorSet = (
+    Arc<crate::coordinator::GroupCoordinator>,
+    Arc<crate::producer_id_manager::ProducerIdManager>,
+    Arc<crate::producer_state::ProducerState>,
+    Arc<crate::txn::coordinator::TxnCoordinator>,
+    Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
+    Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
+);
+
+async fn finish_broker_startup(
+    mut config: BrokerConfig,
+    data_listener: Option<TcpListener>,
+    metadata: (
+        Arc<dyn crate::metadata_source::MetadataSource>,
+        Arc<PartitionRegistry>,
+    ),
+    coordinators: BrokerCoordinatorSet,
+    transport: (
+        Option<Arc<crabka_security::DynamicServerConfig>>,
+        bool,
+        Arc<crate::network::client::InterBrokerClient>,
+    ),
+    runtime: BrokerRuntimeStartup,
+    storage: (
+        crate::log_dir_status::LogDirRegistry,
+        crate::log_dir_id::LogDirIds,
+    ),
+) -> Result<BrokerHandle, BrokerError> {
+    let ListenerStartup {
+        bound,
+        listen_addr,
+        future_logs,
+    } = bind_listeners_and_recover_moves(&mut config, data_listener, &metadata.1).await?;
+    let connections = ConnectionLimiter::new(config.max_connections, config.max_connections_per_ip);
+    let broker = Arc::new(Broker {
+        config,
+        controller: metadata.0,
+        partitions: metadata.1,
+        future_logs,
+        group_coordinator: coordinators.0,
+        producer_ids: coordinators.1,
+        producer_state: coordinators.2,
+        txn_coordinator: coordinators.3,
+        share_coordinator: coordinators.4,
+        share_partition_leaders: coordinators.5,
+        supervisor_shutdown: runtime.supervisor_shutdown,
+        supervisor_handle: tokio::sync::Mutex::new(Some(runtime.supervisor_handle)),
+        disk_scanner_handle: tokio::sync::Mutex::new(runtime.disk_scanner_handle),
+        liveness: runtime.liveness,
+        tls_dynamic: transport.0,
+        ktls_enabled: transport.1,
+        inter_broker_client: transport.2,
+        inter_broker_listener_protocol: runtime.inter_listener_protocol,
+        unclean_recovery: runtime.unclean_recovery,
+        metrics: runtime.metrics,
+        metrics_bound_addr: runtime.metrics_bound_addr,
+        throttle_state: runtime.throttle_state,
+        quota_buckets: runtime.quota_buckets,
+        connections,
+        fetch_session_cache: runtime.fetch_session_cache,
+        want_shutdown: runtime.want_shutdown,
+        should_shutdown: runtime.should_shutdown,
+        remote_reader: runtime.remote_reader,
+        log_dir_status: storage.0,
+        log_dir_ids: storage.1,
+        client_metrics: runtime.client_metrics,
+        #[cfg(any(test, feature = "test-helpers"))]
+        offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
+        audit_log: runtime.audit_log,
+        handlers: crate::handlers::registry::build_registry(),
+    });
+    let (shutdown, listener_tasks) = spawn_listener_tasks(&broker, bound);
+    emit_broker_started(&broker, runtime.audit_led_partition).await;
+    spawn_rlmm_bootstrap(
+        &broker,
+        runtime.kafka_swap_target.as_ref(),
+        runtime.kafka_swap_kickoff.as_ref(),
+        &shutdown,
+    );
+    Ok(BrokerHandle {
+        listen_addr,
+        shutdown,
+        listener_tasks,
+        broker,
+    })
+}
+
+fn spawn_replicator_supervisor(
+    config: &BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    partitions: &Arc<PartitionRegistry>,
+    coordinators: (
+        &Arc<crate::txn::coordinator::TxnCoordinator>,
+        &Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
+    ),
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+    runtime: (
+        &CancellationToken,
+        &Arc<crate::throttle::ThrottleState>,
+        &crate::metrics::BrokerMetrics,
+    ),
+    storage: (
+        &crate::log_dir_status::LogDirRegistry,
+        &Arc<crate::producer_state::ProducerState>,
+        &crate::log_dir_id::LogDirIds,
+    ),
+) -> JoinHandle<()> {
+    let protocol = config
+        .effective_listeners()
+        .iter()
+        .find(|listener| listener.name == config.inter_broker_listener_name)
+        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
+            listener.protocol
+        });
+    crate::replicator_supervisor::ReplicatorSupervisor::new(
+        crate::replicator_supervisor::ReplicatorSupervisorConfig {
+            node_id: config.node_id,
+            broker_id: config.broker_id,
+            controller: Arc::clone(controller),
+            partitions: Arc::clone(partitions),
+            log_dirs: storage.0.online_subset(&config.all_log_dirs()),
+            log_config: config.log_config.clone(),
+            client_id: format!("crabka-broker-{}-replicator", config.broker_id),
+            shutdown: runtime.0.clone(),
+            txn_coordinator: Some(Arc::clone(coordinators.0)),
+            share_coordinator: Some(Arc::clone(coordinators.1)),
+            inter_broker_client: Arc::clone(inter_broker_client),
+            inter_broker_listener_protocol: protocol,
+            inter_broker_listener_name: config.inter_broker_listener_name.clone(),
+            throttle_state: Arc::clone(runtime.1),
+            log_dir_status: storage.0.clone(),
+            producer_state: Arc::clone(storage.1),
+            metrics: runtime.2.clone(),
+            log_dir_ids: storage.2.clone(),
+        },
+    )
+    .spawn()
+}
+
+struct BrokerRuntimeStartup {
+    supervisor_shutdown: CancellationToken,
+    supervisor_handle: JoinHandle<()>,
+    disk_scanner_handle: Option<JoinHandle<()>>,
+    liveness: Arc<crate::heartbeat::controller_state::ControllerLivenessState>,
+    want_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    should_shutdown: Arc<tokio::sync::watch::Sender<bool>>,
+    unclean_recovery: crate::unclean_recovery::UncleanRecoveryHandle,
+    metrics: crate::metrics::BrokerMetrics,
+    metrics_bound_addr: Option<SocketAddr>,
+    throttle_state: Arc<crate::throttle::ThrottleState>,
+    quota_buckets: Arc<crate::quota::QuotaBuckets>,
+    fetch_session_cache: Arc<crate::fetch_session::FetchSessionCache>,
+    remote_reader: Option<Arc<crate::remote_reader::RemoteReader>>,
+    client_metrics: Arc<crate::client_metrics::ClientMetrics>,
+    audit_log: Arc<crabka_audit::AuditLog>,
+    audit_led_partition: Option<PartitionIndex>,
+    kafka_swap_kickoff: Option<KafkaSwapKickoff>,
+    kafka_swap_target: Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
+    inter_listener_protocol: crabka_security::ListenerProtocol,
+}
+
+async fn start_broker_runtime(
+    config: &mut BrokerConfig,
+    controller: &Arc<dyn crate::metadata_source::MetadataSource>,
+    inter_broker_client: &Arc<crate::network::client::InterBrokerClient>,
+    tls_dynamic: Option<&Arc<crabka_security::DynamicServerConfig>>,
+    storage: (
+        &Arc<PartitionRegistry>,
+        &Arc<crate::producer_state::ProducerState>,
+        &crate::log_dir_status::LogDirRegistry,
+        &crate::log_dir_id::LogDirIds,
+    ),
+    coordinators: (
+        &Arc<crate::txn::coordinator::TxnCoordinator>,
+        &Arc<crate::share_coordinator::coordinator::ShareCoordinator>,
+    ),
+) -> Result<BrokerRuntimeStartup, BrokerError> {
+    let supervisor_shutdown = CancellationToken::new();
+    let throttle_state = Arc::new(crate::throttle::ThrottleState::new());
+    let inter_listener_protocol = config
+        .effective_listeners()
+        .iter()
+        .find(|listener| listener.name == config.inter_broker_listener_name)
+        .map_or(crabka_security::ListenerProtocol::Plaintext, |listener| {
+            listener.protocol
+        });
+    let metrics = crate::metrics::BrokerMetrics::new();
+    let (audit_led_partition, audit_log) =
+        start_audit_pipeline(config, &**controller, storage.0, &metrics);
+    let supervisor_handle = spawn_replicator_supervisor(
+        config,
+        controller,
+        storage.0,
+        coordinators,
+        inter_broker_client,
+        (&supervisor_shutdown, &throttle_state, &metrics),
+        (storage.2, storage.1, storage.3),
+    );
+    let LivenessStartup {
+        liveness,
+        want_shutdown,
+        should_shutdown,
+        unclean_recovery,
+    } = start_liveness_services(
+        config,
+        controller,
+        inter_broker_client,
+        inter_listener_protocol,
+        &metrics,
+        &supervisor_shutdown,
+        (storage.2, storage.3),
+    );
+    let ObservabilityStartup {
+        metrics_bound_addr,
+        client_metrics,
+    } = start_observability(config, &metrics, &supervisor_shutdown).await?;
+    spawn_broker_gauge_updater(
+        Arc::clone(storage.0),
+        Arc::clone(controller),
+        Arc::clone(&liveness),
+        config.node_id,
+        metrics.clone(),
+        supervisor_shutdown.child_token(),
+    );
+    let disk_scanner_handle = spawn_storage_security_maintenance(
+        config,
+        storage.0,
+        controller,
+        &metrics,
+        &supervisor_shutdown,
+    );
+    spawn_cluster_data_maintenance(
+        config,
+        controller,
+        &liveness,
+        storage.0,
+        storage.1,
+        &metrics,
+        &supervisor_shutdown,
+    );
+    let kafka_swap_kickoff = kafka_swap_kickoff(config);
+    let remote = start_remote_storage(config, storage.0, controller, &supervisor_shutdown)?;
+    let caches = start_runtime_watchers(
+        config,
+        controller,
+        tls_dynamic,
+        &throttle_state,
+        coordinators.0,
+        &supervisor_shutdown,
+    );
+    Ok(BrokerRuntimeStartup {
+        supervisor_shutdown,
+        supervisor_handle,
+        disk_scanner_handle,
+        liveness,
+        want_shutdown,
+        should_shutdown,
+        unclean_recovery,
+        metrics,
+        metrics_bound_addr,
+        throttle_state,
+        quota_buckets: caches.quota_buckets,
+        fetch_session_cache: caches.fetch_sessions,
+        remote_reader: remote.reader,
+        client_metrics,
+        audit_log,
+        audit_led_partition,
+        kafka_swap_kickoff,
+        kafka_swap_target: remote.swap_target,
+        inter_listener_protocol,
+    })
+}
+
+async fn prepare_startup_transport(config: &BrokerConfig) -> Result<StartupTransport, BrokerError> {
+    let _ = rustls::crypto::ring::default_provider().install_default();
+    config.validate()?;
+    let tls_dynamic = config
+        .tls_config
+        .as_ref()
+        .map(crabka_security::DynamicServerConfig::from_tls_config)
+        .transpose()
+        .map_err(|error| BrokerError::Tls(error.to_string()))?;
+    let ktls_enabled = if tls_dynamic.is_some() {
+        crate::network::ktls_probe::probe_ktls_support().await
+    } else {
+        false
+    };
+    match (ktls_enabled, tls_dynamic.is_some()) {
+        (true, _) => tracing::info!(
+            "Linux kTLS supported: TLS fetch connections will use kernel-offloaded sendfile"
+        ),
+        (false, true) => {
+            tracing::info!("Linux kTLS unavailable: TLS fetch connections use userspace rustls");
+        }
+        (false, false) => {}
+    }
+    let tls_connector = config
+        .tls_config
+        .as_ref()
+        .map(crabka_security::TlsConfig::build_client_config_with_identity)
+        .transpose()
+        .map_err(|error| BrokerError::Tls(error.to_string()))?
+        .map(tokio_rustls::TlsConnector::from);
+    let inter_broker_client = Arc::new(crate::network::client::InterBrokerClient::new(
+        tls_connector,
+        config.inter_broker_credentials.clone(),
+    ));
+    Ok(StartupTransport {
+        tls_dynamic,
+        ktls_enabled,
+        inter_broker_client,
+    })
+}
+
 impl Broker {
     pub(crate) fn handlers(&self) -> &DispatchRegistry {
         &self.handlers
@@ -269,7 +1913,7 @@ pub struct BrokerHandle {
     /// awaits every task to drain in-flight connections.
     listener_tasks: Vec<JoinHandle<()>>,
     /// Held so partition writer tasks live as long as the handle.
-    _broker: Arc<Broker>,
+    broker: Arc<Broker>,
 }
 
 impl BrokerHandle {
@@ -285,9 +1929,8 @@ impl BrokerHandle {
     /// `BrokerConfig::metrics_listen_addr` and read the OS-assigned
     /// port back through this accessor.
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn metrics_addr(&self) -> Option<SocketAddr> {
-        self._broker.metrics_bound_addr
+        self.broker.metrics_bound_addr
     }
 
     /// The actual `SocketAddr` this broker's controller listener bound to
@@ -295,23 +1938,16 @@ impl BrokerHandle {
     /// 0). KIP-853 dynamic-voters tests read this to point joiners at the
     /// bootstrap broker's real controller endpoint.
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn controller_addr(&self) -> SocketAddr {
-        self._broker.controller.controller_bound_addr()
+        self.broker.controller.controller_bound_addr()
     }
 
     /// Current Raft leader id as observed by this broker's controller.
     /// Returns `None` before the first leader is elected. Trivial
     /// passthrough to [`crabka_raft::ControllerHandle::watch_leader`].
-    ///
-    /// `async fn` even though the underlying `watch::Receiver::borrow` is
-    /// synchronous — the broker public API expects
-    /// `controller_leader_id().await`, and keeping the signature async
-    /// preserves room for a future implementation that waits for the
-    /// first non-`None` value via `watch::Receiver::changed`.
-    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
-    pub async fn controller_leader_id(&self) -> Option<crabka_raft::NodeId> {
-        *self._broker.controller.watch_leader().borrow()
+    #[must_use]
+    pub fn controller_leader_id(&self) -> Option<crabka_raft::NodeId> {
+        *self.broker.controller.watch_leader().borrow()
     }
 
     /// Test-only: the controller's current quorum state (leader epoch, HWM,
@@ -320,22 +1956,16 @@ impl BrokerHandle {
     /// voter (e.g. a JVM follower) is fetching.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn controller_quorum_state_for_test(&self) -> crabka_raft::QuorumState {
-        self._broker.controller.quorum_state()
+        self.broker.controller.quorum_state()
     }
 
     /// Number of brokers currently registered in this broker's
     /// `MetadataImage`. Used by replication integration tests to wait
     /// for all peers to come up before issuing `CreateTopics`.
-    ///
-    /// `async fn` for the same reason as
-    /// [`controller_leader_id`](Self::controller_leader_id): keeps the
-    /// public test surface uniform and leaves room for a future
-    /// implementation that blocks until convergence.
-    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
-    pub async fn broker_count(&self) -> usize {
-        self._broker.controller.current_image().brokers().count()
+    #[must_use]
+    pub fn broker_count(&self) -> usize {
+        self.broker.controller.current_image().brokers().count()
     }
 
     /// This broker's own registration endpoints, as stored in the
@@ -344,10 +1974,10 @@ impl BrokerHandle {
     /// projected from `BrokerConfig::effective_listeners()` onto the
     /// self-registration record. Returns the cloned endpoint list (or
     /// empty if the broker has not yet self-registered).
-    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
-    pub async fn self_registration_endpoints(&self) -> Vec<crabka_metadata::BrokerEndpoint> {
-        let node_id = self._broker.config.node_id;
-        self._broker
+    #[must_use]
+    pub fn self_registration_endpoints(&self) -> Vec<crabka_metadata::BrokerEndpoint> {
+        let node_id = self.broker.config.node_id;
+        self.broker
             .controller
             .current_image()
             .broker(node_id)
@@ -365,12 +1995,11 @@ impl BrokerHandle {
     /// # Errors
     ///
     /// Forwards the underlying raft errors as [`BrokerError::Replication`].
-    #[allow(clippy::used_underscore_binding)]
     pub async fn change_membership(
         &self,
         new_voters: std::collections::BTreeSet<crabka_raft::NodeId>,
     ) -> Result<(), BrokerError> {
-        self._broker
+        self.broker
             .controller
             .change_membership(new_voters)
             .await
@@ -384,7 +2013,6 @@ impl BrokerHandle {
     /// # Errors
     ///
     /// Forwards the underlying raft errors as [`BrokerError::Replication`].
-    #[allow(clippy::used_underscore_binding)]
     pub async fn add_learner(
         &self,
         node_id: crabka_raft::NodeId,
@@ -403,7 +2031,7 @@ impl BrokerHandle {
             }],
             kraft_version: crabka_metadata::KRaftVersionRange::default(),
         };
-        self._broker
+        self.broker
             .controller
             .add_learner(node_id, node)
             .await
@@ -413,9 +2041,9 @@ impl BrokerHandle {
     /// Is `(topic, partition)` present in this broker's `MetadataImage`?
     /// Used by replication integration tests to wait for topic
     /// propagation.
-    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
-    pub async fn has_partition(&self, topic: &str, partition: i32) -> bool {
-        self._broker
+    #[must_use]
+    pub fn has_partition(&self, topic: &str, partition: i32) -> bool {
+        self.broker
             .controller
             .current_image()
             .partition(topic, partition)
@@ -425,10 +2053,10 @@ impl BrokerHandle {
     /// Local `log_end_offset` for `(topic, partition)`, if this broker
     /// hosts the partition. Used by replication integration tests to
     /// assert all followers caught up.
-    #[allow(clippy::unused_async, clippy::used_underscore_binding)]
-    pub async fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
+    #[must_use]
+    pub fn local_log_end_offset(&self, topic: &str, partition: i32) -> Option<i64> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))?;
         // Unwrap `Offset` -> `i64` at this test-helper boundary: integration
@@ -446,7 +2074,6 @@ impl BrokerHandle {
     /// Returns [`BrokerError::Replication`] if the partition is not
     /// hosted on this broker.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn test_truncate_local_log(
         &self,
         topic: &str,
@@ -454,7 +2081,7 @@ impl BrokerHandle {
         offset: i64,
     ) -> Result<(), crate::error::BrokerError> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
@@ -467,7 +2094,7 @@ impl BrokerHandle {
         // truncation also reverts idempotent-producer dedup entries for the
         // dropped offsets, so a retried batch from the truncated tail re-appends
         // instead of deduplicating against a vanished offset.
-        self._broker
+        self.broker
             .producer_state
             .truncate(topic, PartitionIndex(partition), offset)
             .await;
@@ -484,7 +2111,6 @@ impl BrokerHandle {
     /// Returns [`BrokerError::Replication`] if the partition is not
     /// hosted on this broker.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn test_advance_log_start(
         &self,
         topic: &str,
@@ -492,7 +2118,7 @@ impl BrokerHandle {
         new_start: i64,
     ) -> Result<(), crate::error::BrokerError> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
@@ -508,13 +2134,8 @@ impl BrokerHandle {
     /// (force an epoch bump) without going through the supervisor's
     /// metadata-image-driven path.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub fn test_set_leader_epoch(&self, topic: &str, partition: i32, epoch: i32) {
-        if let Some(part) = self
-            ._broker
-            .partitions
-            .get(topic, PartitionIndex(partition))
-        {
+        if let Some(part) = self.broker.partitions.get(topic, PartitionIndex(partition)) {
             part.test_set_leader_epoch(epoch);
         }
     }
@@ -525,9 +2146,8 @@ impl BrokerHandle {
     /// new partition dir + writer task.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_exists_for_test(&self, topic: &str, partition: i32) -> bool {
-        self._broker
+        self.broker
             .partitions
             .contains(topic, PartitionIndex(partition))
     }
@@ -535,12 +2155,11 @@ impl BrokerHandle {
     /// Test-only: read the share-state summary
     /// `(state_epoch, leader_epoch, start_offset, delivery_complete_count)`
     /// for `(group, topic_id, partition)` straight from this broker's
-    /// [`ShareCoordinator`](crate::share_coordinator::coordinator::ShareCoordinator).
+    /// the internal `ShareCoordinator`.
     /// Returns `None` when the key has no initialized state. KIP-932 lifecycle
     /// tests use this to assert the group-coordinator Initialized per-partition
     /// share state without advertising the persister RPCs over the wire.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn share_state_summary_for_test(
         &self,
         group: &str,
@@ -549,7 +2168,7 @@ impl BrokerHandle {
     ) -> Option<(i32, i32, i64, i32)> {
         // Unwrap the summary's `start_offset` -> `i64` at this test-helper
         // boundary: integration tests compare it against raw offset literals.
-        self._broker
+        self.broker
             .share_coordinator
             .read_summary(group, topic_id, partition)
             .await
@@ -562,7 +2181,6 @@ impl BrokerHandle {
     /// `(group, topic_id, partition)` (share-state initialized / recovered).
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_for_share_state_summary(
         &self,
         group: &str,
@@ -582,13 +2200,15 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "share-state summary for {group}:{topic_id}:{partition} not present within 30s"
+        );
     }
 
     /// Test-only: await until the share-partition SPSO (start_offset) >= `min`.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_share_spso(
         &self,
         group: &str,
@@ -609,13 +2229,15 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "share SPSO for {group}:{topic_id}:{partition} did not reach {min} within 30s"
+        );
     }
 
     /// Test-only: await until the share-partition delivery-complete count >= `min`.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_share_delivery_complete(
         &self,
         group: &str,
@@ -636,7 +2258,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "share dcc for {group}:{topic_id}:{partition} did not reach {min} within 30s"
+        );
     }
 
     /// Test-only: await until the live share-partition has exactly `n` Acquired
@@ -644,7 +2269,6 @@ impl BrokerHandle {
     /// redelivery returns records to Available — count drops back).
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_share_acquired_count(
         &self,
         group: &str,
@@ -655,7 +2279,7 @@ impl BrokerHandle {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 if let Some(cell) = self
-                    ._broker
+                    .broker
                     .share_partition_leaders
                     .peek_for_test(group, topic_id, partition)
                 {
@@ -668,7 +2292,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "share acquired-batch count for {group}:{topic_id}:{partition} did not reach {n} within 30s"
+        );
     }
 
     // ── consumer/streams/share group awaiters ─────────────────────────────────
@@ -677,13 +2304,12 @@ impl BrokerHandle {
     /// `None` if the group has no live actor.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn group_describe_for_test(
         &self,
         group_id: &str,
     ) -> Option<crate::coordinator::unified::actor::DescribeView> {
         let handle = self
-            ._broker
+            .broker
             .group_coordinator
             .groups
             .get(group_id)?
@@ -701,7 +2327,6 @@ impl BrokerHandle {
     /// Test-only: await until the group has exactly `n` members.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_group_member_count(&self, group_id: &str, n: usize) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
@@ -716,13 +2341,15 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "group {group_id} did not settle at {n} members within 30s"
+        );
     }
 
     /// Test-only: await until the group is empty/drained (no members).
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_group_empty(&self, group_id: &str) {
         self.wait_until_group_member_count(group_id, 0).await;
     }
@@ -731,13 +2358,12 @@ impl BrokerHandle {
     /// Returns `None` when no actor exists or the actor is consumer-kind (not classic).
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn classic_group_inspect_for_test(
         &self,
         group_id: &str,
     ) -> Option<crate::coordinator::unified::actor::ClassicView> {
         let handle = self
-            ._broker
+            .broker
             .group_coordinator
             .groups
             .get(group_id)?
@@ -762,7 +2388,6 @@ impl BrokerHandle {
     /// classic-kind actor.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_classic_group_member_count(&self, group_id: &str, n: usize) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
@@ -777,7 +2402,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "classic group {group_id} did not settle at {n} members within 30s"
+        );
     }
 
     // ── streams-group awaiters ────────────────────────────────────────────────
@@ -786,13 +2414,12 @@ impl BrokerHandle {
     /// `None` if the group has no live streams actor.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn streams_group_describe_for_test(
         &self,
         group_id: &str,
     ) -> Option<crate::coordinator::unified::streams::actor::StreamsDescribeView> {
         let handle = self
-            ._broker
+            .broker
             .group_coordinator
             .streams_groups
             .get(group_id)?
@@ -814,7 +2441,6 @@ impl BrokerHandle {
     /// Test-only: await until the streams group has exactly `n` members.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_streams_group_member_count(&self, group_id: &str, n: usize) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
@@ -829,7 +2455,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "streams group {group_id} did not settle at {n} members within 30s"
+        );
     }
 
     /// Test-only: await until the streams group is empty/drained (no members).
@@ -840,7 +2469,6 @@ impl BrokerHandle {
     /// issuing the classic `JoinGroup` that triggers the streams→classic conversion.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_streams_group_empty(&self, group_id: &str) {
         self.wait_until_streams_group_member_count(group_id, 0)
             .await;
@@ -853,10 +2481,9 @@ impl BrokerHandle {
     /// partition is not hosted on this broker.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_log_start_for_test(&self, topic: &str, partition: i32) -> Option<i64> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))?;
         // Unwrap `Offset` -> `i64` at this test-helper boundary.
@@ -869,14 +2496,13 @@ impl BrokerHandle {
     /// no retention override has been applied (topic uses broker default).
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_retention_ms_for_test(
         &self,
         topic: &str,
         partition: i32,
     ) -> Option<Option<std::time::Duration>> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))?;
         let snap = part.log.lock().ok()?.config_snapshot();
@@ -890,14 +2516,13 @@ impl BrokerHandle {
     /// from the metadata image through the supervisor's reconcile loop.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_log_config_for_test(
         &self,
         topic: &str,
         partition: i32,
     ) -> Option<crabka_log::LogConfig> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))?;
         Some(part.log.lock().ok()?.config_snapshot())
@@ -915,7 +2540,6 @@ impl BrokerHandle {
     /// Returns [`BrokerError::Replication`] if the partition is not local.
     /// Returns [`BrokerError::Txn`] if the writer task is dead.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn produce_records_for_test(
         &self,
         topic: &str,
@@ -923,7 +2547,7 @@ impl BrokerHandle {
         n: usize,
     ) -> Result<i64, crate::error::BrokerError> {
         let part = self
-            ._broker
+            .broker
             .partitions
             .get(topic, PartitionIndex(partition))
             .ok_or_else(|| {
@@ -954,9 +2578,8 @@ impl BrokerHandle {
     /// `RlmmKind::InMemory`.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn rlmm_topic_backed_active_for_test(&self) -> bool {
-        self._broker.metrics.tiered_storage_rlmm_topic_backed.get() == 1
+        self.broker.metrics.tiered_storage_rlmm_topic_backed.get() == 1
     }
 
     /// Test-only: submit a [`crabka_metadata::MetadataRecord`] directly to
@@ -970,12 +2593,11 @@ impl BrokerHandle {
     ///
     /// Forwards the underlying raft errors as [`BrokerError::Replication`].
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn submit_metadata_record_for_test(
         &self,
         rec: crabka_metadata::MetadataRecord,
     ) -> Result<(), crate::error::BrokerError> {
-        self._broker
+        self.broker
             .controller
             .submit_change(vec![rec])
             .await
@@ -987,10 +2609,9 @@ impl BrokerHandle {
     /// (idempotent). Used by admin-handler integration tests to seed the group
     /// registry without running a full `JoinGroup` / `SyncGroup` exchange.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub fn group_create_for_test(&self, group_id: &str) {
         let _ = self
-            ._broker
+            .broker
             .group_coordinator
             .get_or_create_classic(group_id);
     }
@@ -1001,12 +2622,11 @@ impl BrokerHandle {
     /// `StreamsGroupHeartbeat` on a drained classic group).
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn group_type_for_test(
         &self,
         group_id: &str,
     ) -> Option<crate::coordinator::unified::GroupType> {
-        self._broker.group_coordinator.group_type(group_id)
+        self.broker.group_coordinator.group_type(group_id)
     }
 
     /// Test-only: await until the coordinator's group-type lock for `group_id`
@@ -1015,7 +2635,6 @@ impl BrokerHandle {
     /// classic/streams type marker.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_group_type(
         &self,
         group_id: &str,
@@ -1030,7 +2649,12 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "group {group_id} did not settle at type {expected:?} within {TEST_AWAITER_TIMEOUT:?}; \
+             last={:?}",
+            self.group_type_for_test(group_id)
+        );
     }
 
     /// This broker's raft `node_id` (1-indexed broker id used in raft quorum
@@ -1038,9 +2662,8 @@ impl BrokerHandle {
     /// `IncrementalAlterConfigs` broker-resource requests targeting this
     /// broker without hard-coding a node id.
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn node_id(&self) -> u64 {
-        self._broker.config.node_id.0
+        self.broker.config.node_id.0
     }
 
     /// Test-only: return a snapshot of the current `MetadataImage` as seen by
@@ -1050,9 +2673,8 @@ impl BrokerHandle {
     /// `topic_config` directly without adding per-field accessors.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn controller_image_for_test(&self) -> std::sync::Arc<crabka_metadata::MetadataImage> {
-        self._broker.controller.current_image()
+        self.broker.controller.current_image()
     }
 
     /// Test-only: the raft voter set this node's metadata source reports.
@@ -1062,9 +2684,8 @@ impl BrokerHandle {
     /// broker-only node is absent from the controller's voters.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn quorum_voters_for_test(&self) -> Vec<crabka_raft::NodeId> {
-        self._broker.controller.quorum_state().voters
+        self.broker.controller.quorum_state().voters
     }
 
     /// Test-only: clone the inner `Arc<Broker>`. Used by the `auto_join`
@@ -1072,9 +2693,8 @@ impl BrokerHandle {
     /// broker-internal background routines directly.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn broker_arc_for_test(&self) -> Arc<Broker> {
-        self._broker.clone()
+        self.broker.clone()
     }
 
     /// Test-only: the controller voter set's size as seen by this broker's
@@ -1082,9 +2702,8 @@ impl BrokerHandle {
     /// observe auto-join growing / `remove_voter` shrinking the quorum.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn voter_count_for_test(&self) -> usize {
-        self._broker.controller.current_image().voters().len()
+        self.broker.controller.current_image().voters().len()
     }
 
     /// Test-only: the controller voter ids as seen by this broker's
@@ -1092,9 +2711,8 @@ impl BrokerHandle {
     /// dynamic-voters shrink test.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn voter_ids_for_test(&self) -> std::collections::BTreeSet<crabka_raft::NodeId> {
-        self._broker.controller.current_image().voters().ids()
+        self.broker.controller.current_image().voters().ids()
     }
 
     /// Test-only: the `directory_id` of voter `id` from this broker's
@@ -1102,9 +2720,8 @@ impl BrokerHandle {
     /// voter's directory id to disambiguate.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn voter_directory_id_for_test(&self, id: crabka_raft::NodeId) -> Option<uuid::Uuid> {
-        self._broker
+        self.broker
             .controller
             .current_image()
             .voters()
@@ -1120,12 +2737,11 @@ impl BrokerHandle {
     ///
     /// Forwards the underlying raft error.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn remove_voter_for_test(
         &self,
         req: crabka_raft::reconfig::RemoveVoter,
     ) -> Result<crabka_raft::reconfig::ReconfigOutcome, crabka_raft::RaftError> {
-        self._broker.controller.remove_voter(req).await
+        self.broker.controller.remove_voter(req).await
     }
 
     /// Test-only: ask this broker's controller to generate a metadata
@@ -1136,9 +2752,8 @@ impl BrokerHandle {
     ///
     /// Propagates any error from the underlying raft trigger.
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn trigger_snapshot_for_test(&self) -> Result<(), crabka_raft::RaftError> {
-        self._broker.controller.trigger_snapshot().await
+        self.broker.controller.trigger_snapshot().await
     }
 
     /// Test-only: return the current leader node-id for `(topic, partition)`
@@ -1147,9 +2762,8 @@ impl BrokerHandle {
     /// elected leader).
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_leader_for_test(&self, topic: &str, partition: i32) -> Option<u64> {
-        let img = self._broker.controller.current_image();
+        let img = self.broker.controller.current_image();
         let p = img.partition(topic, partition)?;
         if p.leader == crabka_raft::NodeId(0) {
             None
@@ -1163,9 +2777,8 @@ impl BrokerHandle {
     /// not yet in the image.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_isr_for_test(&self, topic: &str, partition: i32) -> Option<Vec<u64>> {
-        let img = self._broker.controller.current_image();
+        let img = self.broker.controller.current_image();
         let p = img.partition(topic, partition)?;
         Some(p.isr.iter().map(|n| n.0).collect())
     }
@@ -1175,13 +2788,12 @@ impl BrokerHandle {
     /// Returns `None` if the partition is not yet in the image.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn partition_record_for_test(
         &self,
         topic: &str,
         partition: i32,
     ) -> Option<crabka_metadata::PartitionRecord> {
-        self._broker
+        self.broker
             .controller
             .current_image()
             .partition(topic, partition)
@@ -1192,11 +2804,10 @@ impl BrokerHandle {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn watch_leader_for_test(
         &self,
     ) -> tokio::sync::watch::Receiver<Option<crabka_raft::NodeId>> {
-        self._broker.controller.watch_leader()
+        self.broker.controller.watch_leader()
     }
 
     /// Test-only: await until `pred` holds for the controller metadata image.
@@ -1204,12 +2815,11 @@ impl BrokerHandle {
     /// sleep. Bounded by a 30s safety-net so a stuck condition fails loudly.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_for_image<F>(&self, pred: F)
     where
         F: Fn(&crabka_metadata::MetadataImage) -> bool,
     {
-        let mut rx = self._broker.controller.watch_image();
+        let mut rx = self.broker.controller.watch_image();
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
                 // Scope the borrow so it is dropped before the await.
@@ -1222,7 +2832,7 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(res.is_ok(), "wait_for_image timed out after 30s");
     }
 
     /// Test-only: borrow this broker's live [`crate::metrics::BrokerMetrics`]
@@ -1236,9 +2846,8 @@ impl BrokerHandle {
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn metrics(&self) -> &crate::metrics::BrokerMetrics {
-        &self._broker.metrics
+        &self.broker.metrics
     }
 
     /// Test-only: poll `predicate` against this broker's live metrics every
@@ -1255,27 +2864,28 @@ impl BrokerHandle {
     /// test-visible timing assumption.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
-    pub async fn wait_for_metrics<F>(&self, _what: &str, mut predicate: F)
+    pub async fn wait_for_metrics<F>(&self, what: &str, mut predicate: F)
     where
         F: FnMut(&crate::metrics::BrokerMetrics) -> bool,
     {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if predicate(&self._broker.metrics) {
+                if predicate(&self.broker.metrics) {
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_millis(25)).await;
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "wait_for_metrics({what}) timed out after {TEST_AWAITER_TIMEOUT:?}"
+        );
     }
 
     /// Test-only: await until a non-zero controller leader is elected.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_controller_leader(&self) -> crabka_raft::NodeId {
         let mut rx = self.watch_leader_for_test();
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
@@ -1292,14 +2902,16 @@ impl BrokerHandle {
         })
         .await;
         let id = res.expect("wait_until_controller_leader timed out after 30s");
-        assert2::assert!(id != crabka_raft::NodeId(0));
+        assert!(
+            id != crabka_raft::NodeId(0),
+            "leader channel closed before a leader was elected"
+        );
         id
     }
 
     /// Test-only: await until this node's metadata image sees `>= n` brokers.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_brokers_registered(&self, n: usize) {
         self.wait_for_image(|img| img.brokers().count() >= n).await;
     }
@@ -1307,7 +2919,6 @@ impl BrokerHandle {
     /// Test-only: await until `topic-partition` is present in the metadata image.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_partition_present(&self, topic: &str, partition: i32) {
         self.wait_for_image(|img| img.partition(topic, partition).is_some())
             .await;
@@ -1317,7 +2928,6 @@ impl BrokerHandle {
     /// node with a non-zero epoch.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_partition_leader_changed(
         &self,
         topic: &str,
@@ -1337,7 +2947,6 @@ impl BrokerHandle {
     /// Test-only: await until `topic-partition`'s ISR has exactly `len` members.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_isr_len(&self, topic: &str, partition: i32, len: usize) {
         self.wait_for_image(|img| {
             img.partition(topic, partition)
@@ -1353,22 +2962,17 @@ impl BrokerHandle {
     /// avoid a lost wakeup.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_local_log_end_offset(&self, topic: &str, partition: i32, min: i64) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self
-                    ._broker
-                    .partitions
-                    .get(topic, PartitionIndex(partition))
-                {
+                if let Some(part) = self.broker.partitions.get(topic, PartitionIndex(partition)) {
                     let notified = part.append_notify.notified();
                     if part.log_end_offset() >= crabka_log::Offset(min) {
                         return;
                     }
                     notified.await;
                 } else {
-                    let mut img = self._broker.controller.watch_image();
+                    let mut img = self.broker.controller.watch_image();
                     if img.changed().await.is_err() {
                         return;
                     }
@@ -1376,7 +2980,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "local log_end_offset({topic}-{partition}) did not reach {min} within 30s"
+        );
     }
 
     /// Test-only: await until the LOCAL high watermark for `topic-partition`
@@ -1384,22 +2991,17 @@ impl BrokerHandle {
     /// async HW recompute that happens after the writer acks `acks=1` appends.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_high_watermark(&self, topic: &str, partition: i32, min: i64) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self
-                    ._broker
-                    .partitions
-                    .get(topic, PartitionIndex(partition))
-                {
+                if let Some(part) = self.broker.partitions.get(topic, PartitionIndex(partition)) {
                     let notified = part.hw_advance_notify.notified();
                     if part.high_watermark().await >= crabka_log::Offset(min) {
                         return;
                     }
                     notified.await;
                 } else {
-                    let mut img = self._broker.controller.watch_image();
+                    let mut img = self.broker.controller.watch_image();
                     if img.changed().await.is_err() {
                         return;
                     }
@@ -1407,7 +3009,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "high_watermark({topic}-{partition}) did not reach {min} within 30s"
+        );
     }
 
     /// Test-only: await until the LOCAL log end offset for `topic-partition` is
@@ -1421,7 +3026,6 @@ impl BrokerHandle {
     /// flake on timing — only fail if the condition never holds within 30s.
     #[doc(hidden)]
     #[cfg(any(test, feature = "test-helpers"))]
-    #[allow(clippy::used_underscore_binding)]
     pub async fn wait_until_local_log_end_offset_eq(
         &self,
         topic: &str,
@@ -1430,11 +3034,7 @@ impl BrokerHandle {
     ) {
         let res = tokio::time::timeout(TEST_AWAITER_TIMEOUT, async {
             loop {
-                if let Some(part) = self
-                    ._broker
-                    .partitions
-                    .get(topic, PartitionIndex(partition))
-                {
+                if let Some(part) = self.broker.partitions.get(topic, PartitionIndex(partition)) {
                     let notified = part.append_notify.notified();
                     if part.log_end_offset() == crabka_log::Offset(target) {
                         return;
@@ -1446,7 +3046,7 @@ impl BrokerHandle {
                         () = tokio::time::sleep(std::time::Duration::from_millis(20)) => {}
                     }
                 } else {
-                    let mut img = self._broker.controller.watch_image();
+                    let mut img = self.broker.controller.watch_image();
                     if img.changed().await.is_err() {
                         return;
                     }
@@ -1454,7 +3054,10 @@ impl BrokerHandle {
             }
         })
         .await;
-        assert2::assert!(res.is_ok());
+        assert!(
+            res.is_ok(),
+            "local log_end_offset({topic}-{partition}) did not settle at {target} within 30s"
+        );
     }
 
     /// Test-only: number of `OffsetForLeaderEpoch` (`api_key` 23) requests this
@@ -1465,9 +3068,8 @@ impl BrokerHandle {
     /// `OFFSET_OUT_OF_RANGE` fetch paths, which issue no OFLE.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn offset_for_leader_epoch_count_for_test(&self) -> u64 {
-        self._broker
+        self.broker
             .offset_for_leader_epoch_requests
             .load(std::sync::atomic::Ordering::Acquire)
     }
@@ -1477,9 +3079,8 @@ impl BrokerHandle {
     /// cross-platform). Drives the KIP-112 offline path.
     #[cfg(any(test, feature = "test-helpers"))]
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn test_mark_log_dir_offline(&self, dir: &std::path::Path) -> bool {
-        self._broker
+        self.broker
             .log_dir_status
             .mark_offline(dir, "test-injected storage failure")
     }
@@ -1500,14 +3101,13 @@ impl BrokerHandle {
     ///   previous config remains in place; the broker keeps serving
     ///   with the old cert.
     /// - `BrokerError::Startup` — no TLS config is configured.
-    #[allow(clippy::used_underscore_binding)]
     pub fn reload_tls(&self) -> Result<(), BrokerError> {
-        let Some(dynamic) = self._broker.tls_dynamic.as_ref() else {
+        let Some(dynamic) = self.broker.tls_dynamic.as_ref() else {
             return Err(BrokerError::Startup(
                 "reload_tls: broker has no tls_config".into(),
             ));
         };
-        let Some(tls_cfg) = self._broker.config.tls_config.as_ref() else {
+        let Some(tls_cfg) = self.broker.config.tls_config.as_ref() else {
             return Err(BrokerError::Startup(
                 "reload_tls: broker has no tls_config".into(),
             ));
@@ -1522,9 +3122,8 @@ impl BrokerHandle {
     /// (KIP-112). The embedding application should call
     /// [`Self::shutdown`] (or `controlled_shutdown`) when this fires.
     #[must_use]
-    #[allow(clippy::used_underscore_binding)]
     pub fn should_shutdown_rx(&self) -> tokio::sync::watch::Receiver<bool> {
-        self._broker.should_shutdown.subscribe()
+        self.broker.should_shutdown.subscribe()
     }
 
     /// Request a graceful, controlled shutdown of this broker.
@@ -1547,16 +3146,15 @@ impl BrokerHandle {
     /// - `BrokerError::ShutdownTimeout` — the controller did not
     ///   acknowledge `should_shut_down=true` within `timeout`; the broker was
     ///   hard-shut-down anyway.
-    #[allow(clippy::used_underscore_binding)]
     pub async fn controlled_shutdown(
         self,
         timeout: std::time::Duration,
     ) -> Result<(), BrokerError> {
-        let mut should_shutdown_rx = self._broker.should_shutdown.subscribe();
+        let mut should_shutdown_rx = self.broker.should_shutdown.subscribe();
         // Latch the request flag. Idempotent — repeated sends to a
         // `watch::Sender` with the same value are harmless and the
         // heartbeat client reads `borrow_and_update()` each tick.
-        let _ = self._broker.want_shutdown.send(true);
+        let _ = self.broker.want_shutdown.send(true);
         // Wait for the heartbeat client to observe should_shut_down=true.
         let wait = async {
             // `subscribe()` returns the current value (`false`) without
@@ -1594,25 +3192,24 @@ impl BrokerHandle {
 
     /// Cancel the listener + drain in-flight connections. Awaiting the
     /// returned future blocks until the listener task exits.
-    #[allow(clippy::used_underscore_binding)] // `_broker` carries shared state we must reach into during shutdown
     pub async fn shutdown(mut self) {
         // Emit the BrokerStopping lifecycle event before tearing down
         // partitions. This record may be dropped if the audit partition is
         // already gone — acceptable for Slice 1; durable shutdown auditing
         // is Slice 3.
-        self._broker
+        self.broker
             .audit_log
             .emit(crabka_audit::AuditEvent::Lifecycle {
                 kind: crabka_audit::LifecycleKind::BrokerStopping,
-                node_id: i64::from(self._broker.config.broker_id),
+                node_id: i64::from(self.broker.config.broker_id),
                 time_ms: crate::time_util::now_ms(),
             });
 
         // Cancel the replicator supervisor BEFORE the controller drops:
         // in-flight replication tasks must observe a clean cancellation
         // rather than a torn-down metadata-watch channel.
-        self._broker.supervisor_shutdown.cancel();
-        if let Some(h) = self._broker.supervisor_handle.lock().await.take() {
+        self.broker.supervisor_shutdown.cancel();
+        if let Some(h) = self.broker.supervisor_handle.lock().await.take() {
             let _ = h.await;
         }
         // Drain the disk-usage scanner if it was spawned.
@@ -1620,7 +3217,7 @@ impl BrokerHandle {
         // its sibling tasks do; awaiting the handle here ensures the
         // background tick is fully wound down before we tear the rest
         // of the broker apart.
-        if let Some(h) = self._broker.disk_scanner_handle.lock().await.take() {
+        if let Some(h) = self.broker.disk_scanner_handle.lock().await.take() {
             let _ = h.await;
         }
         self.shutdown.cancel();
@@ -1632,7 +3229,7 @@ impl BrokerHandle {
         // Without this, a killed broker's in-process raft engine keeps ticking
         // and re-elects itself, preventing the surviving nodes from detecting
         // the leader failure and electing a replacement.
-        self._broker.controller.cancel().await;
+        self.broker.controller.cancel().await;
     }
 }
 
@@ -1765,6 +3362,8 @@ impl Broker {
     /// Build a `Broker`, scan the log dir, spawn partition writers for
     /// every existing `<topic>-<partition>/`, bind the TCP listener, and
     /// return the handle.
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn start(config: BrokerConfig) -> Result<BrokerHandle, BrokerError> {
         Self::start_with_listeners(config, None, None).await
     }
@@ -1775,6 +3374,8 @@ impl Broker {
     /// Thin wrapper over [`Self::start_with_listeners`] for callers that only
     /// hand off the controller port; the data plane still binds from `config`.
     /// See that method for the full handoff contract.
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn start_with_controller_listener(
         config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
@@ -1804,88 +3405,21 @@ impl Broker {
     /// `advertised_listener` to it before calling.
     ///
     /// [`ListenerSpec`]: crate::config::ListenerSpec
-    #[allow(clippy::too_many_lines)]
     // sequential bring-up; splitting hurts readability more than it helps
     // cargo-mutants: network/socket bring-up, not unit-testable
     #[cfg_attr(test, mutants::skip)]
+    /// # Errors
+    /// Returns an error when log I/O fails, a record or index is corrupt, or the requested offset violates the segment state.
     pub async fn start_with_listeners(
         mut config: BrokerConfig,
         controller_listener: Option<tokio::net::TcpListener>,
-        mut data_plane_listener: Option<tokio::net::TcpListener>,
+        data_plane_listener: Option<tokio::net::TcpListener>,
     ) -> Result<BrokerHandle, BrokerError> {
-        // 0a. Install the rustls crypto provider exactly once per process.
-        //     `rustls 0.23` with `default-features = false` does NOT auto-install
-        //     a provider; without this the `ServerConfig::builder()` call below
-        //     (and any client-side rustls usage) panics at runtime. `.ok()`
-        //     swallows the `AlreadySet` error when a previous broker / test
-        //     in the same process installed it first.
-        let _ = rustls::crypto::ring::default_provider().install_default();
-
-        // 0b. Validate listener + auth configuration before any side effects.
-        config.validate()?;
-
-        // 0c. Build the dynamic TLS server config up front so we can
-        //     fail fast on bad cert / key paths before bringing up any
-        //     state. Wrapped in a `DynamicServerConfig` so the TLS
-        //     hot-reload path can swap certs without restart.
-        let tls_dynamic = match &config.tls_config {
-            Some(tls) => Some(
-                crabka_security::DynamicServerConfig::from_tls_config(tls)
-                    .map_err(|e| BrokerError::Tls(e.to_string()))?,
-            ),
-            None => None,
-        };
-
-        // 0c-bis. Probe Linux kTLS support ONCE. `ktls::config_ktls_server`
-        //         consumes the post-handshake `TlsStream` by value, so a
-        //         per-connection failure cannot fall back to userspace TLS on
-        //         that same stream. We therefore decide kTLS routing up front:
-        //         only when this probe succeeds does the per-connection path
-        //         attempt the kTLS transition. The probe runs a real loopback
-        //         TLS handshake and `config_ktls_server` on a throwaway socket
-        //         pair, exercising the exact kernel path (TCP_ULP="tls" +
-        //         crypto_info install) the data plane will use. No TLS config →
-        //         no kTLS (probe skipped, stays false).
-        let ktls_enabled = if tls_dynamic.is_some() {
-            crate::network::ktls_probe::probe_ktls_support().await
-        } else {
-            false
-        };
-        if ktls_enabled {
-            tracing::info!(
-                "Linux kTLS supported: TLS fetch connections will use kernel-offloaded \
-                 sendfile (zero-copy over TLS)"
-            );
-        } else if tls_dynamic.is_some() {
-            tracing::info!(
-                "Linux kTLS unavailable (kernel lacks `tls` module or non-Linux): TLS fetch \
-                 connections use the userspace rustls copy path"
-            );
-        }
-
-        // 0d. Build the outbound `TlsConnector` and the shared
-        //     `InterBrokerClient` once. Both the replicator-supervisor
-        //     and the heartbeat client clone the resulting Arc; the
-        //     raft transport receives it as an injected dialer.
-        let tls_connector = match &config.tls_config {
-            Some(tls) => {
-                // Build a client config that BOTH trusts the peer's serving
-                // CA (`trust_roots_path`, the cluster CA) AND presents this
-                // broker's own cert as a client cert — the controller
-                // listener requires mTLS (`client_auth = Required`), so an
-                // anonymous client config would be rejected with a TLS
-                // `UnknownCA`/handshake failure on every KIP-595 peer dial.
-                let client_cfg = tls
-                    .build_client_config_with_identity()
-                    .map_err(|e| BrokerError::Tls(e.to_string()))?;
-                Some(tokio_rustls::TlsConnector::from(client_cfg))
-            }
-            None => None,
-        };
-        let inter_broker_client = Arc::new(crate::network::client::InterBrokerClient::new(
-            tls_connector,
-            config.inter_broker_credentials.clone(),
-        ));
+        let StartupTransport {
+            tls_dynamic,
+            ktls_enabled,
+            inter_broker_client,
+        } = prepare_startup_transport(&config).await?;
 
         // 1. Bring up the metadata quorum BEFORE the client listener so
         //    handlers can read from it the moment they accept their first
@@ -1911,62 +3445,6 @@ impl Broker {
         //    `Controller::start` returns. We bridge that with an
         //    `Arc<OnceCell<Arc<ControllerHandle>>>` that's installed into
         //    the handshake up front and `set` once the controller exists.
-        let controller_cell: Arc<tokio::sync::OnceCell<Arc<crabka_raft::ControllerHandle>>> =
-            Arc::new(tokio::sync::OnceCell::new());
-
-        let handshake_opt: Option<Arc<dyn crabka_raft::RaftListenerHandshake>> = if config
-            .controller_listener_protocol
-            == crabka_security::ListenerProtocol::Plaintext
-        {
-            // C-1: the controller listener carries raft/controller RPCs
-            // (Vote, BeginQuorumEpoch, Fetch, SubmitChange) — i.e. cluster
-            // metadata and leadership. Running it as PLAINTEXT means there
-            // is NO authentication and NO authorization on that path: any
-            // host with network reachability to this port can inject
-            // cluster metadata, hijack leadership, or disrupt consensus.
-            // We keep dev/single-node working (do not refuse to start), but
-            // warn loudly so this is never an accidental production posture.
-            tracing::warn!(
-                "controller listener is PLAINTEXT: no authentication or authorization is \
-                 enforced on raft/controller RPCs. Any host with network access to this port \
-                 can inject cluster metadata or manipulate leadership. Configure TLS or SASL \
-                 (controller_listener_protocol = Ssl / SaslPlaintext / SaslSsl) for any \
-                 non-isolated deployment."
-            );
-            None
-        } else {
-            // Raft handshake uses the current (snapshot) acceptor. A
-            // mid-rotation reload affects only *new* raft handshakes;
-            // already-established peer connections keep their negotiated
-            // ServerConfig.
-            let raft_acceptor = tls_dynamic
-                .as_ref()
-                .map(|d| tokio_rustls::TlsAcceptor::from(d.current()));
-            let hs = crate::raft_handshake::BrokerRaftHandshake {
-                tls_acceptor: raft_acceptor,
-                plain_credentials: config.plain_credentials.clone(),
-                enabled_sasl_mechanisms: config.enabled_sasl_mechanisms.clone(),
-                protocol: config.controller_listener_protocol,
-                controller: controller_cell.clone(),
-                authorizer: config.authorizer.clone(),
-            };
-            Some(Arc::new(hs) as Arc<dyn crabka_raft::RaftListenerHandshake>)
-        };
-
-        // SNI for dialing peer controller listeners. The operator renders the
-        // shared headless-Service FQDN (a SAN on every broker's serving cert)
-        // so mTLS validates regardless of which peer pod IP we connect to.
-        // Falls back to "localhost" for single-node / dev (no peers dialed).
-        let controller_server_name = config
-            .controller_server_name
-            .clone()
-            .unwrap_or_else(|| "localhost".to_string());
-        let raft_dialer: Option<std::sync::Arc<dyn crabka_raft::OutboundDialer>> =
-            Some(Arc::new(crate::network::client::InterBrokerDialer::new(
-                inter_broker_client.clone(),
-                config.controller_listener_protocol,
-                controller_server_name,
-            )) as Arc<dyn crabka_raft::OutboundDialer>);
 
         // KIP-853: the bootstrap records carry the seed `VotersRecord`. Load
         // them once here so the cold-boot voter set feeds `ControllerConfig`;
@@ -1975,136 +3453,13 @@ impl Broker {
         // on `bootstrap_servers` + auto-join instead. Broker-only nodes never
         // run a controller, so the records stay unused (step 2b is gated on
         // having a non-empty set and `Bootstrap` mode).
-        let mut bootstrap_records = crate::bootstrap::load_bootstrap_records(&config.log_dir)?;
-
-        let controller: Arc<dyn crate::metadata_source::MetadataSource> = if config.is_controller()
-        {
-            let mut initial_voters = crate::bootstrap::initial_voters(&bootstrap_records);
-
-            // KIP-595 static voters: the engine reconstructs its voter set from
-            // `ControllerConfig.initial_voters` every boot. When no `VotersRecord` was
-            // loaded from `bootstrap.records.bin` (the in-process start path that
-            // didn't run `crabka format`), build the static set from
-            // `controller_quorum_voters`. Two shapes:
-            //
-            //   * Single-voter (`len <= 1`): standalone self-bootstrap of *this*
-            //     node; self-elects on the first election timeout.
-            //   * Multi-voter (`len > 1`): the full configured voter set, so
-            //     every node starts with voters={all configured} and elects
-            //     among themselves over the real KIP-595 wire — no auto-join.
-            //
-            // This must run for `Rejoin` as well as `Bootstrap`: a restarted
-            // node recovers its committed metadata log from disk but the engine
-            // still derives `voters` (peer endpoints for dialing/forwarding)
-            // from `initial_voters`. Without this a `Rejoin` node would come up
-            // with an empty voter set — unable to dial peers or forward
-            // `submit_change` to the leader. Only `Bootstrap` additionally seeds
-            // the metadata log (the `V1Voters` + `V1KRaftVersion` pair submitted
-            // through raft in step 2b); a `Rejoin` node already has them
-            // committed on disk and must not re-submit.
-            if initial_voters.is_empty() && !config.controller_quorum_voters.is_empty() {
-                // Build the static voter set, keeping peer hosts as their
-                // configured DNS names so the dialer re-resolves them per
-                // (re)connect — a rejoining peer on a new pod IP stays
-                // reachable. See `static_controller_voter_set`.
-                let voters = static_controller_voter_set(
-                    &config.controller_quorum_voters,
-                    config.node_id,
-                    config.directory_id,
-                    config.controller_listen_addr,
-                );
-                tracing::info!(
-                    node_id = config.node_id.0,
-                    voter_count = config.controller_quorum_voters.len(),
-                    mode = ?config.bootstrap_mode,
-                    "KIP-595 static voter set: deriving voters from controller_quorum_voters (peer hosts re-resolved per dial)"
-                );
-                // The engine reconstructs its voter set from `initial_voters`
-                // (config-derived) every boot under KIP-595 static voters, so the
-                // `V1Voters` / `V1KRaftVersion` raft-control records are NOT seeded
-                // onto the KIP-631-framed metadata log here (they have no KIP-631
-                // counterpart; dynamic reconfiguration is not handled here).
-                initial_voters = voters;
-
-                // KIP-584/1022: a standalone self-bootstrap finalizes every
-                // feature at the newest release's default (metadata.version MAX),
-                // matching a freshly-formatted 4.0 cluster — so e.g. group.version=1
-                // is finalized and the next-gen group protocol is enabled.
-                bootstrap_records.extend(crabka_metadata::bootstrap_feature_records(
-                    crabka_metadata::metadata_version::METADATA_VERSION_MAX,
-                ));
-            }
-
-            let controller_cfg = crabka_raft::ControllerConfig {
-                node_id: config.node_id,
-                bootstrap_servers: config.bootstrap_servers.clone(),
-                directory_id: config.directory_id,
-                auto_join: config.auto_join,
-                observer_lag_bound: config.observer_lag_bound,
-                initial_voters,
-                controller_listen_addr: config.controller_listen_addr,
-                log_dir: config.log_dir.join("__cluster_metadata"),
-                // Sourced from `BrokerConfig` — see the docstrings there for
-                // the production-vs-test tradeoff. Crucially this also sets
-                // openraft's `leader_lease` to `election_timeout × 2`, which
-                // is the floor on how fast a 3-broker cluster can elect a
-                // replacement when the controller leader dies.
-                election_timeout: config.controller_election_timeout,
-                heartbeat_interval: config.controller_heartbeat_interval,
-                client_id: format!("crabka-broker-{}-controller", config.broker_id),
-                bootstrap_mode: config.bootstrap_mode,
-                cluster_id: config.cluster_id,
-                dialer: raft_dialer.clone(),
-                handshake: handshake_opt,
-                max_bytes_between_snapshots: config.metadata_max_bytes_between_snapshots,
-                max_snapshot_interval: config.metadata_max_snapshot_interval,
-                snapshot_interval_records: config.metadata_snapshot_interval_records,
-            };
-            let handle = Arc::new(
-                crabka_raft::Controller::start_with_listener(controller_cfg, controller_listener)
-                    .await
-                    .map_err(|e| BrokerError::Startup(e.to_string()))?,
-            );
-            // Populate the late-bound controller handle so the inbound
-            // `BrokerRaftHandshake` (already wired into the controller's
-            // accept loop) can perform SCRAM credential lookups on the next
-            // authenticated connection. The `set` cannot fail in practice
-            // because we hold the only writer; swallow the `SetError` defensively.
-            let _ = controller_cell.set(handle.clone());
-            handle as Arc<dyn crate::metadata_source::MetadataSource>
-        } else {
-            // Broker-only node: no openraft voter. Keep the `MetadataImage`
-            // current by fetching `__cluster_metadata` from the controller
-            // quorum (the observer), and forward writes to the quorum leader.
-            // `controller_cell` is left unset — a broker-only node runs no
-            // controller listener, so nothing performs SCRAM lookups on it.
-            // The caller-supplied `controller_listener` (if any) goes unused.
-            drop(controller_listener);
-            let dialer = raft_dialer
-                .clone()
-                .expect("broker-only node requires a raft dialer");
-            let observer = crate::metadata_observer::MetadataObserver::start(
-                crate::metadata_observer::ObserverConfig {
-                    voters: config.controller_quorum_voters.clone(),
-                    dialer: dialer.clone(),
-                    client_id: format!("crabka-broker-{}-observer", config.broker_id),
-                    cluster_id: config.cluster_id.unwrap_or_else(uuid::Uuid::nil),
-                    max_bytes: OBSERVER_FETCH_MAX_BYTES,
-                    poll_interval: OBSERVER_POLL_INTERVAL,
-                    sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
-                },
-            );
-            let forwarder = crate::metadata_source::QuorumForwarder {
-                voters: config.controller_quorum_voters.clone(),
-                dialer,
-                client_id: format!("crabka-broker-{}-writer", config.broker_id),
-                leader: observer.watch_leader(),
-            };
-            Arc::new(crate::metadata_source::ObserverSource::new(
-                observer,
-                Arc::new(forwarder),
-            )) as Arc<dyn crate::metadata_source::MetadataSource>
-        };
+        let controller = start_metadata_phase(
+            &mut config,
+            controller_listener,
+            tls_dynamic.as_ref(),
+            &inter_broker_client,
+        )
+        .await?;
 
         // 1b. KIP-853 controller auto-join. Spawned BEFORE the leader-wait in
         //     step 2: a `Join` broker's empty raft log keeps it in openraft's
@@ -2125,117 +3480,14 @@ impl Broker {
         // Auto-join grows the controller *voter* quorum, so only nodes that
         // run a controller participate. A broker-only node is a pure observer
         // and never joins the quorum.
-        if config.is_controller() {
-            let auto_join_protocol = config
-                .effective_listeners()
-                .iter()
-                .find(|l| l.name == config.inter_broker_listener_name)
-                .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
-            tokio::spawn(crate::auto_join::run(crate::auto_join::AutoJoinParams {
-                auto_join: config.auto_join,
-                node_id: config.node_id,
-                directory_id: config.directory_id,
-                cluster_id: config.cluster_id,
-                bootstrap_servers: config.bootstrap_servers.clone(),
-                listener_protocol: auto_join_protocol,
-                controller: controller.clone(),
-                inter_broker_client: inter_broker_client.clone(),
-            }));
-        }
+        // Auto-join, leader readiness, registration, and bootstrap submission
+        // are completed by `start_metadata_phase`.
 
         // 2. Wait for a leader, then submit a self-registration record so
         //    other brokers can discover us. Best-effort: if the submit
         //    fails the next caller's request will surface the error and
         //    membership reconciliation can retry later.
         {
-            let mut leader_rx = controller.watch_leader();
-            let deadline = std::time::Instant::now() + STARTUP_LEADER_WAIT_TIMEOUT;
-            while leader_rx.borrow().is_none() {
-                if std::time::Instant::now() > deadline {
-                    return Err(BrokerError::Startup(format!(
-                        "no leader elected within {STARTUP_LEADER_WAIT_TIMEOUT:?}"
-                    )));
-                }
-                let _ = tokio::time::timeout(
-                    std::time::Duration::from_millis(100),
-                    leader_rx.changed(),
-                )
-                .await;
-            }
-
-            // Controller-only nodes never register — they host no data and
-            // must not appear as brokers in Metadata/DescribeCluster.
-            if config.is_broker() {
-                // Load (or generate) the incarnation UUID before registering.
-                // This persists a UUID to `{log_dir}/incarnation_id` on first
-                // boot and reloads it on every subsequent start, so a JVM
-                // controller can detect broker restarts and fence stale
-                // replica memberships (KIP-631).
-                config.incarnation_id = crate::incarnation::load_or_generate(&config.log_dir);
-
-                // Per-listener endpoints: every configured listener's
-                // advertised `host:port` + protocol becomes a `BrokerEndpoint`
-                // on the broker's self-registration record. Clients on
-                // `Metadata` v9+ pick the right endpoint for their connection;
-                // legacy callers continue reading the top-level `host`/`port`.
-                let endpoints: Vec<crabka_metadata::BrokerEndpoint> = config
-                    .effective_listeners()
-                    .iter()
-                    .map(|l| {
-                        let (host, port) = parse_advertised_host_port(&l.advertised);
-                        crabka_metadata::BrokerEndpoint {
-                            name: l.name.clone(),
-                            host,
-                            port,
-                            protocol: l.protocol,
-                        }
-                    })
-                    .collect();
-                let self_reg = crabka_metadata::MetadataRecord::V1BrokerRegistration(
-                    crabka_metadata::BrokerRegistrationRecord {
-                        node_id: config.node_id,
-                        broker_epoch: 0,
-                        incarnation_id: config.incarnation_id,
-                        host: config
-                            .advertised_listener
-                            .split(':')
-                            .next()
-                            .unwrap_or("127.0.0.1")
-                            .to_string(),
-                        port: config.listen_addr.port(),
-                        rack: config.rack.clone(),
-                        endpoints,
-                    },
-                );
-                let backoff = exponential_backoff::Backoff::new(
-                    SELF_REGISTRATION_MAX_ATTEMPTS,
-                    SELF_REGISTRATION_BACKOFF_MIN,
-                    Some(SELF_REGISTRATION_BACKOFF_MAX),
-                );
-                for (attempt_idx, delay) in backoff.into_iter().enumerate() {
-                    let attempt = attempt_idx + 1;
-                    match controller.submit_change(vec![self_reg.clone()]).await {
-                        Ok(()) => break,
-                        Err(e) => match delay {
-                            Some(delay) => {
-                                tracing::warn!(
-                                    attempt,
-                                    retry_after_ms = delay.as_millis(),
-                                    error = %e,
-                                    "self-registration failed; retrying before serving"
-                                );
-                                tokio::time::sleep(delay).await;
-                            }
-                            None => {
-                                return Err(BrokerError::Startup(format!(
-                                    "self-registration failed after {attempt} attempts: {e}"
-                                )));
-                            }
-                        },
-                    }
-                }
-            }
-
             // 2b. First-start bootstrap-records submit.
             //
             //     On a fresh-cluster cold boot (`BootstrapMode::Bootstrap`),
@@ -2255,1333 +3507,63 @@ impl Broker {
             //     Missing-file is treated as empty (handled by the loader),
             //     so the legacy zero-record path is a no-op and existing
             //     deployments / tests are byte-identical.
-            if matches!(config.bootstrap_mode, crate::BootstrapMode::Bootstrap) {
-                // KIP-853 raft-control records (`V1Voters` / `V1KRaftVersion`)
-                // have no KIP-631 metadata-log counterpart and are never carried
-                // on the KIP-631-framed metadata log here — the engine
-                // reconstructs its voter set from `initial_voters` (config) every
-                // boot. Drop them from the metadata-log submit; only the genuine
-                // metadata records (ACLs, SCRAM, quotas, …) are seeded.
-                bootstrap_records.retain(|r| {
-                    !matches!(
-                        r,
-                        crabka_metadata::MetadataRecord::V1Voters(_)
-                            | crabka_metadata::MetadataRecord::V1KRaftVersion(_)
-                    )
-                });
-                // The cluster-wide finalized features (`metadata.version` etc.)
-                // are already seeded into `bootstrap_records` by
-                // `bootstrap_feature_records` at the point the static voter set
-                // is derived (see above) — a JVM follower refuses to build its
-                // `FeaturesImage` without `metadata.version`, so every
-                // KRaft-faithful fresh cluster carries them in the committed log.
-                if !bootstrap_records.is_empty() {
-                    tracing::info!(
-                        count = bootstrap_records.len(),
-                        "submitting bootstrap records"
-                    );
-                    controller
-                        .submit_change(bootstrap_records)
-                        .await
-                        .map_err(|e| {
-                            BrokerError::Replication(format!("bootstrap submit failed: {e}"))
-                        })?;
-                }
-            }
         }
 
-        // 3. Probe every configured log dir for writability. KIP-113
-        //    offline-dir handling: a single bad dir on a JBOD broker
-        //    must not take down the whole broker — it just gets marked
-        //    offline so `DescribeLogDirs` surfaces it with
-        //    `KAFKA_STORAGE_ERROR` and JBOD placement skips it.
-        let log_dir_status = crate::log_dir_status::LogDirRegistry::probe(&config.all_log_dirs());
+        let StorageStartup {
+            log_dir_status,
+            log_dir_ids,
+            partitions,
+            producer_state,
+            group_coordinator,
+            producer_ids,
+        } = recover_storage_and_groups(&config, &controller).await?;
 
-        // KIP-858: resolve a stable UUID per configured log.dir (minting +
-        // persisting for any extra JBOD dir that lacks one). Shared with the
-        // heartbeat client (offline_log_dirs) and the assignment reporter.
-        let log_dir_ids = crate::log_dir_id::LogDirIds::resolve(&config.all_log_dirs());
-
-        // 4. Scan + recover partitions on disk. Partition state is still
-        //    a local-disk concern; the metadata image is sourced from
-        //    `controller.current_image()` whenever a handler needs it.
-        //    Skip dirs marked offline by the probe — `scan_all` would
-        //    fail the whole startup on the first IO error, and we want
-        //    to keep recovering partitions on the surviving dirs.
-        let partitions: Arc<PartitionRegistry> = Arc::new(PartitionRegistry::new());
-        // Broker-wide idempotent/transactional producer-sequence tracker.
-        // Created before the partition scan so each recovered partition's
-        // writer task gets the shared handle (the `Compact` handler needs
-        // it to build the `RETAIN_EMPTY` active-producer snapshot).
-        let producer_state = Arc::new(crate::producer_state::ProducerState::new());
-        // Controller-only nodes host no data partitions, so they skip the
-        // disk scan/recovery entirely.
-        if config.is_broker() {
-            let scan_dirs = log_dir_status.online_subset(&config.all_log_dirs());
-            for (topic, partition_id, owning_dir) in log_dir::scan_all(&scan_dirs)? {
-                let dir = log_dir::partition_dir(&owning_dir, &topic, partition_id);
-                let log = crabka_log::Log::open(&dir, config.log_config.clone())?;
-                let part = spawn_partition(
-                    topic.clone(),
-                    PartitionIndex(partition_id),
-                    owning_dir,
-                    log,
-                    log_dir_status.clone(),
-                    producer_state.clone(),
-                );
-                partitions.insert(topic.clone(), PartitionIndex(partition_id), part);
-            }
-        }
-
-        // Group coordinator bootstrap. One unified coordinator owns both the
-        // classic and the next-gen consumer-group protocols.
-        let offsets_log: std::sync::Arc<dyn crate::coordinator::unified::offsets_log::OffsetsLog> =
-            std::sync::Arc::new(
-                crate::coordinator::unified::offsets_log::ProductionOffsetsLog::new(
-                    partitions.clone(),
-                ),
-            );
-        let group_coordinator = std::sync::Arc::new(crate::coordinator::GroupCoordinator::new(
-            config.next_gen_consumer_group.as_ref().clone(),
-            config.share_group.as_ref().clone(),
-            std::sync::Arc::new(crate::coordinator::unified::ImageMetadataProvider {
-                controller: controller.clone(),
-            }),
-            offsets_log,
-            config.streams_group.as_ref().clone(),
-        ));
-        let producer_ids = Arc::new(crate::producer_id_manager::ProducerIdManager::new());
-        crate::coordinator::bootstrap::bootstrap(
+        let CoordinatorStartup {
+            txn_coordinator,
+            share_coordinator,
+            share_partition_leaders,
+        } = start_coordinators(
             &config,
             &controller,
             &partitions,
             &group_coordinator,
-            &log_dir_status,
-            &producer_state,
+            &producer_ids,
+            &inter_broker_client,
         )
-        .await?;
-        crate::coordinator::bootstrap::bootstrap_audit_topic(&config, &controller).await?;
-
-        // 4a. Construct the transaction coordinator. All dependencies
-        //     (controller, partitions, producer_ids) are ready at this point.
-        //     Replay any existing __transaction_state records; errors are
-        //     warnings because a brand-new broker has nothing to replay.
-        let txn_coordinator = Arc::new(crate::txn::coordinator::TxnCoordinator::new(
-            config.node_id,
-            partitions.clone(),
-            producer_ids.clone(),
-        ));
-        let _ = txn_coordinator
-            .recover(&controller.current_image())
-            .await
-            .map_err(|e| tracing::warn!(error = %e, "txn coordinator recovery error"));
-
-        // 4a'. Construct the share coordinator (KIP-932 persister). Same
-        //      dependencies as the txn coordinator; replay any existing
-        //      __share_group_state records (warnings only — a fresh broker
-        //      has nothing to replay).
-        let share_coordinator = Arc::new(
-            crate::share_coordinator::coordinator::ShareCoordinator::new(
-                config.node_id,
-                partitions.clone(),
-                (*config.share_coordinator).clone(),
-            ),
-        );
-        let _ = share_coordinator
-            .recover(&controller.current_image())
-            .await
-            .map_err(|e| tracing::warn!(error = %e, "share coordinator recovery error"));
-
-        // 4a''. Wire the KIP-932 group-coordinator → share-state-persister
-        //       bridge. Both the `ShareCoordinator` and the `GroupCoordinator`
-        //       exist now, so build the `SharePersister` and hand it to the
-        //       coordinator; its per-group share actors read it after reconcile
-        //       to Initialize/Delete per-partition share state. Single-broker
-        //       setups always route locally; remote routing mirrors EndTxn.
-        let share_persister = Arc::new(
-            crate::share_coordinator::persister_client::SharePersister::new(
-                config.node_id,
-                share_coordinator.clone(),
-                controller.clone(),
-                inter_broker_client.clone(),
-                config
-                    .effective_listeners()
-                    .iter()
-                    .find(|l| l.name == config.inter_broker_listener_name)
-                    .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol),
-                config.inter_broker_listener_name.clone(),
-            ),
-        );
-        group_coordinator.set_share_persister(share_persister.clone());
-        group_coordinator.set_metadata_source(controller.clone());
-
-        // Share-partition leader manager (KIP-932): owns the
-        //        in-memory acquisition state machines for the (group, topic,
-        //        partition) triples this broker leads, loading/persisting them
-        //        through the same `SharePersister`. A background sweeper expires
-        //        acquisition locks so unacknowledged records redeliver.
-        let share_partition_leaders = Arc::new(
-            crate::share_partition::manager::SharePartitionLeaderManager::new(
-                config.node_id,
-                partitions.clone(),
-                controller.clone(),
-                share_persister.clone(),
-                Arc::new((*config.share_group).clone()),
-            ),
-        );
-        share_partition_leaders.spawn_lock_sweeper();
+        .await;
 
         // 4b. Spawn the replicator supervisor. Started AFTER the controller
         //    is up and self-registration succeeded so the supervisor's
         //    initial reconcile already sees this broker in the brokers()
         //    set. With replication_factor=1 the desired follower set is
         //    always empty, so this is a no-op for single-broker setups.
-        let supervisor_shutdown = CancellationToken::new();
+        let runtime = start_broker_runtime(
+            &mut config,
+            &controller,
+            &inter_broker_client,
+            tls_dynamic.as_ref(),
+            (&partitions, &producer_state, &log_dir_status, &log_dir_ids),
+            (&txn_coordinator, &share_coordinator),
+        )
+        .await?;
 
-        // KIP-73 throttle state. Created here so it can be forwarded to
-        // the replicator supervisor (and from there to each replicator
-        // task). The refresh task is spawned later but shares the same Arc.
-        let throttle_state = Arc::new(crate::throttle::ThrottleState::new());
-
-        let inter_listener_proto = config
-            .effective_listeners()
-            .iter()
-            .find(|l| l.name == config.inter_broker_listener_name)
-            .map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
-
-        // Build the broker metrics handle early so the
-        // replicator supervisor (constructed next) can clone it; the
-        // `/metrics` HTTP listener and any other later consumers
-        // still reuse the same `metrics` value.
-        let metrics = crate::metrics::BrokerMetrics::new();
-
-        // ── Audit pipeline (FedRAMP MLA, Slice 1) ──────────────────────────
-        // Wired after `bootstrap_audit_topic` (which submits the audit topic
-        // metadata record into raft) and after `partitions` + `metrics` are
-        // live. The `KafkaTopicAuditSink` resolves the local audit partition
-        // lazily at write time, so it is safe to construct here even though
-        // the replicator supervisor (spawned below) has not yet materialized
-        // the local partition replica.
-        // Resolve the audit partition this broker leads (broker-affinity).
-        // Hoisted out of the audit_enabled block so block 2 (BrokerStarted
-        // wait) can key on the actual led partition index rather than
-        // hardcoding partition 0.
-        let audit_led_partition: Option<PartitionIndex> = if config.audit_enabled {
-            let image = controller.current_image();
-            let mut led: Option<PartitionIndex> = None;
-            let mut idx = 0i32;
-            while let Some(part) = image.partition(&config.audit_topic, idx) {
-                if part.leader == config.node_id {
-                    led = Some(PartitionIndex(idx));
-                    break;
-                }
-                idx += 1;
-            }
-            led
-        } else {
-            None
-        };
-
-        let audit_log = if config.audit_enabled {
-            let (log, rx) = crabka_audit::AuditLog::new(AUDIT_EVENT_QUEUE_CAPACITY);
-            if let Some(pidx) = audit_led_partition {
-                let sink = std::sync::Arc::new(crate::audit_sink::KafkaTopicAuditSink::new(
-                    partitions.clone(),
-                    config.audit_topic.clone(),
-                    pidx,
-                    metrics.clone(),
-                ));
-                let audit_signer: Option<std::sync::Arc<dyn crabka_audit::SigningKeyProvider>> =
-                    if let (Some(path), Some(key_id)) =
-                        (&config.audit_signing_key_path, &config.audit_signing_key_id)
-                    {
-                        match crabka_audit::FileEd25519Signer::from_pkcs8_file(path, key_id.clone())
-                        {
-                            Ok(s) => Some(std::sync::Arc::new(s)),
-                            Err(e) => {
-                                tracing::error!(
-                                    error = %e,
-                                    "failed to load audit signing key; checkpoints disabled"
-                                );
-                                None
-                            }
-                        }
-                    } else {
-                        tracing::info!(
-                            "no audit signing key configured; audit checkpoints disabled"
-                        );
-                        None
-                    };
-
-                // Open the durable spool (resolve relative dir under the log dir).
-                let spool_dir = if config.audit_spool_dir.is_absolute() {
-                    config.audit_spool_dir.clone()
-                } else {
-                    config.log_dir.join(&config.audit_spool_dir)
-                };
-                let spool = match crabka_audit::Spool::open(
-                    &spool_dir,
-                    config.audit_spool_max_bytes,
-                ) {
-                    Ok(s) => Some(s),
-                    Err(e) => {
-                        tracing::error!(error = %e, "failed to open audit spool; spooling disabled");
-                        None
-                    }
-                };
-
-                // Recover the chain: prefer the spool's last record, else the topic tail.
-                let resume = spool
-                    .as_ref()
-                    .and_then(|s| s.resume_point().ok().flatten())
-                    .or_else(|| {
-                        partitions
-                            .get(&config.audit_topic, pidx)
-                            .and_then(|p| crate::audit_recovery::recover_from_partition_tail(&p))
-                    });
-                let chain = match resume {
-                    Some((next_seq, head)) => {
-                        tracing::info!(next_seq, "audit chain resumed");
-                        crabka_audit::ChainState::resume(next_seq, head)
-                    }
-                    None => crabka_audit::ChainState::new(),
-                };
-
-                let stats = std::sync::Arc::new(crabka_audit::AuditStats::new());
-                let writer = crabka_audit::AuditWriter::new(
-                    rx,
-                    crabka_audit::AuditWriterParams {
-                        sink,
-                        product: Self::audit_product(),
-                        signer: audit_signer,
-                        checkpoint_every_n: config.audit_checkpoint_every_n,
-                        checkpoint_every: std::time::Duration::from_secs(
-                            config.audit_checkpoint_every_secs,
-                        ),
-                        chain,
-                        spool,
-                        stats: stats.clone(),
-                        replay_every: AUDIT_SPOOL_REPLAY_INTERVAL,
-                        sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
-                    },
-                );
-                tokio::spawn(writer.run());
-
-                // Poll spool stats into Prometheus on each tick.
-                let poll_metrics = metrics.clone();
-                let poll_log = log.clone();
-                tokio::spawn(async move {
-                    let mut last_spooled = 0u64;
-                    let mut last_replayed = 0u64;
-                    let mut last_dropped = 0u64;
-                    let mut tick = tokio::time::interval(AUDIT_STATS_POLL_INTERVAL);
-                    loop {
-                        tick.tick().await;
-                        let spooled = stats.spooled();
-                        let replayed = stats.replayed();
-                        // dropped = spool-full/io drops (stats) + channel-full drops (AuditLog)
-                        let dropped = stats.dropped() + poll_log.dropped();
-                        poll_metrics
-                            .audit_records_spooled_total
-                            .inc_by(spooled - last_spooled);
-                        poll_metrics
-                            .audit_records_replayed_total
-                            .inc_by(replayed - last_replayed);
-                        poll_metrics
-                            .audit_records_dropped_total
-                            .inc_by(dropped - last_dropped);
-                        last_spooled = spooled;
-                        last_replayed = replayed;
-                        last_dropped = dropped;
-                        poll_metrics
-                            .audit_spool_depth
-                            .set(i64::try_from(stats.depth()).unwrap_or(i64::MAX));
-                        poll_metrics
-                            .audit_spool_bytes
-                            .set(i64::try_from(stats.spool_bytes()).unwrap_or(i64::MAX));
-                    }
-                });
-            } else {
-                tracing::warn!("no audit partition led by this broker; audit records will drop");
-            }
-            log
-        } else {
-            crabka_audit::AuditLog::disabled()
-        };
-        // Wrap the cluster authorizer with the deny-auditing decorator so every
-        // Deny decision is recorded as an AuthorizationDenied audit event.
-        if config.audit_enabled {
-            config.authorizer = Arc::new(crate::audit_authorizer::AuditingAuthorizer::new(
-                config.authorizer.clone(),
-                audit_log.clone(),
-            ));
-        }
-        // ───────────────────────────────────────────────────────────────────
-
-        // KIP-113 offline-dir handling: feed the supervisor the online
-        // subset so newly materialized partitions never land on a dir
-        // the startup probe flagged unwritable.
-        let supervisor = crate::replicator_supervisor::ReplicatorSupervisor::new(
-            config.node_id,
-            config.broker_id,
-            controller.clone(),
-            partitions.clone(),
-            log_dir_status.online_subset(&config.all_log_dirs()),
-            config.log_config.clone(),
-            format!("crabka-broker-{}-replicator", config.broker_id),
-            supervisor_shutdown.clone(),
-            Some(txn_coordinator.clone()),
-            Some(share_coordinator.clone()),
-            inter_broker_client.clone(),
-            inter_listener_proto,
-            config.inter_broker_listener_name.clone(),
-            throttle_state.clone(),
-            log_dir_status.clone(),
-            producer_state.clone(),
-            metrics.clone(),
-            log_dir_ids.clone(),
-        );
-        let supervisor_handle = supervisor.spawn();
-
-        // 4c. Liveness state for KIP-500 BrokerHeartbeat tracking.
-        let liveness = Arc::new(
-            crate::heartbeat::controller_state::ControllerLivenessState::new(
-                std::time::Duration::from_millis(config.heartbeat_timeout_ms),
-            ),
-        );
-
-        // 4d. Broker-side heartbeat client: sends BrokerHeartbeat to the
-        //     controller leader on every tick. Child token of
-        //     supervisor_shutdown so it is cancelled on broker shutdown.
-        let (want_shutdown_tx, want_shutdown_rx) = tokio::sync::watch::channel(false);
-        let (should_shutdown_tx, _should_shutdown_rx) = tokio::sync::watch::channel(false);
-        let want_shutdown_tx = Arc::new(want_shutdown_tx);
-        let should_shutdown_tx = Arc::new(should_shutdown_tx);
-        let heartbeat_shutdown = supervisor_shutdown.child_token();
-        let _heartbeat_handle = tokio::spawn(crate::heartbeat::client::run(
-            crate::heartbeat::client::Config {
-                broker_id: config.broker_id,
-                interval: std::time::Duration::from_millis(config.heartbeat_interval_ms),
-                controller: controller.clone(),
-                shutdown: heartbeat_shutdown,
-                inter_broker_client: inter_broker_client.clone(),
-                inter_broker_listener_protocol: inter_listener_proto,
-                inter_broker_listener_name: config.inter_broker_listener_name.clone(),
-                want_shutdown: want_shutdown_rx,
-                should_shutdown: should_shutdown_tx.clone(),
-                log_dir_status: log_dir_status.clone(),
-                log_dir_ids: log_dir_ids.clone(),
-                all_log_dirs: config.all_log_dirs(),
-                supervisor_shutdown: supervisor_shutdown.clone(),
-            },
-        ));
-
-        // 4d-2. KIP-966 Unclean Recovery Manager: the controller-side
-        //       orchestrator that polls surviving replicas for their log
-        //       state and elects the most-complete-log replica. Both the
-        //       automatic failover path (the ticker below) and the operator
-        //       `ElectLeaders UNCLEAN` handler enqueue jobs onto it. Built
-        //       here, before the ticker, so the ticker closure can capture a
-        //       clone of the handle. Reuses the same `Arc<InterBrokerClient>`
-        //       and inter-broker listener protocol as the heartbeat path.
-        let unclean_recovery = crate::unclean_recovery::UncleanRecoveryManager::spawn(
-            controller.clone(),
-            liveness.clone(),
-            config.node_id,
-            inter_broker_client.clone(),
-            inter_listener_proto,
-            metrics.clone(),
-            supervisor_shutdown.child_token(),
-        );
-
-        // 4e. Controller-side liveness ticker: scans the heartbeat registry
-        //     every second and fires leader_election callbacks on transitions.
-        let liveness_for_ticker = liveness.clone();
-        let controller_for_ticker = controller.clone();
-        let ticker_node_id = config.node_id;
-        let ticker_shutdown = supervisor_shutdown.child_token();
-        let metrics_for_ticker = metrics.clone();
-        let recovery_for_ticker = unclean_recovery.clone();
-        tokio::spawn(async move {
-            let mut tick = tokio::time::interval(LIVENESS_TICK_INTERVAL);
-            loop {
-                tokio::select! {
-                    _ = tick.tick() => {},
-                    () = ticker_shutdown.cancelled() => return,
-                }
-                let transitions = liveness_for_ticker.tick().await;
-                for t in transitions {
-                    use crate::heartbeat::controller_state::LivenessTransition::{
-                        AliveToDead, DeadToAlive,
-                    };
-                    match t {
-                        AliveToDead(n) => {
-                            if let Err(e) = crate::leader_election::on_broker_dead(
-                                &controller_for_ticker,
-                                ticker_node_id,
-                                crabka_raft::NodeId(n),
-                                &liveness_for_ticker,
-                                &metrics_for_ticker,
-                                &recovery_for_ticker,
-                            )
-                            .await
-                            {
-                                tracing::warn!(broker = n, error = %e,
-                                    "leader_election on_broker_dead failed");
-                            }
-                        }
-                        DeadToAlive(n) => {
-                            if let Err(e) = crate::leader_election::on_broker_alive(
-                                &controller_for_ticker,
-                                ticker_node_id,
-                                crabka_raft::NodeId(n),
-                                &liveness_for_ticker,
-                            )
-                            .await
-                            {
-                                tracing::warn!(broker = n, error = %e,
-                                    "leader_election on_broker_alive failed");
-                            }
-                        }
-                    }
-                }
-            }
-        });
-
-        // 4e-2. Leadership-change watcher: whenever this broker becomes the
-        //       raft leader it seeds the liveness registry with all brokers
-        //       known in the current metadata image. This gives live brokers a
-        //       full heartbeat timeout window to discover the new controller
-        //       before liveness failover runs against this node's fresh local
-        //       heartbeat map. Without seeding, `AliveToDead` never fires for a
-        //       broker that dies while a *different* raft node is the leader.
-        {
-            let mut leader_watch = controller.watch_leader();
-            let this_node = config.node_id;
-            let liveness_seed = liveness.clone();
-            let controller_seed = controller.clone();
-            let seed_shutdown = supervisor_shutdown.child_token();
-            let metrics_seed = metrics.clone();
-            // Track the leader value across `changed()`
-            // notifications so we only bump the counter on actual
-            // transitions (the watch may signal-without-change in some
-            // raft impls; ignore those).
-            let mut last_leader: Option<crabka_raft::NodeId> = *leader_watch.borrow();
-            tokio::spawn(async move {
-                loop {
-                    tokio::select! {
-                        _ = leader_watch.changed() => {},
-                        () = seed_shutdown.cancelled() => return,
-                    }
-                    let new_leader = *leader_watch.borrow();
-                    if new_leader != last_leader {
-                        metrics_seed.controller_leader_changes_total.inc();
-                        last_leader = new_leader;
-                    }
-                    if new_leader == Some(this_node) {
-                        // We just became the raft leader. Seed liveness for
-                        // every broker currently in the metadata image.
-                        let ids: Vec<u64> = controller_seed
-                            .current_image()
-                            .brokers()
-                            .map(|b| b.node_id.0)
-                            .collect();
-                        liveness_seed.seed_brokers(ids).await;
-                    }
-                }
-            });
-        }
-
-        // Build the Prometheus metrics registry + handles
-        // *before* spawning subsystems that emit. Each subsystem clones
-        // a cheap `BrokerMetrics` (single Arc bump). The HTTP
-        // `/metrics` server is spawned only when configured; ISR
-        // maintenance / produce / fetch always update counters.
-        // (The `BrokerMetrics` value itself was constructed
-        // earlier so the replicator supervisor could share it.)
-        let metrics_bound_addr = if let Some(addr) = config.metrics_listen_addr {
-            let shutdown = supervisor_shutdown.child_token();
-            let registry = metrics.registry.clone();
-            // `run` already spawns the server task internally; await
-            // its bind so a port conflict surfaces from `Broker::start`
-            // instead of being lost in a detached task.
-            let bound = crate::metrics_server::run(addr, registry, shutdown)
-                .await
-                .map_err(BrokerError::Io)?;
-            Some(bound)
-        } else {
-            None
-        };
-        // KIP-714 client-metrics: build the bundle (manager + Prometheus
-        // collector + OTLP forwarder) and register the collector into the
-        // shared metrics registry so it appears on the `/metrics` scrape.
-        let client_metrics = Arc::new(crate::client_metrics::ClientMetrics::new(
-            crate::client_metrics::DEFAULT_TELEMETRY_MAX_BYTES,
-            config.client_metrics_otlp_endpoint.clone(),
-        ));
-        {
-            let mut reg = metrics.registry.lock().await;
-            reg.register_collector(Box::new(
-                crate::client_metrics::prometheus_sink::SharedClientMetricsCollector(
-                    client_metrics.prometheus.clone(),
-                ),
-            ));
-        }
-        // Periodic eviction of stale client-metrics entries. Child token of
-        // supervisor_shutdown.
-        {
-            let cm = client_metrics.clone();
-            let token = supervisor_shutdown.child_token();
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(CLIENT_METRICS_EVICTION_TICK);
-                loop {
-                    tokio::select! {
-                        () = token.cancelled() => break,
-                        _ = tick.tick() => cm.manager.evict_stale(
-                            CLIENT_METRICS_STALE_PUSH_INTERVALS,
-                            CLIENT_METRICS_STALE_FLOOR,
-                        ),
-                    }
-                }
-            });
-        }
-
-        // Background gauge updater: poll partitions_led + active_controller
-        // once a second. Cheap (DashMap iteration + one atomic borrow).
-        {
-            let partitions_for_gauge = partitions.clone();
-            let controller_for_gauge = controller.clone();
-            let liveness_for_gauge = liveness.clone();
-            let node_id = config.node_id;
-            let m = metrics.clone();
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(async move {
-                let mut tick = tokio::time::interval(GAUGE_POLL_INTERVAL);
-                loop {
-                    tokio::select! {
-                        _ = tick.tick() => {}
-                        () = shutdown.cancelled() => return,
-                    }
-                    let led = partitions_for_gauge
-                        .arcs()
-                        .iter()
-                        .filter(|p| {
-                            p.current_leader.load(std::sync::atomic::Ordering::Acquire) == node_id
-                        })
-                        .count();
-                    m.partitions_led.set(i64::try_from(led).unwrap_or(i64::MAX));
-                    // Total replicas this broker hosts (leader
-                    // + follower). Cheap: just the registry length.
-                    let total = partitions_for_gauge.len();
-                    m.partitions_total
-                        .set(i64::try_from(total).unwrap_or(i64::MAX));
-                    // Per-leader URP count, sampled from the
-                    // current MetadataImage. URP = ISR.len() < replicas.len()
-                    // among partitions this broker leads. Read-only walk
-                    // of the image; matches Kafka's
-                    // ReplicaManager.UnderReplicatedPartitions semantics.
-                    //
-                    // The same walk also tallies UnderMinIsr (ISR <
-                    // topic's min.insync.replicas) and Offline (leader is
-                    // a dead broker, no live ISR replacement) so all three
-                    // health gauges land in lockstep from a single image
-                    // snapshot. Defaults to min.insync.replicas=1 when the
-                    // topic config is missing or unparseable, matching the
-                    // produce-path gate.
-                    let image = controller_for_gauge.current_image();
-                    let mut urp: usize = 0;
-                    let mut under_min_isr: usize = 0;
-                    let mut offline: usize = 0;
-                    // Snapshot the alive set once (single lock) rather than
-                    // taking the liveness lock per partition inside the scan.
-                    let alive = liveness_for_gauge.alive_snapshot().await;
-                    // Resolve each topic's min.insync.replicas once
-                    // (O(topics)); defaults to 1 when missing or unparseable,
-                    // matching the produce-path gate.
-                    let min_isr_by_topic: std::collections::HashMap<&str, usize> = image
-                        .topics()
-                        .map(|topic| {
-                            let min_isr = image
-                                .topic_config(&topic.name)
-                                .and_then(|m| m.get(crate::config_keys::MIN_INSYNC_REPLICAS))
-                                .and_then(|v| v.parse::<usize>().ok())
-                                .unwrap_or(1);
-                            (topic.name.as_str(), min_isr)
-                        })
-                        .collect();
-                    // Single O(P) walk over every partition.
-                    for pr in image.all_partitions() {
-                        if pr.leader == node_id {
-                            if pr.isr.len() < pr.replicas.len() {
-                                urp += 1;
-                            }
-                            let min_isr = min_isr_by_topic
-                                .get(pr.topic.as_str())
-                                .copied()
-                                .unwrap_or(1);
-                            if pr.isr.len() < min_isr {
-                                under_min_isr += 1;
-                            }
-                        }
-                        // Offline = the leader broker isn't
-                        // alive. Crabka's NodeId is `u64`, so
-                        // there's no in-band "leader unknown"
-                        // sentinel — the controller leaves a
-                        // PartitionRecord pointing at the dead
-                        // broker until a successor election (or
-                        // an unclean election) runs.
-                        // Only count partitions in the local
-                        // broker's owned set so the metric stays
-                        // per-broker; cluster-wide rollup can
-                        // sum across brokers.
-                        if pr.replicas.contains(&node_id) && !alive.contains(&pr.leader.0) {
-                            offline += 1;
-                        }
-                    }
-                    m.under_replicated_partitions
-                        .set(i64::try_from(urp).unwrap_or(i64::MAX));
-                    m.under_min_isr_partition_count
-                        .set(i64::try_from(under_min_isr).unwrap_or(i64::MAX));
-                    m.offline_partitions_count
-                        .set(i64::try_from(offline).unwrap_or(i64::MAX));
-                    let is_ctrl_leader = controller_for_gauge
-                        .watch_leader()
-                        .borrow()
-                        .is_some_and(|n| n == node_id);
-                    m.active_controller.set(i64::from(u8::from(is_ctrl_leader)));
-                }
-            });
-        }
-
-        // 4f. ISR maintenance: per-leader-partition shrink/expand tick.
-        //     Proposes AlterPartition changes when follower lag exceeds
-        //     `replica_lag_time_max_ms`. Child token of supervisor_shutdown.
-        let isr_shutdown = supervisor_shutdown.child_token();
-        tokio::spawn(crate::isr_maintenance::run(
-            crate::isr_maintenance::Config {
-                node_id: config.node_id,
-                partitions: partitions.clone(),
-                controller: controller.clone(),
-                replica_lag_time_max: std::time::Duration::from_millis(
-                    config.replica_lag_time_max_ms,
-                ),
-                broker_id: config.broker_id,
-                shutdown: isr_shutdown,
-                metrics: metrics.clone(),
-            },
-        ));
-
-        // Periodic per-partition disk-usage scanner. Walks
-        // the log dir each tick and updates `partition_disk_bytes` for
-        // the rebalancer's usage scraper. `0` disables entirely. The
-        // `JoinHandle` is retained on the `Broker` so shutdown can drain
-        // the task after cancelling `supervisor_shutdown`.
-        let disk_scanner_handle = if config.partition_disk_scan_interval_secs > 0 {
-            let scanner = crate::disk_scanner::DiskScanner {
-                log_dirs: config.all_log_dirs(),
-                interval: std::time::Duration::from_secs(config.partition_disk_scan_interval_secs),
-                metrics: metrics.clone(),
-                shutdown: supervisor_shutdown.child_token(),
-            };
-            Some(tokio::spawn(scanner.run()))
-        } else {
-            None
-        };
-
-        // OAUTHBEARER JWKS refresher. Spawned only when a JWKS
-        // endpoint is configured (signed-token validation). It shares the
-        // validator's key handle, so a successful fetch rotates the keys the
-        // SaslAuthenticate path reads — no restart, no lock. The first fetch
-        // fires immediately on spawn. Child token of supervisor_shutdown.
-        // Consume the parked signal_rx + shared rate-limit /
-        // expiry-timestamp state from `apply_to`; on-demand refresh + cache
-        // expiry are wired here so the validator's `JwksHandle` and the
-        // refresher point at the same Arc-shared cells.
-        if let Some(endpoint) = config.oauthbearer_jwks_endpoint.clone()
-            && let Some(handle) = config.oauthbearer_validator.jwks_handle()
-        {
-            let signal_rx = config
-                .oauthbearer_jwks_signal_rx
-                .lock()
-                .unwrap()
-                .take()
-                .expect("apply_to must park signal_rx whenever a signed validator is configured");
-            let refresher = crate::oauth_jwks::JwksRefresher {
-                endpoint,
-                handle,
-                interval: config.oauthbearer_jwks_refresh_interval,
-                shutdown: supervisor_shutdown.child_token(),
-                tls_trust: config.oauthbearer_idp_tls_trust.clone(),
-                signal_rx,
-                min_on_demand_pause: config.oauthbearer_jwks_min_on_demand_pause,
-                last_successful_fetch_ms: config.oauthbearer_jwks_last_successful_fetch_ms.clone(),
-                last_on_demand_refresh_ms: config
-                    .oauthbearer_jwks_last_on_demand_refresh_ms
-                    .clone(),
-                ignore_key_use: config.oauthbearer_jwks_ignore_key_use,
-                sleeper: std::sync::Arc::new(qubit_clock::sleep::SystemSleeper::new()),
-            };
-            tokio::spawn(refresher.run());
-        }
-
-        // 4g. Auto-rebalance background task (KIP-460). The task itself
-        //     checks is_leader() on every tick so it is safe to run on
-        //     every broker; only the raft leader will actually submit
-        //     partition changes. Child token of supervisor_shutdown.
-        if config.auto_leader_rebalance_enable {
-            let rebalance_cfg = crate::leader_rebalance::AutoRebalanceConfig {
-                check_interval: std::time::Duration::from_secs(
-                    config.leader_imbalance_check_interval_secs,
-                ),
-                imbalance_threshold_pct: config.leader_imbalance_per_broker_percentage,
-            };
-            let adapter: Arc<dyn crate::leader_rebalance::ControllerLike> =
-                Arc::new(ControllerAdapter {
-                    handle: controller.clone(),
-                    node_id: config.node_id,
-                });
-            let rebalance_liveness = liveness.clone();
-            let rebalance_shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(crate::leader_rebalance::run(
-                adapter,
-                rebalance_liveness,
-                rebalance_cfg,
-                rebalance_shutdown,
-            ));
-        }
-
-        // Spawn reassignment-completion background task. The task itself
-        // checks is_leader() per image apply — safe to run on every broker.
-        // Always-on (no config gate): reassignment completion is a
-        // correctness requirement, not an optional behavior.
-        {
-            let adapter: Arc<dyn crate::reassignment::ReassignmentController> =
-                Arc::new(ReassignmentControllerAdapter {
-                    handle: controller.clone(),
-                    node_id: config.node_id,
-                });
-            let liveness_clone = liveness.clone();
-            let shutdown_clone = supervisor_shutdown.child_token();
-            tokio::spawn(crate::reassignment::run(
-                adapter,
-                liveness_clone,
-                shutdown_clone,
-            ));
-        }
-
-        // Idempotent-producer state expiry sweep (KIP-360 /
-        // `producer.id.expiration.ms`). Without it the per-partition
-        // producer-state maps grow unbounded as idempotent producers churn.
-        // Kafka defaults: expire entries idle for 24h, checked every 10min.
-        {
-            const PRODUCER_ID_EXPIRATION_MS: i64 = 86_400_000;
-            const CHECK_INTERVAL_SECS: u64 = 600;
-            let producer_state = producer_state.clone();
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(async move {
-                let mut tick =
-                    tokio::time::interval(std::time::Duration::from_secs(CHECK_INTERVAL_SECS));
-                tick.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-                loop {
-                    tokio::select! {
-                        _ = tick.tick() => {
-                            let now_ms = crate::time_util::now_ms();
-                            producer_state
-                                .expire_older_than(now_ms, PRODUCER_ID_EXPIRATION_MS)
-                                .await;
-                        }
-                        () = shutdown.cancelled() => return,
-                    }
-                }
-            });
-        }
-
-        // Per-broker log compaction ticker. Always-on; the
-        // cleaner internally filters to (leader && cleanup.policy=compact)
-        // partitions so brokers with no compact topics pay nothing.
-        {
-            let partitions = partitions.clone();
-            let shutdown = supervisor_shutdown.child_token();
-            #[allow(unused_mut)]
-            let mut cfg = crate::cleaner::CleanerConfig::default();
-            #[cfg(any(test, feature = "test-helpers"))]
-            if let Some(interval) = config.cleaner_interval_override {
-                cfg.interval = interval;
-            }
-            tokio::spawn(crate::cleaner::run(
-                partitions,
-                config.node_id,
-                cfg,
-                shutdown,
-                metrics.clone(),
-            ));
-        }
-
-        // KIP-405: tiered-storage copy path. Only spawn when a
-        // remote-storage directory is configured. The reference local store
-        // + in-memory metadata manager are constructed once and shared
-        // across ticks; per-topic offload is gated by `remote.storage.enable`,
-        // and the task filters to partitions this broker leads.
-        //
-        // Construction is hoisted here so the `RemoteReader` on
-        // `Broker` and the copy task share the same RSM / RLMM pair. A
-        // single broker has exactly one of each.
-        // Hoist the parameters for the topic-backed RLMM
-        // bootstrap before `config` moves into the broker struct.
-        let kafka_swap_kickoff: Option<KafkaSwapKickoff> = match &config.remote_log_metadata {
-            crate::config::RlmmKind::InMemory => None,
-            crate::config::RlmmKind::TopicBacked(cfg) => Some({
-                // Resolve the inter-broker listener: its advertised address is
-                // the RLMM bootstrap; its protocol + the broker's credentials +
-                // TLS client config form the metadata-client security policy.
-                let listeners = config.effective_listeners();
-                let inter = listeners
-                    .iter()
-                    .find(|l| l.name == config.inter_broker_listener_name);
-                let proto =
-                    inter.map_or(crabka_security::ListenerProtocol::Plaintext, |l| l.protocol);
-                // Plaintext inter-broker → no security (loopback unchanged).
-                let security = if proto.requires_tls() || proto.requires_sasl() {
-                    // Advertised host of the inter-broker listener. Used for
-                    // both the TLS SNI and the GSSAPI SPN host so they agree.
-                    let advertised_host = inter.map_or_else(
-                        || "localhost".to_string(),
-                        |l| parse_advertised_host_port(&l.advertised).0,
-                    );
-                    let tls = if proto.requires_tls() {
-                        config.tls_config.as_ref().map(|t| {
-                            crabka_client_core::security::TlsConnectorConfig {
-                                trust_roots_pem: t.trust_roots_path.clone(),
-                                // SNI = the advertised host of the inter-broker listener.
-                                server_name: advertised_host.clone(),
-                                client_identity: None,
-                            }
-                        })
-                    } else {
-                        None
-                    };
-                    let sasl = config
-                        .inter_broker_credentials
-                        .as_ref()
-                        .map(crate::network::client::to_client_creds);
-                    // GSSAPI SPN host: set for any SASL listener (SASL_PLAINTEXT
-                    // and SASL_SSL) so Kerberos gets the real advertised host
-                    // rather than falling back to "localhost".
-                    let sasl_host = proto.requires_sasl().then(|| advertised_host.clone());
-                    Some(Box::new(crabka_client_core::security::ClientSecurity {
-                        protocol: proto,
-                        tls,
-                        sasl,
-                        sasl_host,
-                    }))
-                } else {
-                    None
-                };
-                // Bootstrap address for the in-process RLMM metadata client.
-                // Priority: explicit config wins; then inter-broker advertised
-                // addr for secured listeners (TLS SNI / SASL host must match);
-                // then loopback-derived from the primary data listener.
-                let bootstrap = if !cfg.bootstrap.is_empty() {
-                    // Operator/file-config supplied an explicit address — always honor it.
-                    cfg.bootstrap.clone()
-                } else if security.is_some() {
-                    // Secured inter-broker listener: dial its advertised address so the TLS
-                    // SNI / SASL host match. Fall back to loopback if no inter-broker listener.
-                    inter.map_or_else(
-                        || loopback_bootstrap(config.listen_addr),
-                        |l| l.advertised.clone(),
-                    )
-                } else {
-                    // Plaintext, no explicit bootstrap: dial our own listener over loopback.
-                    loopback_bootstrap(config.listen_addr)
-                };
-                KafkaSwapKickoff {
-                    cfg: crate::config::KafkaRlmmConfig {
-                        bootstrap,
-                        num_partitions: cfg.num_partitions,
-                        replication: cfg.replication,
-                        snapshot_interval: cfg.snapshot_interval,
-                        // snapshot_dir is only empty for the programmatic BrokerConfig::default(); the TOML path (file_config.rs) already materialises it from log.dir.
-                        snapshot_dir: if cfg.snapshot_dir.as_os_str().is_empty() {
-                            config.log_dir.join("remote-log-metadata")
-                        } else {
-                            cfg.snapshot_dir.clone()
-                        },
-                        security,
-                    },
-                    broker_id: config.broker_id,
-                }
-            }),
-        };
-        let (remote_reader, kafka_swap_target): (
-            Option<Arc<crate::remote_reader::RemoteReader>>,
-            Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
-        ) = if let Some(backend) = config.remote_storage_backend.clone() {
-            let rsm: Arc<dyn crabka_remote_storage::RemoteStorageManager> = match backend {
-                crate::config::RemoteStorageBackend::Local { dir } => {
-                    Arc::new(crabka_remote_storage::LocalTieredStorage::new(dir))
-                }
-                crate::config::RemoteStorageBackend::S3(cfg) => Arc::new(
-                    crabka_remote_storage::S3RemoteStorage::from_s3_config(&cfg).map_err(|e| {
-                        BrokerError::Startup(format!("remote_storage.s3 builder failed: {e}"))
-                    })?,
-                ),
-                crate::config::RemoteStorageBackend::Gcs(cfg) => Arc::new(
-                    crabka_remote_storage::S3RemoteStorage::from_gcs_config(&cfg).map_err(|e| {
-                        BrokerError::Startup(format!("remote_storage.gcs builder failed: {e}"))
-                    })?,
-                ),
-            };
-            // `[remote_storage.kafka_metadata]` opts in to
-            // the topic-backed RLMM. We can't construct it inline
-            // because its `start` does a loopback `AdminClient` call
-            // to provision `__remote_log_metadata`, and the broker's
-            // listener accept loop is spawned later in this function.
-            // Boot behind a `SwappableRlmm` facade, then spawn a task that
-            // builds the `TopicBasedRemoteLogMetadataManager` once the
-            // listener is serving and swaps it in.
-            let (rlmm, kafka_swap_target): (
-                Arc<dyn crabka_remote_storage::RemoteLogMetadataManager>,
-                Option<Arc<crabka_remote_storage_topic::SwappableRlmm>>,
-            ) = match &config.remote_log_metadata {
-                crate::config::RlmmKind::TopicBacked(_) => {
-                    // Fail-closed: until the topic-backed manager swaps in, every
-                    // RLMM call returns NotReady. The copy task skips tiering
-                    // (no orphaned RSM objects) and remote reads retry.
-                    let not_ready: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                        Arc::new(crabka_remote_storage_topic::NotReadyRlmm::new());
-                    let swap = Arc::new(crabka_remote_storage_topic::SwappableRlmm::new(not_ready));
-                    let typed: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                        swap.clone();
-                    (typed, Some(swap))
-                }
-                crate::config::RlmmKind::InMemory => {
-                    let placeholder: Arc<dyn crabka_remote_storage::RemoteLogMetadataManager> =
-                        Arc::new(crabka_remote_storage::InmemoryRemoteLogMetadataManager::new());
-                    (placeholder, None)
-                }
-            };
-
-            let partitions = partitions.clone();
-            let controller = controller.clone();
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(crate::remote_log_manager::run(
-                partitions,
-                controller,
-                rsm.clone(),
-                rlmm.clone(),
-                config.node_id,
-                config.broker_id,
-                crate::remote_log_manager::RemoteLogManagerConfig {
-                    interval: config.remote_log_manager_interval,
-                },
-                shutdown,
-            ));
-
-            (
-                Some(Arc::new(crate::remote_reader::RemoteReader::new(rsm, rlmm))),
-                kafka_swap_target,
-            )
-        } else {
-            (None, None)
-        };
-
-        // TLS hot-reload watcher. Only spawn when a TLS
-        // config is present — non-TLS brokers don't need it.
-        if let (Some(dynamic), Some(tls_cfg_owned)) =
-            (tls_dynamic.clone(), config.tls_config.clone())
-        {
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(crate::tls_reload::run(
-                dynamic,
-                tls_cfg_owned,
-                config.tls_reload_interval,
-                shutdown,
-            ));
-        }
-
-        // KIP-73 throttle refresh task. Always-on; the bucket itself
-        // has a rate-0 fast path so unthrottled clusters pay nothing.
-        // `throttle_state` was created above (before the supervisor) so it
-        // can be forwarded to the replicator.
-        {
-            let throttle = throttle_state.clone();
-            let watcher: Arc<dyn crate::throttle::ImageWatcher> =
-                Arc::new(ThrottleControllerAdapter {
-                    handle: controller.clone(),
-                });
-            let shutdown = supervisor_shutdown.child_token();
-            let node_id = config.node_id;
-            tokio::spawn(crate::throttle::run(watcher, node_id, throttle, shutdown));
-        }
-
-        // KIP-227 incremental-fetch-session cache. Per-broker shared
-        // state consulted by the Fetch handler; capacity from config.
-        let fetch_session_cache = Arc::new(crate::fetch_session::FetchSessionCache::new(
-            config.max_incremental_fetch_session_cache_slots,
-        ));
-
-        // KIP-13/KIP-124 quota refresh task. Always-on; every broker
-        // enforces its own quotas via its own buckets (no leader gate needed).
-        let quota_buckets = Arc::new(crate::quota::QuotaBuckets::new());
-        {
-            let buckets = quota_buckets.clone();
-            let watcher: Arc<dyn crate::quota::ImageWatcher> = Arc::new(QuotaControllerAdapter {
-                handle: controller.clone(),
-            });
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(crate::quota::run(watcher, buckets, shutdown));
-        }
-
-        // KIP-48: delegation-token expiry sweep. Only spawn
-        // when a master key is configured — without it the four
-        // delegation-token RPCs all return DELEGATION_TOKEN_AUTH_DISABLED
-        // and the image never has any tokens to expire. Every broker
-        // runs the sweep; raft serializes duplicate tombstones into
-        // no-ops on the apply path.
-        if config.delegation_token_secret_key.is_some() {
-            let interval = std::time::Duration::from_millis(
-                u64::try_from(config.delegation_token_expiry_check_interval_ms).unwrap_or(
-                    u64::try_from(crate::config::DEFAULT_DELEGATION_TOKEN_EXPIRY_CHECK_INTERVAL_MS)
-                        .unwrap_or(3_600_000),
-                ),
-            );
-            let controller_adapter: Arc<
-                dyn crate::delegation_token_cleanup::DelegationTokenController,
-            > = Arc::new(DelegationTokenCleanupControllerAdapter {
-                handle: controller.clone(),
-            });
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(crate::delegation_token_cleanup::run(
-                controller_adapter,
-                interval,
-                shutdown,
-            ));
-        }
-
-        // KIP-98 / KIP-939: idle-transaction reaper. Aborts Ongoing
-        // transactions whose timeout has elapsed; 2PC (no-timeout) transactions
-        // are skipped. Every broker runs the loop but only acts on transactions
-        // it currently coordinates. `Duration::ZERO` disables it (the test
-        // default), mirroring the disk-scanner / cleaner interval knobs.
-        if !config.txn_abort_cleanup_interval.is_zero() {
-            let shutdown = supervisor_shutdown.child_token();
-            tokio::spawn(crate::txn::expiration::run(
-                txn_coordinator.clone(),
-                controller.clone(),
-                config.txn_abort_cleanup_interval,
-                shutdown,
-            ));
-        }
-
-        // 5. Build dispatch registry.
-        let handlers = crate::handlers::registry::build_registry();
-
-        // 6. Bind one TcpListener per `ListenerSpec`. The legacy single-listener
-        //    path is preserved via `effective_listeners()`, which synthesizes
-        //    one PLAINTEXT spec from `listen_addr` + `advertised_listener` when
-        //    `config.listeners` is empty.
-        //
-        //    Picks a canonical `listen_addr` for `BrokerHandle::listen_addr()`:
-        //    the inter-broker listener's actual bound address when present,
-        //    otherwise the first bound listener.
-        let listeners_spec = config.effective_listeners();
-        let mut bound: Vec<(crate::config::ListenerSpec, TcpListener, SocketAddr)> =
-            Vec::with_capacity(listeners_spec.len());
-        for spec in listeners_spec {
-            // Adopt a caller-supplied, already-bound data-plane listener whose
-            // local address matches this spec (test harnesses hand one over to
-            // dodge the bind-and-drop TOCTOU race); otherwise bind the spec.
-            let listener = match data_plane_listener
-                .take_if(|l| l.local_addr().is_ok_and(|a| a == spec.bind_addr))
-            {
-                Some(l) => l,
-                None => TcpListener::bind(spec.bind_addr).await?,
-            };
-            let actual = listener.local_addr()?;
-            bound.push((spec, listener, actual));
-        }
-        let listen_addr = bound
-            .iter()
-            .find(|(spec, _, _)| spec.name == config.inter_broker_listener_name)
-            .map_or(bound[0].2, |(_, _, a)| *a);
-
-        // If the legacy `advertised_listener` points at port 0 (tests typically),
-        // rewrite it to the canonical bound port so FindCoordinator/Metadata
-        // return a useful host:port instead of `:0`.
-        if config.advertised_listener.ends_with(":0")
-            && let Some((host, _)) = config.advertised_listener.rsplit_once(':')
-        {
-            config.advertised_listener = format!("{host}:{}", listen_addr.port());
-        }
-        let future_logs: Arc<
-            DashMap<(String, PartitionIndex), Arc<crate::future_log::FutureLogState>>,
-        > = Arc::new(DashMap::new());
-
-        // KIP-113: resume any interrupted intra-broker moves left on
-        // disk as `<topic>-<partition>-future` dirs.
-        for owning_dir in config.all_log_dirs() {
-            let futures = log_dir::scan_future(&owning_dir).unwrap_or_default();
-            for (topic, partition_id) in futures {
-                let partition_idx = PartitionIndex(partition_id);
-                if !partitions.contains(&topic, partition_idx) {
-                    // Stranded future dir — partition is no longer
-                    // hosted (e.g. topic deleted). Remove the leftover.
-                    let stranded = log_dir::future_partition_dir(&owning_dir, &topic, partition_id);
-                    if let Err(e) = std::fs::remove_dir_all(&stranded) {
-                        tracing::warn!(
-                            path = %stranded.display(),
-                            error = %e,
-                            "failed to remove stranded future-log dir"
-                        );
-                    }
-                    continue;
-                }
-                if let Err(e) = crate::future_log::resume_move(
-                    &partitions,
-                    &future_logs,
-                    &owning_dir,
-                    &config.log_config,
-                    &topic,
-                    partition_idx,
-                ) {
-                    tracing::warn!(
-                        topic = %topic, partition = partition_id,
-                        error = ?e,
-                        "failed to resume interrupted log-dir move"
-                    );
-                }
-            }
-        }
-
-        // Capture the connection caps before `config` is moved into the
-        // struct literal below.
-        let config_max_connections = config.max_connections;
-        let config_max_connections_per_ip = config.max_connections_per_ip;
-
-        let broker = Arc::new(Self {
+        finish_broker_startup(
             config,
-            controller,
-            partitions,
-            future_logs,
-            group_coordinator: group_coordinator.clone(),
-            producer_ids,
-            producer_state,
-            txn_coordinator,
-            share_coordinator,
-            share_partition_leaders,
-            supervisor_shutdown,
-            supervisor_handle: tokio::sync::Mutex::new(Some(supervisor_handle)),
-            disk_scanner_handle: tokio::sync::Mutex::new(disk_scanner_handle),
-            liveness: liveness.clone(),
-            tls_dynamic: tls_dynamic.clone(),
-            ktls_enabled,
-            inter_broker_client,
-            inter_broker_listener_protocol: inter_listener_proto,
-            unclean_recovery,
-            metrics: metrics.clone(),
-            metrics_bound_addr,
-            throttle_state,
-            quota_buckets,
-            connections: ConnectionLimiter::new(
-                config_max_connections,
-                config_max_connections_per_ip,
+            data_plane_listener,
+            (controller, partitions),
+            (
+                group_coordinator,
+                producer_ids,
+                producer_state,
+                txn_coordinator,
+                share_coordinator,
+                share_partition_leaders,
             ),
-            fetch_session_cache,
-            want_shutdown: want_shutdown_tx,
-            should_shutdown: should_shutdown_tx,
-            remote_reader,
-            log_dir_status,
-            log_dir_ids,
-            client_metrics,
-            #[cfg(any(test, feature = "test-helpers"))]
-            offset_for_leader_epoch_requests: Arc::new(std::sync::atomic::AtomicU64::new(0)),
-            audit_log,
-            handlers,
-        });
-
-        let shutdown = CancellationToken::new();
-        let mut listener_tasks = Vec::with_capacity(bound.len());
-        for (spec, listener, _) in bound {
-            let task = tokio::spawn(accept_loop(
-                broker.clone(),
-                listener,
-                spec,
-                shutdown.clone(),
-            ));
-            listener_tasks.push(task);
-        }
-
-        // Emit the BrokerStarted lifecycle event now that the broker Arc is
-        // live and listeners are bound. A broker that leads no audit partition
-        // (e.g. a controller-only node, or one that bootstrapped before brokers
-        // registered) has nowhere to durably write its own BrokerStarted record
-        // in Slice 1, so we deliberately skip both the partition-wait and the
-        // emit rather than emit a guaranteed-dropped record. Multi-broker / RF>1
-        // durability is Slice 3. When audit_led_partition is Some, we wait for
-        // the partition to materialize in the local registry before emitting.
-        if let Some(led_pidx) = audit_led_partition {
-            let audit_topic = broker.config.audit_topic.clone();
-            let partitions_for_wait = broker.partitions.clone();
-            let _ = tokio::time::timeout(AUDIT_PARTITION_WAIT_TIMEOUT, async {
-                loop {
-                    // Wait for this broker's led audit partition to materialise.
-                    if partitions_for_wait.contains(&audit_topic, led_pidx) {
-                        return;
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await;
-            broker.audit_log.emit(crabka_audit::AuditEvent::Lifecycle {
-                kind: crabka_audit::LifecycleKind::BrokerStarted,
-                node_id: i64::from(broker.config.broker_id),
-                time_ms: crate::time_util::now_ms(),
-            });
-        }
-
-        // Now that the listener accept loops are spawned, launch the
-        // topic-backed RLMM bootstrap task.  The broker already serves
-        // behind the fail-closed `NotReadyRlmm` facade; the bootstrap
-        // task retries with backoff until the topic-backed manager
-        // starts or the broker shuts down.  Remote reads return a
-        // retryable `NotReady` error and the copy task skips tiering
-        // until the swap completes.
-        if let Some(swap) = kafka_swap_target.as_ref()
-            && let Some(kafka_cfg) = kafka_swap_kickoff.as_ref()
-        {
-            let swap = swap.clone();
-            let kafka_cfg = kafka_cfg.clone();
-            let runtime = tokio::runtime::Handle::current();
-            let shutdown_token = shutdown.clone();
-            let metrics_for_bootstrap = broker.metrics.clone();
-            let node_id = broker.config.node_id;
-            let image_rx = broker.controller.watch_image();
-            let reconciler_shutdown = shutdown.clone();
-            tokio::spawn(async move {
-                tokio::select! {
-                    () = shutdown_token.cancelled() => {
-                        tracing::debug!("topic-backed RLMM bootstrap cancelled");
-                    }
-                    () = bootstrap_topic_rlmm(
-                        swap,
-                        kafka_cfg,
-                        runtime,
-                        metrics_for_bootstrap,
-                        node_id,
-                        image_rx,
-                        reconciler_shutdown,
-                    ) => {}
-                }
-            });
-        }
-
-        Ok(BrokerHandle {
-            listen_addr,
-            shutdown,
-            listener_tasks,
-            _broker: broker,
-        })
+            (tls_dynamic, ktls_enabled, inter_broker_client),
+            runtime,
+            (log_dir_status, log_dir_ids),
+        )
+        .await
     }
 }
 
@@ -3729,9 +3711,7 @@ async fn bootstrap_topic_rlmm(
             runtime.clone(),
             cfg.cfg.snapshot_dir.clone(),
             cfg.cfg.snapshot_interval,
-        )
-        .await
-        {
+        ) {
             Ok(m) => m,
             Err(e) => {
                 tracing::warn!(error = %e, backoff_ms = backoff.as_millis(),
@@ -3873,20 +3853,19 @@ pub(crate) fn spawn_partition(
     let current_leader_epoch = Arc::new(AtomicI32::new(0));
     let log_dir = Arc::new(arc_swap::ArcSwap::from_pointee(log_dir));
     let writer = tokio::spawn(crate::partition_writer::run(
-        topic.clone(),
-        partition_id,
-        log.clone(),
-        log_dir.clone(),
+        (topic.clone(), partition_id),
+        (log.clone(), log_dir.clone()),
         rx,
-        notify.clone(),
-        replica_state.clone(),
-        hw_advance_notify.clone(),
-        log_dir_status,
-        producer_state,
+        (
+            notify.clone(),
+            replica_state.clone(),
+            hw_advance_notify.clone(),
+        ),
+        (log_dir_status, producer_state),
     ));
     Arc::new(Partition {
         topic,
-        partition_id,
+        index: partition_id,
         log_dir,
         log,
         writer_tx: tx,
@@ -3895,7 +3874,7 @@ pub(crate) fn spawn_partition(
         hw_advance_notify,
         current_leader,
         current_leader_epoch,
-        _writer_handle: Arc::new(writer),
+        writer_handle: Arc::new(writer),
     })
 }
 
@@ -4150,20 +4129,16 @@ async fn accept_loop(
                             )
                             && rate > 0.0
                         {
-                            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-                            let initial_rate = rate.max(1.0) as u64;
+                            let initial_rate = crate::quota::positive_f64_to_u64(rate).max(1);
                             let bucket = broker.quota_buckets.get_or_create(
                                 CONNECTION_CREATION_RATE_QUOTA_KEY,
                                 &entity_key,
                                 initial_rate,
                             );
                             if bucket.try_consume(1) == 0 {
-                                #[allow(
-                                    clippy::cast_possible_truncation,
-                                    clippy::cast_sign_loss
-                                )]
-                                let delay_micros =
-                                    ((1.0_f64 / rate) * 1_000_000.0) as u64;
+                                let delay_micros = crate::quota::positive_f64_to_u64(
+                                    (1.0_f64 / rate) * 1_000_000.0,
+                                );
                                 let delay =
                                     std::time::Duration::from_micros(delay_micros)
                                         .min(CONNECTION_CREATION_THROTTLE_MAX);
@@ -4228,7 +4203,7 @@ fn tune_accepted_socket(stream: &tokio::net::TcpStream) {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use tempfile::tempdir;
 
     use super::*;
@@ -4342,7 +4317,10 @@ mod tests {
             match tokio::net::TcpStream::connect(addr).await {
                 Ok(stream) => {
                     drop(stream);
-                    assert2::assert!(std::time::Instant::now() < deadline);
+                    assert!(
+                        std::time::Instant::now() < deadline,
+                        "listener at {addr} still accepts connections after shutdown"
+                    );
                     tokio::time::sleep(std::time::Duration::from_millis(20)).await;
                 }
                 Err(_) => return,
@@ -4350,13 +4328,13 @@ mod tests {
         }
     }
 
-    async fn wait_for_connection_count(broker: &Broker, expected: usize, _message: &'static str) {
+    async fn wait_for_connection_count(broker: &Broker, expected: usize, message: &'static str) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         loop {
             if broker.connections.total() == expected {
                 return;
             }
-            assert2::assert!(std::time::Instant::now() < deadline);
+            assert!(std::time::Instant::now() < deadline, "{message}");
             tokio::time::sleep(std::time::Duration::from_millis(20)).await;
         }
     }
@@ -4428,8 +4406,8 @@ mod tests {
     fn classic_group_with_member(
         group_id: &str,
         member_id: &str,
-    ) -> Box<crate::coordinator::unified::group::Group> {
-        let mut classic = crate::coordinator::unified::classic_state::Group::new(group_id);
+    ) -> Box<crate::coordinator::unified::group::CoordinatorGroup> {
+        let mut classic = crate::coordinator::unified::classic_state::ClassicGroup::new(group_id);
         classic.protocol_type = Some("consumer".to_string());
         classic.generation_id = 1;
         let member = crate::coordinator::unified::classic_state::Member::new(
@@ -4441,7 +4419,7 @@ mod tests {
             vec![("range".to_string(), bytes::Bytes::from_static(b"metadata"))],
         );
         let _ = classic.add_member(member);
-        Box::new(crate::coordinator::unified::group::Group {
+        Box::new(crate::coordinator::unified::group::CoordinatorGroup {
             group_id: group_id.to_string(),
             kind: crate::coordinator::unified::group::GroupKind::Classic(classic),
             committed_offsets: std::collections::HashMap::new(),
@@ -4522,7 +4500,7 @@ mod tests {
             )
             .await
             .expect("seed streams group");
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_streams_group_member_count(streams_group_id, 1),
@@ -4539,15 +4517,11 @@ mod tests {
             active.insert("subtopology-0".to_string(), vec![0, 1]);
             active
         };
-        check!(
-            (
-                streams.group_id.as_str(),
-                streams.members.len(),
-                streams.members[0].member_id.as_str(),
-                &streams.members[0].active,
-            ) == (streams_group_id, 1, streams_member_id, &expected_active)
-        );
-        assert2::assert!(
+        check!(streams.group_id.as_str() == streams_group_id);
+        check!(streams.members.len() == 1);
+        check!(streams.members[0].member_id.as_str() == streams_member_id);
+        check!(streams.members[0].active == expected_active);
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_streams_group_empty(streams_group_id),
@@ -4560,7 +4534,7 @@ mod tests {
         let _ = broker
             .group_coordinator
             .get_or_create_streams(empty_streams_group_id);
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_streams_group_empty(empty_streams_group_id),
@@ -4601,17 +4575,16 @@ mod tests {
         }
     }
 
-    #[allow(clippy::too_many_arguments)]
     async fn submit_metadata_topic_partition(
         handle: &BrokerHandle,
-        topic: &str,
-        topic_id: u128,
+        topic_spec: (&str, u128),
         partition: i32,
         leader: u64,
         replicas: &[u64],
         isr: &[u64],
         leader_epoch: i32,
     ) {
+        let (topic, topic_id) = topic_spec;
         handle
             .submit_metadata_record_for_test(metadata_topic_record(topic, topic_id))
             .await
@@ -4626,8 +4599,8 @@ mod tests {
             .expect("submit partition record");
 
         let image = handle.controller_image_for_test();
-        assert2::assert!(image.topic(topic).is_some());
-        assert2::assert!(image.partition(topic, partition) == Some(&partition_record));
+        assert!(image.topic(topic).is_some());
+        assert!(image.partition(topic, partition) == Some(&partition_record));
     }
 
     fn static_voter_test_config(
@@ -4686,12 +4659,9 @@ mod tests {
             .expect("controller endpoint");
         // Self keeps its real directory id; peers get the nil placeholder.
         check!(
-            (ep0.host.as_str(), ep0.port)
-                == (
-                    "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local",
-                    9093,
-                )
+            ep0.host.as_str() == "demo-broker-0-0.demo-broker-headless.default.svc.cluster.local"
         );
+        check!(ep0.port == 9093);
         check!(v0.directory_id == self_dir);
 
         let v1 = set.get(crabka_audit::NodeId(1)).expect("voter 1 present");
@@ -4700,10 +4670,8 @@ mod tests {
             .iter()
             .find(|e| e.name == "CONTROLLER")
             .expect("controller endpoint");
-        assert2::assert!(
-            ep1.host == "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local"
-        );
-        assert2::assert!(v1.directory_id == uuid::Uuid::nil());
+        assert!(ep1.host == "demo-broker-1-0.demo-broker-headless.default.svc.cluster.local");
+        assert!(v1.directory_id == uuid::Uuid::nil());
     }
 
     #[test]
@@ -4718,12 +4686,13 @@ mod tests {
             self_dir,
             "192.168.1.5:9099".parse().unwrap(),
         );
-        assert2::assert!(set.len() == 1);
+        assert!(set.len() == 1);
         let v = set
             .get(crabka_audit::NodeId(3))
             .expect("self voter present");
         let ep = v.endpoints.iter().find(|e| e.name == "CONTROLLER").unwrap();
-        assert2::assert!((ep.host.as_str(), ep.port) == ("192.168.1.5", 9099));
+        assert!(ep.host == "192.168.1.5");
+        assert!(ep.port == 9099);
     }
 
     #[test]
@@ -4735,7 +4704,10 @@ mod tests {
             ("broker:not-a-port", ("localhost", 9092)),
         ];
         for (input, (host, port)) in cases {
-            assert2::assert!(parse_advertised_host_port(input) == (host.to_string(), port));
+            assert!(
+                parse_advertised_host_port(input) == (host.to_string(), port),
+                "input {input:?}"
+            );
         }
     }
 
@@ -4743,28 +4715,28 @@ mod tests {
     fn connection_guard_increments_and_decrements_global_and_per_ip() {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "10.0.0.1".parse().unwrap();
-        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (0, 0));
+        assert!(limiter.total() == 0);
+        assert!(limiter.per_ip_count(ip) == 0);
 
         let g1 = limiter
             .try_acquire(ip)
             .expect("acquire under unlimited caps");
-        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (1, 1));
+        assert!(limiter.total() == 1);
+        assert!(limiter.per_ip_count(ip) == 1);
 
         let g2 = limiter.try_acquire(ip).expect("second acquire");
-        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (2, 2));
+        assert!(limiter.total() == 2);
+        assert!(limiter.per_ip_count(ip) == 2);
 
         drop(g1);
-        assert2::assert!((limiter.total(), limiter.per_ip_count(ip)) == (1, 1));
+        assert!(limiter.total() == 1);
+        assert!(limiter.per_ip_count(ip) == 1);
 
         drop(g2);
         // Per-IP entry must be removed (not left at 0) when it hits zero.
-        check!(
-            (
-                limiter.total(),
-                limiter.per_ip_count(ip),
-                limiter.per_ip.get(&ip).is_none(),
-            ) == (0, 0, true)
-        );
+        check!(limiter.total() == 0);
+        check!(limiter.per_ip_count(ip) == 0);
+        check!(limiter.per_ip.get(&ip).is_none());
     }
 
     #[test]
@@ -4776,13 +4748,9 @@ mod tests {
         // Global ceiling of 1 reached — a different IP is still rejected,
         // and the rejection reserves nothing (per-IP entry not created).
         check!(limiter.try_acquire(b).is_none());
-        check!(
-            (
-                limiter.total(),
-                limiter.per_ip_count(b),
-                limiter.per_ip.get(&b).is_none(),
-            ) == (1, 0, true)
-        );
+        check!(limiter.total() == 1);
+        check!(limiter.per_ip_count(b) == 0);
+        check!(limiter.per_ip.get(&b).is_none());
     }
 
     #[test]
@@ -4794,10 +4762,12 @@ mod tests {
         // Second from the same IP rejected; global must be rolled back so
         // the count reflects only the one live connection.
         check!(limiter.try_acquire(a).is_none());
-        check!((limiter.total(), limiter.per_ip_count(a)) == (1, 1));
+        check!(limiter.total() == 1);
+        check!(limiter.per_ip_count(a) == 1);
         // A different IP is still under its own per-IP ceiling.
         let _g2 = limiter.try_acquire(b).expect("first from b allowed");
-        assert2::assert!((limiter.total(), limiter.per_ip_count(b)) == (2, 1));
+        assert!(limiter.total() == 2);
+        assert!(limiter.per_ip_count(b) == 1);
     }
 
     #[test]
@@ -4805,9 +4775,9 @@ mod tests {
         let limiter = Arc::new(ConnectionLimiter::new(usize::MAX, usize::MAX));
         let ip: IpAddr = "2001:db8::1".parse().unwrap();
         let g = limiter.try_acquire(ip).expect("ipv6 acquire");
-        assert2::assert!(limiter.per_ip_count(ip) == 1);
+        assert!(limiter.per_ip_count(ip) == 1);
         drop(g);
-        assert2::assert!(limiter.per_ip_count(ip) == 0);
+        assert!(limiter.per_ip_count(ip) == 0);
     }
 
     #[tokio::test]
@@ -4837,12 +4807,8 @@ mod tests {
         // reports doubled values), so assert the portable invariant: tuning grows
         // each buffer above the explicit tiny baseline instead of pinning a host
         // sysctl-dependent absolute size.
-        check!(
-            (
-                sock.send_buffer_size().expect("read send buffer") > send_before,
-                sock.recv_buffer_size().expect("read recv buffer") > recv_before,
-            ) == (true, true)
-        );
+        check!(sock.send_buffer_size().expect("read send buffer") > send_before);
+        check!(sock.recv_buffer_size().expect("read recv buffer") > recv_before);
         drop(client);
     }
 
@@ -4856,7 +4822,10 @@ mod tests {
             ("[2001:db8::5]:9092", "[2001:db8::5]:9092"),
         ];
         for (listen, expected) in cases {
-            assert2::assert!(loopback_bootstrap(listen.parse::<SocketAddr>().unwrap()) == expected);
+            assert!(
+                loopback_bootstrap(listen.parse::<SocketAddr>().unwrap()) == expected,
+                "listen {listen}"
+            );
         }
     }
 
@@ -4876,10 +4845,10 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(8),
         };
-        assert2::assert!(crate::leader_rebalance::ControllerLike::is_leader(
+        assert!(crate::leader_rebalance::ControllerLike::is_leader(
             &leader_adapter
         ));
-        assert2::assert!(!crate::leader_rebalance::ControllerLike::is_leader(
+        assert!(!crate::leader_rebalance::ControllerLike::is_leader(
             &follower_adapter
         ));
 
@@ -4891,10 +4860,10 @@ mod tests {
             handle: source,
             node_id: crabka_raft::NodeId(8),
         };
-        assert2::assert!(crate::reassignment::ReassignmentController::is_leader(
+        assert!(crate::reassignment::ReassignmentController::is_leader(
             &leader_adapter
         ));
-        assert2::assert!(!crate::reassignment::ReassignmentController::is_leader(
+        assert!(!crate::reassignment::ReassignmentController::is_leader(
             &follower_adapter
         ));
     }
@@ -4912,7 +4881,7 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert2::assert!(
+        assert!(
             crate::leader_rebalance::ControllerLike::current_image(&leader).cluster_id()
                 == cluster_id
         );
@@ -4921,32 +4890,28 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert2::assert!(
+        assert!(
             crate::reassignment::ReassignmentController::current_image(&reassignment).cluster_id()
                 == cluster_id
         );
         let reassignment_rx =
             crate::reassignment::ReassignmentController::watch_image(&reassignment);
-        assert2::assert!(reassignment_rx.borrow().cluster_id() == cluster_id);
+        assert!(reassignment_rx.borrow().cluster_id() == cluster_id);
 
         let throttle = ThrottleControllerAdapter {
             handle: source.clone(),
         };
-        assert2::assert!(
-            crate::throttle::ImageWatcher::current_image(&throttle).cluster_id() == cluster_id
-        );
+        assert!(crate::throttle::ImageWatcher::current_image(&throttle).cluster_id() == cluster_id);
         let throttle_rx = crate::throttle::ImageWatcher::watch_image(&throttle);
-        assert2::assert!(throttle_rx.borrow().cluster_id() == cluster_id);
+        assert!(throttle_rx.borrow().cluster_id() == cluster_id);
 
         let quota = QuotaControllerAdapter {
             handle: source.clone(),
         };
-        assert2::assert!(
-            crate::quota::ImageWatcher::current_image(&quota).cluster_id() == cluster_id
-        );
+        assert!(crate::quota::ImageWatcher::current_image(&quota).cluster_id() == cluster_id);
 
         let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
-        assert2::assert!(
+        assert!(
             crate::delegation_token_cleanup::DelegationTokenController::current_image(&cleanup)
                 .cluster_id()
                 == cluster_id
@@ -4966,7 +4931,7 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert2::assert!(
+        assert!(
             crate::leader_rebalance::ControllerLike::submit_change(&leader, vec![record.clone()])
                 .await
                 .is_err()
@@ -4976,7 +4941,7 @@ mod tests {
             handle: source.clone(),
             node_id: crabka_raft::NodeId(1),
         };
-        assert2::assert!(
+        assert!(
             crate::reassignment::ReassignmentController::submit_change(
                 &reassignment,
                 vec![record.clone()],
@@ -4986,7 +4951,7 @@ mod tests {
         );
 
         let cleanup = DelegationTokenCleanupControllerAdapter { handle: source };
-        assert2::assert!(
+        assert!(
             crate::delegation_token_cleanup::DelegationTokenController::submit_change(
                 &cleanup,
                 vec![record],
@@ -5002,8 +4967,8 @@ mod tests {
         shutdown.cancel();
         let mut backoff = std::time::Duration::from_mins(1);
 
-        assert2::assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
-        assert2::assert!(backoff == std::time::Duration::from_mins(1));
+        assert!(!rlmm_bootstrap_backoff(&mut backoff, &shutdown).await);
+        assert!(backoff == std::time::Duration::from_mins(1));
     }
 
     #[tokio::test]
@@ -5018,8 +4983,8 @@ mod tests {
 
         tokio::time::advance(std::time::Duration::from_millis(250)).await;
         let (ok, backoff) = task.await.expect("backoff task");
-        assert2::assert!(ok);
-        assert2::assert!(backoff == std::time::Duration::from_millis(500));
+        assert!(ok);
+        assert!(backoff == std::time::Duration::from_millis(500));
     }
 
     #[tokio::test]
@@ -5033,7 +4998,6 @@ mod tests {
             snapshot_dir.path().join("rlmm-manager"),
             std::time::Duration::from_hours(1),
         )
-        .await
         .expect("topic-backed manager start");
         let (set_tx, set_rx) = tokio::sync::watch::channel(vec![0, 2]);
         let shutdown = CancellationToken::new();
@@ -5041,14 +5005,20 @@ mod tests {
         spawn_rlmm_reconciler(manager.clone(), set_rx, shutdown.clone());
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while manager.assigned_metadata_partitions() != vec![0, 2] {
-            assert2::assert!(std::time::Instant::now() < deadline);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "initial assignment was not reconciled"
+            );
             tokio::task::yield_now().await;
         }
 
         set_tx.send(vec![1]).expect("send changed assignment");
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while manager.assigned_metadata_partitions() != vec![1] {
-            assert2::assert!(std::time::Instant::now() < deadline);
+            assert!(
+                std::time::Instant::now() < deadline,
+                "changed assignment was not reconciled"
+            );
             tokio::task::yield_now().await;
         }
 
@@ -5056,7 +5026,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn single_broker_handle_helpers_observe_real_state_and_errors() {
         let dir = tempfile::tempdir().unwrap();
         let mut config = BrokerConfig::for_tests(dir.path().to_path_buf());
@@ -5070,15 +5039,15 @@ mod tests {
         broker
             .offset_for_leader_epoch_requests
             .store(2, std::sync::atomic::Ordering::Release);
-        assert2::assert!(handle.offset_for_leader_epoch_count_for_test() == 2);
-        assert2::assert!(!handle.rlmm_topic_backed_active_for_test());
+        assert!(handle.offset_for_leader_epoch_count_for_test() == 2);
+        assert!(!handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(1);
-        assert2::assert!(handle.rlmm_topic_backed_active_for_test());
+        assert!(handle.rlmm_topic_backed_active_for_test());
         broker.metrics.tiered_storage_rlmm_topic_backed.set(2);
         check!(!handle.rlmm_topic_backed_active_for_test());
         check!(handle.reload_tls().is_err());
-        check!(!handle.has_partition("missing-mutant-topic", 0).await);
-        check!(handle.local_log_end_offset("missing-mutant-topic", 0).await == None);
+        check!(!handle.has_partition("missing-mutant-topic", 0));
+        check!(handle.local_log_end_offset("missing-mutant-topic", 0) == None);
         check!(
             handle
                 .test_advance_log_start("missing-mutant-topic", 0, 10)
@@ -5093,18 +5062,16 @@ mod tests {
         );
 
         let leader = handle.wait_until_controller_leader().await;
-        assert2::assert!(leader == crabka_raft::NodeId(handle.node_id()));
-        assert2::assert!(
-            handle.controller_leader_id().await == Some(crabka_raft::NodeId(handle.node_id()))
-        );
+        assert!(leader == crabka_raft::NodeId(handle.node_id()));
+        assert!(handle.controller_leader_id() == Some(crabka_raft::NodeId(handle.node_id())));
 
-        let mut endpoints = handle.self_registration_endpoints().await;
+        let mut endpoints = handle.self_registration_endpoints();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(2);
         while endpoints.is_empty() && std::time::Instant::now() < deadline {
             tokio::task::yield_now().await;
-            endpoints = handle.self_registration_endpoints().await;
+            endpoints = handle.self_registration_endpoints();
         }
-        assert2::assert!(!endpoints.is_empty());
+        assert!(!endpoints.is_empty());
 
         handle
             .submit_metadata_record_for_test(crabka_metadata::MetadataRecord::V1BrokerRegistration(
@@ -5125,22 +5092,21 @@ mod tests {
             ))
             .await
             .expect("submit peer broker registration");
-        assert2::assert!(
+        assert!(
             handle
                 .controller_image_for_test()
                 .broker(crabka_raft::NodeId(handle.node_id() + 1))
                 .is_some()
         );
         handle.wait_until_brokers_registered(2).await;
-        assert2::assert!(handle.broker_count().await == 2);
+        assert!(handle.broker_count() == 2);
 
         let topic = "handle-mutant-topic";
         let partition_leader = handle.node_id() + 1;
         let partition_isr = [partition_leader, handle.node_id()];
         submit_metadata_topic_partition(
             &handle,
-            topic,
-            0xCAFE,
+            (topic, 0xCAFE),
             0,
             partition_leader,
             &partition_isr,
@@ -5149,7 +5115,7 @@ mod tests {
         )
         .await;
         handle.wait_until_partition_present(topic, 0).await;
-        check!(handle.has_partition(topic, 0).await);
+        check!(handle.has_partition(topic, 0));
         check!(handle.partition_leader_for_test(topic, 0) == Some(partition_leader));
         check!(handle.partition_isr_for_test(topic, 0) == Some(partition_isr.to_vec()));
         let observed_partition = handle
@@ -5175,7 +5141,7 @@ mod tests {
             directories: vec![uuid::Uuid::nil(); partition_isr.len()],
             partition_epoch: 0,
         };
-        assert2::assert!(observed_partition == expected_partition);
+        assert!(observed_partition == expected_partition);
         check!(handle.partition_leader_for_test("missing-mutant-topic", 0) == None);
         check!(handle.partition_isr_for_test("missing-mutant-topic", 0) == None);
         check!(handle.partition_record_for_test("missing-mutant-topic", 0) == None);
@@ -5192,10 +5158,13 @@ mod tests {
             .is_ok()
         );
 
-        assert2::assert!(matches!(
-            broker.controller.read_snapshot_range(0, 1),
-            crabka_raft::SnapshotRange::NoSnapshot
-        ));
+        assert!(
+            matches!(
+                broker.controller.read_snapshot_range(0, 1),
+                crabka_raft::SnapshotRange::NoSnapshot
+            ),
+            "test should start without a metadata snapshot"
+        );
         handle
             .trigger_snapshot_for_test()
             .await
@@ -5205,20 +5174,21 @@ mod tests {
         else {
             panic!("trigger_snapshot_for_test should write a readable snapshot");
         };
-        assert2::assert!((snapshot.total_size > 0, snapshot.bytes.is_empty()) == (true, false));
+        assert!(snapshot.total_size > 0);
+        assert!(!snapshot.bytes.is_empty());
 
         let local_topic = "handle-local-log-mutant-topic";
         let local_part = local_partition_with_records(dir.path(), local_topic, 0, &[b"a", b"b"]);
-        assert2::assert!(!handle.partition_exists_for_test(local_topic, 0));
+        assert!(!handle.partition_exists_for_test(local_topic, 0));
         broker.partitions.insert(
             local_topic.to_string(),
             PartitionIndex(0),
             Arc::clone(&local_part),
         );
-        assert2::assert!(handle.partition_exists_for_test(local_topic, 0));
-        assert2::assert!(handle.local_log_end_offset(local_topic, 0).await == Some(2));
+        assert!(handle.partition_exists_for_test(local_topic, 0));
+        assert!(handle.local_log_end_offset(local_topic, 0) == Some(2));
         handle.test_set_leader_epoch(local_topic, 0, 7);
-        assert2::assert!(
+        assert!(
             local_part
                 .current_leader_epoch
                 .load(std::sync::atomic::Ordering::Acquire)
@@ -5228,7 +5198,18 @@ mod tests {
             .test_truncate_local_log(local_topic, 0, 1)
             .await
             .expect("truncate local partition");
-        assert2::assert!(handle.local_log_end_offset(local_topic, 0).await == Some(0));
+        assert!(handle.local_log_end_offset(local_topic, 0) == Some(0));
+
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn single_broker_handle_local_log_helpers_observe_real_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .expect("broker start");
+        let broker = handle.broker_arc_for_test();
 
         let helper_topic = "handle-partition-helper-mutant-topic";
         let helper_part = local_partition_with_records(dir.path(), helper_topic, 0, &[]);
@@ -5251,48 +5232,43 @@ mod tests {
             .test_advance_log_start(helper_topic, 0, 2)
             .await
             .expect("advance helper partition log start");
-        assert2::assert!(handle.partition_log_start_for_test(helper_topic, 0) == Some(2));
-        assert2::assert!(
+        assert!(handle.partition_log_start_for_test(helper_topic, 0) == Some(2));
+        assert!(
             handle.partition_retention_ms_for_test(helper_topic, 0)
                 == Some(Some(std::time::Duration::from_secs(123)))
         );
         let observed_config = handle
             .partition_log_config_for_test(helper_topic, 0)
             .expect("helper partition log config");
-        assert2::assert!(
-            (observed_config.retention_ms, observed_config.segment_bytes)
-                == (helper_config.retention_ms, helper_config.segment_bytes)
-        );
+        assert!(observed_config.retention_ms == helper_config.retention_ms);
+        assert!(observed_config.segment_bytes == helper_config.segment_bytes);
         let last_offset = handle
             .produce_records_for_test(helper_topic, 0, 3)
             .await
             .expect("produce helper partition records");
         let log_end = handle
             .local_log_end_offset(helper_topic, 0)
-            .await
             .expect("helper partition log end offset");
-        assert2::assert!(last_offset >= 2);
-        assert2::assert!(last_offset + 1 == log_end);
+        assert!(last_offset >= 2);
+        assert!(last_offset + 1 == log_end);
         let read = helper_part
             .log
             .lock()
             .expect("helper partition log lock")
             .read(crabka_log::Offset(2), 1 << 20)
             .expect("read helper partition records");
-        assert2::assert!(
-            (read.start_offset, read.batches.is_empty()) == (crabka_log::Offset(2), false)
-        );
+        assert!(read.start_offset == crabka_log::Offset(2));
+        assert!(!read.batches.is_empty());
         let records: Vec<_> = read
             .batches
             .iter()
             .flat_map(|batch| batch.records.iter())
             .collect();
+        check!(records.len() == 1);
+        check!(records[0].offset_delta == 0);
         check!(
-            (
-                records.len(),
-                records[0].offset_delta,
-                records[0].value.as_ref().map(bytes::Bytes::as_ref),
-            ) == (1, 0, Some(b"test-record-2".as_slice()))
+            records[0].value.as_ref().map(bytes::Bytes::as_ref)
+                == Some(b"test-record-2".as_slice())
         );
         // Waiting for log_end + 1 must stay pending; waiting for the reached
         // log_end must resolve (both the >= and == variants).
@@ -5329,10 +5305,21 @@ mod tests {
             .is_ok()
         );
 
+        handle.shutdown().await;
+    }
+
+    #[tokio::test]
+    async fn single_broker_handle_share_and_raft_helpers_observe_real_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let handle = Broker::start(BrokerConfig::for_tests(dir.path().to_path_buf()))
+            .await
+            .expect("broker start");
+        let broker = handle.broker_arc_for_test();
+
         let share_group = "handle-share-summary-mutant-group";
         let share_topic_id = uuid::Uuid::from_u128(0xBEE5);
         let share_partition = 3;
-        assert2::assert!(
+        assert!(
             handle
                 .share_state_summary_for_test(share_group, share_topic_id, share_partition)
                 .await
@@ -5371,10 +5358,8 @@ mod tests {
                 share_group,
                 share_topic_id,
                 share_partition,
-                12,
-                2,
-                crabka_log::Offset(95),
-                7,
+                (12, 2),
+                (crabka_log::Offset(95), 7),
                 vec![crate::share_coordinator::persistence::StateBatch {
                     first_offset: crabka_log::Offset(95),
                     last_offset: crabka_log::Offset(99),
@@ -5418,7 +5403,7 @@ mod tests {
             .share_partition_leaders
             .get_or_load(acquired_group, acquired_topic_id, 0)
             .await;
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
@@ -5437,9 +5422,9 @@ mod tests {
                 std::time::Duration::from_secs(30),
                 i16::MAX,
             );
-            assert2::assert!(!acquired.is_empty());
+            assert!(!acquired.is_empty());
         }
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_share_acquired_count(acquired_group, acquired_topic_id, 0, 1),
@@ -5459,7 +5444,7 @@ mod tests {
         )
         .await
         .expect("add_learner returned before timeout");
-        assert2::assert!(add_learner.is_err());
+        assert!(add_learner.is_err());
 
         let own_directory = handle
             .voter_directory_id_for_test(crabka_raft::NodeId(handle.node_id()))
@@ -5478,7 +5463,6 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn group_handle_helpers_observe_live_actor_views() {
         let dir = tempfile::tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
@@ -5498,7 +5482,7 @@ mod tests {
             ))
             .await
             .expect("seed next-gen group");
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_group_member_count(group_id, 1),
@@ -5510,14 +5494,10 @@ mod tests {
             .group_describe_for_test(group_id)
             .await
             .expect("next-gen group describe");
-        check!(
-            (
-                described.group_id.as_str(),
-                described.members.len(),
-                described.members[0].member_id.as_str(),
-            ) == (group_id, 1, member_id)
-        );
-        assert2::assert!(
+        check!(described.group_id.as_str() == group_id);
+        check!(described.members.len() == 1);
+        check!(described.members[0].member_id.as_str() == member_id);
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_group_empty(group_id),
@@ -5531,7 +5511,7 @@ mod tests {
             empty_group_id,
             crate::coordinator::unified::actor::GroupKindTag::Consumer,
         );
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_group_empty(empty_group_id),
@@ -5542,7 +5522,7 @@ mod tests {
 
         let classic_group_id = "handle-classic-group-mutant";
         let classic_member_id = "classic-member-1";
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_millis(75),
                 handle.wait_until_classic_group_member_count(classic_group_id, 1),
@@ -5554,7 +5534,7 @@ mod tests {
             classic_group_id,
             classic_group_with_member(classic_group_id, classic_member_id),
         );
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 std::time::Duration::from_secs(1),
                 handle.wait_until_classic_group_member_count(classic_group_id, 1),
@@ -5566,16 +5546,12 @@ mod tests {
             .classic_group_inspect_for_test(classic_group_id)
             .await
             .expect("classic group inspect");
-        check!(
-            (
-                classic.group_id.as_str(),
-                classic.members.len(),
-                classic.members[0].member_id.as_str(),
-            ) == (classic_group_id, 1, classic_member_id)
-        );
+        check!(classic.group_id.as_str() == classic_group_id);
+        check!(classic.members.len() == 1);
+        check!(classic.members[0].member_id.as_str() == classic_member_id);
 
         let created_classic_group_id = "handle-create-classic-group-mutant";
-        assert2::assert!(
+        assert!(
             handle
                 .classic_group_inspect_for_test(created_classic_group_id)
                 .await
@@ -5586,13 +5562,11 @@ mod tests {
             .classic_group_inspect_for_test(created_classic_group_id)
             .await
             .expect("created classic group inspect");
-        assert2::assert!(
-            (created.group_id.as_str(), created.members.is_empty())
-                == (created_classic_group_id, true)
-        );
+        assert!(created.group_id == created_classic_group_id);
+        assert!(created.members.is_empty());
 
         let marked_classic_group_id = "handle-marked-classic-group-mutant";
-        assert2::assert!(
+        assert!(
             handle
                 .group_type_for_test(marked_classic_group_id)
                 .is_none()
@@ -5600,7 +5574,7 @@ mod tests {
         broker
             .group_coordinator
             .mark_classic(marked_classic_group_id);
-        assert2::assert!(
+        assert!(
             handle.group_type_for_test(marked_classic_group_id)
                 == Some(crate::coordinator::unified::GroupType::Classic)
         );
@@ -5650,7 +5624,7 @@ mod tests {
 
         let leader = tokio::time::timeout(std::time::Duration::from_secs(10), async {
             loop {
-                if let Some(leader) = handle7.controller_leader_id().await
+                if let Some(leader) = handle7.controller_leader_id()
                     && leader != crabka_raft::NodeId(0)
                 {
                     return leader;
@@ -5660,13 +5634,13 @@ mod tests {
         })
         .await
         .expect("two-voter cluster leader");
-        assert2::assert!(leader == crabka_raft::NodeId(7) || leader == crabka_raft::NodeId(8));
+        assert!(leader == crabka_raft::NodeId(7) || leader == crabka_raft::NodeId(8));
         handle7.wait_for_image(|img| img.voters().len() == 2).await;
         handle8.wait_for_image(|img| img.voters().len() == 2).await;
 
         check!(handle7.node_id() == 7);
         check!(handle8.node_id() == 8);
-        check!(handle7.controller_leader_id().await == Some(leader));
+        check!(handle7.controller_leader_id() == Some(leader));
         check!(
             handle7
                 .quorum_voters_for_test()
@@ -5693,8 +5667,13 @@ mod tests {
     }
 
     #[tokio::test]
-    #[allow(clippy::too_many_lines)]
     async fn wait_helpers_remain_pending_until_their_conditions_are_met() {
+        type PendingWait<'a> = (
+            &'a str,
+            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + 'a>>,
+        );
+        type LeaderChangedCase<'a> = (&'a str, u128, u64, &'a [u64], i32, u64);
+
         let dir = tempfile::tempdir().unwrap();
         let config = BrokerConfig::for_tests(dir.path().to_path_buf());
         let handle = Broker::start(config).await.expect("broker start");
@@ -5704,11 +5683,7 @@ mod tests {
         // Every wait helper must still be pending (time out) while its
         // condition is unmet. The futures are lazy async fns, so building the
         // table up front does no work; each is awaited sequentially below.
-        #[allow(clippy::type_complexity)]
-        let pending_waits: [(
-            &str,
-            std::pin::Pin<Box<dyn std::future::Future<Output = ()> + '_>>,
-        ); 9] = [
+        let pending_waits: [PendingWait<'_>; 9] = [
             (
                 "wait_for_share_state_summary",
                 Box::pin(async {
@@ -5784,15 +5759,17 @@ mod tests {
                 }),
             ),
         ];
-        for (_name, wait) in pending_waits {
-            assert2::assert!(tokio::time::timeout(timeout, wait).await.is_err());
+        for (name, wait) in pending_waits {
+            assert!(
+                tokio::time::timeout(timeout, wait).await.is_err(),
+                "{name} resolved while its condition was unmet"
+            );
         }
 
         // wait_until_partition_leader_changed must stay pending for each of
         // these submitted partitions:
         // (topic, topic_id, leader, replicas/isr, leader_epoch, excluded leader)
-        #[allow(clippy::type_complexity)]
-        let leader_changed_cases: [(&str, u128, u64, &[u64], i32, u64); 4] = [
+        let leader_changed_cases: [LeaderChangedCase<'_>; 4] = [
             // leader 0 means "no leader" — never counts as a change.
             ("leader-zero-mutant-topic", 0xF001, 0, &[1], 3, 1),
             // the current leader is exactly the excluded node.
@@ -5812,8 +5789,7 @@ mod tests {
         for (topic, topic_id, leader, replicas, leader_epoch, excluded) in leader_changed_cases {
             submit_metadata_topic_partition(
                 &handle,
-                topic,
-                topic_id,
+                (topic, topic_id),
                 0,
                 leader,
                 replicas,
@@ -5821,7 +5797,7 @@ mod tests {
                 leader_epoch,
             )
             .await;
-            assert2::assert!(
+            assert!(
                 tokio::time::timeout(
                     timeout,
                     handle.wait_until_partition_leader_changed(
@@ -5831,11 +5807,12 @@ mod tests {
                     ),
                 )
                 .await
-                .is_err()
+                .is_err(),
+                "{topic}: wait_until_partition_leader_changed resolved"
             );
         }
         // Leader 0 is also reported as "no leader" by the direct helper.
-        assert2::assert!(
+        assert!(
             handle
                 .partition_leader_for_test("leader-zero-mutant-topic", 0)
                 .is_none()
@@ -5843,8 +5820,7 @@ mod tests {
 
         submit_metadata_topic_partition(
             &handle,
-            "isr-len-mutant-topic",
-            0xF005,
+            ("isr-len-mutant-topic", 0xF005),
             0,
             1,
             &[1, 2],
@@ -5852,7 +5828,7 @@ mod tests {
             3,
         )
         .await;
-        assert2::assert!(
+        assert!(
             tokio::time::timeout(
                 timeout,
                 handle.wait_until_isr_len("isr-len-mutant-topic", 0, 1)
@@ -5907,7 +5883,10 @@ mod tests {
         ];
         expected.sort_unstable();
         expected.dedup();
-        assert2::assert!(got == expected);
+        assert!(
+            got == expected,
+            "p2 (node 7 not a replica) must be excluded"
+        );
     }
 
     #[tokio::test]
@@ -5917,7 +5896,7 @@ mod tests {
         let handle = Broker::start(config).await.unwrap();
         let broker = handle.broker_arc_for_test();
         let addr = handle.listen_addr();
-        assert2::assert!(addr.port() != 0);
+        assert!(addr.port() != 0);
         let stream = tokio::net::TcpStream::connect(addr)
             .await
             .expect("listener accepts before shutdown");
@@ -5938,7 +5917,7 @@ mod tests {
             .controlled_shutdown(std::time::Duration::ZERO)
             .await
             .expect_err("zero-timeout controlled shutdown should report drain timeout");
-        assert2::assert!(matches!(err, BrokerError::ShutdownTimeout(timeout) if timeout.is_zero()));
+        assert!(matches!(err, BrokerError::ShutdownTimeout(timeout) if timeout.is_zero()));
         assert_listener_stops_accepting(addr).await;
     }
 
@@ -5952,7 +5931,10 @@ mod tests {
             (max, max),
         ];
         for (current, expected) in cases {
-            assert2::assert!(next_rlmm_backoff(current, max) == expected);
+            assert!(
+                next_rlmm_backoff(current, max) == expected,
+                "current {current:?}"
+            );
         }
     }
 
@@ -6005,8 +5987,8 @@ mod tests {
 
         // One attempt was recorded, but the cancelled token stopped the
         // dial before anything could activate the topic-backed manager.
-        assert2::assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
-        assert2::assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
+        assert!(metrics.tiered_storage_rlmm_bootstrap_attempts.get() == 1);
+        assert!(metrics.tiered_storage_rlmm_topic_backed.get() == 0);
     }
 
     #[tokio::test]

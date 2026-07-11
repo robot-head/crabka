@@ -18,6 +18,7 @@ use std::{
     time::Duration,
 };
 
+use num_traits::ToPrimitive;
 use parking_lot::RwLock;
 
 use crate::scraper::parse::{MetricKind, ParsedSample};
@@ -227,8 +228,7 @@ impl UsageStore {
         if count == 0 {
             None
         } else {
-            #[allow(clippy::cast_precision_loss)]
-            Some(sum / count as f64)
+            Some(sum / count.to_f64()?)
         }
     }
 
@@ -261,8 +261,7 @@ impl UsageStore {
         if latest.value < earliest.value {
             return None;
         }
-        #[allow(clippy::cast_precision_loss)]
-        let dt_ms = (latest.at_ms - earliest.at_ms) as f64;
+        let dt_ms = (latest.at_ms - earliest.at_ms).to_f64()?;
         let dv = latest.value - earliest.value;
         Some(dv * 1000.0 / dt_ms)
     }

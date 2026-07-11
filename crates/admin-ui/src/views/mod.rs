@@ -69,10 +69,14 @@ pub fn render_route_html(route: Route) -> String {
     render_page(&RoutePage::for_unauthenticated_route(route))
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub fn render_route(route: Route) -> Element {
     render_page_element(&RoutePage::for_unauthenticated_route(route))
 }
 
+/// # Errors
+/// Returns an error when the request is invalid, authentication or session validation fails, or the broker admin operation reports a failure.
 pub fn render_page_element(page: &RoutePage) -> Element {
     match page.clone() {
         RoutePage::Login { state } => render_login_element(state),

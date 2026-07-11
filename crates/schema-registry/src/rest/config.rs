@@ -37,15 +37,16 @@ fn validate(level: &str) -> Result<(), SrError> {
 
 /// GET /config
 // axum requires async handlers even when the body is synchronous.
-#[allow(clippy::unused_async)]
 #[tracing::instrument(level = "debug", name = "sr.get_global_config", skip_all)]
-pub async fn get_global(State(st): State<AppState>) -> Response {
+pub fn get_global(State(st): State<AppState>) -> Response {
     let lvl = st.store.store.read().global_compat().to_string();
     ok_json(&serde_json::json!({ "compatibilityLevel": lvl }))
 }
 
 /// PUT /config
 #[tracing::instrument(level = "info", name = "sr.set_global_config", skip_all, fields(compatibility = tracing::field::Empty), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn put_global(State(st): State<AppState>, body: String) -> Result<Response, SrError> {
     let req: PutConfig = serde_json::from_str(&body)
         .map_err(|e| SrError::InvalidCompatibilityLevel(e.to_string()))?;
@@ -61,9 +62,10 @@ pub async fn put_global(State(st): State<AppState>, body: String) -> Result<Resp
 
 /// GET /config/{subject}
 // axum requires async handlers even when the body is synchronous.
-#[allow(clippy::unused_async)]
 #[tracing::instrument(level = "debug", name = "sr.get_subject_config", skip_all, fields(subject = %subject), err)]
-pub async fn get_subject(
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
+pub fn get_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,
 ) -> Result<Response, SrError> {
@@ -79,6 +81,8 @@ pub async fn get_subject(
 
 /// PUT /config/{subject}
 #[tracing::instrument(level = "info", name = "sr.set_subject_config", skip_all, fields(subject = %subject, compatibility = tracing::field::Empty), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn put_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,
@@ -101,6 +105,8 @@ pub async fn put_subject(
 /// Returns 200 `{"compatibility": "<deleted-level>"}` or 404 `SubjectNotFound`
 /// if no per-subject override was set.
 #[tracing::instrument(level = "info", name = "sr.delete_subject_config", skip_all, fields(subject = %subject), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn delete_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,

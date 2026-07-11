@@ -135,8 +135,23 @@ async fn grafana_e2e_covers_all_api_surfaces_and_query_shapes() -> TestResult {
 // Instant query-shape matrix (Grafana `/api/ds/query`, queryType=instant)
 // ---------------------------------------------------------------------------
 
-#[allow(clippy::too_many_lines)]
 async fn check_instant_query_shapes(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    check_instant_selectors(client, base, fails).await?;
+    check_instant_aggregations(client, base, fails).await?;
+    check_instant_binary_operators(client, base, fails).await?;
+    check_instant_range_functions(client, base, fails).await?;
+    check_instant_over_time(client, base, fails).await?;
+    check_instant_histograms(client, base, fails).await?;
+    check_instant_label_manipulation(client, base, fails).await?;
+    check_instant_scalar_math(client, base, fails).await?;
+    check_instant_time_and_sort(client, base, fails).await
+}
+
+async fn check_instant_selectors(
     client: &reqwest::Client,
     base: &str,
     fails: &mut Vec<String>,
@@ -150,7 +165,6 @@ async fn check_instant_query_shapes(
     //   http_request_duration_seconds_sum=60  _count=90
     //   native_histogram_marker=1
     let exact = Expect::exact;
-    let approx = Expect::approx;
 
     // -- selectors & label matchers --------------------------------------------
     instant(
@@ -198,7 +212,16 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- aggregations ----------------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_aggregations(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let exact = Expect::exact;
+
     instant(
         client,
         base,
@@ -329,7 +352,17 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- binary operators ------------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_binary_operators(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let exact = Expect::exact;
+    let approx = Expect::approx;
+
     instant(
         client,
         base,
@@ -406,7 +439,16 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- counter / range functions ---------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_range_functions(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let approx = Expect::approx;
+
     // rate over [30s] at 45s: GET samples 30s=75,45s=120 -> ~3/s; POST 30s=5,45s=8 -> ~0.2/s.
     instant(
         client,
@@ -475,7 +517,17 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- *_over_time family ----------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_over_time(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let exact = Expect::exact;
+    let approx = Expect::approx;
+
     let temps = "cpu_temperature_celsius[1m]";
     instant(
         client,
@@ -558,7 +610,16 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- histograms (classic) --------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_histograms(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let approx = Expect::approx;
+
     // bucket counts at 45s: le0.5=40, le1=70, le+Inf=90; p50 -> ~0.583, p90 -> in (1,+Inf].
     instant(
         client,
@@ -578,7 +639,16 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- label manipulation ----------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_label_manipulation(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let exact = Expect::exact;
+
     instant(
         client,
         base,
@@ -598,7 +668,17 @@ async fn check_instant_query_shapes(
     )
     .await;
 
-    // -- scalar / math / trig --------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_scalar_math(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let exact = Expect::exact;
+    let approx = Expect::approx;
+
     instant(
         client,
         base,
@@ -698,7 +778,17 @@ async fn check_instant_query_shapes(
     instant_present(client, base, fails, "exp", "exp(native_histogram_marker)").await;
     instant_present(client, base, fails, "trig", "sin(native_histogram_marker)").await;
 
-    // -- time / absence --------------------------------------------------------
+    Ok(())
+}
+
+async fn check_instant_time_and_sort(
+    client: &reqwest::Client,
+    base: &str,
+    fails: &mut Vec<String>,
+) -> TestResult {
+    let exact = Expect::exact;
+    let approx = Expect::approx;
+
     instant(
         client,
         base,

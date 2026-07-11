@@ -7,8 +7,6 @@
 //! exercises handler logic at the same level a real Connect call
 //! would, but without any HTTP serialization. HTTP smoke is T15.
 
-#![allow(clippy::pedantic)]
-
 use std::{sync::Arc, time::Duration};
 
 use assert2::check;
@@ -731,9 +729,9 @@ async fn restart_resumes_in_flight_plan() {
         .expect("broker shutdown within 30s");
 }
 
-/// Synthetic ClusterState with three brokers in rack labels [A, A, B]
+/// Synthetic `ClusterState` with three brokers in rack labels [A, A, B]
 /// and a partition with replicas on the two rack-A brokers. The
-/// RackAware goal must propose moving one off to a non-A rack. We
+/// `RackAware` goal must propose moving one off to a non-A rack. We
 /// drive the goal directly (no real broker needed) since this test
 /// is purely about goal interaction.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -799,8 +797,8 @@ async fn rack_aware_eliminates_same_rack_collisions() {
     );
 }
 
-/// Synthetic three-broker ClusterState where broker 1 holds 10
-/// replicas with `max_replicas: 5`. ReplicaCapacity must propose
+/// Synthetic three-broker `ClusterState` where broker 1 holds 10
+/// replicas with `max_replicas: 5`. `ReplicaCapacity` must propose
 /// movements that reduce broker 1's load.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn replica_capacity_evicts_over_capacity_broker() {
@@ -901,8 +899,8 @@ async fn replica_capacity_evicts_over_capacity_broker() {
     );
 }
 
-/// Synthetic three-broker ClusterState with broker 1 holding 5× more
-/// disk than broker 2. The UsageStore is pre-populated with disk_bytes
+/// Synthetic three-broker `ClusterState` with broker 1 holding 5× more
+/// disk than broker 2. The `UsageStore` is pre-populated with `disk_bytes`
 /// gauge samples. DiskUsage.propose must emit movements that reduce
 /// broker 1's total.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -954,7 +952,7 @@ async fn disk_usage_evicts_hot_broker() {
 
     let store = UsageStore::new(WindowConfig {
         scrape_interval: Duration::from_secs(30),
-        retention: Duration::from_secs(3600),
+        retention: Duration::from_hours(1),
     });
     // Insert at wall-clock "now" so DiskUsage's now_ms()-anchored
     // stale-data guard sees the samples as fresh.

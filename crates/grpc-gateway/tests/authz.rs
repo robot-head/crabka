@@ -48,6 +48,22 @@ use crabka_grpc_gateway::{
     state::AppState,
     types::GatewayRecord,
 };
+
+struct AuditVisitor(Option<String>, Option<bool>);
+
+impl tracing::field::Visit for AuditVisitor {
+    fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+        if field.name() == "principal" {
+            self.0 = Some(format!("{value:?}"));
+        }
+    }
+
+    fn record_bool(&mut self, field: &tracing::field::Field, value: bool) {
+        if field.name() == "allowed" {
+            self.1 = Some(value);
+        }
+    }
+}
 use crabka_metadata::{AclOperation, ResourceType};
 use crabka_security::{AuthMethod, Principal};
 use tempfile::TempDir;
@@ -382,7 +398,6 @@ async fn bearer_token_resolves_principal() {
 ///    `GatewayError::Unauthorized` (so the caller doesn't retry a permanent
 ///    denial). The load-bearing assertions are "allowed ⇒ produced once" and
 ///    "denied ⇒ Unauthorized + not produced".
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 6)]
 async fn forwarding_owner_reauthorizes_caller() {
     let (broker, bootstrap, _dir) = boot().await;
@@ -504,12 +519,10 @@ async fn forwarding_owner_reauthorizes_caller() {
 ///    To keep this immune to concurrent sibling tests writing into the shared
 ///    global capture, we produce under a UNIQUE principal and assert only its
 ///    own event.
-#[allow(clippy::items_after_statements, clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn audit_log_emitted() {
     use std::sync::{Mutex, OnceLock};
 
-    use tracing::field::{Field, Visit};
     use tracing_subscriber::{Layer, layer::Context, prelude::*};
 
     // Process-global capture of `gateway::audit` events as (principal, allowed),
@@ -531,20 +544,7 @@ async fn audit_log_emitted() {
             // `principal = %name` records through the Display-as-Debug wrapper,
             // so it lands in `record_debug` (not `record_str`); `{:?}` is the
             // bare name.
-            struct V(Option<String>, Option<bool>);
-            impl Visit for V {
-                fn record_debug(&mut self, f: &Field, v: &dyn std::fmt::Debug) {
-                    if f.name() == "principal" {
-                        self.0 = Some(format!("{v:?}"));
-                    }
-                }
-                fn record_bool(&mut self, f: &Field, v: bool) {
-                    if f.name() == "allowed" {
-                        self.1 = Some(v);
-                    }
-                }
-            }
-            let mut v = V(None, None);
+            let mut v = AuditVisitor(None, None);
             event.record(&mut v);
             if let Some(principal) = v.0 {
                 events().lock().unwrap().push((principal, v.1));
@@ -648,7 +648,6 @@ struct AclGw {
     token: CancellationToken,
 }
 
-#[allow(clippy::too_many_lines)]
 async fn spawn_acl_gateway(bootstrap: &str, client: &str) -> AclGw {
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap().to_string();

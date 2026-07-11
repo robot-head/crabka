@@ -2,8 +2,8 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned,
-    nullable_string_len, put_compact_nullable_string, put_nullable_string,
+    compact_nullable_string_len, get_compact_nullable_string_owned, get_nullable_string_owned, nullable_string_len, put_compact_nullable_string,
+    put_nullable_string,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -12,7 +12,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,9 +27,7 @@ pub struct RequestHeader {
 impl Encode for RequestHeader {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "RequestHeader version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("RequestHeader version out of range"));
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -88,9 +87,7 @@ impl Encode for RequestHeader {
 impl Decode<'_> for RequestHeader {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::SchemaMismatch(
-                "RequestHeader version out of range",
-            ));
+            return Err(ProtocolError::SchemaMismatch("RequestHeader version out of range"));
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -106,11 +103,7 @@ impl Decode<'_> for RequestHeader {
         if version >= 1 {
             out.client_id = {
                 let flex = false;
-                if flex {
-                    get_compact_nullable_string_owned(buf)?
-                } else {
-                    get_nullable_string_owned(buf)?
-                }
+                if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? }
             };
         }
         if flex {

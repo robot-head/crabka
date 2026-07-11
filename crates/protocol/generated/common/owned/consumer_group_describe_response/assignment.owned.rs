@@ -29,14 +29,8 @@ impl Encode for Assignment {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.topic_partitions).len(),
-                    flex,
-                );
-                let body: usize = (self.topic_partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topic_partitions).len(), flex);
+                let body: usize = (self.topic_partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -56,9 +50,7 @@ impl Decode<'_> for Assignment {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(super::topic_partitions::TopicPartitions::decode(
-                        buf, version,
-                    )?);
+                    v.push(super::topic_partitions::TopicPartitions::decode(buf, version)?);
                 }
                 v
             };

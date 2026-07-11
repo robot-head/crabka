@@ -5,7 +5,10 @@ use std::time::Duration;
 
 use crabka_metadata::MetadataImage;
 
-use super::{QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota};
+use super::{
+    QuotaConsumption, buckets::QuotaBuckets, consume_configured_quota, positive_f64_to_u64,
+    u64_to_f64,
+};
 
 /// Consume `mutations` from the `controller_mutation_rate` bucket for
 /// `(principal, client_id)`. Returns the throttle delay to apply
@@ -29,25 +32,14 @@ pub fn consume_controller_mutation_quota(
             amount: mutations,
         },
         |_| {},
-        |rate| {
-            #[allow(clippy::cast_possible_truncation, clippy::cast_sign_loss)]
-            let initial_rate = rate as u64;
-            Some(initial_rate)
-        },
-        |overage, rate, _| {
-            #[allow(
-                clippy::cast_possible_truncation,
-                clippy::cast_sign_loss,
-                clippy::cast_precision_loss
-            )]
-            let delay_micros = ((overage as f64 / rate) * 1_000_000.0) as u64;
-            Duration::from_micros(delay_micros)
-        },
+        |rate| Some(positive_f64_to_u64(rate)),
+        |overage, rate, _| Duration::from_secs_f64(u64_to_f64(overage) / rate),
     )
 }
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::quota::test_support::image_with_quota as quota_image;
@@ -61,7 +53,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 0);
-        assert2::assert!(delay == Duration::ZERO);
+        assert!(delay == Duration::ZERO);
     }
 
     #[test]
@@ -71,7 +63,7 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 10.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 5);
-        assert2::assert!(delay == Duration::ZERO);
+        assert!(delay == Duration::ZERO);
     }
 
     #[test]
@@ -81,6 +73,6 @@ mod tests {
         let img = img_with_quota(vec![("user", Some("alice"))], 1.0);
         let buckets = QuotaBuckets::new();
         let delay = consume_controller_mutation_quota(&img, &buckets, "alice", "", 100);
-        assert2::assert!(delay == Duration::from_secs(1));
+        assert!(delay == Duration::from_secs(1));
     }
 }

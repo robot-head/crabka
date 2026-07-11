@@ -29,6 +29,10 @@ use crate::{
     fields(body_len = body.len(), files = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
+/// # Panics
+/// Panics if a schema previously validated by the registry is missing a definition or dependency required during resolution.
 pub async fn file_descriptor_set(
     State(st): State<AppState>,
     body: Bytes,

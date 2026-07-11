@@ -1,14 +1,14 @@
 use std::path::Path;
 
-#[allow(clippy::unnecessary_wraps)]
 fn ui_compile_failure(path: &Path) -> datatest_stable::Result<()> {
+    std::fs::metadata(path)?;
     let cases = trybuild::TestCases::new();
     cases.compile_fail(path);
     Ok(())
 }
 
-#[allow(clippy::unnecessary_wraps)]
 fn pass_case(path: &Path) -> datatest_stable::Result<()> {
+    std::fs::metadata(path)?;
     let cases = trybuild::TestCases::new();
     cases.pass(path);
     Ok(())

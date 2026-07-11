@@ -131,7 +131,6 @@ impl UncleanRecoveryManager {
     /// Spawn the URM dispatch loop and return a cloneable handle for
     /// enqueuing jobs. The loop exits when `shutdown` fires or the last
     /// handle is dropped.
-    #[allow(clippy::too_many_arguments)]
     pub(crate) fn spawn(
         controller: Arc<dyn crate::metadata_source::MetadataSource>,
         liveness: Arc<ControllerLivenessState>,
@@ -169,9 +168,6 @@ impl UncleanRecoveryManager {
     /// Per-job entry point: dedup against in-flight recoveries for the same
     /// partition, run the recovery, then release the in-flight slot and
     /// reply (if a reply channel was supplied).
-    // cargo-mutants: per-job orchestration over live recovery state and reply channels;
-    // recovery policy decisions are exercised through focused tests.
-    #[cfg_attr(test, mutants::skip)]
     async fn recover_one(self: Arc<Self>, job: RecoveryJob) {
         let key = (job.topic.clone(), job.partition);
         {
@@ -238,7 +234,19 @@ impl UncleanRecoveryManager {
             let my_id = i32::try_from(self.node_id.0).unwrap_or(-1);
             futs.push(
                 async move {
-                    query_replica(&client, proto, &host, port, my_id, topic_id, partition, r).await
+                    query_replica(
+                        &client,
+                        ReplicaQuery {
+                            proto,
+                            host,
+                            port,
+                            my_broker_id: my_id,
+                            topic_id,
+                            partition,
+                            replica: r,
+                        },
+                    )
+                    .await
                 }
                 .boxed(),
             );
@@ -313,17 +321,17 @@ impl UncleanRecoveryManager {
 /// Query one replica for its log-end-offset and leader-epoch state via
 /// `GetReplicaLogInfo` (`api_key` 93). Returns `None` on any connect / send /
 /// decode error, or if the replica reports an error for this partition.
-#[allow(clippy::too_many_arguments)]
-async fn query_replica(
-    client: &InterBrokerClient,
+struct ReplicaQuery {
     proto: crabka_security::ListenerProtocol,
-    host: &str,
+    host: String,
     port: u16,
     my_broker_id: i32,
     topic_id: WireUuid,
     partition: i32,
     replica: NodeId,
-) -> Option<ReplicaLogInfo> {
+}
+
+async fn query_replica(client: &InterBrokerClient, query: ReplicaQuery) -> Option<ReplicaLogInfo> {
     use crabka_protocol::owned::get_replica_log_info_request::{
         GetReplicaLogInfoRequest, TopicPartitions,
     };
@@ -332,14 +340,14 @@ async fn query_replica(
         ..crabka_client_core::ConnectionOptions::default()
     };
     let conn = client
-        .connect_as_connection(host, port, proto, "localhost", opts)
+        .connect_as_connection(&query.host, query.port, query.proto, "localhost", opts)
         .await
         .ok()?;
     let req = GetReplicaLogInfoRequest {
-        broker_id: my_broker_id,
+        broker_id: query.my_broker_id,
         topic_partitions: vec![TopicPartitions {
-            topic_id,
-            partitions: vec![partition],
+            topic_id: query.topic_id,
+            partitions: vec![query.partition],
             ..Default::default()
         }],
         ..Default::default()
@@ -347,9 +355,9 @@ async fn query_replica(
     let resp = conn.send(req).await.ok()?;
     for t in &resp.topic_partition_log_info_list {
         for pli in &t.partition_log_info {
-            if pli.partition == partition && pli.error_code == 0 {
+            if pli.partition == query.partition && pli.error_code == 0 {
                 return Some(ReplicaLogInfo {
-                    broker_id: replica,
+                    broker_id: query.replica,
                     last_written_leader_epoch: pli.last_written_leader_epoch,
                     log_end_offset: pli.log_end_offset,
                     current_leader_epoch: pli.current_leader_epoch,
@@ -391,6 +399,7 @@ where
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -407,24 +416,24 @@ mod tests {
     fn picks_highest_epoch_then_offset() {
         // Broker 3 has a higher epoch even though broker 2 has a longer log.
         let r = [ri(2, 4, 100), ri(3, 5, 10)];
-        assert2::assert!(select_best_replica(&r) == Some(NodeId(3)));
+        assert!(select_best_replica(&r) == Some(NodeId(3)));
     }
 
     #[test]
     fn ties_on_epoch_break_by_offset() {
         let r = [ri(2, 5, 90), ri(3, 5, 120)];
-        assert2::assert!(select_best_replica(&r) == Some(NodeId(3)));
+        assert!(select_best_replica(&r) == Some(NodeId(3)));
     }
 
     #[test]
     fn ties_on_epoch_and_offset_break_by_lowest_broker_id() {
         let r = [ri(3, 5, 100), ri(1, 5, 100), ri(2, 5, 100)];
-        assert2::assert!(select_best_replica(&r) == Some(NodeId(1)));
+        assert!(select_best_replica(&r) == Some(NodeId(1)));
     }
 
     #[test]
     fn empty_input_returns_none() {
-        assert2::assert!(select_best_replica(&[]) == None);
+        assert!(select_best_replica(&[]) == None);
     }
 
     #[test]
@@ -435,14 +444,16 @@ mod tests {
             log_end_offset: 10,
             current_leader_epoch: 7,
         }];
-        assert2::assert!(has_newer_leader(&r, 6));
-        assert2::assert!(!has_newer_leader(&r, 7));
+        assert!(has_newer_leader(&r, 6));
+        assert!(!has_newer_leader(&r, 7));
     }
 }
 
 #[cfg(test)]
 mod urm_tests {
     use std::time::Duration;
+
+    use assert2::assert;
 
     use super::*;
 
@@ -463,8 +474,8 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_secs(5)).await;
-        assert2::assert!(got.len() == 2);
-        assert2::assert!(select_best_replica(&got) == Some(NodeId(2)));
+        assert!(got.len() == 2);
+        assert!(select_best_replica(&got) == Some(NodeId(2)));
     }
 
     #[tokio::test]
@@ -475,10 +486,8 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert2::assert!(
-            got.iter().map(|info| info.broker_id).collect::<Vec<_>>()
-                == vec![crabka_audit::NodeId(1)]
-        );
+        assert!(got.len() == 1, "must return what arrived before the cap");
+        assert!(got[0].broker_id == crabka_audit::NodeId(1));
     }
 
     #[tokio::test]
@@ -489,17 +498,15 @@ mod urm_tests {
             Some(info(2, 90))
         };
         let got = gather_responses(vec![f1.boxed(), f2.boxed()], Duration::from_millis(50)).await;
-        assert2::assert!(got == vec![info(1, 50)]);
+        assert!(got == vec![info(1, 50)]);
     }
 }
 
 #[cfg(test)]
 mod run_recovery_tests {
-    use std::{
-        collections::{BTreeMap, BTreeSet},
-        net::SocketAddr,
-    };
+    use std::{collections::BTreeSet, net::SocketAddr};
 
+    use assert2::assert;
     use crabka_metadata::{
         BrokerRegistrationRecord, MetadataImage, MetadataRecord, PartitionRecord, TopicRecord,
     };
@@ -541,51 +548,43 @@ mod run_recovery_tests {
             self.image.clone()
         }
         fn watch_image(&self) -> watch::Receiver<Arc<MetadataImage>> {
-            let (_tx, rx) = watch::channel(self.image.clone());
-            rx
+            unimplemented!()
         }
         fn watch_leader(&self) -> watch::Receiver<Option<NodeId>> {
             self.leader_rx.clone()
         }
         fn quorum_state(&self) -> QuorumState {
-            QuorumState {
-                current_term: 0,
-                last_applied_index: 0,
-                current_leader: *self.leader_rx.borrow(),
-                voters: Vec::new(),
-                voter_nodes: BTreeMap::new(),
-                per_voter_matched_index: BTreeMap::new(),
-            }
+            unimplemented!()
         }
         async fn submit_change(&self, _records: Vec<MetadataRecord>) -> Result<(), RaftError> {
             Ok(())
         }
         async fn change_membership(&self, _new_voters: BTreeSet<NodeId>) -> Result<(), RaftError> {
-            panic!("MockSource::change_membership must not be called by unclean recovery tests")
+            unimplemented!()
         }
         async fn add_learner(&self, _node_id: NodeId, _node: Node) -> Result<(), RaftError> {
-            panic!("MockSource::add_learner must not be called by unclean recovery tests")
+            unimplemented!()
         }
         fn controller_bound_addr(&self) -> SocketAddr {
-            SocketAddr::from(([0, 0, 0, 0], 0))
+            unimplemented!()
         }
         fn read_snapshot_range(&self, _position: i64, _max_bytes: i32) -> SnapshotRange {
-            SnapshotRange::NoSnapshot
+            unimplemented!()
         }
         async fn trigger_snapshot(&self) -> Result<(), RaftError> {
-            Ok(())
+            unimplemented!()
         }
         async fn add_voter(&self, _req: AddVoter) -> Result<ReconfigOutcome, RaftError> {
-            panic!("MockSource::add_voter must not be called by unclean recovery tests")
+            unimplemented!()
         }
         async fn remove_voter(&self, _req: RemoveVoter) -> Result<ReconfigOutcome, RaftError> {
-            panic!("MockSource::remove_voter must not be called by unclean recovery tests")
+            unimplemented!()
         }
         async fn update_voter(&self, _req: UpdateVoter) -> Result<ReconfigOutcome, RaftError> {
-            panic!("MockSource::update_voter must not be called by unclean recovery tests")
+            unimplemented!()
         }
         async fn cancel(&self) {
-            // Nothing to cancel in the in-memory test double.
+            unimplemented!()
         }
     }
 
@@ -666,7 +665,7 @@ mod run_recovery_tests {
             MockSource::new(Some(99), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[]).await,
         );
-        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -675,7 +674,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), MetadataImage::new(Uuid::nil())),
             liveness_with_alive(&[]).await,
         );
-        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -684,7 +683,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[1]).await,
         );
-        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NotNeeded);
     }
 
     #[tokio::test]
@@ -694,7 +693,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), image_with_partition(1, &[1, 2])),
             liveness_with_alive(&[]).await,
         );
-        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -707,7 +706,7 @@ mod run_recovery_tests {
             MockSource::new(Some(NODE), img),
             liveness_with_alive(&[2]).await,
         );
-        assert2::assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
+        assert!(mgr.run_recovery(&job()).await == RecoveryOutcome::NoEligibleReplica);
     }
 
     #[tokio::test]
@@ -726,6 +725,6 @@ mod run_recovery_tests {
             reply: Some(tx),
         };
         mgr.clone().recover_one(j).await;
-        assert2::assert!(rx.await.unwrap() == RecoveryOutcome::InProgress);
+        assert!(rx.await.unwrap() == RecoveryOutcome::InProgress);
     }
 }

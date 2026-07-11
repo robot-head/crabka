@@ -31,6 +31,8 @@ use crate::{PromqlError, engine::MAX_RESOLUTION_POINTS, parse_promql};
 /// the interior sub-range (hence its cache key) is byte-for-byte identical even
 /// when the surrounding window slides. Only the partial leading/trailing
 /// windows clipped by the query bounds differ between such queries.
+/// # Errors
+/// Returns an error when metric input is malformed, a limit is exceeded, or the backing WAL, block store, or remote endpoint fails.
 pub fn plan_range_query(
     query: &str,
     start_ms: i64,

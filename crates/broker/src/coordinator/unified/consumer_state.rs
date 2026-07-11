@@ -51,9 +51,8 @@ pub struct MemberState {
     pub subscribed_topic_regex: Option<String>,
     /// Compiled form of `subscribed_topic_regex`, cached so the reconciler
     /// doesn't recompile the pattern for this member on every recompute.
-    /// `Some(Some(re))` = pattern compiled OK; `Some(None)` = pattern set
-    /// but failed to compile (cached negative — don't retry every reconcile);
-    /// `None` = no pattern. Always kept in sync via [`MemberState::set_regex`]
+    /// The cache distinguishes a compiled pattern, a cached compilation
+    /// failure, and an absent pattern. Always kept in sync via [`MemberState::set_regex`]
     /// — never set `subscribed_topic_regex` directly.
     ///
     /// `Regex` is `Clone` + `Debug` but NOT `PartialEq`/`Eq`. `MemberState`
@@ -62,11 +61,9 @@ pub struct MemberState {
     /// string instead and skip this cached field.
     ///
     /// Public only so cross-module struct literals can initialize it to
-    /// `None`; treat it as private and mutate exclusively via
+    /// its default; treat it as private and mutate exclusively via
     /// [`MemberState::set_regex`] / [`MemberState::sync_regex_cache`].
-    #[allow(clippy::option_option)]
-    // outer = "regex field present?", inner = "compiled successfully?"
-    pub compiled_regex: Option<Option<Regex>>,
+    pub compiled_regex: CompiledRegex,
     pub server_assignor: Option<String>,
     pub rebalance_timeout: Duration,
     pub member_epoch: i32,
@@ -77,6 +74,14 @@ pub struct MemberState {
     pub last_seen: Instant,
     /// Set iff this is a classic member hosted in an upgraded group.
     pub classic: Option<ClassicMemberFacade>,
+}
+
+#[derive(Debug, Clone, Default)]
+pub enum CompiledRegex {
+    #[default]
+    Absent,
+    Invalid,
+    Valid(Regex),
 }
 
 impl MemberState {
@@ -91,19 +96,22 @@ impl MemberState {
     /// Set `subscribed_topic_regex` and (re)compile the cached `Regex`.
     /// The compile is performed exactly once per distinct pattern — call
     /// this only when the pattern actually changes. An invalid pattern is
-    /// cached as `Some(None)` (warned once) so the reconciler neither
+    /// cached as [`CompiledRegex::Invalid`] (warned once) so the reconciler neither
     /// retries the compile nor treats it as "match everything".
     pub fn set_regex(&mut self, pattern: Option<String>) {
-        self.compiled_regex = pattern.as_deref().map(|pat| match Regex::new(pat) {
-            Ok(re) => Some(re),
-            Err(e) => {
-                tracing::warn!(
-                    pattern = %pat, error = %e,
-                    "consumer-group: subscribed_topic_regex failed to compile; ignored"
-                );
-                None
-            }
-        });
+        self.compiled_regex = match pattern.as_deref() {
+            None => CompiledRegex::Absent,
+            Some(pat) => match Regex::new(pat) {
+                Ok(regex) => CompiledRegex::Valid(regex),
+                Err(e) => {
+                    tracing::warn!(
+                        pattern = %pat, error = %e,
+                        "consumer-group: subscribed_topic_regex failed to compile; ignored"
+                    );
+                    CompiledRegex::Invalid
+                }
+            },
+        };
         self.subscribed_topic_regex = pattern;
     }
 
@@ -120,7 +128,10 @@ impl MemberState {
     /// both when there is no pattern and when the pattern failed to compile.
     #[must_use]
     pub fn compiled_regex(&self) -> Option<&Regex> {
-        self.compiled_regex.as_ref().and_then(Option::as_ref)
+        match &self.compiled_regex {
+            CompiledRegex::Valid(regex) => Some(regex),
+            CompiledRegex::Absent | CompiledRegex::Invalid => None,
+        }
     }
 }
 
@@ -390,7 +401,7 @@ fn compute_revoke_split(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -403,7 +414,7 @@ mod tests {
             client_host: "/127.0.0.1".into(),
             subscribed_topic_names: HashSet::new(),
             subscribed_topic_regex: None,
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: 0,
@@ -420,7 +431,7 @@ mod tests {
     fn add_member_marks_dirty_first_time() {
         let mut g = GroupState::new("g");
         g.add_or_update_member(member("m1"));
-        assert2::assert!(g.dirty);
+        assert!(g.dirty);
     }
 
     #[test]
@@ -429,7 +440,7 @@ mod tests {
         g.add_or_update_member(member("m1"));
         g.dirty = false;
         g.add_or_update_member(member("m1"));
-        assert2::assert!(!g.dirty);
+        assert!(!g.dirty);
     }
 
     #[test]
@@ -440,7 +451,7 @@ mod tests {
         let mut m = member("m1");
         m.subscribed_topic_names.insert("t".into());
         g.add_or_update_member(m);
-        assert2::assert!(g.dirty);
+        assert!(g.dirty);
     }
 
     #[test]
@@ -449,7 +460,7 @@ mod tests {
         g.add_or_update_member(member("m1"));
         g.dirty = false;
         g.remove_member("m1");
-        assert2::assert!(g.dirty);
+        assert!(g.dirty);
     }
 
     #[test]
@@ -460,7 +471,8 @@ mod tests {
         g.add_or_update_member(m);
         g.add_or_update_member(member("m2"));
         let evicted = g.evict_expired(Instant::now(), Duration::from_mins(1));
-        assert2::assert!((evicted, g.members.contains_key("m2")) == (vec!["m1".to_string()], true));
+        assert!(evicted == vec!["m1".to_string()]);
+        assert!(g.members.contains_key("m2"));
     }
 
     #[test]
@@ -474,17 +486,9 @@ mod tests {
         target_for_m1.insert(t, vec![0, 1]);
         g.install_target([("m1".to_string(), target_for_m1)].into());
         let m = &g.members["m1"];
-        check!(
-            (
-                &m.partitions_pending_revocation,
-                &m.assigned_partitions,
-                m.assignment_state,
-            ) == (
-                &HashMap::from([(t, vec![2])]),
-                &HashMap::from([(t, vec![0, 1])]),
-                MemberAssignmentState::UnrevokedPartitions,
-            )
-        );
+        check!(m.partitions_pending_revocation[&t] == vec![2]);
+        check!(m.assigned_partitions[&t] == vec![0, 1]);
+        check!(m.assignment_state == MemberAssignmentState::UnrevokedPartitions);
     }
 
     #[test]
@@ -493,7 +497,7 @@ mod tests {
         let mut m = member("m1");
         m.instance_id = Some("inst1".into());
         g.add_or_update_member(m);
-        assert2::assert!(g.current_member_for_instance("inst1") == Some("m1"));
+        assert!(g.current_member_for_instance("inst1") == Some("m1"));
     }
 
     #[test]
@@ -501,21 +505,18 @@ mod tests {
         let mut g = GroupState::new("g");
         g.dirty = false;
         g.bump_epoch();
-        assert2::assert!((g.group_epoch, g.dirty) == (1, true));
+        assert!(g.group_epoch == 1);
+        assert!(g.dirty);
     }
 
     #[test]
     fn set_regex_compiles_and_caches() {
         let mut m = member("m1");
         m.set_regex(Some("^orders-.*".into()));
+        assert!(m.subscribed_topic_regex.as_deref() == Some("^orders-.*"));
         let re = m.compiled_regex().expect("valid regex must compile");
-        assert2::assert!(
-            (
-                m.subscribed_topic_regex.as_deref(),
-                re.is_match("orders-eu"),
-                re.is_match("shipments"),
-            ) == (Some("^orders-.*"), true, false)
-        );
+        assert!(re.is_match("orders-eu"));
+        assert!(!re.is_match("shipments"));
     }
 
     #[test]
@@ -524,26 +525,18 @@ mod tests {
         m.set_regex(Some("*invalid".into()));
         // Pattern string is retained, but no compiled regex is exposed —
         // the reconciler treats this as names-only, not match-everything.
-        assert2::assert!(
-            (
-                m.subscribed_topic_regex.as_deref(),
-                m.compiled_regex().is_none(),
-            ) == (Some("*invalid"), true)
-        );
+        assert!(m.subscribed_topic_regex.as_deref() == Some("*invalid"));
+        assert!(m.compiled_regex().is_none());
     }
 
     #[test]
     fn set_regex_none_clears_cache() {
         let mut m = member("m1");
         m.set_regex(Some("^a".into()));
-        assert2::assert!(m.compiled_regex().is_some());
+        assert!(m.compiled_regex().is_some());
         m.set_regex(None);
-        assert2::assert!(
-            (
-                m.subscribed_topic_regex.is_none(),
-                m.compiled_regex().is_none()
-            ) == (true, true)
-        );
+        assert!(m.subscribed_topic_regex.is_none());
+        assert!(m.compiled_regex().is_none());
     }
 
     #[test]
@@ -551,14 +544,10 @@ mod tests {
         // Mimics a cross-module struct literal: pattern set, cache left None.
         let mut m = member("m1");
         m.subscribed_topic_regex = Some("^a".into());
-        m.compiled_regex = None;
+        m.compiled_regex = crate::coordinator::unified::consumer_state::CompiledRegex::Absent;
         m.sync_regex_cache();
-        assert2::assert!(
-            (
-                m.subscribed_topic_regex.as_deref(),
-                m.compiled_regex().expect("synced").is_match("apple"),
-            ) == (Some("^a"), true)
-        );
+        assert!(m.subscribed_topic_regex.as_deref() == Some("^a"));
+        assert!(m.compiled_regex().expect("synced").is_match("apple"));
     }
 
     #[test]
@@ -568,6 +557,7 @@ mod tests {
         g.group_epoch = 5;
         g.advance_member_epoch("m1");
         let m = &g.members["m1"];
-        assert2::assert!((m.member_epoch, m.previous_member_epoch) == (5, 0));
+        assert!(m.member_epoch == 5);
+        assert!(m.previous_member_epoch == 0);
     }
 }

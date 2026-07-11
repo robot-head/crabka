@@ -16,6 +16,8 @@ use crate::codec::CodecError;
 ///
 /// Returns `Ok(())` on success.  On failure, all validation error messages are
 /// joined and returned as [`CodecError::Validate`].
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
     // Parse the schema string as JSON.
     let schema_value: Value = serde_json::from_str(schema)
@@ -47,6 +49,8 @@ pub fn validate(schema: &str, json: &[u8]) -> Result<(), CodecError> {
 /// The JSON wire format is the JSON document itself (the Confluent JSON serde
 /// puts JSON bytes on the wire; framing is added by `wire.rs`).  This function
 /// validates the bytes and returns them unchanged.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
     validate(schema, json)?;
     Ok(Bytes::copy_from_slice(json))
@@ -56,6 +60,8 @@ pub fn serialize(schema: &str, json: &[u8]) -> Result<Bytes, CodecError> {
 ///
 /// Validates `payload` against `schema` and returns the bytes unchanged — the
 /// payload is already JSON.
+/// # Errors
+/// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
 pub fn deserialize(schema: &str, payload: &[u8]) -> Result<Bytes, CodecError> {
     validate(schema, payload)?;
     Ok(Bytes::copy_from_slice(payload))
@@ -83,7 +89,7 @@ mod tests {
             ),
         ] {
             let result = validate(schema, payload);
-            assert2::assert!(result.is_ok() == valid);
+            assert2::assert!(result.is_ok() == valid, "case {name}");
         }
     }
 
@@ -107,7 +113,7 @@ mod tests {
             ),
             ("deserialize_invalid", deserialize(SCHEMA, br"{}"), None),
         ] {
-            assert2::assert!(result.as_deref().ok() == expected);
+            assert2::assert!(result.as_deref().ok() == expected, "case {name}");
         }
     }
 }

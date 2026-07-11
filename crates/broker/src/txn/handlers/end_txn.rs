@@ -66,7 +66,6 @@ const INITIAL_COORDINATOR_EPOCH: i32 = 0;
 /// of the replicator / heartbeat / auto-join inter-broker clients.
 const INTER_BROKER_SNI: &str = "localhost";
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_end_txn",
     level = "info",
@@ -84,7 +83,6 @@ pub(crate) async fn handle(
     let coord = broker.txn_coordinator.clone();
     let controller = broker.controller.clone();
     let partitions = broker.partitions.clone();
-    let node_id = broker.config.node_id;
     let authorizer = broker.config.authorizer.as_ref();
     let mut cur: &[u8] = req_bytes;
     let req = EndTxnRequest::decode(&mut cur, version)?;
@@ -96,87 +94,26 @@ pub(crate) async fn handle(
     coord.refresh_leader_partitions(&image).await;
 
     let tid = req.transactional_id.as_str();
-
-    // ── ACL preamble: Write on TransactionalId ─────────────
-    let tid_req = AuthorizationRequest {
-        principal: ctx.principal,
-        host: ctx.peer,
-        resource_type: ResourceType::TransactionalId,
-        resource_name: tid,
-        operation: AclOperation::Write,
+    let entry_mutex = match validate_end_txn(&coord, authorizer, &image, ctx, &req).await {
+        Ok(entry) => entry,
+        Err(code) => return encode_err(version, code),
     };
-    if authorizer.authorize(&*image, &tid_req) == AuthorizationResult::Deny {
-        return encode_err(version, codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
-    }
-
-    if !coord.is_coordinator_for(tid).await {
-        return encode_err(version, codes::NOT_COORDINATOR);
-    }
-
-    let Some(entry_mutex) = coord.get(tid) else {
-        return encode_err(version, codes::INVALID_PRODUCER_ID_MAPPING);
-    };
-
-    {
-        let entry = entry_mutex.lock().await;
-        // `req.producer_id` is the raw wire `i64`; wrap it to compare with the
-        // coordinator's `ProducerId`.
-        if entry.producer_id != req.producer_id || entry.producer_epoch != req.producer_epoch {
-            return encode_err(version, codes::INVALID_PRODUCER_EPOCH);
-        }
-    }
 
     // ── Phase 1: Ongoing → Prepare{Commit,Abort} ──────────────────────
 
-    let marker_type = if req.committed {
-        MarkerType::Commit
-    } else {
-        MarkerType::Abort
-    };
-
-    let (prepare, complete, prepare_snap): (TxnState, TxnState, TxnEntry) = {
-        let mut entry = entry_mutex.lock().await;
-        match decide_phase1_transition(&mut entry, req.committed) {
-            Ok((prepare, complete)) => {
-                entry.last_update_ms = now_millis();
-                (prepare, complete, entry.clone())
-            }
+    let (marker_type, prepare, complete, prepare_snap) =
+        match prepare_transaction(&coord, &entry_mutex, req.committed, txnv, tid).await {
+            Ok(prepared) => prepared,
             Err(code) => return encode_err(version, code),
-        }
-        // Lock dropped here.
-    };
-
-    if let Err(e) = coord.put(prepare_snap.clone(), txnv).await {
-        tracing::error!(
-            tid,
-            state = ?prepare,
-            error = %e,
-            "EndTxn: failed to persist PrepareCommit/PrepareAbort"
-        );
-        return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
-    }
+        };
 
     // ── Phase 2: Fan out WriteTxnMarkers ──────────────────────────────
 
-    if let Err(e) = dispatch_markers(
-        node_id,
-        &partitions,
-        &prepare_snap,
-        marker_type,
-        &image,
-        &broker.inter_broker_client,
-        broker.inter_broker_listener_protocol,
-        &broker.config.inter_broker_listener_name,
-    )
-    .await
+    if let Err(code) =
+        dispatch_transaction_markers(broker, &image, &partitions, &prepare_snap, marker_type, tid)
+            .await
     {
-        tracing::error!(
-            tid,
-            error = %e,
-            "EndTxn: WriteTxnMarkers fan-out failed; returning retriable error"
-        );
-        // Return a retriable error; the producer will retry EndTxn.
-        return encode_err(version, codes::UNKNOWN_SERVER_ERROR);
+        return encode_err(version, code);
     }
 
     // ── Phase 3: Prepare{Commit,Abort} → Complete{Commit,Abort} ───────
@@ -312,6 +249,102 @@ pub(crate) async fn handle(
 
     // Unwrap the post-completion `ProducerId` into the raw-`i64` wire response.
     encode_ok(version, response_pid.get(), response_epoch)
+}
+
+async fn validate_end_txn(
+    coordinator: &crate::txn::coordinator::TxnCoordinator,
+    authorizer: &dyn crate::authorizer::Authorizer,
+    image: &MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    request: &EndTxnRequest,
+) -> Result<std::sync::Arc<tokio::sync::Mutex<TxnEntry>>, i16> {
+    let transactional_id = request.transactional_id.as_str();
+    let authorization = AuthorizationRequest {
+        principal: context.principal,
+        host: context.peer,
+        resource_type: ResourceType::TransactionalId,
+        resource_name: transactional_id,
+        operation: AclOperation::Write,
+    };
+    if authorizer.authorize(image, &authorization) == AuthorizationResult::Deny {
+        return Err(codes::TRANSACTIONAL_ID_AUTHORIZATION_FAILED);
+    }
+    if !coordinator.is_coordinator_for(transactional_id).await {
+        return Err(codes::NOT_COORDINATOR);
+    }
+    let entry = coordinator
+        .get(transactional_id)
+        .ok_or(codes::INVALID_PRODUCER_ID_MAPPING)?;
+    {
+        let state = entry.lock().await;
+        if state.producer_id != request.producer_id
+            || state.producer_epoch != request.producer_epoch
+        {
+            return Err(codes::INVALID_PRODUCER_EPOCH);
+        }
+    }
+    Ok(entry)
+}
+
+async fn prepare_transaction(
+    coordinator: &crate::txn::coordinator::TxnCoordinator,
+    entry: &std::sync::Arc<tokio::sync::Mutex<TxnEntry>>,
+    committed: bool,
+    version: crate::txn::version::TxnVersion,
+    transactional_id: &str,
+) -> Result<(MarkerType, TxnState, TxnState, TxnEntry), i16> {
+    let marker_type = if committed {
+        MarkerType::Commit
+    } else {
+        MarkerType::Abort
+    };
+    let (prepare, complete, snapshot) = {
+        let mut state = entry.lock().await;
+        let (prepare, complete) = decide_phase1_transition(&mut state, committed)?;
+        state.last_update_ms = now_millis();
+        (prepare, complete, state.clone())
+    };
+    if let Err(error) = coordinator.put(snapshot.clone(), version).await {
+        tracing::error!(
+            tid = transactional_id,
+            state = ?prepare,
+            error = %error,
+            "EndTxn: failed to persist PrepareCommit/PrepareAbort"
+        );
+        return Err(codes::UNKNOWN_SERVER_ERROR);
+    }
+    Ok((marker_type, prepare, complete, snapshot))
+}
+
+async fn dispatch_transaction_markers(
+    broker: &Broker,
+    image: &MetadataImage,
+    partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
+    snapshot: &TxnEntry,
+    marker_type: MarkerType,
+    transactional_id: &str,
+) -> Result<(), i16> {
+    dispatch_markers(
+        MarkerDispatchContext {
+            node_id: broker.config.node_id,
+            image,
+            inter_broker_client: &broker.inter_broker_client,
+            inter_broker_protocol: broker.inter_broker_listener_protocol,
+            inter_broker_listener_name: &broker.config.inter_broker_listener_name,
+        },
+        partitions,
+        snapshot,
+        marker_type,
+    )
+    .await
+    .map_err(|error| {
+        tracing::error!(
+            tid = transactional_id,
+            error = %error,
+            "EndTxn: WriteTxnMarkers fan-out failed; returning retriable error"
+        );
+        codes::UNKNOWN_SERVER_ERROR
+    })
 }
 
 /// Apply (on COMMIT) or drop (on ABORT) the transactional consumer offsets
@@ -454,17 +487,22 @@ pub(crate) fn validate_complete_reacquire(
 /// Any `__consumer_offsets` partitions registered via `AddOffsetsToTxn` live
 /// in `entry.partitions` (Kafka's model has no separate group list), so they
 /// are fanned out by the same loop as data partitions.
-#[allow(clippy::too_many_arguments)]
-async fn dispatch_markers(
+#[derive(Clone, Copy)]
+struct MarkerDispatchContext<'a> {
     node_id: NodeId,
+    image: &'a MetadataImage,
+    inter_broker_client: &'a InterBrokerClient,
+    inter_broker_protocol: ListenerProtocol,
+    inter_broker_listener_name: &'a str,
+}
+
+async fn dispatch_markers(
+    context: MarkerDispatchContext<'_>,
     partitions: &std::sync::Arc<crate::partition_registry::PartitionRegistry>,
     entry: &TxnEntry,
     marker_type: MarkerType,
-    image: &MetadataImage,
-    inter_broker_client: &InterBrokerClient,
-    inter_broker_protocol: ListenerProtocol,
-    inter_broker_listener_name: &str,
 ) -> Result<(), BrokerError> {
+    let MarkerDispatchContext { node_id, image, .. } = context;
     // Group every involved (topic, partition) by its current leader.
     let mut by_leader: HashMap<NodeId, Vec<TopicPartition>> = HashMap::new();
 
@@ -498,18 +536,7 @@ async fn dispatch_markers(
             }
         } else {
             // Remote path: send WriteTxnMarkersRequest to the leader.
-            send_write_txn_markers(
-                node_id,
-                leader,
-                entry,
-                marker_type,
-                &tps,
-                image,
-                inter_broker_client,
-                inter_broker_protocol,
-                inter_broker_listener_name,
-            )
-            .await?;
+            send_write_txn_markers(context, leader, entry, marker_type, &tps).await?;
         }
     }
 
@@ -538,18 +565,20 @@ async fn dispatch_markers(
 // value, so dropping it (→ empty Default vec) is only observable through the
 // remote RPC. Exercised by the live txn marker-fanout / differential suite.
 #[cfg_attr(test, mutants::skip)]
-#[allow(clippy::too_many_arguments)]
 async fn send_write_txn_markers(
-    my_node_id: NodeId,
+    context: MarkerDispatchContext<'_>,
     leader_node: NodeId,
     entry: &TxnEntry,
     marker_type: MarkerType,
     tps: &[TopicPartition],
-    image: &MetadataImage,
-    inter_broker_client: &InterBrokerClient,
-    inter_broker_protocol: ListenerProtocol,
-    inter_broker_listener_name: &str,
 ) -> Result<(), BrokerError> {
+    let MarkerDispatchContext {
+        node_id: my_node_id,
+        image,
+        inter_broker_client,
+        inter_broker_protocol,
+        inter_broker_listener_name,
+    } = context;
     let Some(broker_info) = image.broker(leader_node) else {
         return Err(BrokerError::Txn(format!(
             "EndTxn: leader node {leader_node} not found in metadata image"
@@ -661,7 +690,7 @@ fn encode_response(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_ids::PartitionIndex;
     use crabka_metadata::{BrokerEndpoint, BrokerRegistrationRecord, MetadataRecord};
     use crabka_protocol::{UnknownTaggedFields, owned::end_txn_response::EndTxnResponse};
@@ -677,7 +706,7 @@ mod tests {
     #[test]
     fn encode_err_leaves_producer_identity_at_error_sentinels() {
         let bytes = encode_err(5, codes::NOT_COORDINATOR).expect("encode error");
-        assert2::assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty());
         let resp = decode_response(&bytes, 5);
 
         let expected = EndTxnResponse {
@@ -687,13 +716,13 @@ mod tests {
             producer_epoch: -1,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
     fn encode_ok_returns_v5_producer_identity() {
         let bytes = encode_ok(5, 42, 7).expect("encode ok");
-        assert2::assert!(!bytes.is_empty());
+        assert!(!bytes.is_empty());
         let resp = decode_response(&bytes, 5);
 
         let expected = EndTxnResponse {
@@ -703,7 +732,7 @@ mod tests {
             producer_epoch: 7,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -712,25 +741,16 @@ mod tests {
         let ids = crate::producer_id_manager::ProducerIdManager::new();
         let cases = [
             // Below TV_2 (Classic, Flexible): pid + epoch unchanged.
-            (
-                "classic identity unchanged",
-                TxnVersion::Classic,
-                (ProducerId(7), 3),
-            ),
-            (
-                "flexible identity unchanged",
-                TxnVersion::Flexible,
-                (ProducerId(7), 3),
-            ),
+            (TxnVersion::Classic, (ProducerId(7), 3)),
+            (TxnVersion::Flexible, (ProducerId(7), 3)),
             // TV_2 (Verified) non-overflow: same pid, epoch + 1.
-            (
-                "verified epoch bumps",
-                TxnVersion::Verified,
-                (ProducerId(7), 4),
-            ),
+            (TxnVersion::Verified, (ProducerId(7), 4)),
         ];
-        for (_case, version, want) in cases {
-            assert2::assert!(next_producer_identity(version, ProducerId(7), 3, &ids) == want);
+        for (version, want) in cases {
+            assert!(
+                next_producer_identity(version, ProducerId(7), 3, &ids) == want,
+                "txn version {version:?}"
+            );
         }
     }
 
@@ -742,13 +762,14 @@ mod tests {
         // (monotonic from PID_BASE) and the epoch resets to 0. No panic.
         let (new_pid, new_epoch) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
-        assert2::assert!((new_pid != 7, new_epoch) == (true, 0));
+        assert!(new_pid != 7);
+        assert!(new_epoch == 0);
         // The allocator hands out a distinct pid on the next overflow too.
         let (next_pid, _) =
             next_producer_identity(TxnVersion::Verified, ProducerId(7), i16::MAX, &ids);
-        assert2::assert!(next_pid != new_pid);
+        assert!(next_pid != new_pid);
         // Below TV_2 at i16::MAX: no roll, epoch stays (no bump path taken).
-        assert2::assert!(
+        assert!(
             next_producer_identity(TxnVersion::Classic, ProducerId(7), i16::MAX, &ids)
                 == (ProducerId(7), i16::MAX)
         );
@@ -772,18 +793,11 @@ mod tests {
         let cases = [
             // Entry is exactly as Phase 1 left it: same pid/epoch, still in
             // Prepare — proceed.
-            (
-                "unchanged prepared entry",
-                7,
-                3,
-                TxnState::PrepareCommit,
-                ReacquireDecision::Proceed,
-            ),
+            (7, 3, TxnState::PrepareCommit, ReacquireDecision::Proceed),
             // A concurrent InitProducerId bumped the epoch during the marker
             // fan-out. We must NOT overwrite with the stale epoch / Complete
             // state.
             (
-                "concurrent epoch bump",
                 7,
                 4,
                 TxnState::PrepareCommit,
@@ -791,7 +805,6 @@ mod tests {
             ),
             // Producer id changed underneath us — fenced.
             (
-                "new producer id",
                 8,
                 3,
                 TxnState::PrepareCommit,
@@ -800,7 +813,6 @@ mod tests {
             // Another caller (or an EndTxn retry that lost the race) already
             // drove this exact transition. Report success, do not re-write.
             (
-                "already completed",
                 7,
                 3,
                 TxnState::CompleteCommit,
@@ -811,7 +823,6 @@ mod tests {
             // fan-out no longer reflects the live transaction; refuse to
             // finalise.
             (
-                "wrong ongoing state",
                 7,
                 3,
                 TxnState::Ongoing,
@@ -821,14 +832,13 @@ mod tests {
             // different finalisation kind raced us. Refuse to write
             // CompleteCommit.
             (
-                "wrong prepare state",
                 7,
                 3,
                 TxnState::PrepareAbort,
                 ReacquireDecision::Reject(codes::INVALID_TXN_STATE),
             ),
         ];
-        for (_case, pid, epoch, state, expected) in cases {
+        for (pid, epoch, state, expected) in cases {
             let e = entry(pid, epoch, state);
             let decision = validate_complete_reacquire(
                 &e,
@@ -837,7 +847,10 @@ mod tests {
                 TxnState::PrepareCommit,
                 TxnState::CompleteCommit,
             );
-            assert2::assert!(decision == expected);
+            assert!(
+                decision == expected,
+                "observed pid {pid}, epoch {epoch}, state {state:?}"
+            );
         }
     }
 
@@ -845,7 +858,7 @@ mod tests {
     fn abort_path_proceeds_and_is_idempotent() {
         // Mirror the abort branch: prepare=PrepareAbort, complete=CompleteAbort.
         let prep = entry(7, 3, TxnState::PrepareAbort);
-        assert2::assert!(
+        assert!(
             validate_complete_reacquire(
                 &prep,
                 ProducerId(7),
@@ -855,7 +868,7 @@ mod tests {
             ) == ReacquireDecision::Proceed
         );
         let done = entry(7, 3, TxnState::CompleteAbort);
-        assert2::assert!(
+        assert!(
             validate_complete_reacquire(
                 &done,
                 ProducerId(7),
@@ -887,25 +900,42 @@ mod tests {
         InterBrokerClient::new(None, None)
     }
 
+    async fn send_test_markers(
+        image: &MetadataImage,
+        leader: NodeId,
+        listener_name: &str,
+    ) -> Result<(), BrokerError> {
+        let client = plaintext_client();
+        let entry = marker_entry();
+        let partitions = tps();
+        send_write_txn_markers(
+            MarkerDispatchContext {
+                node_id: NodeId(1),
+                image,
+                inter_broker_client: &client,
+                inter_broker_protocol: ListenerProtocol::Plaintext,
+                inter_broker_listener_name: listener_name,
+            },
+            leader,
+            &entry,
+            MarkerType::Commit,
+            &partitions,
+        )
+        .await
+    }
+
     /// Leader node absent from the metadata image → descriptive `Txn` error,
     /// no dial attempted.
     #[tokio::test]
     async fn errors_when_leader_node_missing_from_image() {
         let image = MetadataImage::default();
-        let err = send_write_txn_markers(
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(99),
-            &marker_entry(),
-            MarkerType::Commit,
-            &tps(),
-            &image,
-            &plaintext_client(),
-            ListenerProtocol::Plaintext,
-            "PLAINTEXT",
-        )
-        .await
-        .expect_err("missing leader must error");
-        assert2::assert!(matches!(&err, BrokerError::Txn(m) if m.contains("not found")));
+        let err = send_test_markers(&image, NodeId(99), "PLAINTEXT")
+            .await
+            .expect_err("missing leader must error");
+        assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("not found")),
+            "unexpected error: {err:?}"
+        );
     }
 
     /// Leader resolves to its inter-broker endpoint, but the address is
@@ -931,21 +961,12 @@ mod tests {
                 }],
             },
         ));
-        let err = send_write_txn_markers(
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
-            &marker_entry(),
-            MarkerType::Commit,
-            &tps(),
-            &image,
-            &plaintext_client(),
-            ListenerProtocol::Plaintext,
-            "INTERNAL",
-        )
-        .await
-        .expect_err("unreachable endpoint must error");
-        assert2::assert!(
-            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9"))
+        let err = send_test_markers(&image, NodeId(2), "INTERNAL")
+            .await
+            .expect_err("unreachable endpoint must error");
+        assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
+            "unexpected error: {err:?}"
         );
     }
 
@@ -973,21 +994,12 @@ mod tests {
                 }],
             },
         ));
-        let err = send_write_txn_markers(
-            crabka_audit::NodeId(1),
-            crabka_audit::NodeId(2),
-            &marker_entry(),
-            MarkerType::Commit,
-            &tps(),
-            &image,
-            &plaintext_client(),
-            ListenerProtocol::Plaintext,
-            "INTERNAL",
-        )
-        .await
-        .expect_err("unreachable fallback must error");
-        assert2::assert!(
-            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9"))
+        let err = send_test_markers(&image, NodeId(2), "INTERNAL")
+            .await
+            .expect_err("unreachable fallback must error");
+        assert!(
+            matches!(&err, BrokerError::Txn(m) if m.contains("connect to 127.0.0.1:9")),
+            "expected fallback to top-level 127.0.0.1:9, got: {err:?}"
         );
     }
 }

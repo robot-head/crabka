@@ -1,6 +1,5 @@
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` in test files
 // (same upstream bug as `tests/mtls.rs` etc).
-#![allow(clippy::pedantic)]
 
 //! KIP-511 — `ApiVersions` v3+ client-information validation and the
 //! `client_software_versions_total` Prometheus counter.
@@ -14,6 +13,7 @@
 
 use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, config::ListenerSpec};
 use crabka_protocol::{
@@ -58,7 +58,7 @@ async fn boot() -> (
     (kafka_addr, metrics_addr, handle, tempdir)
 }
 
-/// Send one ApiVersions request at the requested version with the given
+/// Send one `ApiVersions` request at the requested version with the given
 /// client-info fields and return the decoded response.
 async fn send_api_versions(
     addr: SocketAddr,
@@ -135,7 +135,11 @@ async fn v3_valid_client_info_accepted() {
     let resp = send_api_versions(kafka_addr, 3, "crabka-client-core", "0.1.1")
         .await
         .expect("ApiVersions");
-    assert2::assert!((resp.error_code, resp.api_keys.is_empty()) == (0, false));
+    assert!(resp.error_code == 0, "valid v3 must succeed: {resp:?}");
+    assert!(
+        !resp.api_keys.is_empty(),
+        "valid v3 must return the API list",
+    );
 
     handle.shutdown().await;
 }
@@ -147,7 +151,14 @@ async fn v3_empty_software_name_rejected_with_invalid_request() {
     let resp = send_api_versions(kafka_addr, 3, "", "1.0.0")
         .await
         .expect("ApiVersions");
-    assert2::assert!((resp.error_code, resp.api_keys.is_empty()) == (INVALID_REQUEST, true));
+    assert!(
+        resp.error_code == INVALID_REQUEST,
+        "empty name must be rejected: {resp:?}"
+    );
+    assert!(
+        resp.api_keys.is_empty(),
+        "error path must not advertise APIs",
+    );
 
     handle.shutdown().await;
 }
@@ -159,7 +170,10 @@ async fn v3_empty_software_version_rejected_with_invalid_request() {
     let resp = send_api_versions(kafka_addr, 3, "crabka", "")
         .await
         .expect("ApiVersions");
-    assert2::assert!(resp.error_code == INVALID_REQUEST);
+    assert!(
+        resp.error_code == INVALID_REQUEST,
+        "empty version must be rejected: {resp:?}"
+    );
 
     handle.shutdown().await;
 }
@@ -171,7 +185,10 @@ async fn v3_invalid_char_in_name_rejected() {
     let resp = send_api_versions(kafka_addr, 3, "has space", "1.0.0")
         .await
         .expect("ApiVersions");
-    assert2::assert!(resp.error_code == INVALID_REQUEST);
+    assert!(
+        resp.error_code == INVALID_REQUEST,
+        "spaces must be rejected: {resp:?}"
+    );
 
     handle.shutdown().await;
 }
@@ -183,7 +200,10 @@ async fn v3_leading_dash_in_version_rejected() {
     let resp = send_api_versions(kafka_addr, 3, "crabka", "-1.0.0")
         .await
         .expect("ApiVersions");
-    assert2::assert!(resp.error_code == INVALID_REQUEST);
+    assert!(
+        resp.error_code == INVALID_REQUEST,
+        "leading dash must be rejected: {resp:?}"
+    );
 
     handle.shutdown().await;
 }
@@ -199,7 +219,11 @@ async fn pre_v3_does_not_validate_client_info() {
     let resp = send_api_versions(kafka_addr, 0, "", "")
         .await
         .expect("ApiVersions");
-    assert2::assert!((resp.error_code, resp.api_keys.is_empty()) == (0, false));
+    assert!(
+        resp.error_code == 0,
+        "v0 ApiVersions must not validate KIP-511 fields: {resp:?}"
+    );
+    assert!(!resp.api_keys.is_empty());
 
     handle.shutdown().await;
 }
@@ -227,12 +251,18 @@ async fn accepted_v3_handshake_bumps_client_software_versions_counter() {
     let body = scrape(metrics_addr).await;
 
     // Three series, one count, plus the family HELP/TYPE lines.
-    assert2::assert!(body.contains("# TYPE crabka_broker_client_software_versions counter"));
+    assert!(
+        body.contains("# TYPE crabka_broker_client_software_versions counter"),
+        "TYPE line missing in:\n{body}",
+    );
     let needle_repeat = "crabka_broker_client_software_versions_total{software_name=\"crabka-it\",software_version=\"1.0.0\"} 2";
     let needle_new = "crabka_broker_client_software_versions_total{software_name=\"crabka-it\",software_version=\"1.0.1\"} 1";
     let needle_other = "crabka_broker_client_software_versions_total{software_name=\"another-lib\",software_version=\"9.9.9\"} 1";
     for needle in [needle_repeat, needle_new, needle_other] {
-        assert2::assert!(body.contains(needle));
+        assert!(
+            body.contains(needle),
+            "expected sample {needle:?} not found in:\n{body}",
+        );
     }
 
     handle.shutdown().await;
@@ -255,9 +285,15 @@ async fn rejected_v3_handshake_does_not_bump_counter() {
         .expect("ApiVersions");
 
     let body = scrape(metrics_addr).await;
-    assert2::assert!(!body.contains("software_name=\"bad client\""));
+    assert!(
+        !body.contains("software_name=\"bad client\""),
+        "rejected handshake must not be recorded:\n{body}",
+    );
     // Spot-check the valid one is recorded.
-    assert2::assert!(body.contains("software_name=\"valid-client\""));
+    assert!(
+        body.contains("software_name=\"valid-client\""),
+        "valid handshake must be recorded:\n{body}",
+    );
 
     handle.shutdown().await;
 }
@@ -276,8 +312,9 @@ async fn pre_v3_handshake_does_not_bump_counter() {
     // The metric *family* may still appear in the scrape registration
     // (HELP/TYPE lines emit even with no series), so just check no
     // sample row with software_name="" was emitted.
-    assert2::assert!(
-        !body.contains("crabka_broker_client_software_versions_total{software_name=\"\"")
+    assert!(
+        !body.contains("crabka_broker_client_software_versions_total{software_name=\"\""),
+        "v0 handshake must not be recorded:\n{body}",
     );
 
     handle.shutdown().await;

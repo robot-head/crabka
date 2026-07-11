@@ -468,10 +468,6 @@ async fn crabka_tenant_b_cannot_see_tenant_a_traces_tags_or_values() -> TestResu
 
 #[tokio::test]
 #[ignore = "requires Docker and the mirror.gcr.io/grafana/grafana image"]
-#[allow(
-    clippy::too_many_lines,
-    reason = "integration test drives all Grafana datasource legs end-to-end"
-)]
 async fn grafana_accepts_tempo_datasource_pointing_at_crabka() -> TestResult {
     let client = reqwest::Client::new();
     let otlp_body = sample_otlp_body();

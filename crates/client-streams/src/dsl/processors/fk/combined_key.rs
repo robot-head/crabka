@@ -53,13 +53,13 @@ mod tests {
         let fk = b"foreign";
         let pk = b"primary";
         let k = combined_key(fk, pk);
-        assert2::assert!(&k[..4] == &u32::try_from(fk.len()).unwrap().to_be_bytes());
-        assert2::assert!(&k[4..4 + fk.len()] == fk);
-        assert2::assert!(&k[4 + fk.len()..] == pk);
-        assert2::assert!(foreign_prefix(fk).as_ref() == &k[..4 + fk.len()]);
+        assert_eq!(&k[..4], &u32::try_from(fk.len()).unwrap().to_be_bytes());
+        assert_eq!(&k[4..4 + fk.len()], fk);
+        assert_eq!(&k[4 + fk.len()..], pk);
+        assert_eq!(foreign_prefix(fk).as_ref(), &k[..4 + fk.len()]);
         let (gfk, gpk) = split_combined_key(&k);
-        assert2::assert!(gfk == fk);
-        assert2::assert!(gpk == pk);
+        assert_eq!(gfk, fk);
+        assert_eq!(gpk, pk);
     }
 
     #[test]
@@ -71,11 +71,13 @@ mod tests {
         for e in v["combined_key"].as_array().unwrap() {
             let fk = e["fk"].as_str().unwrap().as_bytes();
             let pk = e["pk"].as_str().unwrap().as_bytes();
-            assert2::assert!(
-                combined_key(fk, pk) == Bytes::from(hex(e["bytes_hex"].as_str().unwrap()))
+            assert_eq!(
+                combined_key(fk, pk),
+                Bytes::from(hex(e["bytes_hex"].as_str().unwrap()))
             );
-            assert2::assert!(
-                foreign_prefix(fk) == Bytes::from(hex(e["prefix_hex"].as_str().unwrap()))
+            assert_eq!(
+                foreign_prefix(fk),
+                Bytes::from(hex(e["prefix_hex"].as_str().unwrap()))
             );
         }
     }

@@ -111,6 +111,8 @@ fn check_pair(
     fields(subject = %subject, schema_type = ?ty, level = tracing::field::Empty, transitive = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn check_registration(
     snap: &StoreState,
     subject: &str,
@@ -171,6 +173,8 @@ pub fn check_registration(
     fields(subject = %subject, schema_type = ?ty, level = tracing::field::Empty, is_compatible = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub fn check_against_version(
     snap: &StoreState,
     subject: &str,

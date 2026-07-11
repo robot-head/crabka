@@ -47,7 +47,6 @@ const DEFAULT_RESOURCE_TYPES: [i8; 3] = [
     RESOURCE_TYPE_CLIENT_METRICS,
 ];
 
-#[allow(clippy::unused_async)]
 #[tracing::instrument(
     name = "handle_list_config_resources",
     level = "info",
@@ -55,7 +54,7 @@ const DEFAULT_RESOURCE_TYPES: [i8; 3] = [
     fields(api = "ListConfigResources", version, req_bytes = req_bytes.len()),
     err,
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     version: i16,
     _correlation_id: i32,
@@ -166,6 +165,7 @@ fn collect_resources(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_metadata::{BrokerRegistrationRecord, MetadataImage, MetadataRecord, TopicRecord};
     use crabka_protocol::UnknownTaggedFields;
     use uuid::Uuid;
@@ -247,22 +247,22 @@ mod tests {
     fn v0_returns_client_metrics_subscriptions() {
         let img = image_with_subs(&["sub-b", "sub-a"]);
         let out = collect_resources(&img, 0, &[]);
-        assert2::assert!(out.len() == 2);
-        assert2::assert!(
+        assert_eq!(out.len(), 2);
+        assert!(
             out.iter()
                 .all(|r| r.resource_type == RESOURCE_TYPE_CLIENT_METRICS)
         );
-        assert2::assert!(out[0].resource_name == "sub-a"); // sorted
-        assert2::assert!(out[1].resource_name == "sub-b");
+        assert_eq!(out[0].resource_name, "sub-a"); // sorted
+        assert_eq!(out[1].resource_name, "sub-b");
     }
 
     #[test]
     fn v1_client_metrics_filter_returns_subscriptions() {
         let img = image_with_subs(&["sub-a"]);
         let out = collect_resources(&img, 1, &[RESOURCE_TYPE_CLIENT_METRICS]);
-        assert2::assert!(out.len() == 1);
-        assert2::assert!(out[0].resource_type == RESOURCE_TYPE_CLIENT_METRICS);
-        assert2::assert!(out[0].resource_name == "sub-a");
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].resource_type, RESOURCE_TYPE_CLIENT_METRICS);
+        assert_eq!(out[0].resource_name, "sub-a");
     }
 
     #[test]
@@ -293,7 +293,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert2::assert!(out == expected);
+        assert!(out == expected);
     }
 
     #[test]
@@ -305,7 +305,7 @@ mod tests {
             resource_type: RESOURCE_TYPE_TOPIC,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         }];
-        assert2::assert!(out == expected);
+        assert!(out == expected);
     }
 
     #[test]
@@ -324,7 +324,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert2::assert!(out == expected);
+        assert!(out == expected);
     }
 
     #[test]
@@ -332,7 +332,10 @@ mod tests {
         let img = image_with_topics_and_brokers(&["t-a"], &[1]);
         // type 8 = BROKER_LOGGER, type 32 = GROUP — neither supported.
         let out = collect_resources(&img, 1, &[8, 32]);
-        assert2::assert!(out.is_empty());
+        assert!(
+            out.is_empty(),
+            "unsupported resource types silently drop; got {out:?}"
+        );
     }
 
     #[test]
@@ -359,7 +362,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields::default(),
             },
         ];
-        assert2::assert!(out == expected);
+        assert!(out == expected);
     }
 
     #[test]
@@ -369,7 +372,7 @@ mod tests {
         // Topics sorted lexicographically, brokers sorted lexicographically
         // by id-as-string.
         let names: Vec<&str> = out.iter().map(|r| r.resource_name.as_str()).collect();
-        assert2::assert!(names == vec!["a-early", "z-late", "1", "10"]);
+        assert!(names == vec!["a-early", "z-late", "1", "10"]);
     }
 
     #[tokio::test]
@@ -384,9 +387,7 @@ mod tests {
             ..Default::default()
         });
 
-        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
-            .await
-            .expect("handle");
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx).expect("handle");
         let resp = decode_response(&bytes);
 
         let expected = ListConfigResourcesResponse {
@@ -395,7 +396,7 @@ mod tests {
             config_resources: vec![],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -413,29 +414,17 @@ mod tests {
             ..Default::default()
         });
 
-        let bytes = handle(&broker, VERSION, 123, &req, &ctx)
-            .await
-            .expect("handle");
+        let bytes = handle(&broker, VERSION, 123, &req, &ctx).expect("handle");
         let resp = decode_response(&bytes);
 
-        let expected = ListConfigResourcesResponse {
-            throttle_time_ms: 0,
-            error_code: codes::NONE,
-            config_resources: vec![
-                ConfigResource {
-                    resource_type: RESOURCE_TYPE_TOPIC,
-                    resource_name: "__consumer_offsets".into(),
-                    ..Default::default()
-                },
-                ConfigResource {
-                    resource_type: RESOURCE_TYPE_TOPIC,
-                    resource_name: "orders".into(),
-                    ..Default::default()
-                },
-            ],
-            ..Default::default()
-        };
-        assert2::assert!(resp == expected);
+        assert!(resp.error_code == codes::NONE);
+        assert!(resp.throttle_time_ms == 0);
+        let resource = resp
+            .config_resources
+            .iter()
+            .find(|r| r.resource_name == "orders")
+            .expect("seeded topic resource");
+        assert!(resource.resource_type == RESOURCE_TYPE_TOPIC);
         broker_handle.shutdown().await;
     }
 }

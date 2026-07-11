@@ -2,8 +2,11 @@
 
 use std::{
     collections::BTreeMap,
+    fmt::{Arguments, Write},
     path::{Path, PathBuf},
 };
+
+use crate::numeric::{nonnegative_f64_to_u64, to_f64};
 
 use anyhow::{Context, Result};
 
@@ -12,9 +15,17 @@ use crate::{
     scenario::{RunOutput, Stack},
 };
 
+fn push_fmt(output: &mut String, args: Arguments<'_>) {
+    output
+        .write_fmt(args)
+        .expect("writing formatted data to a String cannot fail");
+}
+
 /// Walk `input_dir` for `*.json` files, deserialize each into a
 /// `RunOutput`, group by `(scenario name, broker_count)`, average each
 /// metric across all runs in a group, and emit a Markdown summary.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
     let mut runs: Vec<(PathBuf, RunOutput)> = Vec::new();
     let entries = std::fs::read_dir(input_dir)
@@ -58,19 +69,28 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
     out.push_str("Each cell is the **mean across all runs** of a (scenario, topology); `(±N%)` is the coefficient of variation (sample stddev ÷ mean), shown when a cell has more than one run. The `ratio` column is `crabka / kafka` for throughput / efficiency (higher is better for Crabka) and `kafka / crabka` for latency / resource (lower-is-better Crabka still > 1).\n\n");
 
     for ((name, brokers), runs) in &by_group {
-        let crabka: Vec<&RunOutput> = runs
-            .iter()
-            .filter(|r| matches!(r.stack, Stack::Crabka))
-            .collect();
-        let kafka: Vec<&RunOutput> = runs
-            .iter()
-            .filter(|r| matches!(r.stack, Stack::Kafka))
-            .collect();
+        render_group(&mut out, name, *brokers, runs);
+    }
 
-        out.push_str(&format!("## `{name}` @ {brokers} broker(s)\n\n"));
+    Ok(out)
+}
 
-        if let Some(r) = runs.first() {
-            out.push_str(&format!(
+fn render_group(out: &mut String, name: &str, brokers: u32, runs: &[RunOutput]) {
+    let crabka: Vec<&RunOutput> = runs
+        .iter()
+        .filter(|r| matches!(r.stack, Stack::Crabka))
+        .collect();
+    let kafka: Vec<&RunOutput> = runs
+        .iter()
+        .filter(|r| matches!(r.stack, Stack::Kafka))
+        .collect();
+
+    push_fmt(out, format_args!("## `{name}` @ {brokers} broker(s)\n\n"));
+
+    if let Some(r) = runs.first() {
+        push_fmt(
+            out,
+            format_args!(
                 "Topology: partitions={}, RF={}, broker_count={} (per stack). Duration={}s, warmup={}s. Runs averaged: crabka={}, kafka={}.\n\n",
                 r.topology.partitions,
                 r.topology.replication_factor,
@@ -79,211 +99,221 @@ pub fn render_markdown(input_dir: &Path, strict: bool) -> Result<String> {
                 r.scenario.warmup_s,
                 crabka.len(),
                 kafka.len(),
-            ));
-        }
+            ),
+        );
+    }
 
-        // ── Topline table ───────────────────────────────────────────────────
-        out.push_str("| metric | crabka | kafka | ratio |\n");
-        out.push_str("|---|---|---|---|\n");
-        row_metric(
-            &mut out,
-            "producer msgs/s (higher better)",
-            &crabka,
-            &kafka,
-            |t| t.throughput.producer_msgs_per_sec,
-            true,
-        );
-        row_metric(
-            &mut out,
-            "consumer msgs/s (higher better)",
-            &crabka,
-            &kafka,
-            |t| t.throughput.consumer_msgs_per_sec,
-            true,
-        );
-        row_metric(
-            &mut out,
-            "producer MB/s (higher better)",
-            &crabka,
-            &kafka,
-            |t| t.throughput.mb_in / (t.scenario.duration_s.max(1) as f64),
-            true,
-        );
-        row_metric(
-            &mut out,
-            "p99 producer ack ms (lower better)",
-            &crabka,
-            &kafka,
-            |t| t.producer_latency_ms.p99_ms,
-            false,
-        );
-        row_metric(
-            &mut out,
-            "p99 consumer e2e ms (lower better)",
-            &crabka,
-            &kafka,
-            |t| t.consumer_e2e_latency_ms.p99_ms,
-            false,
-        );
-        row_metric(
-            &mut out,
-            "msgs/s per CPU-core (higher better)",
-            &crabka,
-            &kafka,
-            |t| t.resource.msgs_per_cpu_core,
-            true,
-        );
-        row_metric(
-            &mut out,
-            "cgroup working-set MB (lower better)",
-            &crabka,
-            &kafka,
-            |t| t.resource.mem_cgroup_working_set_bytes as f64 / 1_048_576.0,
-            false,
-        );
-        row_metric(
-            &mut out,
-            "startup ms (CR-apply → Ready) (lower better)",
-            &crabka,
-            &kafka,
-            |t| t.startup_ms.unwrap_or(0) as f64,
-            false,
-        );
-        row_metric(
-            &mut out,
-            "first-ack ms (Ready → first ack) (lower better)",
-            &crabka,
-            &kafka,
-            |t| t.first_ack_ms as f64,
-            false,
-        );
-        out.push('\n');
+    // ── Topline table ───────────────────────────────────────────────────
+    out.push_str("| metric | crabka | kafka | ratio |\n");
+    out.push_str("|---|---|---|---|\n");
+    row_metric(
+        out,
+        "producer msgs/s (higher better)",
+        &crabka,
+        &kafka,
+        |t| t.throughput.producer_msgs_per_sec,
+        true,
+    );
+    row_metric(
+        out,
+        "consumer msgs/s (higher better)",
+        &crabka,
+        &kafka,
+        |t| t.throughput.consumer_msgs_per_sec,
+        true,
+    );
+    row_metric(
+        out,
+        "producer MB/s (higher better)",
+        &crabka,
+        &kafka,
+        |t| t.throughput.mb_in / to_f64(t.scenario.duration_s.max(1)),
+        true,
+    );
+    row_metric(
+        out,
+        "p99 producer ack ms (lower better)",
+        &crabka,
+        &kafka,
+        |t| t.producer_latency_ms.p99_ms,
+        false,
+    );
+    row_metric(
+        out,
+        "p99 consumer e2e ms (lower better)",
+        &crabka,
+        &kafka,
+        |t| t.consumer_e2e_latency_ms.p99_ms,
+        false,
+    );
+    row_metric(
+        out,
+        "msgs/s per CPU-core (higher better)",
+        &crabka,
+        &kafka,
+        |t| t.resource.msgs_per_cpu_core,
+        true,
+    );
+    row_metric(
+        out,
+        "cgroup working-set MB (lower better)",
+        &crabka,
+        &kafka,
+        |t| to_f64(t.resource.mem_cgroup_working_set_bytes) / 1_048_576.0,
+        false,
+    );
+    row_metric(
+        out,
+        "startup ms (CR-apply → Ready) (lower better)",
+        &crabka,
+        &kafka,
+        |t| to_f64(t.startup_ms.unwrap_or(0)),
+        false,
+    );
+    row_metric(
+        out,
+        "first-ack ms (Ready → first ack) (lower better)",
+        &crabka,
+        &kafka,
+        |t| to_f64(t.first_ack_ms),
+        false,
+    );
+    out.push('\n');
 
-        // ── Latency percentiles (mean across runs) ──────────────────────────
-        out.push_str("**Producer ack latency (ms):**\n\n");
-        out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
-        for (label, sel) in latency_percentiles_pairs() {
-            let c: Vec<f64> = crabka.iter().map(|r| sel(&r.producer_latency_ms)).collect();
-            let k: Vec<f64> = kafka.iter().map(|r| sel(&r.producer_latency_ms)).collect();
-            out.push_str(&format!(
-                "| {label} | {} | {} |\n",
-                fmt_cell(&c),
-                fmt_cell(&k)
-            ));
-        }
-        out.push('\n');
+    // ── Latency percentiles (mean across runs) ──────────────────────────
+    out.push_str("**Producer ack latency (ms):**\n\n");
+    out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
+    for (label, sel) in latency_percentiles_pairs() {
+        let c: Vec<f64> = crabka.iter().map(|r| sel(&r.producer_latency_ms)).collect();
+        let k: Vec<f64> = kafka.iter().map(|r| sel(&r.producer_latency_ms)).collect();
+        push_fmt(
+            out,
+            format_args!("| {label} | {} | {} |\n", fmt_cell(&c), fmt_cell(&k)),
+        );
+    }
+    out.push('\n');
 
-        out.push_str("**Consumer end-to-end latency (ms):**\n\n");
-        out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
-        for (label, sel) in latency_percentiles_pairs() {
-            let c: Vec<f64> = crabka
-                .iter()
-                .map(|r| sel(&r.consumer_e2e_latency_ms))
-                .collect();
-            let k: Vec<f64> = kafka
-                .iter()
-                .map(|r| sel(&r.consumer_e2e_latency_ms))
-                .collect();
-            out.push_str(&format!(
-                "| {label} | {} | {} |\n",
-                fmt_cell(&c),
-                fmt_cell(&k)
-            ));
-        }
-        out.push('\n');
-
-        // ── Kafka-only memory split (mean across kafka runs that report it) ──
-        let heap: Vec<f64> = kafka
+    out.push_str("**Consumer end-to-end latency (ms):**\n\n");
+    out.push_str("| percentile | crabka | kafka |\n|---|---|---|\n");
+    for (label, sel) in latency_percentiles_pairs() {
+        let c: Vec<f64> = crabka
             .iter()
-            .filter_map(|r| r.resource.jvm_heap_used_bytes)
-            .map(|x| x as f64)
+            .map(|r| sel(&r.consumer_e2e_latency_ms))
             .collect();
-        let nonheap: Vec<f64> = kafka
+        let k: Vec<f64> = kafka
             .iter()
-            .filter_map(|r| r.resource.jvm_nonheap_used_bytes)
-            .map(|x| x as f64)
+            .map(|r| sel(&r.consumer_e2e_latency_ms))
             .collect();
-        let pc: Vec<f64> = kafka
+        push_fmt(
+            out,
+            format_args!("| {label} | {} | {} |\n", fmt_cell(&c), fmt_cell(&k)),
+        );
+    }
+    out.push('\n');
+
+    // ── Kafka-only memory split (mean across kafka runs that report it) ──
+    let heap: Vec<f64> = kafka
+        .iter()
+        .filter_map(|r| r.resource.jvm_heap_used_bytes)
+        .map(to_f64)
+        .collect();
+    let nonheap: Vec<f64> = kafka
+        .iter()
+        .filter_map(|r| r.resource.jvm_nonheap_used_bytes)
+        .map(to_f64)
+        .collect();
+    let pc: Vec<f64> = kafka
+        .iter()
+        .filter_map(|r| r.resource.kafka_page_cache_approx_bytes)
+        .map(to_f64)
+        .collect();
+    if !heap.is_empty() && !nonheap.is_empty() && !pc.is_empty() {
+        let ws: Vec<f64> = kafka
             .iter()
-            .filter_map(|r| r.resource.kafka_page_cache_approx_bytes)
-            .map(|x| x as f64)
+            .map(|r| to_f64(r.resource.mem_cgroup_working_set_bytes))
             .collect();
-        if !heap.is_empty() && !nonheap.is_empty() && !pc.is_empty() {
-            let ws: Vec<f64> = kafka
-                .iter()
-                .map(|r| r.resource.mem_cgroup_working_set_bytes as f64)
-                .collect();
-            out.push_str("**Kafka memory split (MiB):**\n\n");
-            out.push_str(&format!(
+        out.push_str("**Kafka memory split (MiB):**\n\n");
+        push_fmt(
+            out,
+            format_args!(
                 "- JVM heap used: {:.1}\n- JVM non-heap used: {:.1}\n- Page-cache (approx, working-set − heap − non-heap): {:.1}\n- cgroup working-set (limit-relevant): {:.1}\n\n",
                 mean(&heap) / 1_048_576.0,
                 mean(&nonheap) / 1_048_576.0,
                 mean(&pc) / 1_048_576.0,
                 mean(&ws) / 1_048_576.0,
-            ));
-        }
+            ),
+        );
+    }
 
-        // ── Failover disturbance (mean across runs that injected a kill) ────
-        for (label, stack_runs) in [("crabka", &crabka), ("kafka", &kafka)] {
-            let dists: Vec<&crate::scenario::Disturbance> = stack_runs
-                .iter()
-                .filter_map(|r| r.disturbance.as_ref())
-                .collect();
-            if dists.is_empty() {
-                continue;
-            }
-            let recovery: Vec<f64> = dists
-                .iter()
-                .map(|d| d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0) as f64)
-                .collect();
-            let dropped: Vec<f64> = dists.iter().map(|d| d.dropped.0 as f64).collect();
-            let spike: Vec<f64> = dists.iter().map(|d| d.latency_spike_max_ms).collect();
-            out.push_str(&format!(
+    // ── Failover disturbance (mean across runs that injected a kill) ────
+    for (label, stack_runs) in [("crabka", &crabka), ("kafka", &kafka)] {
+        let dists: Vec<&crate::scenario::Disturbance> = stack_runs
+            .iter()
+            .filter_map(|r| r.disturbance.as_ref())
+            .collect();
+        if dists.is_empty() {
+            continue;
+        }
+        let recovery: Vec<f64> = dists
+            .iter()
+            .map(|d| to_f64(d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0)))
+            .collect();
+        let dropped: Vec<f64> = dists.iter().map(|d| to_f64(d.dropped.0)).collect();
+        let spike: Vec<f64> = dists.iter().map(|d| d.latency_spike_max_ms).collect();
+        push_fmt(
+            out,
+            format_args!(
                 "**Failover ({label}, n={}):** recovery {:.0} ms, {:.0} drops, max latency spike {:.1} ms.\n\n",
                 dists.len(),
                 mean(&recovery),
                 mean(&dropped),
                 mean(&spike),
-            ));
-        }
-        render_failover_comparison(&mut out, &crabka, &kafka);
-
-        // ── Notes & errors (deduped across runs) ────────────────────────────
-        for (label, stack_runs) in [("crabka", &crabka), ("kafka", &kafka)] {
-            let mut notes: Vec<String> = Vec::new();
-            let mut errors: Vec<String> = Vec::new();
-            for r in stack_runs {
-                for n in &r.notes {
-                    if !notes.contains(n) {
-                        notes.push(n.clone());
-                    }
-                }
-                for e in &r.errors {
-                    if !errors.contains(e) {
-                        errors.push(e.clone());
-                    }
-                }
-            }
-            if !notes.is_empty() {
-                out.push_str(&format!("_{label} notes:_ {}\n\n", notes.join(", ")));
-            }
-            if !errors.is_empty() {
-                out.push_str(&format!(
-                    "_{label} errors:_ {}\n\n",
-                    truncate_list(&errors, 3)
-                ));
-            }
-        }
-        out.push('\n');
+            ),
+        );
     }
+    render_failover_comparison(out, &crabka, &kafka);
 
-    Ok(out)
+    render_notes_and_errors(out, &crabka, &kafka);
+    out.push('\n');
+}
+
+fn render_notes_and_errors(out: &mut String, crabka: &[&RunOutput], kafka: &[&RunOutput]) {
+    for (label, stack_runs) in [("crabka", crabka), ("kafka", kafka)] {
+        let mut notes: Vec<String> = Vec::new();
+        let mut errors: Vec<String> = Vec::new();
+        for r in stack_runs {
+            for n in &r.notes {
+                if !notes.contains(n) {
+                    notes.push(n.clone());
+                }
+            }
+            for e in &r.errors {
+                if !errors.contains(e) {
+                    errors.push(e.clone());
+                }
+            }
+        }
+        if !notes.is_empty() {
+            push_fmt(
+                out,
+                format_args!("_{label} notes:_ {}\n\n", notes.join(", ")),
+            );
+        }
+        if !errors.is_empty() {
+            push_fmt(
+                out,
+                format_args!("_{label} errors:_ {}\n\n", truncate_list(&errors, 3)),
+            );
+        }
+    }
 }
 
 /// Return human-readable failover gate violations. An empty vector means every
 /// failover cell with both stacks present has the evidence needed for the
 /// objective: Crabka recovered no slower than Kafka, and both stacks emitted
 /// producer and consumer message-rate samples over time.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn failover_gate_violations(input_dir: &Path, strict: bool) -> Result<Vec<String>> {
     let runs: Vec<RunOutput> = collect_runs(input_dir, strict)?
         .into_iter()
@@ -311,7 +341,7 @@ fn latency_percentiles_pairs() -> [(&'static str, LatencySelector); 6] {
         ("p99", |p| p.p99_ms),
         ("p99.9", |p| p.p999_ms),
         ("max", |p| p.max_ms),
-        ("count", |p| p.count as f64),
+        ("count", |p| to_f64(p.count)),
     ]
 }
 
@@ -321,7 +351,7 @@ fn mean(v: &[f64]) -> f64 {
     if v.is_empty() {
         0.0
     } else {
-        v.iter().sum::<f64>() / v.len() as f64
+        v.iter().sum::<f64>() / to_f64(v.len())
     }
 }
 
@@ -332,7 +362,7 @@ fn sample_stddev(v: &[f64]) -> f64 {
         return 0.0;
     }
     let m = mean(v);
-    let var = v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (v.len() as f64 - 1.0);
+    let var = v.iter().map(|x| (x - m).powi(2)).sum::<f64>() / (to_f64(v.len()) - 1.0);
     var.sqrt()
 }
 
@@ -355,15 +385,18 @@ fn render_failover_comparison(out: &mut String, crabka: &[&RunOutput], kafka: &[
     } else {
         "FAIL"
     };
-    let delta = (c_recovery - k_recovery).abs().round() as u64;
+    let delta = nonnegative_f64_to_u64((c_recovery - k_recovery).abs().round());
     let faster = if c_recovery <= k_recovery {
         "faster than"
     } else {
         "slower than"
     };
-    out.push_str(&format!(
-        "**Failover comparison:** {verdict} — Crabka recovered {delta} ms {faster} kafka (crabka {c_recovery:.0} ms, kafka {k_recovery:.0} ms).\n\n",
-    ));
+    push_fmt(
+        out,
+        format_args!(
+            "**Failover comparison:** {verdict} — Crabka recovered {delta} ms {faster} kafka (crabka {c_recovery:.0} ms, kafka {k_recovery:.0} ms).\n\n",
+        ),
+    );
 
     let c_producer_rate = mean_rate_recovery(crabka, producer_sample_rate);
     let k_producer_rate = mean_rate_recovery(kafka, producer_sample_rate);
@@ -536,7 +569,7 @@ fn mean_failover_recovery(runs: &[&RunOutput]) -> Option<f64> {
     let vals: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.disturbance.as_ref())
-        .map(|d| d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0) as f64)
+        .map(|d| to_f64(d.recovery_at_ms.0.saturating_sub(d.kill_at_ms.0)))
         .collect();
     (!vals.is_empty()).then(|| mean(&vals))
 }
@@ -545,7 +578,7 @@ fn mean_failover_dropped(runs: &[&RunOutput]) -> Option<f64> {
     let vals: Vec<f64> = runs
         .iter()
         .filter_map(|r| r.disturbance.as_ref())
-        .map(|d| d.dropped.0 as f64)
+        .map(|d| to_f64(d.dropped.0))
         .collect();
     (!vals.is_empty()).then(|| mean(&vals))
 }
@@ -574,12 +607,13 @@ fn mean_rate_recovery(
     let mins: Vec<f64> = vals.iter().map(|v| v.min_after_kill_mps).collect();
     let recoveries: Vec<f64> = vals
         .iter()
-        .filter_map(|v| v.recovery_ms.map(|ms| ms as f64))
+        .filter_map(|v| v.recovery_ms.map(to_f64))
         .collect();
     Some(RateRecovery {
         baseline_mps: mean(&baselines),
         min_after_kill_mps: mean(&mins),
-        recovery_ms: (!recoveries.is_empty()).then(|| mean(&recoveries).round() as u64),
+        recovery_ms: (!recoveries.is_empty())
+            .then(|| nonnegative_f64_to_u64(mean(&recoveries).round())),
     })
 }
 
@@ -648,22 +682,28 @@ fn render_rate_recovery_row(
     consumer_rate: Option<RateRecovery>,
 ) {
     match (producer_rate, consumer_rate) {
-        (Some(producer_rate), Some(consumer_rate)) => out.push_str(&format!(
-            "| {stack} | {failover_recovery_ms:.0} | {:.0} | {:.0} | {} | {:.0} | {:.0} | {} |\n",
-            producer_rate.baseline_mps,
-            producer_rate.min_after_kill_mps,
-            producer_rate
-                .recovery_ms
-                .map_or_else(|| "unrecovered".into(), |ms| ms.to_string()),
-            consumer_rate.baseline_mps,
-            consumer_rate.min_after_kill_mps,
-            consumer_rate
-                .recovery_ms
-                .map_or_else(|| "unrecovered".into(), |ms| ms.to_string())
-        )),
-        _ => out.push_str(&format!(
-            "| {stack} | {failover_recovery_ms:.0} | n/a | n/a | n/a | n/a | n/a | n/a |\n"
-        )),
+        (Some(producer_rate), Some(consumer_rate)) => push_fmt(
+            out,
+            format_args!(
+                "| {stack} | {failover_recovery_ms:.0} | {:.0} | {:.0} | {} | {:.0} | {:.0} | {} |\n",
+                producer_rate.baseline_mps,
+                producer_rate.min_after_kill_mps,
+                producer_rate
+                    .recovery_ms
+                    .map_or_else(|| "unrecovered".into(), |ms| ms.to_string()),
+                consumer_rate.baseline_mps,
+                consumer_rate.min_after_kill_mps,
+                consumer_rate
+                    .recovery_ms
+                    .map_or_else(|| "unrecovered".into(), |ms| ms.to_string())
+            ),
+        ),
+        _ => push_fmt(
+            out,
+            format_args!(
+                "| {stack} | {failover_recovery_ms:.0} | n/a | n/a | n/a | n/a | n/a | n/a |\n"
+            ),
+        ),
     }
 }
 
@@ -708,11 +748,14 @@ fn row_metric(
     } else {
         "—".into()
     };
-    out.push_str(&format!(
-        "| {label} | {} | {} | {ratio} |\n",
-        fmt_cell(&cvals),
-        fmt_cell(&kvals)
-    ));
+    push_fmt(
+        out,
+        format_args!(
+            "| {label} | {} | {} | {ratio} |\n",
+            fmt_cell(&cvals),
+            fmt_cell(&kvals)
+        ),
+    );
 }
 
 // ── CSV exports (graph-ready) ────────────────────────────────────────────────
@@ -777,6 +820,8 @@ fn csv_field(s: &str) -> String {
 /// One row per run (wide): every aggregate metric is a column. Group by
 /// `(scenario, stack, broker_count)` in any tool to draw crabka-vs-kafka bars
 /// with run-to-run error bars.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_csv(input_dir: &Path, strict: bool) -> Result<String> {
     let mut runs = collect_runs(input_dir, strict)?;
     runs.sort_by(|(pa, a), (pb, b)| {
@@ -877,6 +922,8 @@ notes,errors_count\n",
 /// Long/tidy time-series CSV: one row per (run × time-offset × metric). This is
 /// the graph-ready export for plotting values *over the test* — filter by
 /// `metric` and group by `(scenario, stack, run_tag)` to draw lines.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
     let mut runs = collect_runs(input_dir, strict)?;
     runs.sort_by(|(pa, a), (pb, b)| {
@@ -914,18 +961,27 @@ pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
                 ("producer_p99_ms", s.producer_p99_ms),
                 ("consumer_e2e_p99_ms", s.consumer_e2e_p99_ms),
             ] {
-                out.push_str(&format!("{prefix},{},{metric},{value:.3}\n", s.t_offset_ms));
+                push_fmt(
+                    &mut out,
+                    format_args!("{prefix},{},{metric},{value:.3}\n", s.t_offset_ms),
+                );
             }
         }
         for b in &r.broker_samples {
-            out.push_str(&format!(
-                "{prefix},{},broker_cpu_cores,{:.4}\n",
-                b.t_offset_ms, b.cpu_cores
-            ));
-            out.push_str(&format!(
-                "{prefix},{},broker_mem_working_set_bytes,{}\n",
-                b.t_offset_ms, b.mem_working_set_bytes
-            ));
+            push_fmt(
+                &mut out,
+                format_args!(
+                    "{prefix},{},broker_cpu_cores,{:.4}\n",
+                    b.t_offset_ms, b.cpu_cores
+                ),
+            );
+            push_fmt(
+                &mut out,
+                format_args!(
+                    "{prefix},{},broker_mem_working_set_bytes,{}\n",
+                    b.t_offset_ms, b.mem_working_set_bytes
+                ),
+            );
         }
     }
     Ok(out)
@@ -934,6 +990,8 @@ pub fn render_timeseries_csv(input_dir: &Path, strict: bool) -> Result<String> {
 /// Render a self-contained Plotly HTML report (bar charts + averaged
 /// time-series) from every run in `input_dir`. Delegates the aggregation +
 /// figure building to [`crate::aggregate`] / [`crate::graph`].
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_html(input_dir: &Path, strict: bool, title: &str) -> Result<String> {
     let outputs: Vec<RunOutput> = collect_runs(input_dir, strict)?
         .into_iter()
@@ -945,6 +1003,8 @@ pub fn render_html(input_dir: &Path, strict: bool, title: &str) -> Result<String
 /// Render the website HTML fragment (per-run + averaged throughput/CPU/memory
 /// charts) from every run in `input_dir`, pairing each run with its `runNN`
 /// tag (parsed from the result filename) so per-run traces are labelled.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub fn render_web_fragment(input_dir: &Path, strict: bool) -> Result<String> {
     let tagged: Vec<(String, RunOutput)> = collect_runs(input_dir, strict)?
         .into_iter()
@@ -1000,8 +1060,8 @@ mod tests {
                 msgs_consumed: MessageCount(msgs),
                 mb_in: 5.0,
                 mb_out: 5.0,
-                producer_msgs_per_sec: msgs as f64 / 60.0,
-                consumer_msgs_per_sec: msgs as f64 / 60.0,
+                producer_msgs_per_sec: to_f64(msgs) / 60.0,
+                consumer_msgs_per_sec: to_f64(msgs) / 60.0,
             },
             ..RunOutput::default_placeholder()
         }

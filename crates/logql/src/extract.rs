@@ -11,6 +11,8 @@ pub struct JsonParserConfig {
 }
 
 impl JsonParserConfig {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(extractions: Vec<JsonExtraction>) -> Result<Self, ParseError> {
         if extractions.is_empty() {
             return Err(template_parse_error("expected json extraction"));
@@ -40,6 +42,8 @@ pub struct JsonExtraction {
 }
 
 impl JsonExtraction {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(
         destination: DestinationLabel,
         expression: JsonExpressionPath,
@@ -230,79 +234,79 @@ mod tests {
         )
         .unwrap();
 
-        assert2::assert!(extraction.expression() == "trace:id.request-id");
+        assert_eq!(extraction.expression(), "trace:id.request-id");
     }
 
     #[test]
     fn json_path_parse_advances_over_dot_separators() {
-        assert2::assert!(
-            JsonPath::parse("request.headers").unwrap()
-                == JsonPath {
-                    parts: vec![
-                        JsonPathPart::Field("request".to_string()),
-                        JsonPathPart::Field("headers".to_string()),
-                    ],
-                }
+        assert_eq!(
+            JsonPath::parse("request.headers").unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("request".to_string()),
+                    JsonPathPart::Field("headers".to_string()),
+                ],
+            }
         );
     }
 
     #[test]
     fn json_path_parse_rejects_empty_dot_field_segments() {
         for path in [".request", "request.", "request..headers"] {
-            assert2::assert!(JsonPath::parse(path).is_err());
+            assert!(JsonPath::parse(path).is_err(), "{path}");
         }
     }
 
     #[test]
     fn json_path_parse_advances_over_array_indexes() {
-        assert2::assert!(
-            JsonPath::parse("servers[10]").unwrap()
-                == JsonPath {
-                    parts: vec![
-                        JsonPathPart::Field("servers".to_string()),
-                        JsonPathPart::Index(10),
-                    ],
-                }
+        assert_eq!(
+            JsonPath::parse("servers[10]").unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("servers".to_string()),
+                    JsonPathPart::Index(10),
+                ],
+            }
         );
     }
 
     #[test]
     fn json_path_parse_accepts_bracket_start_field() {
-        assert2::assert!(
-            JsonPath::parse(r#"["request"].headers"#).unwrap()
-                == JsonPath {
-                    parts: vec![
-                        JsonPathPart::Field("request".to_string()),
-                        JsonPathPart::Field("headers".to_string()),
-                    ],
-                }
+        assert_eq!(
+            JsonPath::parse(r#"["request"].headers"#).unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("request".to_string()),
+                    JsonPathPart::Field("headers".to_string()),
+                ],
+            }
         );
     }
 
     #[test]
     fn json_path_bracket_strings_decode_escaped_characters() {
-        assert2::assert!(
-            JsonPath::parse(r#"headers["quoted\"name"]"#).unwrap()
-                == JsonPath {
-                    parts: vec![
-                        JsonPathPart::Field("headers".to_string()),
-                        JsonPathPart::Field("quoted\"name".to_string()),
-                    ],
-                }
+        assert_eq!(
+            JsonPath::parse(r#"headers["quoted\"name"]"#).unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("headers".to_string()),
+                    JsonPathPart::Field("quoted\"name".to_string()),
+                ],
+            }
         );
     }
 
     #[test]
     fn json_path_field_names_accept_identifier_punctuation() {
-        assert2::assert!(
-            JsonPath::parse("trace:id.request-id._meta").unwrap()
-                == JsonPath {
-                    parts: vec![
-                        JsonPathPart::Field("trace:id".to_string()),
-                        JsonPathPart::Field("request-id".to_string()),
-                        JsonPathPart::Field("_meta".to_string()),
-                    ],
-                }
+        assert_eq!(
+            JsonPath::parse("trace:id.request-id._meta").unwrap(),
+            JsonPath {
+                parts: vec![
+                    JsonPathPart::Field("trace:id".to_string()),
+                    JsonPathPart::Field("request-id".to_string()),
+                    JsonPathPart::Field("_meta".to_string()),
+                ],
+            }
         );
     }
 
@@ -310,8 +314,8 @@ mod tests {
     fn logfmt_flags_preserve_non_strict_keep_empty_config() {
         let config = LogfmtParserConfig::flags(false, true).unwrap();
 
-        assert2::assert!(!config.strict());
-        assert2::assert!(config.keep_empty());
+        assert!(!config.strict());
+        assert!(config.keep_empty());
     }
 
     #[test]
@@ -342,14 +346,20 @@ pub struct LogfmtParserConfig {
 }
 
 impl LogfmtParserConfig {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn new(extractions: Vec<LogfmtExtraction>) -> Result<Self, ParseError> {
         Self::with_options(extractions, false, false)
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn flags(strict: bool, keep_empty: bool) -> Result<Self, ParseError> {
         Self::with_options(Vec::new(), strict, keep_empty)
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn with_options(
         extractions: Vec<LogfmtExtraction>,
         strict: bool,
@@ -403,11 +413,15 @@ pub struct LogfmtExtraction {
 }
 
 impl LogfmtExtraction {
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn same(name: impl Into<String>) -> Result<Self, ParseError> {
         let name = name.into();
         Self::rename(DestinationLabel(name.clone()), SourceLabel(name))
     }
 
+    /// # Errors
+    /// Returns an error when the query or template is malformed, a requested conversion is invalid, or evaluation cannot read its input data.
     pub fn rename(destination: DestinationLabel, source: SourceLabel) -> Result<Self, ParseError> {
         let extraction = Self {
             destination,
@@ -478,7 +492,7 @@ impl<'a> LogfmtParser<'a> {
             match self.parse_value(strict) {
                 Ok(value) => return Ok(Some((key, value))),
                 Err(details) if strict => return Err(details),
-                Err(_) => continue,
+                Err(_) => {}
             }
         }
     }

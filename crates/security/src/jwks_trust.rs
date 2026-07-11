@@ -31,6 +31,8 @@ pub enum JwksTrustError {
 // span fields (the PEM path is not secret but adds no useful cardinality here).
 // `err` surfaces IO / parse / rustls failures (Debug).
 #[tracing::instrument(level = "info", skip_all, err)]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn build_client_config_from_pem(
     path: &Path,
 ) -> Result<Arc<rustls::ClientConfig>, JwksTrustError> {

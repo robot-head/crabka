@@ -62,7 +62,7 @@ struct Cli {
     #[arg(long, default_value = "order-counts")]
     output_topic: String,
     #[arg(long, env = "CRABKA_DEMO_ORDERS_PER_SEC", default_value_t = 50)]
-    orders_per_sec: u64,
+    orders_per_sec: u32,
 }
 
 #[tokio::main]
@@ -131,8 +131,7 @@ async fn run_produce(cli: &Cli, metrics: &DemoMetrics) -> Result<(), BoxError> {
         futures_idle().await;
         return Ok(());
     }
-    #[allow(clippy::cast_precision_loss)]
-    let per_sec = cli.orders_per_sec as f64;
+    let per_sec = f64::from(cli.orders_per_sec);
     let period = Duration::from_secs_f64(1.0 / per_sec);
     let mut tick = tokio::time::interval(period);
     let mut i: u64 = 0;

@@ -48,8 +48,7 @@
 //! With a per-broker in-memory RLMM the survivor would have no metadata and the
 //! consume would fail.  Do NOT weaken the assertion (must require all records back).
 
-#![allow(clippy::pedantic, clippy::manual_assert, clippy::too_many_lines)]
-
+use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -107,7 +106,7 @@ async fn start_three_tiered_brokers() -> (
         .collect();
 
     // Build a config for broker `i` (1-indexed broker_id/node_id).
-    let mut cfgs: Vec<BrokerConfig> = (0..3)
+    let mut broker_configs: Vec<BrokerConfig> = (0..3)
         .map(|i| {
             let mut cfg = BrokerConfig::for_tests(log_dirs[i].path().to_path_buf());
             cfg.broker_id = i32::try_from(i + 1).unwrap();
@@ -147,24 +146,25 @@ async fn start_three_tiered_brokers() -> (
 
     // Static cold-boot: all 3 start concurrently (sequential would deadlock —
     // a leader needs a majority of the static voter set up).
-    let (cfg0, cfg1, cfg2) = (cfgs.remove(0), cfgs.remove(0), cfgs.remove(0));
+    let (config0, config1, config2) = (
+        broker_configs.remove(0),
+        broker_configs.remove(0),
+        broker_configs.remove(0),
+    );
     let mut client_ls = client_listeners.into_iter();
     let mut ctrl_ls = controller_listeners.into_iter();
-    let (cl0, ctl0) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
-    let (cl1, ctl1) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
-    let (cl2, ctl2) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
-    let j0 =
-        tokio::spawn(
-            async move { Broker::start_with_listeners(cfg0, Some(ctl0), Some(cl0)).await },
-        );
-    let j1 =
-        tokio::spawn(
-            async move { Broker::start_with_listeners(cfg1, Some(ctl1), Some(cl1)).await },
-        );
-    let j2 =
-        tokio::spawn(
-            async move { Broker::start_with_listeners(cfg2, Some(ctl2), Some(cl2)).await },
-        );
+    let (client0, controller0) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (client1, controller1) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (client2, controller2) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let j0 = tokio::spawn(async move {
+        Broker::start_with_listeners(config0, Some(controller0), Some(client0)).await
+    });
+    let j1 = tokio::spawn(async move {
+        Broker::start_with_listeners(config1, Some(controller1), Some(client1)).await
+    });
+    let j2 = tokio::spawn(async move {
+        Broker::start_with_listeners(config2, Some(controller2), Some(client2)).await
+    });
     let b1 = j0.await.expect("b1 spawn join").expect("b1 start");
     let b2 = j1.await.expect("b2 spawn join").expect("b2 start");
     let b3 = j2.await.expect("b3 spawn join").expect("b3 start");
@@ -172,7 +172,7 @@ async fn start_three_tiered_brokers() -> (
     (b1, b2, b3, log_dirs, remote_dir)
 }
 
-/// Wait until all three brokers see each other registered (broker_count >= 3).
+/// Wait until all three brokers see each other registered (`broker_count` >= 3).
 async fn await_all_brokers_registered(b1: &BrokerHandle, b2: &BrokerHandle, b3: &BrokerHandle) {
     // Each broker's own metadata image must show all 3 brokers registered.
     b1.wait_until_brokers_registered(3).await;
@@ -265,7 +265,10 @@ async fn fetch_all_records(
         if id != WireUuid::default() {
             break id;
         }
-        assert2::assert!(Instant::now() <= deadline);
+        assert!(
+            Instant::now() <= deadline,
+            "survivor never returned a valid topic id for {topic} within deadline"
+        );
         // intentional: topic-id visibility is polled over the wire client (this
         // helper has no BrokerHandle); retry until the survivor's metadata settles.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -318,7 +321,11 @@ async fn fetch_all_records(
             break;
         }
 
-        assert2::assert!(Instant::now() <= deadline);
+        assert!(
+            Instant::now() <= deadline,
+            "survivor only served {total_records}/{expected_count} records before deadline; \
+             fetch_offset={fetch_offset}"
+        );
         // intentional: records are fetched over the wire client (no BrokerHandle
         // here); retry the bounded Fetch poll until the survivor serves them all.
         tokio::time::sleep(Duration::from_millis(300)).await;
@@ -327,44 +334,8 @@ async fn fetch_all_records(
     total_records
 }
 
-/// In-process multi-broker tiered metadata-sharing proof.
-///
-/// Three brokers share a `Local` remote tier and a topic-backed RLMM with
-/// rf=2 metadata replication.  Broker 1 leads the rf=2 user partition and
-/// runs the RLM copy task; broker 2 only consumes `__remote_log_metadata`
-/// to learn segment locations.  After broker 1 is shut down, the surviving
-/// 2/3 quorum commits a new partition-leader record and broker 2 serves all
-/// records from the remote tier — proving the RLMM metadata sharing claim.
-///
-/// Runs under plain `cargo test` (no Docker, no MinIO, no
-/// host.docker.internal).
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn tiered_storage_metadata_sharing_via_survivor() {
-    let (b1, b2, b3, _dirs, remote_dir) = start_three_tiered_brokers().await;
-
-    // Wait for all brokers to see each other registered.
-    await_all_brokers_registered(&b1, &b2, &b3).await;
-    eprintln!("ITEST: all 3 brokers registered; waiting for topic-backed RLMM to activate");
-
-    // Wait for all RLMMs to activate (metadata topic created + bootstrap done).
-    await_all_rlmm_active(&b1, &b2, &b3).await;
-    eprintln!("ITEST: RLMM active on all 3 brokers; creating tiered topic");
-
-    // Build an admin client against broker 1 for CreateTopics + Produce.
-    let b1_bootstrap = format!("127.0.0.1:{}", b1.listen_addr().port());
-    let admin = Client::builder()
-        .bootstrap(&b1_bootstrap)
-        .client_id("tiered-multi-admin")
-        .build()
-        .await
-        .expect("admin client");
-
-    // Create a rf=2 tiered topic.  With 3 registered brokers and rf=2,
-    // round-robin assigns the partition to broker 1 (leader) and broker 2
-    // (follower).  Tiny segment.bytes seals segments quickly;
-    // local.retention.bytes=1 evicts every copied segment so the survivor
-    // must fetch from the remote tier.
-    let create_resp = admin
+async fn create_tiered_topic(admin: &Client, b1: &BrokerHandle, b2: &BrokerHandle) {
+    let response = admin
         .send(CreateTopicsRequest {
             topics: vec![CreatableTopic {
                 name: TOPIC.into(),
@@ -391,9 +362,6 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
                         value: Some("-1".into()),
                         ..Default::default()
                     },
-                    // Disable time-based retention: records have max_timestamp_ms=0
-                    // so the default 7-day retention would immediately evict tiered
-                    // segments (now - 0 > 7d).  Disable to keep segments alive.
                     CreatableTopicConfig {
                         name: "retention.ms".into(),
                         value: Some("-1".into()),
@@ -407,29 +375,110 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(create_resp.topics[0].error_code == 0);
-    eprintln!("ITEST: topic {TOPIC} created (rf=2, tiered)");
+    assert!(
+        response.topics[0].error_code == 0,
+        "CreateTopics failed: {response:?}"
+    );
 
-    // Wait for the tiered config to propagate to the partition leader's log.
-    // At least one of broker 1 or broker 2 must see the config (they host the
-    // rf=2 partition).  Broker 3 is not in the replica set for this topic.
-    let cfg_deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(30);
     loop {
-        let b1_ok = b1.partition_log_config_for_test(TOPIC, 0).is_some_and(|c| {
-            c.remote_storage_enable && c.segment_bytes == 1024 && c.local_retention_bytes == Some(1)
-        });
-        let b2_ok = b2.partition_log_config_for_test(TOPIC, 0).is_some_and(|c| {
-            c.remote_storage_enable && c.segment_bytes == 1024 && c.local_retention_bytes == Some(1)
-        });
-        if b1_ok || b2_ok {
-            break;
+        let ready = |broker: &BrokerHandle| {
+            broker
+                .partition_log_config_for_test(TOPIC, 0)
+                .is_some_and(|config| {
+                    config.remote_storage_enable
+                        && config.segment_bytes == 1024
+                        && config.local_retention_bytes == Some(1)
+                })
+        };
+        if ready(b1) || ready(b2) {
+            return;
         }
-        assert2::assert!(Instant::now() <= cfg_deadline);
-        // intentional: the tiered LogConfig override is applied by each broker's
-        // local reconcile loop and is not surfaced in the metadata image or any
-        // metric, so poll partition_log_config_for_test directly.
+        assert!(
+            Instant::now() <= deadline,
+            "tiered config did not propagate"
+        );
         tokio::time::sleep(Duration::from_millis(200)).await;
     }
+}
+
+async fn produce_and_await_remote_segments(admin: &Client, remote_dir: &std::path::Path) {
+    let topic_id = topic_id_for(admin, TOPIC).await;
+    for index in 0..RECORDS {
+        let batch = RecordBatch {
+            records: vec![Record {
+                value: Some(bytes::Bytes::from(format!("test-record-{index}"))),
+                ..Default::default()
+            }],
+            ..Default::default()
+        };
+        let response = admin
+            .send(ProduceRequest {
+                acks: -1,
+                timeout_ms: 10_000,
+                topic_data: vec![TopicProduceData {
+                    name: TOPIC.into(),
+                    topic_id,
+                    partition_data: vec![PartitionProduceData {
+                        index: 0,
+                        records: Some(batch.into()),
+                        ..Default::default()
+                    }],
+                    ..Default::default()
+                }],
+                ..Default::default()
+            })
+            .await
+            .expect("Produce");
+        assert!(
+            response.responses[0].partition_responses[0].error_code == 0,
+            "Produce failed: {response:?}"
+        );
+    }
+
+    let deadline = Instant::now() + Duration::from_mins(1);
+    while count_remote_log_files(remote_dir) < 2 {
+        assert!(
+            Instant::now() <= deadline,
+            "fewer than two segments were tiered"
+        );
+        tokio::time::sleep(Duration::from_millis(300)).await;
+    }
+}
+
+/// In-process multi-broker tiered metadata-sharing proof.
+///
+/// Three brokers share a `Local` remote tier and a topic-backed RLMM with
+/// rf=2 metadata replication.  Broker 1 leads the rf=2 user partition and
+/// runs the RLM copy task; broker 2 only consumes `__remote_log_metadata`
+/// to learn segment locations.  After broker 1 is shut down, the surviving
+/// 2/3 quorum commits a new partition-leader record and broker 2 serves all
+/// records from the remote tier — proving the RLMM metadata sharing claim.
+///
+/// Runs under plain `cargo test` (no Docker, no `MinIO`, no
+/// host.docker.internal).
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn tiered_storage_metadata_sharing_via_survivor() {
+    let (b1, b2, b3, _dirs, remote_dir) = start_three_tiered_brokers().await;
+
+    // Wait for all brokers to see each other registered.
+    await_all_brokers_registered(&b1, &b2, &b3).await;
+    eprintln!("ITEST: all 3 brokers registered; waiting for topic-backed RLMM to activate");
+
+    // Wait for all RLMMs to activate (metadata topic created + bootstrap done).
+    await_all_rlmm_active(&b1, &b2, &b3).await;
+    eprintln!("ITEST: RLMM active on all 3 brokers; creating tiered topic");
+
+    // Build an admin client against broker 1 for CreateTopics + Produce.
+    let b1_bootstrap = format!("127.0.0.1:{}", b1.listen_addr().port());
+    let admin = Client::builder()
+        .bootstrap(&b1_bootstrap)
+        .client_id("tiered-multi-admin")
+        .build()
+        .await
+        .expect("admin client");
+
+    create_tiered_topic(&admin, &b1, &b2).await;
     eprintln!("ITEST: tiered config propagated; discovering partition leader");
 
     // Discover which of broker 1 / broker 2 is the partition leader.
@@ -456,59 +505,7 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
          producing {RECORDS} records"
     );
 
-    // Produce RECORDS single-record batches (~85 bytes each) via the admin
-    // client bootstrapped to broker 1.  Single-record batches seal the 1 KiB
-    // segment every ~12 records, creating several sealed segments for the copy
-    // task.  acks=-1 waits for ISR acknowledgement (both replicas).
-    let topic_id = topic_id_for(&admin, TOPIC).await;
-    for i in 0..RECORDS {
-        let batch = RecordBatch {
-            base_offset: 0,
-            last_offset_delta: 0,
-            records: vec![Record {
-                offset_delta: 0,
-                value: Some(bytes::Bytes::from(format!("test-record-{i}"))),
-                ..Default::default()
-            }],
-            ..Default::default()
-        };
-        let prod = admin
-            .send(ProduceRequest {
-                acks: -1,
-                timeout_ms: 10_000,
-                topic_data: vec![TopicProduceData {
-                    name: TOPIC.into(),
-                    topic_id,
-                    partition_data: vec![PartitionProduceData {
-                        index: 0,
-                        records: Some(batch.into()),
-                        ..Default::default()
-                    }],
-                    ..Default::default()
-                }],
-                ..Default::default()
-            })
-            .await
-            .expect("Produce");
-        assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
-    }
-    eprintln!("ITEST: produced {RECORDS} records; waiting for segments to be tiered");
-
-    // Wait until at least 2 segments land in the shared remote dir.
-    // This confirms the leader's RLM copy task ran and published CopySegment
-    // events to __remote_log_metadata, which propagate to the follower.
-    let copy_deadline = Instant::now() + Duration::from_secs(60);
-    loop {
-        let n = count_remote_log_files(remote_dir.path());
-        if n >= 2 {
-            eprintln!("ITEST: {n} segments tiered to shared remote dir");
-            break;
-        }
-        assert2::assert!(Instant::now() <= copy_deadline);
-        // intentional: segments landing in the shared remote object store is
-        // filesystem state with no crabka metric/awaiter; poll the dir directly.
-        tokio::time::sleep(Duration::from_millis(300)).await;
-    }
+    produce_and_await_remote_segments(&admin, remote_dir.path()).await;
 
     // Give the RLMM time to propagate CopySegment metadata to the follower via
     // __remote_log_metadata (rf=2).  Interval=1s → 8 ticks plus consume latency.
@@ -541,7 +538,11 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
     }
 
     // The surviving replica is whichever of b1/b2 is still alive (the follower).
-    let survivor = if follower_node_id == opt_b1.as_ref().map(|h| h.node_id()).unwrap_or(0) {
+    let survivor = if follower_node_id
+        == opt_b1
+            .as_ref()
+            .map_or(0, crabka_broker::BrokerHandle::node_id)
+    {
         opt_b1.as_ref().unwrap()
     } else {
         opt_b2.as_ref().unwrap()
@@ -571,11 +572,16 @@ async fn tiered_storage_metadata_sharing_via_survivor() {
         "ITEST: consuming {RECORDS} records from survivor (broker{follower_node_id}) \
          at {follower_addr}"
     );
-    let consume_deadline = Instant::now() + Duration::from_secs(60);
+    let consume_deadline = Instant::now() + Duration::from_mins(1);
     let served = fetch_all_records(&follower_addr, TOPIC, 0, 0, RECORDS, consume_deadline).await;
 
     eprintln!("ITEST: survivor served {served} records (expected >= {RECORDS})");
-    assert2::assert!(served >= RECORDS);
+    assert!(
+        served >= RECORDS,
+        "expected >= {RECORDS} records served by the surviving broker via the remote tier; \
+         got {served}. The survivor (broker{follower_node_id}) should have learned segment \
+         locations from __remote_log_metadata (rf=2) without having run the copy task itself."
+    );
 
     // Shut down surviving brokers.
     if let Some(h) = opt_b1.take() {

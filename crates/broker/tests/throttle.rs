@@ -5,18 +5,15 @@
 //
 // Both are suppressed locally; the rest of the workspace still enforces the
 // full lint gate.
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
-#![allow(clippy::type_complexity)]
 
 //! Broker-side integration tests for KIP-73 replication throttle.
 //!
 //! Tests:
 //! 1. `broker_scoped_alter_persists_in_image` — `IncrementalAlterConfigs`
-//!    (resource_type=Broker) sets `leader.replication.throttled.rate`; visible
+//!    (`resource_type=Broker`) sets `leader.replication.throttled.rate`; visible
 //!    in `MetadataImage` via `controller_image_for_test`.
 //! 2. `topic_throttle_config_propagates` — `IncrementalAlterConfigs`
-//!    (resource_type=Topic) sets `leader.replication.throttled.replicas`; the
+//!    (`resource_type=Topic`) sets `leader.replication.throttled.replicas`; the
 //!    `TopicThrottle` helper reports it correctly.
 //! 3. `throttle_rate_caps_fetch_response_size` — produce 8 KB, set
 //!    leader-rate=512, then Fetch with `replica_id >= 0`; assert response is
@@ -29,6 +26,7 @@
 
 use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, config::ListenerSpec};
 use crabka_protocol::{
@@ -47,6 +45,9 @@ use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::TcpStream,
 };
+
+type ConfigOperations = Vec<(String, Option<String>, i8)>;
+type ConfigResources = Vec<(i8, String, ConfigOperations)>;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // Wire helpers — single length-prefixed request/response exchange.
@@ -241,7 +242,12 @@ async fn create_topic_as_admin(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({topic}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Create a topic via PLAINTEXT (no SASL, compat shim = allow-all).
@@ -269,7 +275,12 @@ async fn create_topic_plaintext(addr: SocketAddr, topic: &str, partitions: i32, 
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({topic}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Await until `handle` sees `(topic, partition)` present in its image.
@@ -281,15 +292,17 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 // Wire drivers for IncrementalAlterConfigs and DescribeConfigs
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `IncrementalAlterConfigs` (api_key=44) over a SASL/PLAIN connection.
+/// Drive `IncrementalAlterConfigs` (`api_key=44`) over a SASL/PLAIN connection.
 /// `resources` is a list of `(resource_type, name, [(config_name, value, op)])`.
 /// Returns the top-level error code from the first resource response (0 = success).
 async fn drive_incremental_alter_configs(
     addr: SocketAddr,
     user: &str,
     pass: &str,
-    resources: Vec<(i8, String, Vec<(String, Option<String>, i8)>)>,
+    resources: ConfigResources,
 ) -> i16 {
+    const VERSION: i16 = 1;
+
     use crabka_protocol::owned::{
         incremental_alter_configs_request::{
             AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
@@ -320,9 +333,6 @@ async fn drive_incremental_alter_configs(
         validate_only: false,
         ..Default::default()
     };
-
-    // Use version 1 (flexible).
-    const VERSION: i16 = 1;
 
     let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
         .await
@@ -337,15 +347,17 @@ async fn drive_incremental_alter_configs(
     let resp = IncrementalAlterConfigsResponse::decode(&mut cur, VERSION)
         .expect("decode IncrementalAlterConfigsResponse");
 
-    resp.responses.first().map(|r| r.error_code).unwrap_or(0)
+    resp.responses.first().map_or(0, |r| r.error_code)
 }
 
-/// Drive `IncrementalAlterConfigs` (api_key=44) over a PLAINTEXT connection
+/// Drive `IncrementalAlterConfigs` (`api_key=44`) over a PLAINTEXT connection
 /// (no SASL — compat shim allows everything).
 async fn drive_incremental_alter_configs_plaintext(
     addr: SocketAddr,
-    resources: Vec<(i8, String, Vec<(String, Option<String>, i8)>)>,
+    resources: ConfigResources,
 ) -> i16 {
+    const VERSION: i16 = 1;
+
     use crabka_protocol::owned::{
         incremental_alter_configs_request::{
             AlterConfigsResource, AlterableConfig, IncrementalAlterConfigsRequest,
@@ -377,8 +389,6 @@ async fn drive_incremental_alter_configs_plaintext(
         ..Default::default()
     };
 
-    const VERSION: i16 = 1;
-
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut body = BytesMut::new();
     req.encode(&mut body, VERSION)
@@ -390,10 +400,10 @@ async fn drive_incremental_alter_configs_plaintext(
     let resp = IncrementalAlterConfigsResponse::decode(&mut cur, VERSION)
         .expect("decode IncrementalAlterConfigsResponse");
 
-    resp.responses.first().map(|r| r.error_code).unwrap_or(0)
+    resp.responses.first().map_or(0, |r| r.error_code)
 }
 
-/// Drive `DescribeConfigs` (api_key=32, version=1) over a SASL/PLAIN connection.
+/// Drive `DescribeConfigs` (`api_key=32`, version=1) over a SASL/PLAIN connection.
 /// Returns `Vec<(per-resource error_code, Vec<(name, value)>)>`.
 #[allow(dead_code)]
 async fn drive_describe_configs(
@@ -402,6 +412,8 @@ async fn drive_describe_configs(
     pass: &str,
     resources: Vec<(i8, String)>,
 ) -> Vec<(i16, Vec<(String, String)>)> {
+    const VERSION: i16 = 1;
+
     use crabka_protocol::owned::{
         describe_configs_request::{DescribeConfigsRequest, DescribeConfigsResource},
         describe_configs_response::DescribeConfigsResponse,
@@ -421,9 +433,6 @@ async fn drive_describe_configs(
         include_documentation: false,
         ..Default::default()
     };
-
-    // Use version 1 (non-flexible, supports include_synonyms).
-    const VERSION: i16 = 1;
 
     let mut stream = sasl_plain_authenticate(addr, user, pass.as_bytes())
         .await
@@ -458,6 +467,8 @@ async fn drive_describe_configs(
 /// Produce `count` records of `record_bytes` bytes each to `(topic, 0)` over
 /// a PLAINTEXT connection. Asserts `error_code=0` on the partition row.
 async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, count: usize) {
+    const VERSION: i16 = 9; // flexible, pre-KIP-516 (no topic_id needed)
+
     use crabka_protocol::{
         owned::{
             produce_request::{PartitionProduceData, ProduceRequest, TopicProduceData},
@@ -497,7 +508,6 @@ async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, c
         ..Default::default()
     };
 
-    const VERSION: i16 = 9; // flexible, pre-KIP-516 (no topic_id needed)
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut body = BytesMut::new();
     req.encode(&mut body, VERSION).expect("encode Produce");
@@ -507,13 +517,19 @@ async fn produce_plaintext(addr: SocketAddr, topic: &str, record_bytes: usize, c
     let mut cur: &[u8] = &resp_bytes;
     let resp = ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse");
     let part = &resp.responses[0].partition_responses[0];
-    assert2::assert!(part.error_code == 0);
+    assert!(
+        part.error_code == 0,
+        "Produce must succeed: error_code={}",
+        part.error_code
+    );
 }
 
 /// Issue a single Fetch request with `replica_id` (>= 0 = inter-broker
 /// replica fetch, subject to leader-side throttle) over a PLAINTEXT
 /// connection. Returns the raw response payload byte length.
 async fn fetch_plaintext_replica(addr: SocketAddr, topic: &str, replica_id: i32) -> usize {
+    const VERSION: i16 = 12; // flexible
+
     use crabka_protocol::owned::{
         fetch_request::{FetchPartition, FetchRequest, FetchTopic},
         fetch_response::FetchResponse,
@@ -537,7 +553,6 @@ async fn fetch_plaintext_replica(addr: SocketAddr, topic: &str, replica_id: i32)
         ..Default::default()
     };
 
-    const VERSION: i16 = 12; // flexible
     let mut stream = TcpStream::connect(addr).await.expect("connect");
     let mut body = BytesMut::new();
     req.encode(&mut body, VERSION).expect("encode Fetch");
@@ -577,7 +592,7 @@ async fn fetch_plaintext_replica(addr: SocketAddr, topic: &str, replica_id: i32)
 // Integration tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Test 1: `IncrementalAlterConfigs` with resource_type=Broker sets the
+/// Test 1: `IncrementalAlterConfigs` with `resource_type=Broker` sets the
 /// `leader.replication.throttled.rate` key. The value must be visible in
 /// the metadata image via `controller_image_for_test`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -602,7 +617,7 @@ async fn broker_scoped_alter_persists_in_image() {
         )],
     )
     .await;
-    assert2::assert!(err == 0);
+    assert!(err == 0, "alter should succeed; got error_code={err}");
 
     // Await until the config is visible (absorb raft commit latency).
     handle
@@ -616,7 +631,7 @@ async fn broker_scoped_alter_persists_in_image() {
     handle.shutdown().await;
 }
 
-/// Test 2: `IncrementalAlterConfigs` with resource_type=Topic sets
+/// Test 2: `IncrementalAlterConfigs` with `resource_type=Topic` sets
 /// `leader.replication.throttled.replicas`; `TopicThrottle::for_topic`
 /// returns the correct throttled-replica entries.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -642,7 +657,7 @@ async fn topic_throttle_config_propagates() {
         )],
     )
     .await;
-    assert2::assert!(err == 0);
+    assert!(err == 0, "topic alter should succeed; got error_code={err}");
 
     // Allow raft commit to propagate.
     handle
@@ -656,7 +671,7 @@ async fn topic_throttle_config_propagates() {
 }
 
 /// Test 3: After setting a very low leader throttle rate (512 bytes/sec) and
-/// marking partition 0 as throttled for replica_id=2, a Fetch issued with
+/// marking partition 0 as throttled for `replica_id=2`, a Fetch issued with
 /// `replica_id=2` must return a response well under 8 KB.
 ///
 /// The token bucket has a one-second burst capacity at the configured rate, so
@@ -685,7 +700,7 @@ async fn throttle_rate_caps_fetch_response_size() {
         )],
     )
     .await;
-    assert2::assert!(err == 0);
+    assert!(err == 0, "broker throttle alter failed: error_code={err}");
 
     // Mark partition 0 as throttled for follower replica_id=2.
     let err = drive_incremental_alter_configs_plaintext(
@@ -701,7 +716,7 @@ async fn throttle_rate_caps_fetch_response_size() {
         )],
     )
     .await;
-    assert2::assert!(err == 0);
+    assert!(err == 0, "topic throttle alter failed: error_code={err}");
 
     // Wait for the configs to appear in the image before producing (so the
     // throttle enforcement is armed when the Fetch arrives).
@@ -725,7 +740,10 @@ async fn throttle_rate_caps_fetch_response_size() {
     // The throttled response must be much smaller than the 8 KB we produced.
     // We allow up to 2 KB as the upper bound to give headroom for framing
     // overhead (batch headers, response wrapper).
-    assert2::assert!(resp_bytes <= 2048);
+    assert!(
+        resp_bytes <= 2048,
+        "expected throttled fetch response <= 2048 bytes, got {resp_bytes} bytes"
+    );
 
     handle.shutdown().await;
 }
@@ -747,7 +765,10 @@ async fn unthrottled_partition_unaffected() {
     let resp_bytes = fetch_plaintext_replica(addr, "baz", 2).await;
 
     // Full 8 KB data plus framing. The response should be well over 4 KB.
-    assert2::assert!(resp_bytes >= 4096);
+    assert!(
+        resp_bytes >= 4096,
+        "expected unthrottled fetch response >= 4096 bytes, got {resp_bytes} bytes"
+    );
 
     handle.shutdown().await;
 }

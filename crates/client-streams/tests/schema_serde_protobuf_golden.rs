@@ -15,7 +15,6 @@ use crabka_schema_serde::{
 pub const FILE_DESCRIPTOR_SET_BYTES: &[u8] =
     include_bytes!("../examples/gen/file_descriptor_set.bin");
 
-#[allow(clippy::all, clippy::pedantic, missing_docs)]
 mod order {
     include!("../examples/gen/order.rs");
 }

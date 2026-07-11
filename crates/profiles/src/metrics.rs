@@ -277,7 +277,7 @@ async fn export(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use axum::{
         body::Body,
         http::{Request, StatusCode},
@@ -311,7 +311,7 @@ mod tests {
             "crabka_profiles_query_requests_total",
             "crabka_profiles_query_duration_seconds",
         ] {
-            assert2::assert!(buf.contains(needle));
+            assert!(buf.contains(needle), "missing {needle} in:\n{buf}");
         }
         for label in [
             "tenant=\"tenant-a\"",
@@ -337,20 +337,20 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(resp.status() == StatusCode::OK);
+        assert!(resp.status() == StatusCode::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert2::assert!(ct.starts_with("application/openmetrics-text"));
+        assert!(ct.starts_with("application/openmetrics-text"), "ct={ct}");
         let body = axum::body::to_bytes(resp.into_body(), 64 * 1024)
             .await
             .unwrap();
         let s = std::str::from_utf8(&body).unwrap();
-        assert2::assert!(s.contains("crabka_profiles_ingest_requests_total"));
-        assert2::assert!(s.contains("# EOF"));
+        assert!(s.contains("crabka_profiles_ingest_requests_total"), "{s}");
+        assert!(s.contains("# EOF"), "{s}");
     }
 
     #[test]
@@ -361,8 +361,8 @@ mod tests {
         // A positive body/item count must flow through to the cumulative
         // counters. This pins the `> 0` guards: flipping to `< 0` or `== 0`
         // would skip `inc_by` for positive inputs, leaving these at zero.
-        assert2::assert!(m.ingest_bytes.get() == 1024);
-        assert2::assert!(m.ingest_items.get() == 3);
+        check!(m.ingest_bytes.get() == 1024);
+        check!(m.ingest_items.get() == 3);
     }
 
     #[test]
@@ -370,9 +370,9 @@ mod tests {
         let m = ServiceMetrics::new();
         // An ok=false request alone must NOT bump wal_append_failures.
         m.record_ingest(false, IngestBytes(0), IngestItems(0), 0.001);
-        assert2::assert!(m.wal_append_failures.get() == 0);
+        assert!(m.wal_append_failures.get() == 0);
         // Only the explicit WAL-failure call does.
         m.record_wal_append_failure();
-        assert2::assert!(m.wal_append_failures.get() == 1);
+        assert!(m.wal_append_failures.get() == 1);
     }
 }

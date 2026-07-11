@@ -24,8 +24,16 @@ fn exec(container: &str, args: &[&str]) {
 }
 
 /// Run the full battery. `mirror.gcr.io/apache/kafka:4.3.0` ships CLI tools under `/opt/kafka/bin`.
-#[allow(clippy::too_many_lines)]
 pub fn run(container: &str) {
+    run_topic_ops(container);
+    run_config_ops(container);
+    run_message_ops(container);
+    run_group_ops(container);
+    run_admin_ops(container);
+    run_admin_tail(container);
+}
+
+fn run_topic_ops(container: &str) {
     let bs = ["--bootstrap-server", BOOTSTRAP];
     let t = "/opt/kafka/bin";
     exec(
@@ -58,6 +66,11 @@ pub fn run(container: &str) {
             bs[1],
         ],
     );
+}
+
+fn run_config_ops(container: &str) {
+    let bs = ["--bootstrap-server", BOOTSTRAP];
+    let t = "/opt/kafka/bin";
     exec(
         container,
         &[
@@ -71,6 +84,11 @@ pub fn run(container: &str) {
             bs[1],
         ],
     );
+}
+
+fn run_message_ops(container: &str) {
+    let bs = ["--bootstrap-server", BOOTSTRAP];
+    let t = "/opt/kafka/bin";
     exec(
         container,
         &[
@@ -84,6 +102,11 @@ pub fn run(container: &str) {
             bs[1],
         ],
     );
+}
+
+fn run_group_ops(container: &str) {
+    let bs = ["--bootstrap-server", BOOTSTRAP];
+    let t = "/opt/kafka/bin";
     exec(
         container,
         &[
@@ -99,6 +122,11 @@ pub fn run(container: &str) {
             bs[1],
         ],
     );
+}
+
+fn run_admin_ops(container: &str) {
+    let bs = ["--bootstrap-server", BOOTSTRAP];
+    let t = "/opt/kafka/bin";
     exec(
         container,
         &[
@@ -161,6 +189,11 @@ pub fn run(container: &str) {
             bs[1],
         ],
     );
+}
+
+fn run_admin_tail(container: &str) {
+    let bs = ["--bootstrap-server", BOOTSTRAP];
+    let t = "/opt/kafka/bin";
     exec(
         container,
         &[

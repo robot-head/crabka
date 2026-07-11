@@ -21,6 +21,9 @@ const T_MAP: u8 = 11;
 const T_STRUCT: u8 = 12;
 
 /// Decode a Jaeger compact-Thrift HTTP `Batch` body into internal spans.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_jaeger_thrift(body: &[u8]) -> Result<Vec<Span>, WireError> {
     let mut input = CompactInput::new(body);
     let batch = read_batch(&mut input)?;
@@ -28,6 +31,9 @@ pub fn decode_jaeger_thrift(body: &[u8]) -> Result<Vec<Span>, WireError> {
 }
 
 /// Decode a Jaeger binary-Thrift HTTP `Batch` body into internal spans.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_jaeger_binary_thrift(body: &[u8]) -> Result<Vec<Span>, WireError> {
     let mut input = BinaryInput::new(body);
     let batch = read_binary_batch(&mut input)?;
@@ -722,11 +728,6 @@ impl<'a> BinaryInput<'a> {
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
 pub(crate) mod test_support {
     use crate::ids::{TraceIdHigh, TraceIdLow};
 
@@ -858,27 +859,22 @@ pub(crate) mod test_support {
 
     fn write_varint(out: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
-            out.push((value as u8) | 0x80);
+            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
             value >>= 7;
         }
-        out.push(value as u8);
+        out.push(u8::try_from(value).unwrap());
     }
 
     fn zigzag_i32(value: i32) -> u64 {
-        ((value << 1) ^ (value >> 31)) as u32 as u64
+        u64::from(((value << 1) ^ (value >> 31)).cast_unsigned())
     }
 
     fn zigzag_i64(value: i64) -> u64 {
-        ((value << 1) ^ (value >> 63)) as u64
+        ((value << 1) ^ (value >> 63)).cast_unsigned()
     }
 }
 
 #[cfg(test)]
-#[allow(
-    clippy::cast_lossless,
-    clippy::cast_possible_truncation,
-    clippy::cast_sign_loss
-)]
 mod tests {
     use super::*;
     use crate::{
@@ -1265,17 +1261,17 @@ mod tests {
 
     fn write_varint(out: &mut Vec<u8>, mut value: u64) {
         while value >= 0x80 {
-            out.push((value as u8) | 0x80);
+            out.push(u8::try_from(value & 0x7f).unwrap() | 0x80);
             value >>= 7;
         }
-        out.push(value as u8);
+        out.push(u8::try_from(value).unwrap());
     }
 
     fn zigzag_i32(value: i32) -> u64 {
-        ((value << 1) ^ (value >> 31)) as u32 as u64
+        u64::from(((value << 1) ^ (value >> 31)).cast_unsigned())
     }
 
     fn zigzag_i64(value: i64) -> u64 {
-        ((value << 1) ^ (value >> 63)) as u64
+        ((value << 1) ^ (value >> 63)).cast_unsigned()
     }
 }

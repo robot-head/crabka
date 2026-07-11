@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, put_i16, put_i32};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,31 +28,25 @@ pub struct StreamsGroupHeartbeatResponse {
     pub acceptable_recovery_lag: i32,
     pub task_offset_interval_ms: i32,
     pub status: Option<Vec<super::common::streams_group_heartbeat_response::status::Status>>,
-    pub active_tasks:
-        Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
-    pub standby_tasks:
-        Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
-    pub warmup_tasks:
-        Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
+    pub active_tasks: Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
+    pub standby_tasks: Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
+    pub warmup_tasks: Option<Vec<super::common::streams_group_heartbeat_response::task_ids::TaskIds>>,
     pub endpoint_information_epoch: i32,
     pub partitions_by_user_endpoint: Option<Vec<EndpointToPartitions>>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
-impl Encode for StreamsGroupHeartbeatResponse {
-    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
-        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
-        }
-        let flex = is_flexible(version);
+impl StreamsGroupHeartbeatResponse {
+    fn encode_field_0<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.throttle_time_ms);
         }
+    }
+    fn encode_field_1<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i16(buf, self.error_code);
         }
+    }
+    fn encode_field_2<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
             if flex {
                 put_compact_nullable_string(buf, self.error_message.as_deref());
@@ -60,25 +54,33 @@ impl Encode for StreamsGroupHeartbeatResponse {
                 put_nullable_string(buf, self.error_message.as_deref());
             }
         }
+    }
+    fn encode_field_3<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) {
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.member_id);
-            } else {
-                put_string(buf, &self.member_id);
-            }
+            if flex { put_compact_string(buf, &self.member_id) } else { put_string(buf, &self.member_id) }
         }
+    }
+    fn encode_field_4<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.member_epoch);
         }
+    }
+    fn encode_field_5<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.heartbeat_interval_ms);
         }
+    }
+    fn encode_field_6<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.acceptable_recovery_lag);
         }
+    }
+    fn encode_field_7<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.task_offset_interval_ms);
         }
+    }
+    fn encode_field_8<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.status).as_ref().map(Vec::len);
@@ -90,6 +92,9 @@ impl Encode for StreamsGroupHeartbeatResponse {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_9<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.active_tasks).as_ref().map(Vec::len);
@@ -101,6 +106,9 @@ impl Encode for StreamsGroupHeartbeatResponse {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_10<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.standby_tasks).as_ref().map(Vec::len);
@@ -112,6 +120,9 @@ impl Encode for StreamsGroupHeartbeatResponse {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_11<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.warmup_tasks).as_ref().map(Vec::len);
@@ -123,9 +134,14 @@ impl Encode for StreamsGroupHeartbeatResponse {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_field_12<B: BufMut>(&self, buf: &mut B, version: i16, _flex: bool) {
         if version >= 0 {
             put_i32(buf, self.endpoint_information_epoch);
         }
+    }
+    fn encode_field_13<B: BufMut>(&self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
         if version >= 0 {
             {
                 let len = (self.partitions_by_user_endpoint).as_ref().map(Vec::len);
@@ -137,10 +153,186 @@ impl Encode for StreamsGroupHeartbeatResponse {
                 }
             }
         }
+        Ok(())
+    }
+    fn encode_tagged_fields<B: BufMut>(&self, buf: &mut B, _version: i16, flex: bool) {
         if flex {
             let tagged = WriteTaggedFields::new();
             tagged.write(buf, &self.unknown_tagged_fields);
         }
+    }
+    fn decode_field_0<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.throttle_time_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_1<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_code = get_i16(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_2<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.error_message = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
+        }
+        Ok(())
+    }
+    fn decode_field_3<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
+        }
+        Ok(())
+    }
+    fn decode_field_4<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.member_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_5<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.heartbeat_interval_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_6<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.acceptable_recovery_lag = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_7<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.task_offset_interval_ms = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_8<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.status = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_response::status::Status::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_9<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.active_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_10<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.standby_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_11<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.warmup_tasks = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_field_12<B: Buf>(out: &mut Self, buf: &mut B, version: i16, _flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.endpoint_information_epoch = get_i32(buf)?;
+        }
+        Ok(())
+    }
+    fn decode_field_13<B: Buf>(out: &mut Self, buf: &mut B, version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if version >= 0 {
+            out.partitions_by_user_endpoint = {
+                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
+                match opt {
+                    None => None,
+                    Some(n) => {
+                        let mut v = Vec::with_capacity(n);
+                        for _ in 0..n {
+                            v.push(EndpointToPartitions::decode(buf, version)?);
+                        }
+                        Some(v)
+                    }
+                }
+            };
+        }
+        Ok(())
+    }
+    fn decode_tagged_fields<B: Buf>(out: &mut Self, buf: &mut B, _version: i16, flex: bool) -> Result<(), ProtocolError> {
+        if flex {
+            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
+        }
+        Ok(())
+    }
+}
+impl Encode for StreamsGroupHeartbeatResponse {
+    fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
+        if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
+        }
+        let flex = is_flexible(version);
+        self.encode_field_0(buf, version, flex);
+        self.encode_field_1(buf, version, flex);
+        self.encode_field_2(buf, version, flex);
+        self.encode_field_3(buf, version, flex);
+        self.encode_field_4(buf, version, flex);
+        self.encode_field_5(buf, version, flex);
+        self.encode_field_6(buf, version, flex);
+        self.encode_field_7(buf, version, flex);
+        self.encode_field_8(buf, version, flex)?;
+        self.encode_field_9(buf, version, flex)?;
+        self.encode_field_10(buf, version, flex)?;
+        self.encode_field_11(buf, version, flex)?;
+        self.encode_field_12(buf, version, flex);
+        self.encode_field_13(buf, version, flex)?;
+        self.encode_tagged_fields(buf, version, flex);
         Ok(())
     }
     fn encoded_len(&self, version: i16) -> usize {
@@ -160,11 +352,7 @@ impl Encode for StreamsGroupHeartbeatResponse {
             };
         }
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.member_id)
-            } else {
-                string_len(&self.member_id)
-            };
+            n += if flex { compact_string_len(&self.member_id) } else { string_len(&self.member_id) };
         }
         if version >= 0 {
             n += 4;
@@ -181,48 +369,32 @@ impl Encode for StreamsGroupHeartbeatResponse {
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.status).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
-                    flex,
-                );
-                let body: usize =
-                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
+                let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.active_tasks).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
-                    flex,
-                );
-                let body: usize =
-                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
+                let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.standby_tasks).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
-                    flex,
-                );
-                let body: usize =
-                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
+                let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.warmup_tasks).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
-                    flex,
-                );
-                let body: usize =
-                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
+                let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                 prefix + body
             };
         }
@@ -232,12 +404,8 @@ impl Encode for StreamsGroupHeartbeatResponse {
         if version >= 0 {
             n += {
                 let opt: Option<&Vec<_>> = (self.partitions_by_user_endpoint).as_ref();
-                let prefix = crate::primitives::array::nullable_array_len_prefix_len(
-                    opt.map(std::vec::Vec::len),
-                    flex,
-                );
-                let body: usize =
-                    opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
+                let prefix = crate::primitives::array::nullable_array_len_prefix_len(opt.map(std::vec::Vec::len), flex);
+                let body: usize = opt.map_or(0, |v| v.iter().map(|it| it.encoded_len(version)).sum());
                 prefix + body
             };
         }
@@ -251,146 +419,25 @@ impl Encode for StreamsGroupHeartbeatResponse {
 impl Decode<'_> for StreamsGroupHeartbeatResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
-        if version >= 0 {
-            out.throttle_time_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.error_code = get_i16(buf)?;
-        }
-        if version >= 0 {
-            out.error_message = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.member_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
-        }
-        if version >= 0 {
-            out.member_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.heartbeat_interval_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.acceptable_recovery_lag = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.task_offset_interval_ms = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.status = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_response::status::Status::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.active_tasks = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.standby_tasks = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.warmup_tasks = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(
-                                super::common::streams_group_heartbeat_response::task_ids::TaskIds::decode(
-                                    buf,
-                                    version,
-                                )?,
-                            );
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if version >= 0 {
-            out.endpoint_information_epoch = get_i32(buf)?;
-        }
-        if version >= 0 {
-            out.partitions_by_user_endpoint = {
-                let opt = crate::primitives::array::get_nullable_array_len(buf, flex)?;
-                match opt {
-                    None => None,
-                    Some(n) => {
-                        let mut v = Vec::with_capacity(n);
-                        for _ in 0..n {
-                            v.push(EndpointToPartitions::decode(buf, version)?);
-                        }
-                        Some(v)
-                    }
-                }
-            };
-        }
-        if flex {
-            out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
-        }
+        Self::decode_field_0(&mut out, buf, version, flex)?;
+        Self::decode_field_1(&mut out, buf, version, flex)?;
+        Self::decode_field_2(&mut out, buf, version, flex)?;
+        Self::decode_field_3(&mut out, buf, version, flex)?;
+        Self::decode_field_4(&mut out, buf, version, flex)?;
+        Self::decode_field_5(&mut out, buf, version, flex)?;
+        Self::decode_field_6(&mut out, buf, version, flex)?;
+        Self::decode_field_7(&mut out, buf, version, flex)?;
+        Self::decode_field_8(&mut out, buf, version, flex)?;
+        Self::decode_field_9(&mut out, buf, version, flex)?;
+        Self::decode_field_10(&mut out, buf, version, flex)?;
+        Self::decode_field_11(&mut out, buf, version, flex)?;
+        Self::decode_field_12(&mut out, buf, version, flex)?;
+        Self::decode_field_13(&mut out, buf, version, flex)?;
+        Self::decode_tagged_fields(&mut out, buf, version, flex)?;
         Ok(out)
     }
 }
@@ -424,30 +471,16 @@ impl StreamsGroupHeartbeatResponse {
             m.task_offset_interval_ms = 1i32;
         }
         if version >= 0 {
-            m.status = Some(vec![
-                super::common::streams_group_heartbeat_response::status::Status::populated(version),
-            ]);
+            m.status = Some(vec![super::common::streams_group_heartbeat_response::status::Status::populated(version)]);
         }
         if version >= 0 {
-            m.active_tasks = Some(vec![
-                super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(
-                    version,
-                ),
-            ]);
+            m.active_tasks = Some(vec![super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(version)]);
         }
         if version >= 0 {
-            m.standby_tasks = Some(vec![
-                super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(
-                    version,
-                ),
-            ]);
+            m.standby_tasks = Some(vec![super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(version)]);
         }
         if version >= 0 {
-            m.warmup_tasks = Some(vec![
-                super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(
-                    version,
-                ),
-            ]);
+            m.warmup_tasks = Some(vec![super::common::streams_group_heartbeat_response::task_ids::TaskIds::populated(version)]);
         }
         if version >= 0 {
             m.endpoint_information_epoch = 1i32;
@@ -461,10 +494,8 @@ impl StreamsGroupHeartbeatResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct EndpointToPartitions {
     pub user_endpoint: super::common::streams_group_heartbeat_response::endpoint::Endpoint,
-    pub active_partitions:
-        Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition>,
-    pub standby_partitions:
-        Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition>,
+    pub active_partitions: Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition>,
+    pub standby_partitions: Vec<super::common::streams_group_heartbeat_response::topic_partition::TopicPartition>,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl Encode for EndpointToPartitions {
@@ -503,27 +534,15 @@ impl Encode for EndpointToPartitions {
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.active_partitions).len(),
-                    flex,
-                );
-                let body: usize = (self.active_partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.active_partitions).len(), flex);
+                let body: usize = (self.active_partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
         if version >= 0 {
             n += {
-                let prefix = crate::primitives::array::array_len_prefix_len(
-                    (self.standby_partitions).len(),
-                    flex,
-                );
-                let body: usize = (self.standby_partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.standby_partitions).len(), flex);
+                let body: usize = (self.standby_partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -539,22 +558,14 @@ impl Decode<'_> for EndpointToPartitions {
         let flex = version >= 0;
         let mut out = Self::default();
         if version >= 0 {
-            out.user_endpoint =
-                super::common::streams_group_heartbeat_response::endpoint::Endpoint::decode(
-                    buf, version,
-                )?;
+            out.user_endpoint = super::common::streams_group_heartbeat_response::endpoint::Endpoint::decode(buf, version)?;
         }
         if version >= 0 {
             out.active_partitions = {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode(buf, version)?);
                 }
                 v
             };
@@ -564,12 +575,7 @@ impl Decode<'_> for EndpointToPartitions {
                 let n = crate::primitives::array::get_array_len(buf, flex)?;
                 let mut v = Vec::with_capacity(n);
                 for _ in 0..n {
-                    v.push(
-                        super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode(
-                            buf,
-                            version,
-                        )?,
-                    );
+                    v.push(super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::decode(buf, version)?);
                 }
                 v
             };
@@ -586,20 +592,13 @@ impl EndpointToPartitions {
     pub fn populated(version: i16) -> Self {
         let mut m = Self::default();
         if version >= 0 {
-            m.user_endpoint =
-                super::common::streams_group_heartbeat_response::endpoint::Endpoint::populated(
-                    version,
-                );
+            m.user_endpoint = super::common::streams_group_heartbeat_response::endpoint::Endpoint::populated(version);
         }
         if version >= 0 {
-            m.active_partitions = vec![
-                super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)
-            ];
+            m.active_partitions = vec![super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)];
         }
         if version >= 0 {
-            m.standby_partitions = vec![
-                super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)
-            ];
+            m.standby_partitions = vec![super::common::streams_group_heartbeat_response::topic_partition::TopicPartition::populated(version)];
         }
         m
     }
@@ -608,15 +607,12 @@ impl EndpointToPartitions {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("throttleTimeMs".to_string(), ::serde_json::json!(0));
     obj.insert("errorCode".to_string(), ::serde_json::json!(0));
     obj.insert("errorMessage".to_string(), ::serde_json::Value::Null);
-    obj.insert(
-        "memberId".to_string(),
-        ::serde_json::Value::String(String::new()),
-    );
+    obj.insert("memberId".to_string(), ::serde_json::Value::String(String::new()));
     obj.insert("memberEpoch".to_string(), ::serde_json::json!(0));
     obj.insert("heartbeatIntervalMs".to_string(), ::serde_json::json!(0));
     obj.insert("acceptableRecoveryLag".to_string(), ::serde_json::json!(0));
@@ -625,13 +621,7 @@ pub fn default_json(version: i16) -> ::serde_json::Value {
     obj.insert("activeTasks".to_string(), ::serde_json::Value::Null);
     obj.insert("standbyTasks".to_string(), ::serde_json::Value::Null);
     obj.insert("warmupTasks".to_string(), ::serde_json::Value::Null);
-    obj.insert(
-        "endpointInformationEpoch".to_string(),
-        ::serde_json::json!(0),
-    );
-    obj.insert(
-        "partitionsByUserEndpoint".to_string(),
-        ::serde_json::Value::Null,
-    );
+    obj.insert("endpointInformationEpoch".to_string(), ::serde_json::json!(0));
+    obj.insert("partitionsByUserEndpoint".to_string(), ::serde_json::Value::Null);
     ::serde_json::Value::Object(obj)
 }

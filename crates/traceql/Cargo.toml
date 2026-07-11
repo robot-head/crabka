@@ -19,7 +19,6 @@ categories = ["database-implementations"]
 workspace = true
 
 [dependencies]
-assert2 = { workspace = true }
 crabka-blockstore = { path = "../blockstore", version = "0.3.7" }
 arrow = { workspace = true }
 datafusion = { workspace = true }
@@ -32,6 +31,8 @@ thiserror = { workspace = true }
 tracing = { workspace = true }
 
 [dev-dependencies]
+num-traits = { workspace = true }
+assert2 = { workspace = true }
 datatest-stable = { workspace = true }
 proptest = { workspace = true }
 tokio = { workspace = true, features = ["macros", "rt-multi-thread"] }

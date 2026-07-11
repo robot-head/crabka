@@ -8,12 +8,9 @@
 //
 // Both are suppressed locally; the rest of the workspace still enforces the
 // full lint gate.
-#![allow(clippy::pedantic)]
 // `clippy::unnecessary_unwrap` fires on the `l1.unwrap()` inside `if l1.is_some()`
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
-#![allow(clippy::unnecessary_unwrap)]
 // `clippy::too_many_lines` fires on the auto-rebalance integration test body.
-#![allow(clippy::too_many_lines)]
 
 //! Broker-side integration tests for the operator-triggered
 //! `ElectLeaders` RPC. Drives the wire path end-to-end with a Rust
@@ -41,6 +38,7 @@ use std::{
     time::{Duration, Instant},
 };
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -74,7 +72,7 @@ const ELECT_LEADERS_VERSION: i16 = 2;
 /// 3-broker cluster at a time. Mirrors `quorum.rs` / `leader_election.rs`.
 /// Without this, the tests' static 3-voter clusters boot concurrently on
 /// the same loopback with short raft timings and starve each other's
-/// elections / ISR re-admission (intermittent FENCED_LEADER_EPOCH churn).
+/// elections / ISR re-admission (intermittent `FENCED_LEADER_EPOCH` churn).
 fn cluster_lock() -> &'static tokio::sync::Mutex<()> {
     static LOCK: std::sync::OnceLock<tokio::sync::Mutex<()>> = std::sync::OnceLock::new();
     LOCK.get_or_init(|| tokio::sync::Mutex::new(()))
@@ -133,7 +131,7 @@ async fn round_trip(
 }
 
 /// Drive `ElectLeaders` over a fresh PLAINTEXT connection. The authorizer's
-/// compat shim (no super_users + no ACLs → Allow) lets this through without
+/// compat shim (no `super_users` + no ACLs → Allow) lets this through without
 /// SASL. Asserts the top-level `error_code == 0` and returns per-partition
 /// `(partition_id, error_code)` rows for the topic named `topic`.
 async fn drive_elect_leaders(
@@ -163,7 +161,11 @@ async fn drive_elect_leaders(
     let resp = ElectLeadersResponse::decode(&mut cur, ELECT_LEADERS_VERSION)
         .expect("decode ElectLeadersResponse");
 
-    assert2::assert!(resp.error_code == 0);
+    assert!(
+        resp.error_code == 0,
+        "top-level error_code must be 0, got {}",
+        resp.error_code
+    );
 
     resp.replica_election_results
         .into_iter()
@@ -198,8 +200,7 @@ async fn wait_isr_contains(handle: &BrokerHandle, topic: &str, partition: i32, n
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .map(|p| p.isr.contains(&crabka_broker::NodeId(node)))
-                .unwrap_or(false)
+                .is_some_and(|p| p.isr.contains(&crabka_broker::NodeId(node)))
         })
         .await;
 }
@@ -214,13 +215,11 @@ async fn wait_partition_isr_only(
     let expected_set: std::collections::HashSet<u64> = expected.iter().copied().collect();
     handle
         .wait_for_image(|img| {
-            img.partition(topic, partition)
-                .map(|p| {
-                    let actual_set: std::collections::HashSet<u64> =
-                        p.isr.iter().map(|n| n.0).collect();
-                    actual_set == expected_set
-                })
-                .unwrap_or(false)
+            img.partition(topic, partition).is_some_and(|p| {
+                let actual_set: std::collections::HashSet<u64> =
+                    p.isr.iter().map(|n| n.0).collect();
+                actual_set == expected_set
+            })
         })
         .await;
 }
@@ -237,8 +236,7 @@ async fn wait_partition_isr_contains(
     handle
         .wait_for_image(|img| {
             img.partition(topic, partition)
-                .map(|p| p.isr.contains(&crabka_broker::NodeId(member)))
-                .unwrap_or(false)
+                .is_some_and(|p| p.isr.contains(&crabka_broker::NodeId(member)))
         })
         .await;
 }
@@ -254,8 +252,8 @@ async fn wait_partition_isr_contains(
 /// 2. Broker 2 becomes partition leader via the automatic on-broker-dead path.
 /// 3. Revive broker 1 (Rejoin). It catches up on replication and expands
 ///    back into the ISR.
-/// 4. Send `ElectLeaders Preferred` (election_type=0) via wire.
-/// 5. Assert per-partition error_code = 0; poll until leader == 1 again.
+/// 4. Send `ElectLeaders Preferred` (`election_type=0`) via wire.
+/// 5. Assert per-partition `error_code` = 0; poll until leader == 1 again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn preferred_election_via_wire_returns_success() {
     let _g = cluster_lock().lock().await;
@@ -332,7 +330,10 @@ async fn preferred_election_via_wire_returns_success() {
     // Now send ElectLeaders Preferred (election_type=0). Broker 1 is the
     // preferred replica (replicas[0]) and is now back in ISR and alive.
     let result = drive_elect_leaders(elect_addr, "foo-preferred", vec![0], 0).await;
-    assert2::assert!(result == vec![(0, 0)]);
+    assert!(
+        result == vec![(0, 0)],
+        "expected error_code=0 for PREFERRED election; got {result:?}"
+    );
 
     // Poll until the image reflects broker 1 as leader again.
     wait_partition_leader(&cluster[0].0, "foo-preferred", 0, 1).await;
@@ -354,10 +355,10 @@ async fn preferred_election_via_wire_returns_success() {
 ///    exist, so liveness says it's dead.
 /// 2. Broker 1 (in replicas but not in ISR) is alive and its heartbeat is
 ///    known to the controller.
-/// 3. Send `ElectLeaders Unclean` (election_type=1) via wire.
+/// 3. Send `ElectLeaders Unclean` (`election_type=1`) via wire.
 /// 4. The handler checks: is any ISR member (99) alive? No → unclean eligible.
 ///    First alive replica in [1, 2]? Broker 1 → elected as leader, ISR=[1].
-/// 5. Assert per-partition error_code = 0 and poll until leader == 1.
+/// 5. Assert per-partition `error_code` = 0 and poll until leader == 1.
 // PRE-EXISTING FLAKE (orthogonal to KIP-595; bisected to caa97e85, the 3d-1
 // tip): the test forges leader=99/ISR=[99] (both dead) then drives an UNCLEAN
 // election expecting it to elect broker 1. Forging a *dead* leader removes the
@@ -426,7 +427,10 @@ async fn unclean_election_via_wire_picks_alive_replica() {
     // The algorithm finds: ISR=[99] — all dead → unclean eligible.
     // First alive in replicas=[1,2] → broker 1 → new leader=1, isr=[1].
     let result = drive_elect_leaders(addr, "foo-unclean", vec![0], 1).await;
-    assert2::assert!(result == vec![(0, 0)]);
+    assert!(
+        result == vec![(0, 0)],
+        "expected error_code=0 for UNCLEAN election; got {result:?}"
+    );
 
     // Poll until the metadata image reflects the new leader. The unclean
     // election makes broker 1 the leader with ISR=[1]; we assert leadership and
@@ -448,7 +452,7 @@ async fn unclean_election_via_wire_picks_alive_replica() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a topic on a PLAINTEXT broker. The authorizer's compat shim
-/// (no super_users, no ACLs) lets the request through.
+/// (no `super_users`, no ACLs) lets the request through.
 async fn create_topic_plaintext(
     addr: SocketAddr,
     name: &str,
@@ -478,7 +482,12 @@ async fn create_topic_plaintext(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Poll until the partition record for `(topic, partition)` is visible in the
@@ -608,7 +617,10 @@ async fn non_super_user_without_acl_denied() {
         if r.iter().all(|(_, ec)| *ec == 31) {
             break r;
         }
-        assert2::assert!(Instant::now() <= deadline_auth);
+        assert!(
+            Instant::now() <= deadline_auth,
+            "ACL shim still active or wrong error after 5s; got {r:?}"
+        );
         // intentional: backoff between bounded RPC-response retries that
         // re-drive the SASL ElectLeaders wire path to observe the authorizer's
         // decision; the awaited state is on the request path, not in the
@@ -619,7 +631,10 @@ async fn non_super_user_without_acl_denied() {
     handle.shutdown().await;
 
     // Per-row error code must be 31 (CLUSTER_AUTHORIZATION_FAILED).
-    assert2::assert!(resp == vec![(0, 31)]);
+    assert!(
+        resp == vec![(0, 31)],
+        "expected CLUSTER_AUTHORIZATION_FAILED (31) for alice; got {resp:?}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -667,7 +682,7 @@ async fn auto_rebalance_restores_preferred_leader() {
         dir0.path(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    cfg0.auto_leader_rebalance_enable = true;
+    cfg0.features.auto_leader_rebalance_enable = true;
     cfg0.leader_imbalance_check_interval_secs = 1;
     cfg0.leader_imbalance_per_broker_percentage = 0;
 
@@ -679,7 +694,7 @@ async fn auto_rebalance_restores_preferred_leader() {
         dir1.path(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    cfg1.auto_leader_rebalance_enable = true;
+    cfg1.features.auto_leader_rebalance_enable = true;
     cfg1.leader_imbalance_check_interval_secs = 1;
     cfg1.leader_imbalance_per_broker_percentage = 0;
 
@@ -691,25 +706,25 @@ async fn auto_rebalance_restores_preferred_leader() {
         dir2.path(),
         crabka_broker::BootstrapMode::Bootstrap,
     );
-    cfg2.auto_leader_rebalance_enable = true;
+    cfg2.features.auto_leader_rebalance_enable = true;
     cfg2.leader_imbalance_check_interval_secs = 1;
     cfg2.leader_imbalance_per_broker_percentage = 0;
 
     // Start all three statically; they elect among themselves over the wire.
     let mut client_ls = client_listeners.into_iter();
     let mut ctrl_ls = controller_listeners.into_iter();
-    let (cl0, ctl0) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
-    let (cl1, ctl1) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
-    let (cl2, ctl2) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (client0, controller0) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (client1, controller1) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
+    let (client2, controller2) = (client_ls.next().unwrap(), ctrl_ls.next().unwrap());
     let cfg1_clone = cfg1.clone();
     let cfg2_clone = cfg2.clone();
     let join1 = tokio::spawn(async move {
-        Broker::start_with_listeners(cfg1_clone, Some(ctl1), Some(cl1)).await
+        Broker::start_with_listeners(cfg1_clone, Some(controller1), Some(client1)).await
     });
     let join2 = tokio::spawn(async move {
-        Broker::start_with_listeners(cfg2_clone, Some(ctl2), Some(cl2)).await
+        Broker::start_with_listeners(cfg2_clone, Some(controller2), Some(client2)).await
     });
-    let h0 = Broker::start_with_listeners(cfg0.clone(), Some(ctl0), Some(cl0))
+    let h0 = Broker::start_with_listeners(cfg0.clone(), Some(controller0), Some(client0))
         .await
         .expect("broker 1 start");
     let h1 = join1.await.expect("spawn join1").expect("broker 2 start");
@@ -776,7 +791,7 @@ async fn auto_rebalance_restores_preferred_leader() {
 // ─────────────────────────────────────────────────────────────────────────────
 
 /// Create a topic via SASL/PLAIN (used by the auth-deny test where the
-/// listener is SASL_PLAINTEXT rather than PLAINTEXT).
+/// listener is `SASL_PLAINTEXT` rather than PLAINTEXT).
 async fn create_topic_sasl_plain(
     addr: SocketAddr,
     user: &str,
@@ -810,7 +825,12 @@ async fn create_topic_sasl_plain(
         .expect("CreateTopics round-trip");
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, 7).expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Drive `ElectLeaders` over a SASL/PLAIN authenticated connection.

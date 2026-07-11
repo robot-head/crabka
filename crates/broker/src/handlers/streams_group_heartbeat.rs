@@ -97,7 +97,7 @@ pub(crate) async fn handle(
         if handle
             .tx
             .send(StreamsGroupActorMessage::Heartbeat {
-                request: req,
+                request: Box::new(req),
                 client_id: String::new(),
                 client_host: String::new(),
                 reply: tx,
@@ -134,6 +134,7 @@ fn error(code: i16) -> StreamsGroupHeartbeatResponse {
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_metadata::{FeatureLevelRecord, MetadataRecord};
     use crabka_protocol::owned::streams_group_heartbeat_response;
     use crabka_security::Principal;
@@ -218,7 +219,7 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert2::assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -238,7 +239,7 @@ mod tests {
             .expect("handle");
         let resp = decode_response(&resp);
 
-        assert2::assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -247,7 +248,7 @@ mod tests {
     #[test]
     fn disabled_feature_yields_unsupported_version() {
         let resp = disabled_response();
-        assert2::assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
+        assert!(resp.error_code == codes::UNSUPPORTED_VERSION);
     }
 
     #[test]
@@ -267,7 +268,7 @@ mod tests {
         let peer = std::net::SocketAddr::from(([127, 0, 0, 1], 9092));
         let ctx = crate::test_support::request_context(&principal, &peer, "streams-client");
 
-        assert2::assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let bytes = crate::handlers::encode_response(
             &error(codes::GROUP_AUTHORIZATION_FAILED),
@@ -280,6 +281,6 @@ mod tests {
             streams_group_heartbeat_response::MAX_VERSION,
         )
         .unwrap();
-        assert2::assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
+        assert!(resp.error_code == codes::GROUP_AUTHORIZATION_FAILED);
     }
 }

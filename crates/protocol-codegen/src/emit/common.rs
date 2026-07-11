@@ -46,13 +46,12 @@ pub fn format_int_literal(s: &str, suffix: &str) -> String {
             decimal_string = s.to_string();
             (negative_in, &decimal_string)
         };
-    #[allow(clippy::manual_is_multiple_of)]
     let underscored: String = {
         let chars: Vec<char> = digits.chars().collect();
         let mut result = String::new();
         let len = chars.len();
         for (i, &c) in chars.iter().enumerate() {
-            if i > 0 && (len - i) % 3 == 0 {
+            if i > 0 && (len - i).is_multiple_of(3) {
                 result.push('_');
             }
             result.push(c);
@@ -73,21 +72,21 @@ pub fn format_int_literal(s: &str, suffix: &str) -> String {
 fn hex_to_signed(v: u64, suffix: &str) -> i64 {
     let bits: u32 = suffix.trim_start_matches(['i', 'u']).parse().unwrap_or(64);
     if bits >= 64 {
-        #[allow(clippy::cast_possible_wrap)]
-        return v as i64;
+        return v.cast_signed();
     }
     let mask = (1u64 << bits) - 1;
     let x = v & mask;
-    #[allow(clippy::cast_possible_wrap)]
     if suffix.starts_with('i') && (x & (1u64 << (bits - 1))) != 0 {
-        (x as i64) - (1i64 << bits)
+        let shift = 64 - bits;
+        (x << shift).cast_signed() >> shift
     } else {
-        x as i64
+        i64::try_from(x).expect("sub-64-bit unsigned literal must fit in i64")
     }
 }
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -99,18 +98,14 @@ mod tests {
             ("2147483647", "2_147_483_647i32"),
             ("-2147483648", "-2_147_483_648i32"),
         ] {
-            assert2::assert!(format_int_literal(input, "i32") == want);
+            assert!(format_int_literal(input, "i32") == want);
         }
     }
 
     #[test]
     fn hex_positive_normalizes_to_decimal() {
-        for (_case, input, want) in [
-            ("lowercase", "0x7fffffff", "2_147_483_647i32"),
-            ("uppercase", "0X10", "16i32"),
-        ] {
-            assert2::assert!(format_int_literal(input, "i32") == want);
-        }
+        assert!(format_int_literal("0x7fffffff", "i32") == "2_147_483_647i32");
+        assert!(format_int_literal("0X10", "i32") == "16i32");
     }
 
     #[test]
@@ -122,7 +117,8 @@ mod tests {
             ("0x80000000", "i32", "-2_147_483_648i32"),
             ("0xffffffff", "i64", "4_294_967_295i64"),
         ] {
-            assert2::assert!(format_int_literal(input, suffix) == want);
+            assert!(format_int_literal(input, suffix) == want);
         }
+        assert!(hex_to_signed(0x4000_0000_0000_0000, "i63") == -(1i64 << 62));
     }
 }

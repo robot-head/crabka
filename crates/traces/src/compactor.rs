@@ -49,6 +49,9 @@ pub fn compacted_object_key(
 }
 
 /// Merge existing span block object keys into one replacement block and index entry.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn compact_block_keys(
     store: Arc<dyn ObjectStore>,
     writer: &BlockWriter,
@@ -106,6 +109,9 @@ pub async fn compact_block_keys(
 }
 
 /// Compact every tenant in the selected time window independently.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn compact_index_window(
     store: Arc<dyn ObjectStore>,
     writer: &BlockWriter,

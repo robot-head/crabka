@@ -3,16 +3,7 @@
 //!
 //! Windows-gated like the other multi-broker tests.
 
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::default_trait_access,
-    // The follower-truncation test reads top-to-bottom as one scenario
-    // (bring up cluster → propagate → produce → diverge → converge); the
-    // per-stage poll loops don't factor into reusable helpers cleanly.
-    clippy::too_many_lines
-)]
-
-use assert2::check;
+use assert2::{assert, check};
 use bytes::Bytes;
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_core::Client;
@@ -162,7 +153,7 @@ async fn fenced_leader_epoch_truncates_zombie_writes() {
         .expect("fetch");
     let pd = &resp.responses[0].partitions[0];
     // FENCED_LEADER_EPOCH = 74
-    assert2::assert!(pd.error_code == 74);
+    assert!(pd.error_code == 74, "expected FENCED_LEADER_EPOCH");
 
     broker.shutdown().await;
 }
@@ -203,7 +194,7 @@ async fn unknown_leader_epoch_on_metadata_lag() {
         .expect("fetch");
     let pd = &resp.responses[0].partitions[0];
     // UNKNOWN_LEADER_EPOCH = 75
-    assert2::assert!(pd.error_code == 75);
+    assert!(pd.error_code == 75, "expected UNKNOWN_LEADER_EPOCH");
 
     broker.shutdown().await;
 }
@@ -342,9 +333,8 @@ async fn diverging_epoch_returned_on_stale_last_fetched_epoch() {
     // Sanity: the leader really advanced to LEO == n.
     let leo = broker
         .local_log_end_offset("diverge", 0)
-        .await
         .expect("local leo");
-    assert2::assert!(leo == n);
+    assert!(leo == n, "expected leader LEO == {n}, got {leo}");
 
     // Follower Fetch at offset n claiming last_fetched_epoch == e0. Leave
     // `current_leader_epoch` at its -1 default so we don't trip the KIP-101
@@ -375,17 +365,28 @@ async fn diverging_epoch_returned_on_stale_last_fetched_epoch() {
     let part = &resp.responses[0].partitions[0];
     // NONE error code: divergence is reported in-band, not as an error.
     check!(
-        (
-            part.error_code,
-            part.diverging_epoch.end_offset,
-            part.diverging_epoch.epoch,
-            part.records.is_none()
-                || part
-                    .records
-                    .as_ref()
-                    .and_then(|r| r.as_v2())
-                    .is_none_or(<[_]>::is_empty),
-        ) == (0, k, e0, true),
+        part.error_code == 0,
+        "expected NONE, got {}",
+        part.error_code
+    );
+    check!(
+        part.diverging_epoch.end_offset == k,
+        "diverging_epoch.end_offset should be the epoch-0 boundary {k}, got {}",
+        part.diverging_epoch.end_offset
+    );
+    check!(
+        part.diverging_epoch.epoch == e0,
+        "diverging_epoch.epoch should be {e0}, got {}",
+        part.diverging_epoch.epoch
+    );
+    // No records are served alongside a divergence signal.
+    check!(
+        part.records.is_none()
+            || part
+                .records
+                .as_ref()
+                .and_then(|r| r.as_v2())
+                .is_none_or(<[_]>::is_empty),
         "diverging fetch must serve no records"
     );
 
@@ -442,7 +443,7 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
         })
         .await
         .unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0);
     let topic_id = resp.topics[0].topic_id;
 
     // Wait for the partition to materialize on every broker.
@@ -477,7 +478,7 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
             })
             .await
             .unwrap();
-        assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
+        assert!(prod.responses[0].partition_responses[0].error_code == 0);
     }
 
     // Wait for all three brokers to converge to LEO k.
@@ -506,9 +507,12 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
         .expect("inject divergent suffix");
     let diverged_leo = follower
         .local_log_end_offset("divtrunc", 0)
-        .await
         .expect("follower leo after suffix");
-    assert2::assert!(diverged_leo == k + suffix);
+    assert!(
+        diverged_leo == k + suffix,
+        "follower should hold a divergent suffix (expected {}, got {diverged_leo})",
+        k + suffix
+    );
 
     // The leader stays at LEO k, so its epoch-0 boundary (8) is below the
     // follower's fetch offset (13): the next follower Fetch gets a
@@ -519,21 +523,20 @@ async fn follower_truncates_in_band_on_diverging_epoch() {
     follower
         .wait_until_local_log_end_offset_eq("divtrunc", 0, k)
         .await;
-    let f_leo = follower
-        .local_log_end_offset("divtrunc", 0)
-        .await
-        .unwrap_or(-1);
+    let f_leo = follower.local_log_end_offset("divtrunc", 0).unwrap_or(-1);
     let l_leo = cluster[0]
         .0
         .local_log_end_offset("divtrunc", 0)
-        .await
         .unwrap_or(-1);
-    assert2::assert!(f_leo == l_leo && f_leo == k);
+    assert!(
+        f_leo == l_leo && f_leo == k,
+        "follower did not converge to leader (follower={f_leo}, leader={l_leo}, k={k})"
+    );
 
     // Final cross-check: leader LEO and follower LEO agree.
-    assert2::assert!(
-        follower.local_log_end_offset("divtrunc", 0).await
-            == cluster[0].0.local_log_end_offset("divtrunc", 0).await
+    assert!(
+        follower.local_log_end_offset("divtrunc", 0)
+            == cluster[0].0.local_log_end_offset("divtrunc", 0)
     );
 
     for (h, _, _) in cluster {

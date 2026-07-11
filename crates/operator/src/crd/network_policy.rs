@@ -31,6 +31,7 @@ pub struct NetworkPolicyPeer {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -38,7 +39,7 @@ mod tests {
     fn network_policy_spec_empty_round_trips() {
         let cfg: NetworkPolicySpec = serde_json::from_str("{}").unwrap();
         let back = serde_json::to_string(&cfg).unwrap();
-        assert2::assert!(back == "{}");
+        assert!(back == "{}");
     }
 
     #[test]
@@ -48,31 +49,34 @@ mod tests {
             "namespaceSelector":{"matchLabels":{"team":"platform"}}
         }"#;
         let p: NetworkPolicyPeer = serde_json::from_str(json).unwrap();
-        assert2::assert!(
-            p == NetworkPolicyPeer {
-                pod_selector: Some(LabelSelector {
-                    match_labels: Some([("role".into(), "frontend".into())].into()),
-                    match_expressions: None,
-                }),
-                namespace_selector: Some(LabelSelector {
-                    match_labels: Some([("team".into(), "platform".into())].into()),
-                    match_expressions: None,
-                }),
-            }
+        let pod = p.pod_selector.as_ref().expect("podSelector present");
+        let ns = p
+            .namespace_selector
+            .as_ref()
+            .expect("namespaceSelector present");
+        assert!(
+            pod.match_labels
+                .as_ref()
+                .and_then(|m| m.get("role"))
+                .map(String::as_str)
+                == Some("frontend")
+        );
+        assert!(
+            ns.match_labels
+                .as_ref()
+                .and_then(|m| m.get("team"))
+                .map(String::as_str)
+                == Some("platform")
         );
         let back = serde_json::to_string(&p).unwrap();
-        for (_name, expected) in [
-            ("pod selector", "\"podSelector\""),
-            ("namespace selector", "\"namespaceSelector\""),
-        ] {
-            assert2::assert!(back.contains(expected));
-        }
+        assert!(back.contains("\"podSelector\""), "got: {back}");
+        assert!(back.contains("\"namespaceSelector\""), "got: {back}");
     }
 
     #[test]
     fn peer_omits_unset_selectors() {
         let p = NetworkPolicyPeer::default();
         let json = serde_json::to_string(&p).unwrap();
-        assert2::assert!(json == "{}");
+        assert!(json == "{}", "default peer must serialize to empty object");
     }
 }

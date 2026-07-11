@@ -201,6 +201,8 @@ fn anomaly_key_to_proto(k: &crate::detector::AnomalyKey) -> pb::AnomalyKey {
 
 /// Read the latest cluster snapshot; 503 (`Unavailable`) if none yet.
 #[tracing::instrument(level = "info", skip_all, err(Debug))]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn get_state(
     Extension(state): Extension<Arc<AppState>>,
     _req: ConnectRequest<pb::GetStateRequest>,
@@ -219,6 +221,8 @@ pub async fn get_state(
     fields(goals = req.0.goals.len()),
     err(Debug),
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn create_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::CreateProposalRequest>,
@@ -253,6 +257,8 @@ pub async fn create_proposal(
 }
 
 /// Look up a stored proposal and return summary + estimated cost.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn dry_run_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::DryRunProposalRequest>,
@@ -271,6 +277,8 @@ pub async fn dry_run_proposal(
 }
 
 /// Fetch a proposal by id; 404 (`NotFound`) if missing.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn get_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::GetProposalRequest>,
@@ -284,6 +292,8 @@ pub async fn get_proposal(
 }
 
 /// Return the most recent `limit` proposals (or capacity if `limit == 0`).
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn list_proposals(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::ListProposalsRequest>,
@@ -305,6 +315,8 @@ pub async fn list_proposals(
     fields(proposal_id = %req.0.id),
     err(Debug),
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn execute_proposal(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::ExecuteProposalRequest>,
@@ -422,6 +434,8 @@ pub async fn execute_proposal(
     fields(proposal_id = %req.0.id),
     err(Debug),
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn cancel_execution(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::CancelExecutionRequest>,
@@ -487,6 +501,8 @@ fn cancel_poll_expired(now: std::time::Instant, deadline: std::time::Instant) ->
 /// when unset — the wire's default boolean false would be surprising;
 /// most callers want the full history surface.
 #[tracing::instrument(level = "info", skip_all, err(Debug))]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn get_anomalies(
     Extension(state): Extension<Arc<AppState>>,
     req: ConnectRequest<pb::GetAnomaliesRequest>,

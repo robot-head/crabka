@@ -9,7 +9,6 @@
 //! blocks, and common-struct files are reused verbatim from `super::borrowed`
 //! (whose wire bytes are already test-covered). The `borrowed_quote_parity`
 //! test asserts token-stream equality with the string emitter for every schema.
-#![allow(clippy::doc_markdown, clippy::too_many_lines)]
 
 use std::str::FromStr;
 
@@ -23,9 +22,9 @@ use crate::{
             self, base_type, borrowed_default_expr, borrowed_populated_value, decode_borrow_call,
             decode_owned_call, encode_call, encode_call_option_as_non_nullable, encoded_len_expr,
             encoded_len_expr_option_as_non_nullable, field_forces_non_flex, flex_min, has_any_flex,
-            has_float64_recursive, is_nullable, is_tagged, needs_lifetime, nullable_split_cond,
-            owned_struct_path_for, spec_needs_lifetime, struct_path_for, tagged_field_needs_owned,
-            tagged_is_default_cond, to_owned_field_expr, version_cond,
+            has_float64_recursive, is_nullable, is_struct_type, is_tagged, needs_lifetime,
+            nullable_split_cond, owned_struct_path_for, spec_needs_lifetime, struct_path_for,
+            tagged_field_needs_owned, tagged_is_default_cond, to_owned_field_expr, version_cond,
         },
         common,
         common::banner,
@@ -41,6 +40,36 @@ type ResMap = std::collections::HashMap<String, Resolution>;
 
 fn parse_expr(s: &str) -> TokenStream {
     TokenStream::from_str(s).expect("leaf generator produced an unlexable fragment")
+}
+
+fn tagged_should_encode(f: &FieldSpec) -> TokenStream {
+    if base_type(&f.field_type) == "bool" {
+        let field = format_ident!("{}", name_conv::field_name(&f.name));
+        return match &f.default {
+            Some(serde_json::Value::Bool(true)) => {
+                quote!(!self.#field)
+            }
+            Some(serde_json::Value::String(value)) if value == "true" => {
+                quote!(!self.#field)
+            }
+            Some(serde_json::Value::Bool(false)) => {
+                quote!(self.#field)
+            }
+            Some(serde_json::Value::String(value)) if value == "false" => quote!(self.#field),
+            _ => tagged_should_encode_from_default(f),
+        };
+    }
+    tagged_should_encode_from_default(f)
+}
+
+fn tagged_should_encode_from_default(f: &FieldSpec) -> TokenStream {
+    let default = tagged_is_default_cond(f);
+    if let Some(positive) = default.strip_prefix('!') {
+        parse_expr(positive)
+    } else {
+        let default = parse_expr(&default);
+        quote!(!(#default))
+    }
 }
 
 /// Shared context threaded through every struct block in one message file.
@@ -61,6 +90,8 @@ impl FlexSource {
     fn tokens(&self) -> TokenStream {
         match self {
             FlexSource::TopLevel => quote!(is_flexible(version)),
+            FlexSource::Nested(i16::MIN) => quote!(true),
+            FlexSource::Nested(i16::MAX) => quote!(version == i16::MAX),
             FlexSource::Nested(fm) => {
                 let n = Literal::i16_unsuffixed(*fm);
                 quote!(version >= #n)
@@ -69,6 +100,8 @@ impl FlexSource {
     }
 }
 
+/// # Errors
+/// Returns an error when the schema model is invalid or generated Rust cannot be formatted or written.
 pub fn emit(
     spec: &MessageSpec,
     schemas_version: &str,
@@ -94,8 +127,7 @@ pub fn emit(
         spec_needs_lifetime(spec, &res_map),
         &FlexSource::TopLevel,
         Some(version_err(spec)),
-        true,
-        has_any_flex(spec),
+        (true, has_any_flex(spec)),
     );
     structural.extend(nested_structs(&ctx, &spec.fields, flex_min(spec)));
 
@@ -180,8 +212,7 @@ fn emit_commons(
             has_lt,
             &FlexSource::Nested(fm),
             None,
-            false,
-            fm < i16::MAX,
+            (false, fm < i16::MAX),
         );
         struct_tokens.extend(nested_structs(&ctx, &cs.fields, fm));
 
@@ -212,7 +243,6 @@ fn version_err(spec: &MessageSpec) -> TokenStream {
 /// Struct + `Default` + `to_owned` + `Encode` + `DecodeBorrow` + `populated`.
 /// `top_level` toggles the tagged-field-owned typing that only the message type
 /// uses; nested structs always store tagged fields in their borrowed form.
-#[allow(clippy::too_many_arguments)]
 fn struct_block(
     ctx: &Ctx,
     name: &str,
@@ -220,9 +250,9 @@ fn struct_block(
     has_lt: bool,
     flex: &FlexSource,
     guard: Option<TokenStream>,
-    top_level: bool,
-    has_flex: bool,
+    options: (bool, bool),
 ) -> TokenStream {
+    let (top_level, has_flex) = options;
     let ty = format_ident!("{name}");
     // `<'a>` on the value type / impls, `<'de>` on the Self type in DecodeBorrow.
     let gen_a = if has_lt { quote!(<'a>) } else { quote!() };
@@ -241,27 +271,8 @@ fn struct_block(
         quote!(, Eq)
     };
 
-    let field_defs = ordered(fields).map(|f| {
-        let fname = format_ident!("{}", name_conv::field_name(&f.name));
-        let ty = parse_expr(&field_type(ctx, f, top_level));
-        quote!(pub #fname: #ty,)
-    });
-
-    let default_assigns = ordered(fields).map(|f| {
-        let fname = format_ident!("{}", name_conv::field_name(&f.name));
-        let expr = parse_expr(&borrowed_default_expr(f, ctx.res_map));
-        quote!(#fname: #expr,)
-    });
-
-    let owned_target = parse_expr(&format!(
-        "{}::{}::{name}",
-        ctx.owned_root, ctx.parent_module
-    ));
-    let to_owned_assigns = ordered(fields).map(|f| {
-        let fname = format_ident!("{}", name_conv::field_name(&f.name));
-        let expr = parse_expr(&to_owned_expr(ctx, f, top_level));
-        quote!(#fname: #expr,)
-    });
+    let (field_defs, default_assigns, owned_target, to_owned_assigns) =
+        struct_members(ctx, name, fields, top_level);
 
     let guard =
         guard.map(|err| quote!(if !(MIN_VERSION..=MAX_VERSION).contains(&version) { #err }));
@@ -269,20 +280,39 @@ fn struct_block(
     let encode_body = encode_body(ctx, fields, has_flex);
     let len_body = len_body(ctx, fields, has_flex);
     let decode_body = decode_body(ctx, fields, has_flex);
-    let populated = populated_impl(ctx, &impl_a, &ty_a, fields);
+    let (codec_helpers, encode_body, decode_body) = if fields.len() >= 8 {
+        let (encode_helpers, encode_calls) = split_encode_body(ctx, fields, has_flex);
+        let (decode_helpers, decode_calls) = split_decode_body(ctx, fields, has_flex, has_lt);
+        (
+            quote!(#encode_helpers #decode_helpers),
+            encode_calls,
+            decode_calls,
+        )
+    } else {
+        (quote!(), encode_body, decode_body)
+    };
+    let encode_flex = flex_binding(&encode_body, &flex_src);
+    let len_flex = flex_binding(&len_body, &flex_src);
+    let decode_flex = flex_binding(&decode_body, &flex_src);
+    let populated_target = if has_lt {
+        quote!(impl #ty<'_>)
+    } else {
+        quote!(impl #ty)
+    };
+    let populated = populated_impl(ctx, &populated_target, fields);
 
     quote! {
         #[derive(Debug, Clone, PartialEq #eq)]
         pub struct #ty_a {
-            #(#field_defs)*
+            #field_defs
             pub unknown_tagged_fields: UnknownTaggedFields,
         }
 
         #impl_a Default for #ty_a {
             fn default() -> Self {
                 Self {
-                    #(#default_assigns)*
-                    unknown_tagged_fields: Default::default(),
+                    #default_assigns
+                    unknown_tagged_fields: UnknownTaggedFields::default(),
                 }
             }
         }
@@ -290,21 +320,23 @@ fn struct_block(
         #impl_a #ty_a {
             pub fn to_owned(&self) -> #owned_target {
                 #owned_target {
-                    #(#to_owned_assigns)*
+                    #to_owned_assigns
                     unknown_tagged_fields: self.unknown_tagged_fields.clone(),
                 }
             }
+
+            #codec_helpers
         }
 
         #impl_a Encode for #ty_a {
             fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
                 #guard
-                let flex = #flex_src;
+                #encode_flex
                 #encode_body
                 Ok(())
             }
             fn encoded_len(&self, version: i16) -> usize {
-                let flex = #flex_src;
+                #len_flex
                 let mut n: usize = 0;
                 #len_body
                 n
@@ -314,7 +346,7 @@ fn struct_block(
         impl<'de> DecodeBorrow<'de> for #ty_de {
             fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
                 #guard
-                let flex = #flex_src;
+                #decode_flex
                 let mut out = Self::default();
                 #decode_body
                 Ok(out)
@@ -323,6 +355,53 @@ fn struct_block(
 
         #populated
     }
+}
+
+fn struct_members(
+    ctx: &Ctx,
+    name: &str,
+    fields: &[FieldSpec],
+    top_level: bool,
+) -> (TokenStream, TokenStream, TokenStream, TokenStream) {
+    let field_defs = ordered(fields).map(|field| {
+        let name = format_ident!("{}", name_conv::field_name(&field.name));
+        let ty = parse_expr(&field_type(ctx, field, top_level));
+        quote!(pub #name: #ty,)
+    });
+    let default_assigns = ordered(fields).map(|field| {
+        let name = format_ident!("{}", name_conv::field_name(&field.name));
+        let expr = if is_struct_type(base_type(&field.field_type))
+            && !field.field_type.starts_with("[]")
+            && field.default.is_none()
+        {
+            let ty = parse_expr(&field_type(ctx, field, top_level));
+            quote!(<#ty>::default())
+        } else {
+            parse_expr(&borrowed_default_expr(field, ctx.res_map))
+        };
+        quote!(#name: #expr,)
+    });
+    let owned_target = parse_expr(&format!(
+        "{}::{}::{name}",
+        ctx.owned_root, ctx.parent_module
+    ));
+    let to_owned_assigns = ordered(fields).map(|field| {
+        let name = format_ident!("{}", name_conv::field_name(&field.name));
+        let expr = parse_expr(&to_owned_expr(ctx, field, top_level));
+        quote!(#name: #expr,)
+    });
+    (
+        quote!(#(#field_defs)*),
+        quote!(#(#default_assigns)*),
+        owned_target,
+        quote!(#(#to_owned_assigns)*),
+    )
+}
+
+fn flex_binding(body: &TokenStream, flex_source: &TokenStream) -> Option<TokenStream> {
+    body.to_string()
+        .contains("flex")
+        .then(|| quote!(let flex = #flex_source;))
 }
 
 fn ordered(fields: &[FieldSpec]) -> impl Iterator<Item = &FieldSpec> {
@@ -366,18 +445,15 @@ fn to_owned_expr(ctx: &Ctx, f: &FieldSpec, top_level: bool) -> String {
         if top_level && tagged_field_needs_owned(f, ctx.res_map) {
             return format!("self.{field}.clone()");
         }
-        return to_owned_field_expr(&f.field_type, &expr, nullable, ctx.res_map);
+        return to_owned_field_expr(&f.field_type, &expr, nullable);
     }
-    to_owned_field_expr(&f.field_type, &expr, is_nullable(f), ctx.res_map)
+    to_owned_field_expr(&f.field_type, &expr, is_nullable(f))
 }
 
 // --- encode / encoded_len (identical shape to owned, borrowed leaf codecs) ---
 
 fn encode_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
-    let stmts = fields
-        .iter()
-        .filter(|f| !is_tagged(f))
-        .map(|f| encode_one(ctx, f));
+    let stmts = fields.iter().filter(|f| !is_tagged(f)).map(encode_one);
     let trailer = has_flex.then(|| {
         let mut_kw = if fields.iter().any(is_tagged) {
             quote!(mut)
@@ -399,6 +475,78 @@ fn encode_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
     quote!(#(#stmts)* #trailer)
 }
 
+fn split_encode_body(
+    ctx: &Ctx,
+    fields: &[FieldSpec],
+    has_flex: bool,
+) -> (TokenStream, TokenStream) {
+    let mut helpers = Vec::new();
+    let mut calls = Vec::new();
+    for (index, field) in fields.iter().filter(|field| !is_tagged(field)).enumerate() {
+        let helper = format_ident!("encode_field_{index}");
+        let body = encode_one(field);
+        let flex = if body.to_string().contains("flex") {
+            quote!(flex)
+        } else {
+            quote!(_flex)
+        };
+        if body.to_string().contains('?') {
+            helpers.push(quote! {
+                fn #helper<B: BufMut>(
+                    &self,
+                    buf: &mut B,
+                    version: i16,
+                    #flex: bool,
+                ) -> Result<(), ProtocolError> {
+                    #body
+                    Ok(())
+                }
+            });
+            calls.push(quote!(self.#helper(buf, version, flex)?;));
+        } else {
+            helpers.push(quote! {
+                fn #helper<B: BufMut>(&self, buf: &mut B, version: i16, #flex: bool) {
+                    #body
+                }
+            });
+            calls.push(quote!(self.#helper(buf, version, flex);));
+        }
+    }
+    if has_flex {
+        let helper = format_ident!("encode_tagged_fields");
+        let has_tagged = fields.iter().any(is_tagged);
+        let mut_kw = if has_tagged { quote!(mut) } else { quote!() };
+        let adds = fields
+            .iter()
+            .filter(|field| is_tagged(field))
+            .map(|field| encode_tagged(ctx, field));
+        let body = quote! {
+            if flex {
+                let #mut_kw tagged = WriteTaggedFields::new();
+                #(#adds)*
+                tagged.write(buf, &self.unknown_tagged_fields);
+            }
+        };
+        let version = if body.to_string().contains("version") {
+            quote!(version)
+        } else {
+            quote!(_version)
+        };
+        helpers.push(quote! {
+            fn #helper<B: BufMut>(
+                &self,
+                buf: &mut B,
+                #version: i16,
+                flex: bool,
+            ) {
+                #body
+            }
+        });
+        calls.push(quote!(self.#helper(buf, version, flex);));
+    }
+    (quote!(#(#helpers)*), quote!(#(#calls)*))
+}
+
 fn non_flex_wrap(f: &FieldSpec, body: TokenStream) -> TokenStream {
     if field_forces_non_flex(f) {
         quote!({ let flex = false; #body })
@@ -407,28 +555,19 @@ fn non_flex_wrap(f: &FieldSpec, body: TokenStream) -> TokenStream {
     }
 }
 
-fn encode_one(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
+fn encode_one(f: &FieldSpec) -> TokenStream {
     let field = name_conv::field_name(&f.name);
     let cond = parse_expr(&version_cond(f.versions, "version"));
     let expr = format!("self.{field}");
     let inner = if let Some(ncond) = nullable_split_cond(f) {
-        let nb = parse_expr(&encode_call(&f.field_type, &expr, true, ctx.res_map));
-        let nnb = parse_expr(&encode_call_option_as_non_nullable(
-            &f.field_type,
-            &expr,
-            ctx.res_map,
-        ));
+        let nb = parse_expr(&encode_call(&f.field_type, &expr, true));
+        let nnb = parse_expr(&encode_call_option_as_non_nullable(&f.field_type, &expr));
         let nc = parse_expr(&ncond);
         non_flex_wrap(f, quote!(if #nc { #nb } else { #nnb }))
     } else {
         non_flex_wrap(
             f,
-            parse_expr(&encode_call(
-                &f.field_type,
-                &expr,
-                is_nullable(f),
-                ctx.res_map,
-            )),
+            parse_expr(&encode_call(&f.field_type, &expr, is_nullable(f))),
         )
     };
     quote!(if #cond { #inner })
@@ -447,15 +586,15 @@ fn encode_tagged(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
     let nullable = is_nullable(f) || default_is_null(f);
     let expr = format!("self.{field}");
     let body_str = if tagged_owned_codec(ctx, f) {
-        borrowed::owned_encode_call(&f.field_type, &expr, nullable, ctx.res_map)
+        borrowed::owned_encode_call(&f.field_type, &expr, nullable)
     } else {
-        encode_call(&f.field_type, &expr, nullable, ctx.res_map)
+        encode_call(&f.field_type, &expr, nullable)
     };
     let body = parse_expr(&body_str.replace("buf", "b"));
     let len = parse_expr(&tagged_len_str(ctx, f, &expr, nullable));
-    let is_default = parse_expr(&tagged_is_default_cond(f));
+    let should_encode = tagged_should_encode(f);
     quote! {
-        if !(#is_default) {
+        if #should_encode {
             let payload = encode_to_bytes(#len, |b| { #body; Ok(()) });
             tagged.add(#tag, payload);
         }
@@ -464,17 +603,14 @@ fn encode_tagged(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
 
 fn tagged_len_str(ctx: &Ctx, f: &FieldSpec, expr: &str, nullable: bool) -> String {
     if tagged_owned_codec(ctx, f) {
-        borrowed::owned_encoded_len_expr(&f.field_type, expr, nullable, ctx.res_map)
+        borrowed::owned_encoded_len_expr(&f.field_type, expr, nullable)
     } else {
-        encoded_len_expr(&f.field_type, expr, nullable, ctx.res_map)
+        encoded_len_expr(&f.field_type, expr, nullable)
     }
 }
 
 fn len_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
-    let stmts = fields
-        .iter()
-        .filter(|f| !is_tagged(f))
-        .map(|f| len_one(ctx, f));
+    let stmts = fields.iter().filter(|f| !is_tagged(f)).map(len_one);
     let trailer = has_flex.then(|| {
         let mut_kw = if fields.iter().any(is_tagged) {
             quote!(mut)
@@ -496,28 +632,22 @@ fn len_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
     quote!(#(#stmts)* #trailer)
 }
 
-fn len_one(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
+fn len_one(f: &FieldSpec) -> TokenStream {
     let field = name_conv::field_name(&f.name);
     let cond = parse_expr(&version_cond(f.versions, "version"));
     let expr = format!("self.{field}");
     let inner = if let Some(ncond) = nullable_split_cond(f) {
-        let nb = parse_expr(&encoded_len_expr(&f.field_type, &expr, true, ctx.res_map));
+        let nb = parse_expr(&encoded_len_expr(&f.field_type, &expr, true));
         let nnb = parse_expr(&encoded_len_expr_option_as_non_nullable(
             &f.field_type,
             &expr,
-            ctx.res_map,
         ));
         let nc = parse_expr(&ncond);
         non_flex_wrap(f, quote!(if #nc { #nb } else { #nnb }))
     } else {
         non_flex_wrap(
             f,
-            parse_expr(&encoded_len_expr(
-                &f.field_type,
-                &expr,
-                is_nullable(f),
-                ctx.res_map,
-            )),
+            parse_expr(&encoded_len_expr(&f.field_type, &expr, is_nullable(f))),
         )
     };
     quote!(if #cond { n += #inner; })
@@ -528,9 +658,9 @@ fn len_tagged(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
     let tag = Literal::u32_unsuffixed(f.tag.expect("tagged field has tag"));
     let nullable = is_nullable(f) || default_is_null(f);
     let len = parse_expr(&tagged_len_str(ctx, f, &format!("self.{field}"), nullable));
-    let is_default = parse_expr(&tagged_is_default_cond(f));
+    let should_encode = tagged_should_encode(f);
     quote! {
-        if !(#is_default) {
+        if #should_encode {
             known_pairs.push((#tag, #len));
         }
     }
@@ -545,6 +675,56 @@ fn decode_body(ctx: &Ctx, fields: &[FieldSpec], has_flex: bool) -> TokenStream {
         .map(|f| decode_one(ctx, f));
     let trailer = has_flex.then(|| decode_tagged_block(ctx, fields));
     quote!(#(#stmts)* #trailer)
+}
+
+fn split_decode_body(
+    ctx: &Ctx,
+    fields: &[FieldSpec],
+    has_flex: bool,
+    has_lt: bool,
+) -> (TokenStream, TokenStream) {
+    let mut helpers = Vec::new();
+    let mut calls = Vec::new();
+    let helper_lifetime = if has_lt { quote!('a) } else { quote!('de) };
+    let helper_generics = if has_lt { quote!() } else { quote!(<'de>) };
+    for (index, field) in fields.iter().filter(|field| !is_tagged(field)).enumerate() {
+        let helper = format_ident!("decode_field_{index}");
+        let body = decode_one(ctx, field);
+        let flex = if body.to_string().contains("flex") {
+            quote!(flex)
+        } else {
+            quote!(_flex)
+        };
+        helpers.push(quote! {
+            fn #helper #helper_generics(
+                out: &mut Self,
+                buf: &mut &#helper_lifetime [u8],
+                version: i16,
+                #flex: bool,
+            ) -> Result<(), ProtocolError> {
+                #body
+                Ok(())
+            }
+        });
+        calls.push(quote!(Self::#helper(&mut out, buf, version, flex)?;));
+    }
+    if has_flex {
+        let helper = format_ident!("decode_tagged_fields");
+        let body = decode_tagged_block(ctx, fields);
+        helpers.push(quote! {
+            fn #helper #helper_generics(
+                out: &mut Self,
+                buf: &mut &#helper_lifetime [u8],
+                version: i16,
+                flex: bool,
+            ) -> Result<(), ProtocolError> {
+                #body
+                Ok(())
+            }
+        });
+        calls.push(quote!(Self::#helper(&mut out, buf, version, flex)?;));
+    }
+    (quote!(#(#helpers)*), quote!(#(#calls)*))
 }
 
 fn decode_one(ctx: &Ctx, f: &FieldSpec) -> TokenStream {
@@ -614,13 +794,8 @@ fn decode_tagged_block(ctx: &Ctx, fields: &[FieldSpec]) -> TokenStream {
 
 // --- populated + nested -----------------------------------------------------
 
-fn populated_impl(
-    ctx: &Ctx,
-    impl_a: &TokenStream,
-    ty_a: &TokenStream,
-    fields: &[FieldSpec],
-) -> TokenStream {
-    let assigns = ordered(fields)
+fn populated_impl(ctx: &Ctx, impl_target: &TokenStream, fields: &[FieldSpec]) -> TokenStream {
+    let assigns: Vec<_> = ordered(fields)
         .filter(|f| base_type(&f.field_type) != "records")
         .map(|f| {
             let field = format_ident!("{}", name_conv::field_name(&f.name));
@@ -633,13 +808,34 @@ fn populated_impl(
             ));
             let cond = parse_expr(&version_cond(f.versions, "version"));
             quote!(if #cond { m.#field = #value; })
-        });
+        })
+        .collect();
+    if assigns.is_empty() {
+        return quote! {
+            #[cfg(test)]
+            #impl_target {
+                #[must_use]
+                pub fn populated(_version: i16) -> Self {
+                    Self::default()
+                }
+            }
+        };
+    }
+    let mut_kw = quote!(mut);
+    let version = if assigns
+        .iter()
+        .any(|assign| assign.to_string().contains("version"))
+    {
+        quote!(version)
+    } else {
+        quote!(_version)
+    };
     quote! {
         #[cfg(test)]
-        #impl_a #ty_a {
+        #impl_target {
             #[must_use]
-            pub fn populated(version: i16) -> Self {
-                let mut m = Self::default();
+            pub fn populated(#version: i16) -> Self {
+                let #mut_kw m = Self::default();
                 #(#assigns)*
                 m
             }
@@ -658,8 +854,7 @@ fn nested_structs(ctx: &Ctx, fields: &[FieldSpec], flex_min_val: i16) -> TokenSt
             needs_lifetime(&f.fields, ctx.res_map),
             &FlexSource::Nested(flex_min_val),
             None,
-            false,
-            flex_min_val < i16::MAX,
+            (false, flex_min_val < i16::MAX),
         ));
         out.extend(nested_structs(ctx, &f.fields, flex_min_val));
     }

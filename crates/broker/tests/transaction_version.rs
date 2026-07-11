@@ -1,21 +1,20 @@
-#![allow(clippy::pedantic)]
 //! KIP-890 per-level `transaction.version` integration tests.
 //!
-//! An in-process test broker self-bootstraps `transaction.version=2` (TV_2),
-//! so the existing `transactions.rs` suite already covers the TV_2 happy path.
-//! These tests prove the *other* two levels end-to-end, the TV_2
+//! An in-process test broker self-bootstraps `transaction.version=2` (`TV_2`),
+//! so the existing `transactions.rs` suite already covers the `TV_2` happy path.
+//! These tests prove the *other* two levels end-to-end, the `TV_2`
 //! verify-only `AddPartitionsToTxn` path, and that persisted txn state
 //! survives a broker restart (the startup DECODE/recover-from-disk path):
 //!
-//! 1. **TV_1** — downgrade `transaction.version` to 1 (flexible, v1
+//! 1. **`TV_1`** — downgrade `transaction.version` to 1 (flexible, v1
 //!    `TransactionLogValue` records, no epoch bump), then run a full
 //!    transactional produce → commit → `read_committed` consume. Success
 //!    proves the coordinator persists `__transaction_state` via the v1
 //!    *encode* path at the resolved level and the transaction commits/reads
 //!    end-to-end.
-//! 2. **TV_0** — downgrade to 0 (tombstone → Classic, non-flexible v0
+//! 2. **`TV_0`** — downgrade to 0 (tombstone → Classic, non-flexible v0
 //!    records), then the same full cycle. Proves the v0 encode path + cycle.
-//! 3. **verify-only `AddPartitionsToTxn`** at TV_2 — confirm per-partition
+//! 3. **verify-only `AddPartitionsToTxn`** at `TV_2` — confirm per-partition
 //!    `NONE (0)` for an already-added partition and
 //!    `TRANSACTION_ABORTABLE (120)` for one that was never added.
 //! 4. **restart recovery** (v0 + v1) — persist an `Ongoing` entry, restart the
@@ -30,6 +29,7 @@
 
 use std::time::Duration;
 
+use assert2::assert;
 use bytes::Bytes;
 use crabka_broker::{BootstrapMode, Broker, BrokerConfig, BrokerHandle};
 use crabka_client_consumer::{AutoOffsetReset, Consumer, IsolationLevel};
@@ -49,6 +49,7 @@ use tempfile::TempDir;
 // Kafka error codes asserted below.
 const NONE: i16 = 0;
 const TRANSACTION_ABORTABLE: i16 = 120;
+const VERIFY_TID: &str = "verify-tid";
 
 // ── shared helpers (mirrors transactions.rs) ───────────────────────────────────
 
@@ -70,6 +71,52 @@ async fn admin_client(bootstrap: &str) -> Client {
         .unwrap()
 }
 
+async fn await_transaction_coordinator(client: &Client) -> (i64, i16) {
+    let coordinator = client
+        .send(FindCoordinatorRequest {
+            key: VERIFY_TID.into(),
+            key_type: 1,
+            coordinator_keys: vec![VERIFY_TID.into()],
+            ..Default::default()
+        })
+        .await
+        .expect("FindCoordinator");
+    assert!(
+        coordinator.error_code == 0
+            || coordinator
+                .coordinators
+                .iter()
+                .all(|row| row.error_code == 0),
+        "FindCoordinator: {coordinator:?}"
+    );
+
+    let deadline = std::time::Instant::now() + Duration::from_secs(10);
+    loop {
+        let response = client
+            .send(InitProducerIdRequest {
+                transactional_id: Some(VERIFY_TID.into()),
+                transaction_timeout_ms: 60_000,
+                producer_id: -1,
+                producer_epoch: -1,
+                ..Default::default()
+            })
+            .await
+            .expect("InitProducerId");
+        if response.error_code == 0 {
+            return (response.producer_id, response.producer_epoch);
+        }
+        assert!(
+            response.error_code == 15 || response.error_code == 16,
+            "InitProducerId: {response:?}"
+        );
+        assert!(
+            std::time::Instant::now() < deadline,
+            "transaction coordinator did not become ready"
+        );
+        tokio::time::sleep(Duration::from_millis(100)).await;
+    }
+}
+
 async fn create_topic(client: &Client, name: &str, partitions: i32) {
     let cr = client
         .send(CreateTopicsRequest {
@@ -84,11 +131,15 @@ async fn create_topic(client: &Client, name: &str, partitions: i32) {
         })
         .await
         .unwrap();
-    assert2::assert!(cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36);
+    assert!(
+        cr.topics[0].error_code == 0 || cr.topics[0].error_code == 36,
+        "create_topic {name}: error_code={}",
+        cr.topics[0].error_code
+    );
 }
 
 /// Downgrade the finalized `transaction.version` to `level` via a
-/// SAFE_DOWNGRADE (`upgrade_type = 2`) `UpdateFeatures` request. Level 1
+/// `SAFE_DOWNGRADE` (`upgrade_type = 2`) `UpdateFeatures` request. Level 1
 /// finalizes the Flexible level; level 0 tombstones the feature (→ absent →
 /// Classic). `resolve_txn_version` reads the live image per request, so a new
 /// transaction started after this returns picks up the downgraded level.
@@ -106,13 +157,16 @@ async fn downgrade_transaction_version(client: &Client, level: i16) {
         })
         .await
         .expect("UpdateFeatures");
-    assert2::assert!(resp.error_code == 0);
+    assert!(resp.error_code == 0, "UpdateFeatures top-level: {resp:?}");
     if let Some(row) = resp
         .results
         .iter()
         .find(|r| r.feature == "transaction.version")
     {
-        assert2::assert!(row.error_code == 0);
+        assert!(
+            row.error_code == 0,
+            "transaction.version downgrade to {level} rejected: {resp:?}"
+        );
     }
 }
 
@@ -129,7 +183,7 @@ fn rec(topic: &str, v: &str) -> ProducerRecord {
 /// fresh `read_committed` consumer must observe exactly `["a","b","c"]`.
 ///
 /// The commit forces the coordinator to write `TransactionLogValue` records to
-/// `__transaction_state` at the resolved level (v0 for TV_0, v1 for TV_1/TV_2)
+/// `__transaction_state` at the resolved level (v0 for `TV_0`, v1 for `TV_1/TV_2`)
 /// across its state transitions, so a successful produce→commit→read cycle
 /// proves the level's *encode* path runs and the transaction commits/reads
 /// end-to-end. (In-memory state drives the transitions within one broker
@@ -165,7 +219,10 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
             seen.push(String::from_utf8_lossy(r.value.as_deref().unwrap_or(b"")).into_owned());
         }
     }
-    assert2::assert!(seen == vec!["a", "b", "c"]);
+    assert!(
+        seen == vec!["a", "b", "c"],
+        "tid={tid} level cycle: {seen:?}"
+    );
 
     producer.close().await.unwrap();
     consumer.close().await.unwrap();
@@ -176,8 +233,8 @@ async fn full_cycle_commit_and_read(bootstrap: &str, topic: &str, tid: &str, gro
 /// Downgrade `transaction.version` to 1, then run a full transactional
 /// produce → commit → `read_committed` consume. The commit writes v1
 /// (flexible, `header 00 01`) `TransactionLogValue` records across the
-/// Ongoing → PrepareCommit → CompleteCommit transitions; seeing the committed
-/// records proves the v1 *encode* path runs at TV_1 and the cycle works
+/// Ongoing → `PrepareCommit` → `CompleteCommit` transitions; seeing the committed
+/// records proves the v1 *encode* path runs at `TV_1` and the cycle works
 /// end-to-end (decode/recover byte-exactness is unit-tested in `txn::log_record`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tv1_flexible_full_cycle_commits_and_reads() {
@@ -197,7 +254,7 @@ async fn tv1_flexible_full_cycle_commits_and_reads() {
 /// Downgrade `transaction.version` to 0 (tombstone → Classic), then run a full
 /// transactional cycle. The commit writes v0 (non-flexible, `header 00 00`)
 /// `TransactionLogValue` records; reading the committed records back proves the
-/// v0 *encode* path runs at TV_0 and the cycle works end-to-end (decode/recover
+/// v0 *encode* path runs at `TV_0` and the cycle works end-to-end (decode/recover
 /// byte-exactness is unit-tested in `txn::log_record`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tv0_classic_full_cycle_commits_and_reads() {
@@ -214,13 +271,13 @@ async fn tv0_classic_full_cycle_commits_and_reads() {
 
 // ── test 3: verify-only AddPartitionsToTxn at TV_2 ─────────────────────────────
 
-/// At the default TV_2, verify-only `AddPartitionsToTxn` (KIP-890) returns
+/// At the default `TV_2`, verify-only `AddPartitionsToTxn` (KIP-890) returns
 /// per-partition `NONE (0)` for a partition already in the ongoing txn and
 /// `TRANSACTION_ABORTABLE (120)` for one that was never added.
 ///
-/// Flow: `InitProducerId` → `AddPartitionsToTxn` (verify_only=false) adding
-/// `(t,0)` → `AddPartitionsToTxn` (verify_only=true) querying both `(t,0)`
-/// (added → NONE) and `(t,1)` (never added → TRANSACTION_ABORTABLE).
+/// Flow: `InitProducerId` → `AddPartitionsToTxn` (`verify_only=false`) adding
+/// `(t,0)` → `AddPartitionsToTxn` (`verify_only=true`) querying both `(t,0)`
+/// (added → NONE) and `(t,1)` (never added → `TRANSACTION_ABORTABLE`).
 ///
 /// Sent over a single connection to the in-process broker, which is its own
 /// transaction coordinator. `Client::send` negotiates the highest mutually
@@ -234,50 +291,12 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
     // Two partitions so (t,1) is a real partition that simply isn't in the txn.
     create_topic(&client, "t", 2).await;
 
-    const TID: &str = "verify-tid";
-
     // Locate (and trigger loading of) the transaction coordinator for TID.
     // On a single-broker cluster the coordinator is this same node, but the
     // `__transaction_state` partition's coordinator load can lag broker boot,
     // so `InitProducerId` may transiently return NOT_COORDINATOR (16) until it
     // settles — retry until the coordinator is ready.
-    let fc = client
-        .send(FindCoordinatorRequest {
-            key: TID.into(),
-            key_type: 1, // TRANSACTION
-            coordinator_keys: vec![TID.into()],
-            ..Default::default()
-        })
-        .await
-        .expect("FindCoordinator");
-    assert2::assert!(fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0));
-
-    let mut init = None;
-    let deadline = std::time::Instant::now() + Duration::from_secs(10);
-    while std::time::Instant::now() < deadline {
-        let resp = client
-            .send(InitProducerIdRequest {
-                transactional_id: Some(TID.into()),
-                transaction_timeout_ms: 60_000,
-                producer_id: -1,
-                producer_epoch: -1,
-                ..Default::default()
-            })
-            .await
-            .expect("InitProducerId");
-        if resp.error_code == 0 {
-            init = Some(resp);
-            break;
-        }
-        // 15 COORDINATOR_NOT_AVAILABLE / 16 NOT_COORDINATOR: coordinator still
-        // loading — back off and retry.
-        assert2::assert!(resp.error_code == 15 || resp.error_code == 16);
-        // intentional: txn-coordinator load state is not in the metadata image and
-        // has no metric/awaiter; only InitProducerId's 15/16 code signals it.
-        tokio::time::sleep(Duration::from_millis(100)).await;
-    }
-    let init = init.expect("InitProducerId did not become ready within 10s");
-    let (pid, epoch) = (init.producer_id, init.producer_epoch);
+    let (pid, epoch) = await_transaction_coordinator(&client).await;
 
     // Normal add of (t, 0): transitions the entry to Ongoing and registers the
     // partition. verify_only=false.
@@ -289,14 +308,14 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
     let add = client
         .send(AddPartitionsToTxnRequest {
             transactions: vec![AddPartitionsToTxnTransaction {
-                transactional_id: TID.into(),
+                transactional_id: VERIFY_TID.into(),
                 producer_id: pid,
                 producer_epoch: epoch,
                 verify_only: false,
                 topics: vec![added_topic.clone()],
                 ..Default::default()
             }],
-            v3_and_below_transactional_id: TID.into(),
+            v3_and_below_transactional_id: VERIFY_TID.into(),
             v3_and_below_producer_id: pid,
             v3_and_below_producer_epoch: epoch,
             v3_and_below_topics: vec![added_topic],
@@ -304,9 +323,12 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("AddPartitionsToTxn add");
-    assert2::assert!(add.error_code == 0);
+    assert!(add.error_code == 0, "AddPartitionsToTxn add: {add:?}");
     let add_part = &add.results_by_transaction[0].topic_results[0].results_by_partition[0];
-    assert2::assert!(add_part.partition_error_code == NONE);
+    assert!(
+        add_part.partition_error_code == NONE,
+        "adding (t,0) should succeed: {add:?}"
+    );
 
     // Verify-only query for BOTH (t,0) (added → NONE) and (t,1) (not added →
     // TRANSACTION_ABORTABLE). verify_only=true must never mutate state.
@@ -318,14 +340,14 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
     let verify = client
         .send(AddPartitionsToTxnRequest {
             transactions: vec![AddPartitionsToTxnTransaction {
-                transactional_id: TID.into(),
+                transactional_id: VERIFY_TID.into(),
                 producer_id: pid,
                 producer_epoch: epoch,
                 verify_only: true,
                 topics: vec![verify_topic.clone()],
                 ..Default::default()
             }],
-            v3_and_below_transactional_id: TID.into(),
+            v3_and_below_transactional_id: VERIFY_TID.into(),
             v3_and_below_producer_id: pid,
             v3_and_below_producer_epoch: epoch,
             v3_and_below_topics: vec![verify_topic],
@@ -333,10 +355,10 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
         })
         .await
         .expect("AddPartitionsToTxn verify-only");
-    assert2::assert!(verify.error_code == 0);
+    assert!(verify.error_code == 0, "verify-only top-level: {verify:?}");
 
     let topic_result = &verify.results_by_transaction[0].topic_results[0];
-    assert2::assert!(topic_result.name == "t");
+    assert!(topic_result.name == "t", "verify topic name: {verify:?}");
 
     let code_for = |partition: i32| -> i16 {
         topic_result
@@ -349,8 +371,14 @@ async fn tv2_verify_only_add_partitions_reports_per_partition_codes() {
 
     let p0 = code_for(0);
     let p1 = code_for(1);
-    assert2::assert!(p0 == NONE);
-    assert2::assert!(p1 == TRANSACTION_ABORTABLE);
+    assert!(
+        p0 == NONE,
+        "verify-only (t,0) already in txn must be NONE(0), got {p0}: {verify:?}"
+    );
+    assert!(
+        p1 == TRANSACTION_ABORTABLE,
+        "verify-only (t,1) not in txn must be TRANSACTION_ABORTABLE(120), got {p1}: {verify:?}"
+    );
 
     broker.shutdown().await;
 }
@@ -382,7 +410,10 @@ async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
         })
         .await
         .expect("FindCoordinator");
-    assert2::assert!(fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0));
+    assert!(
+        fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0),
+        "FindCoordinator: {fc:?}"
+    );
 
     let mut init = None;
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -401,7 +432,10 @@ async fn init_producer_id(client: &Client, tid: &str) -> (i64, i16) {
             init = Some(resp);
             break;
         }
-        assert2::assert!(resp.error_code == 15 || resp.error_code == 16);
+        assert!(
+            resp.error_code == 15 || resp.error_code == 16,
+            "InitProducerId failed: {resp:?}"
+        );
         // intentional: txn-coordinator load state is not in the metadata image and
         // has no metric/awaiter; only InitProducerId's 15/16 code signals it.
         tokio::time::sleep(Duration::from_millis(100)).await;
@@ -445,9 +479,12 @@ async fn add_partition_ongoing(
         })
         .await
         .expect("AddPartitionsToTxn add");
-    assert2::assert!(add.error_code == 0);
+    assert!(add.error_code == 0, "AddPartitionsToTxn add: {add:?}");
     let add_part = &add.results_by_transaction[0].topic_results[0].results_by_partition[0];
-    assert2::assert!(add_part.partition_error_code == NONE);
+    assert!(
+        add_part.partition_error_code == NONE,
+        "adding ({topic},{partition}) should succeed: {add:?}"
+    );
 }
 
 /// Wait for the transaction coordinator for `tid` to finish loading after a
@@ -467,7 +504,10 @@ async fn commit_via_end_txn(client: &Client, tid: &str, pid: i64, epoch: i16) ->
         })
         .await
         .expect("FindCoordinator");
-    assert2::assert!(fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0));
+    assert!(
+        fc.error_code == 0 || fc.coordinators.iter().all(|c| c.error_code == 0),
+        "FindCoordinator: {fc:?}"
+    );
 
     // Retry while the coordinator is still loading state from disk.
     let deadline = std::time::Instant::now() + Duration::from_secs(10);
@@ -536,7 +576,11 @@ async fn v1_ongoing_txn_survives_restart_via_decode_recover() {
         let client = admin_client(&bootstrap).await;
 
         let code = commit_via_end_txn(&client, TID, pid, epoch).await;
-        assert2::assert!(code == NONE);
+        assert!(
+            code == NONE,
+            "EndTxn(commit) after restart must succeed (proves recover() decoded \
+             the Ongoing v1 entry with matching pid={pid}/epoch={epoch}); got error_code={code}"
+        );
 
         broker.shutdown().await;
     }
@@ -547,7 +591,7 @@ async fn v1_ongoing_txn_survives_restart_via_decode_recover() {
 /// Identical to the v1 test, except `transaction.version` is downgraded to 0
 /// BEFORE the transaction starts, so the persisted `TransactionLogValue` is the
 /// non-flexible v0 (`header 00 00`) format. The post-restart `EndTxn(commit)`
-/// succeeding proves the v0 record was decoded from disk by recover().
+/// succeeding proves the v0 record was decoded from disk by `recover()`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn v0_ongoing_txn_survives_restart_via_decode_recover() {
     const TID: &str = "recover-v0-tid";
@@ -578,7 +622,11 @@ async fn v0_ongoing_txn_survives_restart_via_decode_recover() {
         let client = admin_client(&bootstrap).await;
 
         let code = commit_via_end_txn(&client, TID, pid, epoch).await;
-        assert2::assert!(code == NONE);
+        assert!(
+            code == NONE,
+            "EndTxn(commit) after restart must succeed (proves recover() decoded \
+             the Ongoing v0 entry with matching pid={pid}/epoch={epoch}); got error_code={code}"
+        );
 
         broker.shutdown().await;
     }

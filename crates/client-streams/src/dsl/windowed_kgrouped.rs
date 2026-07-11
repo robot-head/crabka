@@ -257,7 +257,6 @@ where
     /// returning the resulting
     /// `KTable<Windowed<K>, VA>`. Mirrors `KGroupedStream::lower_aggregate`, but
     /// emits `Windowed<K>` keys and a window store.
-    #[allow(clippy::too_many_lines)]
     fn lower_aggregate_windowed<KS, VS, VA, I, A>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -339,9 +338,7 @@ where
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
                 // Tumbling/hopping: retention basis == window size.
-                windows.size_ms,
-                windows.size_ms,
-                windows.grace_ms,
+                (windows.size_ms, windows.size_ms, windows.grace_ms),
                 [h.name().to_string()],
             );
             // Cache only emit-on-update windowed aggregates: emit-final must stay
@@ -369,7 +366,6 @@ where
     /// Record the (optional) repartition node + a windowed reduce node (first
     /// value in a window seeds, later
     /// values fold), returning the `KTable<Windowed<K>, V>`.
-    #[allow(clippy::too_many_lines)]
     fn lower_reduce_windowed<KS, VS, R>(
         mut self,
         materialized: Materialized<KS, VS>,
@@ -444,9 +440,7 @@ where
                 key_serde_for_lower.clone(),
                 value_serde_for_lower.clone(),
                 // Tumbling/hopping: retention basis == window size.
-                windows.size_ms,
-                windows.size_ms,
-                windows.grace_ms,
+                (windows.size_ms, windows.size_ms, windows.grace_ms),
                 [h.name().to_string()],
             );
             // Cache only emit-on-update windowed reduces (see aggregate lower).
@@ -596,17 +590,22 @@ mod tests {
             );
         }
         let p = || Produced::with(TimeWindowedSerde::new(StringSerde, 10), I64Serde);
-        assert2::assert!(
-            d.read_output("out", p())
-                == Some((
-                    Some(Windowed {
-                        key: "a".into(),
-                        window: Window { start: 0, end: 10 }
-                    }),
-                    2
-                ))
+        assert_eq!(
+            d.read_output("out", p()),
+            Some((
+                Some(Windowed {
+                    key: "a".into(),
+                    window: Window { start: 0, end: 10 }
+                }),
+                2
+            )),
+            "emit-final forwards window [0,10) with final count 2 on close"
         );
         // No per-update emits and the still-open window [10,20) is not emitted.
-        assert2::assert!(d.read_output("out", p()) == None);
+        assert_eq!(
+            d.read_output("out", p()),
+            None,
+            "exactly one emit-final record"
+        );
     }
 }

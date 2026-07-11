@@ -17,8 +17,7 @@
 //!   through `__remote_log_metadata` over the loopback) and the records
 //!   read back at offset 0.
 
-#![allow(clippy::pedantic, clippy::manual_assert)]
-
+use assert2::assert;
 mod support;
 
 use std::time::{Duration, Instant};
@@ -84,6 +83,28 @@ async fn start_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     (broker, log_dir, remote_dir)
 }
 
+async fn await_tiered_config(broker: &BrokerHandle, topic: &str) {
+    let deadline = Instant::now() + Duration::from_secs(10);
+    loop {
+        if broker
+            .partition_log_config_for_test(topic, 0)
+            .is_some_and(|config| {
+                config.remote_storage_enable
+                    && config.segment_bytes == 1024
+                    && config.local_retention_bytes == Some(1)
+            })
+        {
+            return;
+        }
+        assert!(
+            Instant::now() <= deadline,
+            "tiered-storage topic config never propagated; saw {:?}",
+            broker.partition_log_config_for_test(topic, 0)
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 async fn build_client(broker: &BrokerHandle) -> Client {
     build_client_secured(broker, None).await
 }
@@ -121,7 +142,10 @@ async fn topic_rlmm_activates_against_loopback() {
     let (broker, _log_dir, _remote_dir) = start_broker_with_topic_rlmm().await;
 
     await_activation(&broker).await;
-    assert2::assert!(broker.has_partition(METADATA_TOPIC, 0).await);
+    assert!(
+        broker.has_partition(METADATA_TOPIC, 0),
+        "__remote_log_metadata-0 should be hosted after bootstrap"
+    );
 
     broker.shutdown().await;
 }
@@ -131,7 +155,6 @@ async fn topic_rlmm_activates_against_loopback() {
 /// events to `__remote_log_metadata` over the loopback and consumes them
 /// back to update its cache), then read the records back at offset 0.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[allow(clippy::too_many_lines)]
 async fn topic_rlmm_copy_then_fetch_round_trip() {
     const TOPIC: &str = "tiered-topic-rlmm-itest";
 
@@ -150,9 +173,8 @@ async fn topic_rlmm_copy_then_fetch_round_trip() {
 /// Shared copy→metadata→read body: create a tiered topic, wait for the
 /// config to propagate, produce enough to seal segments, wait for the RLM
 /// copy task to tier one through the topic-backed RLMM, then read offset 0
-/// back. Used by both the plaintext loopback test and the SASL_PLAINTEXT
+/// back. Used by both the plaintext loopback test and the `SASL_PLAINTEXT`
 /// variant; the only difference is how `client` was built.
-#[allow(clippy::too_many_lines)]
 async fn copy_then_fetch_round_trip(
     broker: &BrokerHandle,
     client: &Client,
@@ -207,7 +229,11 @@ async fn copy_then_fetch_round_trip(
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics failed: {:?}",
+        resp.topics[0].error_message
+    );
 
     // Wait for the tiered config to flow from the metadata image through
     // the supervisor's reconcile loop into the partition's `LogConfig`.
@@ -224,7 +250,11 @@ async fn copy_then_fetch_round_trip(
         {
             break;
         }
-        assert2::assert!(Instant::now() <= cfg_deadline);
+        assert!(
+            Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated within 10s; saw {:?}",
+            broker.partition_log_config_for_test(topic, 0)
+        );
         tokio::task::yield_now().await;
     }
 
@@ -247,7 +277,10 @@ async fn copy_then_fetch_round_trip(
         if count_remote_log_files(remote_dir) >= 1 {
             break;
         }
-        assert2::assert!(Instant::now() <= copy_deadline);
+        assert!(
+            Instant::now() <= copy_deadline,
+            "no segment tiered to remote storage within 30s"
+        );
         tokio::task::yield_now().await;
     }
 
@@ -290,11 +323,17 @@ async fn copy_then_fetch_round_trip(
         {
             break first.value.clone();
         }
-        assert2::assert!(Instant::now() <= fetch_deadline);
+        assert!(
+            Instant::now() <= fetch_deadline,
+            "offset 0 never returned records within 30s"
+        );
         tokio::task::yield_now().await;
     };
 
-    assert2::assert!(value.as_deref() == Some(b"test-record-0".as_slice()));
+    assert!(
+        value.as_deref() == Some(b"test-record-0".as_slice()),
+        "offset 0 should read back the first produced record"
+    );
 }
 
 async fn topic_id_for(client: &Client, name: &str) -> WireUuid {
@@ -337,7 +376,7 @@ fn count_remote_log_files(root: &std::path::Path) -> usize {
 }
 
 /// Boot a single broker whose only (and inter-broker) listener is
-/// SASL_PLAINTEXT/PLAIN, with the topic-backed RLMM pointed at it. The
+/// `SASL_PLAINTEXT/PLAIN`, with the topic-backed RLMM pointed at it. The
 /// RLMM authenticates as the inter-broker PLAIN principal.
 async fn start_sasl_broker_with_topic_rlmm() -> (BrokerHandle, TempDir, TempDir) {
     use crabka_broker::config::{InterBrokerCredentials, ListenerSpec};
@@ -414,10 +453,7 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
 
     support::init_tracing();
 
-    // Held listeners eliminate the bind-and-drop TOCTOU race under parallel
-    // nextest. The RLMM bootstrap here is a dead port (127.0.0.1:1) so the
-    // data-plane port itself is never dialled by the RLMM — but we still hold
-    // both ports race-free.
+    // Hold both ports to eliminate bind-and-drop races under parallel nextest.
     let (client_addrs, controller_addrs, client_listeners, controller_listeners) =
         support::bind_and_hold_ports(1).await;
     let listen = client_addrs[0];
@@ -434,7 +470,6 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     cfg.remote_storage_backend = Some(RemoteStorageBackend::Local {
         dir: remote_dir.path().to_path_buf(),
     });
-    // Fast ticks so the copy task gets plenty of chances to (not) tier.
     cfg.remote_log_manager_interval = Duration::from_millis(200);
     // Dead port: the retry loop can never dial the bootstrap; the SwappableRlmm
     // stays on the NotReadyRlmm stub for the entire test.
@@ -454,7 +489,6 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         .expect("broker starts");
     let client = build_client(&broker).await;
 
-    // Create the same tiered topic config as the loopback round-trip test.
     let resp = client
         .send(CreateTopicsRequest {
             topics: vec![CreatableTopic {
@@ -495,24 +529,17 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics failed: {:?}",
+        resp.topics[0].error_message
+    );
 
     // Wait for the tiered config to propagate into the partition's LogConfig
     // (same gate as the loopback round-trip test).
     // intentional: local `LogConfig` override applied by the reconcile loop —
     // no awaiter/metric exists for it, so poll directly.
-    let cfg_deadline = Instant::now() + Duration::from_secs(10);
-    loop {
-        if let Some(pcfg) = broker.partition_log_config_for_test(TOPIC, 0)
-            && pcfg.remote_storage_enable
-            && pcfg.segment_bytes == 1024
-            && pcfg.local_retention_bytes == Some(1)
-        {
-            break;
-        }
-        assert2::assert!(Instant::now() <= cfg_deadline);
-        tokio::task::yield_now().await;
-    }
+    await_tiered_config(&broker, TOPIC).await;
 
     // Same 80 records as the loopback round-trip — enough to seal several
     // 1 KiB segments and give the copy task ample segments to try to tier.
@@ -530,7 +557,10 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
     // The RLMM is still NotReady, so add_remote_log_segment_metadata returns
     // NotReady and the copy task must have skipped every segment.
     let tiered = count_remote_log_files(remote_dir.path());
-    assert2::assert!(tiered == 0);
+    assert!(
+        tiered == 0,
+        "expected no tiered objects while RLMM not ready, found {tiered}"
+    );
 
     // Close the test client before broker shutdown for the same reason as
     // `topic_rlmm_copy_then_fetch_round_trip`.
@@ -539,9 +569,9 @@ async fn copy_task_skips_tiering_while_rlmm_not_ready() {
 }
 
 /// The full copy→metadata→read round-trip, but the broker's only listener
-/// is SASL_PLAINTEXT/PLAIN. The RLMM's internal metadata client must
+/// is `SASL_PLAINTEXT/PLAIN`. The RLMM's internal metadata client must
 /// authenticate as the inter-broker PLAIN principal to bootstrap the
-/// topic, publish/consume CopySegment events, and serve the read-back —
+/// topic, publish/consume `CopySegment` events, and serve the read-back —
 /// proving the secured metadata client works end-to-end. The test's own
 /// client authenticates with the same credentials.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

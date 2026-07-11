@@ -33,8 +33,6 @@
 //!
 //! Re-running this test regenerates both fixture files verbatim.
 
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -55,7 +53,7 @@ const ADVERTISED: &str = "host.docker.internal:9092";
 
 const SR_IMAGE: &str = "mirror.gcr.io/confluentinc/cp-schema-registry:7.4.0";
 
-/// The shared `"sr"` election group id both cp nodes (and our DescribeGroups
+/// The shared `"sr"` election group id both cp nodes (and our `DescribeGroups`
 /// read) use.
 const GROUP_ID: &str = "schema-registry";
 
@@ -207,7 +205,7 @@ impl Drop for ContainerGuard {
 /// only serves this once the `"sr"` group has elected a master through Crabka,
 /// so a 200 proves the election round-tripped against our coordinator.
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str, label: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {

@@ -133,7 +133,7 @@ pub fn metadata_schema() -> SchemaRef {
 #[cfg(test)]
 mod tests {
     use arrow::datatypes::DataType;
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
@@ -160,10 +160,9 @@ mod tests {
         match field.data_type() {
             DataType::List(inner) => match inner.data_type() {
                 DataType::Struct(fields) => {
-                    assert2::assert!(
-                        fields.iter().map(|field| field.name()).collect::<Vec<_>>()
-                            == vec!["offset", "length"]
-                    );
+                    assert!(fields.len() == 2);
+                    check!(fields[0].name() == "offset");
+                    check!(fields[1].name() == "length");
                 }
                 other => panic!("expected Struct, got {other:?}"),
             },
@@ -174,9 +173,8 @@ mod tests {
     #[test]
     fn exemplar_schema_promotes_trace_and_span() {
         let s = exemplar_schema();
-        for (_name, column) in [("trace id", "trace_id"), ("span id", "span_id")] {
-            assert2::assert!(s.column_with_name(column).unwrap().1.data_type() == &DataType::Utf8);
-        }
+        assert!(s.column_with_name("trace_id").unwrap().1.data_type() == &DataType::Utf8);
+        assert!(s.column_with_name("span_id").unwrap().1.data_type() == &DataType::Utf8);
     }
 
     #[test]

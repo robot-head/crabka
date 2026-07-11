@@ -20,6 +20,8 @@ const TOPIC_ALREADY_EXISTS: i16 = 36;
     fields(topic = %cfg.schemas_topic, replicas = cfg.schemas_topic_rf),
     err
 )]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn ensure_schemas_topic(
     cfg: &RegistryConfig,
     security: Option<ClientSecurity>,

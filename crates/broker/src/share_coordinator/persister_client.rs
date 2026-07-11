@@ -297,18 +297,17 @@ impl SharePersister {
     // remote path (`send_to_leader` dials a real inter-broker socket); only the
     // live-broker integration suite exercises it, not in-file unit tests.
     #[cfg_attr(test, mutants::skip)]
-    #[allow(clippy::too_many_arguments)]
     pub(crate) async fn write_state(
         &self,
         group: &str,
         topic_id: uuid::Uuid,
         partition: i32,
-        state_epoch: i32,
-        leader_epoch: i32,
-        start_offset: Offset,
-        delivery_complete_count: i32,
+        epochs: (i32, i32),
+        progress: (Offset, i32),
         batches: Vec<StateBatch>,
     ) -> Result<(), BrokerError> {
+        let (state_epoch, leader_epoch) = epochs;
+        let (start_offset, delivery_complete_count) = progress;
         self.ensure_topic_and_refresh().await?;
 
         let state_partition = self
@@ -317,16 +316,7 @@ impl SharePersister {
         if self.share_coordinator.is_leader(state_partition).await {
             return self
                 .share_coordinator
-                .write(
-                    group,
-                    topic_id,
-                    partition,
-                    state_epoch,
-                    leader_epoch,
-                    start_offset,
-                    delivery_complete_count,
-                    batches,
-                )
+                .write(group, topic_id, partition, epochs, progress, batches)
                 .await
                 .map_err(|code| {
                     BrokerError::Share(format!(

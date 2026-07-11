@@ -87,6 +87,7 @@ mod tests {
         let er = ErasedRecord::new(Some(Box::new(7i32)), Box::new("v".to_string()), 1);
         let key = er.key.unwrap().downcast::<i32>().unwrap();
         let val = er.value.downcast::<String>().unwrap();
-        check!((*key, val.as_str()) == (7, "v"));
+        check!(*key == 7);
+        check!(*val == "v");
     }
 }

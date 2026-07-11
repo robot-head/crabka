@@ -4,6 +4,8 @@
 
 use std::collections::HashMap;
 
+use num_traits::ToPrimitive;
+
 use super::{Rule, RuleCtx, RuleHit};
 use crate::{
     detector::{AnomalyKey, AnomalyKind, AnomalySeverity},
@@ -17,7 +19,6 @@ impl Rule for DiskPressure {
         AnomalyKind::DiskPressure
     }
 
-    #[allow(clippy::cast_precision_loss)]
     fn evaluate(&self, ctx: &RuleCtx<'_>) -> Vec<RuleHit> {
         // Sum disk_bytes_avg per broker across all hosted replicas.
         let mut per_broker: HashMap<i32, f64> = HashMap::new();
@@ -48,7 +49,10 @@ impl Rule for DiskPressure {
             if cap_bytes == 0 {
                 continue;
             }
-            let ratio = total / cap_bytes as f64;
+            let ratio = total
+                / cap_bytes
+                    .to_f64()
+                    .expect("u64 capacity must convert to f64");
             if ratio <= ctx.cfg.disk_pressure_pct {
                 continue;
             }

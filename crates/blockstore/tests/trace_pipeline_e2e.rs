@@ -93,10 +93,6 @@ fn block_stats(
 }
 
 #[tokio::test]
-#[allow(
-    clippy::too_many_lines,
-    reason = "single cohesive end-to-end pipeline test"
-)]
 async fn trace_block_built_indexed_and_located_by_id() {
     // Two distinct traces in the same span block.
     let trace_a = [9u8; 16];

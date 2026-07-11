@@ -21,6 +21,8 @@ impl ShareGroupAssignor {
     }
 
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized log state is poisoned or a segment previously validated as nonempty is unexpectedly missing its required batch or index entry.
     pub fn assign(&self, members: &[MemberSubscription], topics: &TopicMetadata) -> Assignment {
         let mut out: Assignment = members
             .iter()
@@ -72,7 +74,7 @@ impl ShareGroupAssignor {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid;
 
     use super::*;
@@ -102,8 +104,8 @@ mod tests {
         ];
         let a = ShareGroupAssignor.assign(&members, &topics);
         let total: usize = a.values().flat_map(|m| m.values()).map(Vec::len).sum();
-        assert2::assert!(total == 4); // all 4 partitions assigned
-        assert2::assert!(a["m1"][&id].len() == 2 && a["m2"][&id].len() == 2);
+        assert!(total == 4); // all 4 partitions assigned
+        assert!(a["m1"][&id].len() == 2 && a["m2"][&id].len() == 2);
     }
 
     #[test]
@@ -119,7 +121,7 @@ mod tests {
         let a = ShareGroupAssignor.assign(&members, &topics);
         // Every member gets the single partition (share semantics permit overlap).
         for i in 0..3 {
-            assert2::assert!(a[&format!("m{i}")][&id] == vec![0]);
+            assert!(a[&format!("m{i}")][&id] == vec![0]);
         }
     }
 }

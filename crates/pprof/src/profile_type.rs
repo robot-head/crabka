@@ -17,6 +17,8 @@ pub struct ProfileType {
 
 impl ProfileType {
     /// Parse five colon-separated non-empty parts plus an optional `:delta` suffix.
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn parse(input: &str) -> Result<Self, ProfileError> {
         let parts: Vec<&str> = input.split(':').collect();
         let delta = matches!(parts.as_slice(), [_, _, _, _, _, "delta"]);
@@ -52,13 +54,14 @@ impl fmt::Display for ProfileType {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn parses_go_cpu() {
         let pt = ProfileType::parse("process_cpu:cpu:nanoseconds:cpu:nanoseconds").unwrap();
-        assert2::assert!(
+        assert!(
             pt == ProfileType {
                 name: "process_cpu".to_string(),
                 sample_type: "cpu".to_string(),
@@ -78,7 +81,7 @@ mod tests {
             "wall:wall:nanoseconds:wall:nanoseconds",
         ] {
             let pt = ProfileType::parse(input).unwrap();
-            assert2::assert!(format!("{pt}") == input);
+            assert!(format!("{pt}") == input);
         }
     }
 
@@ -87,7 +90,7 @@ mod tests {
         let input = "process_cpu:cpu:nanoseconds:cpu:nanoseconds:delta";
         let pt = ProfileType::parse(input).unwrap();
 
-        assert2::assert!(
+        assert!(
             pt == ProfileType {
                 name: "process_cpu".to_string(),
                 sample_type: "cpu".to_string(),
@@ -97,13 +100,13 @@ mod tests {
                 delta: true,
             }
         );
-        assert2::assert!(format!("{pt}") == input);
+        assert!(format!("{pt}") == input);
     }
 
     #[test]
     fn rejects_wrong_part_count() {
         for input in ["a:b:c:d", "a:b:c:d:e:f", "a:b::d:e", "a:b:c:d:e:cumulative"] {
-            assert2::assert!(ProfileType::parse(input).is_err());
+            assert!(ProfileType::parse(input).is_err(), "{input}");
         }
     }
 }

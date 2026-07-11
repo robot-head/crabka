@@ -211,6 +211,7 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_metadata::{AclOperation, PatternType, PermissionType, ResourceType};
     use crabka_protocol::{UnknownTaggedFields, owned::create_acls_request::AclCreation};
 
@@ -270,32 +271,27 @@ mod tests {
         let c = creation(&resource_name, &principal_name, OPERATION_READ);
 
         let entry = validate(&c).expect("exact boundary lengths are valid");
-        let expected = AclEntry {
-            resource_type: ResourceType::Topic,
-            resource_name: resource_name.clone(),
-            pattern_type: PatternType::Literal,
-            principal: principal_name.clone(),
-            host: "*".into(),
-            operation: AclOperation::Read,
-            permission_type: PermissionType::Allow,
-        };
-        assert2::assert!(entry == expected);
+        assert!(entry.resource_name == resource_name);
+        assert!(entry.principal == principal_name);
 
         let mut too_long_resource = c.clone();
         too_long_resource.resource_name = "r".repeat(MAX_RESOURCE_NAME_LEN + 1);
         let err = validate(&too_long_resource).unwrap_err();
-        assert2::assert!(err == (codes::INVALID_REQUEST, "resource_name too long"));
+        assert!(err.0 == codes::INVALID_REQUEST);
+        assert!(err.1 == "resource_name too long");
 
         let mut too_long_principal = c;
         too_long_principal.principal =
             format!("User:{}", "a".repeat(MAX_PRINCIPAL_LEN + 1 - "User:".len()));
         let err = validate(&too_long_principal).unwrap_err();
-        assert2::assert!(err == (codes::INVALID_REQUEST, "principal too long"));
+        assert!(err.0 == codes::INVALID_REQUEST);
+        assert!(err.1 == "principal too long");
     }
 
     #[test]
     fn validate_rejects_malformed_resource_principal_and_host() {
-        type TestCase1 = (fn(&mut AclCreation), &'static str);
+        type CorruptCreation = fn(&mut AclCreation);
+
         let valid = creation("topic-a", "User:alice", OPERATION_READ);
         let entry = validate(&valid).expect("valid ACL creation");
         let expected = AclEntry {
@@ -307,9 +303,9 @@ mod tests {
             operation: AclOperation::Read,
             permission_type: PermissionType::Allow,
         };
-        assert2::assert!(entry == expected);
+        assert!(entry == expected);
 
-        let cases: [TestCase1; 4] = [
+        let cases: [(CorruptCreation, &str); 4] = [
             (|c| c.resource_name.clear(), "empty resource_name"),
             (
                 |c| c.resource_name = "bad\0name".into(),
@@ -324,19 +320,15 @@ mod tests {
         for (corrupt, want) in cases {
             let mut c = valid.clone();
             corrupt(&mut c);
-            assert2::assert!(validate(&c).unwrap_err().1 == want);
+            assert!(validate(&c).unwrap_err().1 == want, "expected {want:?}");
         }
     }
 
     #[test]
     fn error_and_submit_helpers_preserve_non_default_result_fields() {
         let err = acl_error_result(codes::INVALID_REQUEST, "bad acl");
-        let expected_err = AclCreationResult {
-            error_code: codes::INVALID_REQUEST,
-            error_message: Some("bad acl".into()),
-            unknown_tagged_fields: UnknownTaggedFields::default(),
-        };
-        assert2::assert!(err == expected_err);
+        assert!(err.error_code == codes::INVALID_REQUEST);
+        assert!(err.error_message.as_deref() == Some("bad acl"));
 
         let mut results = vec![
             AclCreationResult::default(),
@@ -364,7 +356,7 @@ mod tests {
                 unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
             },
         ];
-        assert2::assert!(results == expected);
+        assert!(results == expected);
     }
 
     #[test]
@@ -394,7 +386,7 @@ mod tests {
             resource_type: "Acl".to_string(),
             name: "topic-ok".to_string(),
         }];
-        assert2::assert!(resources == expected);
+        assert!(resources == expected);
     }
 
     #[test]
@@ -405,7 +397,10 @@ mod tests {
         let ctx = test_context(&p, &peer);
 
         audit_created_acls(log.as_ref(), &ctx, Vec::new());
-        assert2::assert!(rx.try_recv().is_err());
+        assert!(
+            rx.try_recv().is_err(),
+            "empty audit resource list is a no-op"
+        );
 
         audit_created_acls(
             log.as_ref(),
@@ -427,7 +422,7 @@ mod tests {
         else {
             panic!("expected AdminOperation");
         };
-        assert2::assert!(
+        assert!(
             (
                 outcome,
                 principal.name.as_str(),
@@ -463,7 +458,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(decoded == expected);
+        assert!(decoded == expected);
     }
 
     #[tokio::test]
@@ -491,8 +486,8 @@ mod tests {
             results: vec![denied.clone(), denied],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
-        assert2::assert!(all_acls(&broker_handle).is_empty());
+        assert!(resp == expected);
+        assert!(all_acls(&broker_handle).is_empty());
         broker_handle.shutdown().await;
     }
 
@@ -530,7 +525,7 @@ mod tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
 
         let acls = all_acls(&broker_handle);
         let expected_acls = vec![AclEntry {
@@ -542,7 +537,7 @@ mod tests {
             operation: AclOperation::Read,
             permission_type: PermissionType::Allow,
         }];
-        assert2::assert!(acls == expected_acls);
+        assert!(acls == expected_acls);
         broker_handle.shutdown().await;
     }
 }

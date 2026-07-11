@@ -101,6 +101,9 @@ impl WalTailProfileStore {
         }
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
     pub fn append_record(&self, record: ProfileRecord) -> Result<(), ProfilesError> {
         let max_ts_ms = record
             .samples
@@ -199,16 +202,12 @@ fn apply_record(
     for (sample, stack_id) in record.samples.iter().zip(stack_ids) {
         let timestamp_ms = profile_timestamp_ms(sample.timestamp_ns);
         store.push_sample_with_total_and_associations(
-            &record.tenant,
-            &record.profile_type,
+            (&record.tenant, &record.profile_type),
             record.labels.clone(),
-            crate::blockbuilder::STACKTRACE_PARTITION,
-            stack_id,
-            sample.value,
-            total_value,
+            (crate::blockbuilder::STACKTRACE_PARTITION, stack_id),
+            (sample.value, total_value),
             timestamp_ms,
-            sample.span_id,
-            sample.trace_id.clone(),
+            (sample.span_id, sample.trace_id.clone()),
         );
     }
     Ok(())
@@ -288,6 +287,9 @@ impl ProfileStore for WalTailProfileStore {
     }
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run_wal_tail(
     store: WalTailProfileStore,
     bootstrap: String,
@@ -325,6 +327,7 @@ mod tests {
     use std::sync::Arc;
 
     use arrow::array::{Array, BinaryArray};
+    use assert2::assert;
     use crabka_blockstore::{LabelMatcher, MatchOp};
     use crabka_pprof::{EngineOpts, FlameEngine, PCOL_TRACE_ID, ProfileStore, SeriesAgg};
 
@@ -377,8 +380,8 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(flamegraph.total == 9);
-        assert2::assert!(flamegraph.names.iter().any(|name| name == "hot_fn"));
+        assert!(flamegraph.total == 9);
+        assert!(flamegraph.names.iter().any(|name| name == "hot_fn"));
     }
 
     #[tokio::test]
@@ -389,20 +392,17 @@ mod tests {
 
         let series = engine
             .select_series(
-                "tenant-a",
-                PT,
-                r#"{service_name="api"}"#,
+                ("tenant-a", PT, r#"{service_name="api"}"#),
                 &[],
                 1.0,
                 SeriesAgg::Sum,
-                0,
-                i64::MAX,
+                (0, i64::MAX),
             )
             .await
             .unwrap();
 
-        assert2::assert!(series.len() == 1);
-        assert2::assert!(series[0].points.as_slice() == &[(1_700_000, 9.0)][..]);
+        assert!(series.len() == 1);
+        assert!(series[0].points == vec![(1_700_000, 9.0)]);
     }
 
     #[tokio::test]
@@ -441,8 +441,8 @@ mod tests {
             .as_any()
             .downcast_ref::<BinaryArray>()
             .unwrap();
-        assert2::assert!(!trace_ids.is_null(0));
-        assert2::assert!(trace_ids.value(0) == &[0xaa; 16][..]);
+        assert!(!trace_ids.is_null(0));
+        assert!(trace_ids.value(0) == &[0xaa; 16]);
     }
 
     fn record_at(value: i64, timestamp_ns: i64) -> ProfileRecord {
@@ -468,15 +468,15 @@ mod tests {
 
         // Querying the full range must see only the surviving fresh sample.
         let stats = store.stats("tenant-a", 0, i64::MAX).await.unwrap();
-        assert2::assert!(stats.oldest_profile_time == Some(10_000));
-        assert2::assert!(stats.newest_profile_time == Some(10_000));
+        assert!(stats.oldest_profile_time == Some(10_000), "{stats:?}");
+        assert!(stats.newest_profile_time == Some(10_000), "{stats:?}");
 
         let engine = FlameEngine::new(Arc::new(store), EngineOpts::default());
         let fg = engine
             .select_merge_stacktraces("tenant-a", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
             .await
             .unwrap();
-        assert2::assert!(fg.total == 7);
+        assert!(fg.total == 7, "old sample not evicted: {}", fg.total);
     }
 
     #[tokio::test]
@@ -497,7 +497,7 @@ mod tests {
             .await
             .unwrap();
         // Only the two most recent records (values 2 and 4) survive.
-        assert2::assert!(fg.total == 6);
+        assert!(fg.total == 6, "budget eviction wrong: {}", fg.total);
     }
 
     #[tokio::test]
@@ -528,7 +528,11 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(fg.total == 46 + 47 + 48 + 49 + 50);
+        assert!(
+            fg.total == 46 + 47 + 48 + 49 + 50,
+            "recent-window query wrong: {}",
+            fg.total
+        );
     }
 
     #[tokio::test]
@@ -544,8 +548,8 @@ mod tests {
 
         // The pre-append snapshot still sees only the original sample.
         let before = snapshot.stats("tenant-a", 0, i64::MAX).await.unwrap();
-        assert2::assert!(before.oldest_profile_time == Some(1));
-        assert2::assert!(before.newest_profile_time == Some(1));
+        assert!(before.oldest_profile_time == Some(1), "{before:?}");
+        assert!(before.newest_profile_time == Some(1), "{before:?}");
 
         // A fresh snapshot sees both samples.
         let after = store
@@ -554,6 +558,6 @@ mod tests {
             .stats("tenant-a", 0, i64::MAX)
             .await
             .unwrap();
-        assert2::assert!(after.newest_profile_time == Some(2));
+        assert!(after.newest_profile_time == Some(2), "{after:?}");
     }
 }

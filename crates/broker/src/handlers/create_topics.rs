@@ -11,7 +11,7 @@ use crabka_metadata::{
 use crabka_protocol::{
     Decode, Encode,
     owned::{
-        create_topics_request::CreateTopicsRequest,
+        create_topics_request::{CreatableTopic, CreateTopicsRequest},
         create_topics_response::{CreatableTopicResult, CreateTopicsResponse},
     },
     primitives::uuid::Uuid as ProtoUuid,
@@ -125,7 +125,6 @@ fn is_local_leader(leader: crabka_raft::NodeId, node_id: crabka_raft::NodeId) ->
     leader == node_id
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_create_topics",
     level = "info",
@@ -143,38 +142,24 @@ pub(crate) async fn handle(
     // ── ACL preamble ────────────────────────────────────────
     // Whole-request Cluster Create gate. On Deny, return
     // CLUSTER_AUTHORIZATION_FAILED on every topic row and short-circuit.
-    {
-        let image = broker.controller.current_image();
-        let allow = broker.config.authorizer.authorize(
-            &*image,
-            &AuthorizationRequest {
-                principal: ctx.principal,
-                host: ctx.peer,
-                resource_type: crabka_metadata::ResourceType::Cluster,
-                resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
-                operation: AclOperation::Create,
-            },
-        );
-        if allow == AuthorizationResult::Deny {
-            // Peek at the topic names without consuming the request fully.
-            let mut cur: &[u8] = req_bytes;
-            let req = CreateTopicsRequest::decode(&mut cur, version)?;
-            let results: Vec<CreatableTopicResult> = req
-                .topics
-                .into_iter()
-                .map(|t| {
-                    topic_error_result(
-                        t.name,
-                        codes::CLUSTER_AUTHORIZATION_FAILED,
-                        Some("create-topics denied".into()),
-                    )
-                })
-                .collect();
-            return encode_response(&create_topics_response(results, 0), version);
-        }
+    let mut cursor = req_bytes;
+    let req = CreateTopicsRequest::decode(&mut cursor, version)?;
+    let image = broker.controller.current_image();
+    if cluster_create_denied(broker, &image, ctx) {
+        let results = req
+            .topics
+            .iter()
+            .map(|topic| {
+                topic_error_result(
+                    topic.name.clone(),
+                    codes::CLUSTER_AUTHORIZATION_FAILED,
+                    Some("create-topics denied".into()),
+                )
+            })
+            .collect();
+        return encode_response(&create_topics_response(results, 0), version);
     }
 
-    let req_bytes = req_bytes.to_vec();
     let controller = broker.controller.clone();
     let node_id = broker.config.node_id;
     let log_dirs = broker.config.all_log_dirs();
@@ -183,241 +168,271 @@ pub(crate) async fn handle(
     let partitions_map = broker.partitions.clone();
     let producer_state = broker.producer_state.clone();
 
-    {
-        let mut cur: &[u8] = &req_bytes;
-        let req = CreateTopicsRequest::decode(&mut cur, version)?;
+    // KIP-599: count mutations before running handler logic so that even
+    // invalid requests consume quota (bad-faith clients can't escape by
+    // sending malformed RPCs). num_partitions == -1 means "use cluster
+    // default"; count it as 1 for accounting.
+    let mutation_count = mutation_count(&req);
 
-        // KIP-599: count mutations before running handler logic so that even
-        // invalid requests consume quota (bad-faith clients can't escape by
-        // sending malformed RPCs). num_partitions == -1 means "use cluster
-        // default"; count it as 1 for accounting.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let mutation_count: u64 = req
-            .topics
-            .iter()
-            .map(|t| t.num_partitions.max(1) as u64)
-            .sum();
+    let mut results: Vec<CreatableTopicResult> = Vec::with_capacity(req.topics.len());
 
-        // Hoist the image once; the per-topic loop reuses it for broker-set
-        // lookup instead of calling current_image() on every iteration.
-        let image = controller.current_image();
+    for topic_req in req.topics {
+        let name = topic_req.name.clone();
+        let partition_count = topic_req.num_partitions;
+        let replication_factor = topic_req.replication_factor;
 
-        let mut results: Vec<CreatableTopicResult> = Vec::with_capacity(req.topics.len());
+        // Reject invalid partition counts before attempting placement.
+        if partition_count <= 0 {
+            results.push(topic_error_result(name, codes::INVALID_PARTITIONS, None));
+            continue;
+        }
 
-        for topic_req in req.topics {
-            let name = topic_req.name.clone();
-            let partition_count = topic_req.num_partitions;
-            let replication_factor = topic_req.replication_factor;
+        // Read the current broker set from the controller's image; sort by
+        // node_id for determinism.
+        //
+        // Race-tolerance: on a freshly-started cluster, the self-registration
+        // V1BrokerRegistration record may not have made it into the local
+        // MetadataImage yet when this handler runs (the controller's apply is
+        // mostly synchronous on the leader but observable timing has slipped
+        // on slow runners). If `brokers()` is empty, fall back to "this broker
+        // is the only known broker" so the single-broker case (which is by
+        // far the most common) doesn't silently degrade to
+        // INVALID_REPLICATION_FACTOR.
+        let mut sorted_brokers: Vec<crabka_raft::NodeId> =
+            image.brokers().map(|b| b.node_id).collect();
+        if sorted_brokers.is_empty() {
+            sorted_brokers.push(node_id);
+        }
+        sorted_brokers.sort_unstable();
 
-            // Reject invalid partition counts before attempting placement.
-            if partition_count <= 0 {
-                results.push(topic_error_result(name, codes::INVALID_PARTITIONS, None));
-                continue;
-            }
+        let assignments =
+            round_robin_replicas(&sorted_brokers, partition_count, replication_factor);
 
-            // Read the current broker set from the controller's image; sort by
-            // node_id for determinism.
-            //
-            // Race-tolerance: on a freshly-started cluster, the self-registration
-            // V1BrokerRegistration record may not have made it into the local
-            // MetadataImage yet when this handler runs (the controller's apply is
-            // mostly synchronous on the leader but observable timing has slipped
-            // on slow runners). If `brokers()` is empty, fall back to "this broker
-            // is the only known broker" so the single-broker case (which is by
-            // far the most common) doesn't silently degrade to
-            // INVALID_REPLICATION_FACTOR.
-            let mut sorted_brokers: Vec<crabka_raft::NodeId> =
-                image.brokers().map(|b| b.node_id).collect();
-            if sorted_brokers.is_empty() {
-                sorted_brokers.push(node_id);
-            }
-            sorted_brokers.sort_unstable();
-
-            let assignments =
-                round_robin_replicas(&sorted_brokers, partition_count, replication_factor);
-
-            if assignments.is_empty() {
-                // RF > broker count. Surface INVALID_REPLICATION_FACTOR per Apache
-                // Kafka semantics.
-                results.push(topic_error_result(
-                    name,
-                    codes::INVALID_REPLICATION_FACTOR,
-                    None,
-                ));
-                continue;
-            }
-
-            let topic_id = Uuid::new_v4();
-
-            // Build the batch: one TopicRecord + N PartitionRecords.
-            let mut records = vec![MetadataRecord::V1Topic(TopicRecord {
-                name: name.clone(),
-                topic_id,
-                partitions: partition_count,
-                replication_factor,
-            })];
-            for (p, replicas) in assignments.iter().enumerate() {
-                let p_i32 = i32::try_from(p).unwrap_or(0);
-                records.push(MetadataRecord::V1Partition(PartitionRecord {
-                    topic: name.clone(),
-                    partition: p_i32,
-                    leader: replicas[0],
-                    replicas: replicas.clone(),
-                    isr: replicas.clone(),
-                    leader_epoch: crabka_metadata::LeaderEpoch(INITIAL_LEADER_EPOCH),
-                    adding_replicas: vec![],
-                    removing_replicas: vec![],
-                    directories: vec![],
-                    partition_epoch: 0,
-                }));
-            }
-
-            // Persist any topic-level configs the client sent. Without
-            // this, cleanup.policy / segment.bytes / retention.ms etc.
-            // set at CreateTopics time would be silently dropped — clients
-            // would need a follow-up AlterConfigs round-trip. Match Kafka's
-            // CreateTopics semantics by emitting one V1TopicConfig record
-            // covering the full override map.
-            if !topic_req.configs.is_empty() {
-                let mut overrides: std::collections::BTreeMap<String, String> =
-                    std::collections::BTreeMap::new();
-                for cfg in &topic_req.configs {
-                    if let Some(value) = &cfg.value {
-                        overrides.insert(cfg.name.clone(), value.clone());
-                    }
-                }
-                if !overrides.is_empty() {
-                    records.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
-                        topic: name.clone(),
-                        overrides,
-                    }));
-                }
-            }
-
-            let result = controller.submit_change(records).await;
-
-            let error_code = match result {
-                Ok(()) => {
-                    // Committed to quorum — materialize on-disk partitions for
-                    // every assignment where THIS broker is in `replicas`,
-                    // whether as leader or follower. The replicator supervisor
-                    // materializes the same partitions on the OTHER brokers
-                    // lazily via the metadata-watch; this handler-side path is
-                    // an optimization so producers that immediately follow the
-                    // CreateTopics ack don't race the supervisor.
-                    for (p, replicas) in assignments.iter().enumerate() {
-                        let p_i32 = i32::try_from(p).unwrap_or(0);
-                        if should_materialize_locally(replicas, node_id) {
-                            // Use the same `materialize_partition` helper the
-                            // supervisor uses — its Entry::Vacant gate ensures
-                            // we don't spawn a second writer task when the
-                            // supervisor has already reconciled (the metadata
-                            // watch can fire mid-handler).
-                            if let Err(e) = materialize_partition(
-                                &partitions_map,
-                                &name,
-                                p_i32,
-                                &log_dirs,
-                                &log_config,
-                                &log_dir_status,
-                                &producer_state,
-                            ) {
-                                tracing::error!(
-                                    topic = %name, partition = p_i32, error = %e,
-                                    "CreateTopics: materialize after quorum commit failed"
-                                );
-                                // Quorum already committed — partition will be
-                                // recovered on next broker restart.
-                                continue;
-                            }
-                            // Mirror what `ReplicatorSupervisor::reconcile` does
-                            // for newly-materialized leader partitions: sync the
-                            // cached leader + epoch, and (when self is leader)
-                            // install the ISR for HW computation. Without this, a
-                            // Produce arriving before the supervisor's
-                            // metadata-watch fires sees `isr.is_empty()`, falls
-                            // into `compute_hw == leader_leo`, and acks=-1 returns
-                            // instantly without waiting for followers.
-                            if let Some(part) =
-                                partitions_map.get(&name, crabka_ids::PartitionIndex(p_i32))
-                            {
-                                let leader = replicas[0];
-                                part.install_leader_change(leader.0, INITIAL_LEADER_EPOCH)
-                                    .await;
-                                if is_local_leader(leader, node_id) {
-                                    // At creation the ISR equals the full replica set.
-                                    part.install_isr(replicas, replicas, leader).await;
-                                }
-                            }
-                        }
-                    }
-                    codes::NONE
-                }
-                Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {
-                    codes::TOPIC_ALREADY_EXISTS
-                }
-                Err(RaftError::Metadata(crabka_metadata::MetadataError::InvalidRecord(_))) => {
-                    // E.g., `partitions <= 0` rejected by image::validate.
-                    codes::INVALID_PARTITIONS
-                }
-                Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
-                    codes::NOT_CONTROLLER
-                }
-                Err(e) => {
-                    tracing::error!(topic = %name, error = %e, "CreateTopics submit_change failed");
-                    codes::UNKNOWN_SERVER_ERROR
-                }
-            };
-
-            // Convert uuid::Uuid → crabka_protocol::primitives::uuid::Uuid.
-            let proto_uuid = ProtoUuid(topic_id.into_bytes());
-
-            let mut result = CreatableTopicResult {
+        if assignments.is_empty() {
+            // RF > broker count. Surface INVALID_REPLICATION_FACTOR per Apache
+            // Kafka semantics.
+            results.push(topic_error_result(
                 name,
-                topic_id: proto_uuid,
-                error_code,
-                ..Default::default()
-            };
+                codes::INVALID_REPLICATION_FACTOR,
+                None,
+            ));
+            continue;
+        }
 
-            if error_code == codes::NONE {
-                result.num_partitions = partition_count;
-                result.replication_factor = replication_factor;
-                // KIP-525 (v5+): return an empty configs list to satisfy
-                // clients that unconditionally call `configs().stream()`.
-                result.configs = Some(Vec::new());
+        let topic_id = Uuid::new_v4();
+
+        // Build the batch: one TopicRecord + N PartitionRecords.
+        let records = topic_records(&topic_req, topic_id, &assignments);
+
+        let result = controller.submit_change(records).await;
+
+        let error_code = match result {
+            Ok(()) => {
+                materialize_topic(
+                    TopicMaterialization {
+                        partitions: &partitions_map,
+                        log_dirs: &log_dirs,
+                        log_config: &log_config,
+                        log_dir_status: &log_dir_status,
+                        producer_state: &producer_state,
+                        node_id,
+                    },
+                    &name,
+                    &assignments,
+                )
+                .await;
+                codes::NONE
             }
-            results.push(result);
-        }
+            Err(RaftError::Metadata(crabka_metadata::MetadataError::TopicExists(_))) => {
+                codes::TOPIC_ALREADY_EXISTS
+            }
+            Err(RaftError::Metadata(crabka_metadata::MetadataError::InvalidRecord(_))) => {
+                // E.g., `partitions <= 0` rejected by image::validate.
+                codes::INVALID_PARTITIONS
+            }
+            Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => codes::NOT_CONTROLLER,
+            Err(e) => {
+                tracing::error!(topic = %name, error = %e, "CreateTopics submit_change failed");
+                codes::UNKNOWN_SERVER_ERROR
+            }
+        };
 
-        // Audit: emit one AdminOperation record for the successfully-created topics.
-        audit_created_topics(
-            broker.audit_log.as_ref(),
-            ctx,
-            created_topic_resources(&results),
-        );
+        // Convert uuid::Uuid → crabka_protocol::primitives::uuid::Uuid.
+        let proto_uuid = ProtoUuid(topic_id.into_bytes());
 
-        // KIP-599: consume controller_mutation_rate quota.
-        let delay = crate::quota::consume_controller_mutation_quota(
-            &image,
-            &broker.quota_buckets,
-            &ctx.principal.name,
-            ctx.client_id,
-            mutation_count,
-        );
-        let resp = create_topics_response(
-            results,
-            i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
-        );
-        if delay > Duration::ZERO {
-            tokio::time::sleep(delay).await;
+        let mut result = CreatableTopicResult {
+            name,
+            topic_id: proto_uuid,
+            error_code,
+            ..Default::default()
+        };
+
+        if error_code == codes::NONE {
+            result.num_partitions = partition_count;
+            result.replication_factor = replication_factor;
+            // KIP-525 (v5+): return an empty configs list to satisfy
+            // clients that unconditionally call `configs().stream()`.
+            result.configs = Some(Vec::new());
         }
-        encode_response(&resp, version)
+        results.push(result);
     }
+
+    finish_response(broker, &image, ctx, results, mutation_count, version).await
+}
+
+fn mutation_count(request: &CreateTopicsRequest) -> u64 {
+    request
+        .topics
+        .iter()
+        .map(|topic| {
+            u64::try_from(topic.num_partitions.max(1)).expect("mutation count is positive")
+        })
+        .sum()
+}
+
+async fn finish_response(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+    results: Vec<CreatableTopicResult>,
+    mutation_count: u64,
+    version: i16,
+) -> Result<Bytes, BrokerError> {
+    audit_created_topics(
+        broker.audit_log.as_ref(),
+        context,
+        created_topic_resources(&results),
+    );
+    let delay = crate::quota::consume_controller_mutation_quota(
+        image,
+        &broker.quota_buckets,
+        &context.principal.name,
+        context.client_id,
+        mutation_count,
+    );
+    let response = create_topics_response(
+        results,
+        i32::try_from(delay.as_millis()).unwrap_or(i32::MAX),
+    );
+    if delay > Duration::ZERO {
+        tokio::time::sleep(delay).await;
+    }
+    encode_response(&response, version)
+}
+
+fn cluster_create_denied(
+    broker: &Broker,
+    image: &crabka_metadata::MetadataImage,
+    context: &crate::handlers::RequestContext<'_>,
+) -> bool {
+    broker.config.authorizer.authorize(
+        image,
+        &AuthorizationRequest {
+            principal: context.principal,
+            host: context.peer,
+            resource_type: crabka_metadata::ResourceType::Cluster,
+            resource_name: crate::handlers::acl_wire::CLUSTER_RESOURCE_NAME,
+            operation: AclOperation::Create,
+        },
+    ) == AuthorizationResult::Deny
+}
+
+#[derive(Clone, Copy)]
+struct TopicMaterialization<'a> {
+    partitions: &'a std::sync::Arc<crate::partition_registry::PartitionRegistry>,
+    log_dirs: &'a [std::path::PathBuf],
+    log_config: &'a crabka_log::LogConfig,
+    log_dir_status: &'a crate::log_dir_status::LogDirRegistry,
+    producer_state: &'a std::sync::Arc<crate::producer_state::ProducerState>,
+    node_id: crabka_raft::NodeId,
+}
+
+async fn materialize_topic(
+    context: TopicMaterialization<'_>,
+    topic: &str,
+    assignments: &[Vec<crabka_raft::NodeId>],
+) {
+    for (index, replicas) in assignments.iter().enumerate() {
+        if !should_materialize_locally(replicas, context.node_id) {
+            continue;
+        }
+        let index = i32::try_from(index).unwrap_or(0);
+        if let Err(error) = materialize_partition(
+            context.partitions,
+            topic,
+            index,
+            context.log_dirs,
+            context.log_config,
+            context.log_dir_status,
+            context.producer_state,
+        ) {
+            tracing::error!(topic, partition = index, error = %error,
+                "CreateTopics: materialize after quorum commit failed");
+            continue;
+        }
+        let Some(partition) = context
+            .partitions
+            .get(topic, crabka_ids::PartitionIndex(index))
+        else {
+            continue;
+        };
+        let leader = replicas[0];
+        partition
+            .install_leader_change(leader.0, INITIAL_LEADER_EPOCH)
+            .await;
+        if is_local_leader(leader, context.node_id) {
+            partition.install_isr(replicas, replicas, leader).await;
+        }
+    }
+}
+
+fn topic_records(
+    request: &CreatableTopic,
+    topic_id: Uuid,
+    assignments: &[Vec<crabka_raft::NodeId>],
+) -> Vec<MetadataRecord> {
+    let mut records = vec![MetadataRecord::V1Topic(TopicRecord {
+        name: request.name.clone(),
+        topic_id,
+        partitions: request.num_partitions,
+        replication_factor: request.replication_factor,
+    })];
+    records.extend(assignments.iter().enumerate().map(|(index, replicas)| {
+        MetadataRecord::V1Partition(PartitionRecord {
+            topic: request.name.clone(),
+            partition: i32::try_from(index).unwrap_or(0),
+            leader: replicas[0],
+            replicas: replicas.clone(),
+            isr: replicas.clone(),
+            leader_epoch: crabka_metadata::LeaderEpoch(INITIAL_LEADER_EPOCH),
+            adding_replicas: vec![],
+            removing_replicas: vec![],
+            directories: vec![],
+            partition_epoch: 0,
+        })
+    }));
+    let overrides = request
+        .configs
+        .iter()
+        .filter_map(|config| {
+            config
+                .value
+                .as_ref()
+                .map(|value| (config.name.clone(), value.clone()))
+        })
+        .collect::<std::collections::BTreeMap<_, _>>();
+    if !overrides.is_empty() {
+        records.push(MetadataRecord::V1TopicConfig(TopicConfigRecord {
+            topic: request.name.clone(),
+            overrides,
+        }));
+    }
+    records
 }
 
 #[cfg(test)]
 mod replica_assignment_tests {
-
+    use assert2::assert;
     use crabka_raft::NodeId;
 
     use super::round_robin_replicas;
@@ -430,12 +445,12 @@ mod replica_assignment_tests {
         let leaders: Vec<_> = out.iter().map(|r| r[0]).collect();
         let mut sorted = leaders.clone();
         sorted.sort_unstable();
-        assert2::assert!(sorted == vec![NodeId(1), NodeId(2), NodeId(3)]);
+        assert!(sorted == vec![NodeId(1), NodeId(2), NodeId(3)]);
         // Each partition has all three brokers as replicas.
         for replicas in &out {
             let mut s = replicas.clone();
             s.sort_unstable();
-            assert2::assert!(s == vec![NodeId(1), NodeId(2), NodeId(3)]);
+            assert!(s == vec![NodeId(1), NodeId(2), NodeId(3)]);
         }
     }
 
@@ -443,21 +458,21 @@ mod replica_assignment_tests {
     fn offset_per_partition_means_distinct_leaders() {
         let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 3, 1);
-        assert2::assert!(out == vec![vec![NodeId(1)], vec![NodeId(2)], vec![NodeId(3)]]);
+        assert!(out == vec![vec![NodeId(1)], vec![NodeId(2)], vec![NodeId(3)]]);
     }
 
     #[test]
     fn rf_too_high_returns_empty() {
         let bs = vec![NodeId(1), NodeId(2), NodeId(3)];
         let out = round_robin_replicas(&bs, 1, 5);
-        assert2::assert!(out.is_empty());
+        assert!(out.is_empty());
     }
 
     #[test]
     fn rf_one_single_broker_preserves_replica_shape() {
         let bs = vec![NodeId(1)];
         let out = round_robin_replicas(&bs, 2, 1);
-        assert2::assert!(out == vec![vec![NodeId(1)], vec![NodeId(1)]]);
+        assert!(out == vec![vec![NodeId(1)], vec![NodeId(1)]]);
     }
 
     #[test]
@@ -480,16 +495,19 @@ mod replica_assignment_tests {
         }));
         let cases = [
             // Exact (user, client-id) tuple match should throttle on overage.
-            ("exact user and client match", "app-x", true),
+            ("app-x", true),
             // Non-matching client_id should not throttle.
-            ("nonmatching client", "other", false),
+            ("other", false),
         ];
-        for (_case, client_id, want_throttle) in cases {
+        for (client_id, want_throttle) in cases {
             let buckets = crate::quota::QuotaBuckets::new();
             let delay = crate::quota::consume_controller_mutation_quota(
                 &img, &buckets, "alice", client_id, 10,
             );
-            assert2::assert!((delay > std::time::Duration::ZERO) == want_throttle);
+            assert!(
+                (delay > std::time::Duration::ZERO) == want_throttle,
+                "client_id {client_id}, delay {delay:?}"
+            );
         }
     }
 }
@@ -498,7 +516,7 @@ mod replica_assignment_tests {
 mod handler_tests {
     use std::{net::SocketAddr, sync::Arc};
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_protocol::{
         UnknownTaggedFields,
         owned::create_topics_request::{CreatableTopic, CreatableTopicConfig, CreateTopicsRequest},
@@ -610,7 +628,7 @@ mod handler_tests {
             resource_type: "Topic".into(),
             name: "ok".into(),
         }];
-        assert2::assert!(resources == expected);
+        assert!(resources == expected);
     }
 
     #[test]
@@ -621,7 +639,10 @@ mod handler_tests {
         let ctx = test_context(&p, &peer);
 
         audit_created_topics(log.as_ref(), &ctx, Vec::new());
-        assert2::assert!(rx.try_recv().is_err());
+        assert!(
+            rx.try_recv().is_err(),
+            "empty audit resource list is a no-op"
+        );
 
         audit_created_topics(
             log.as_ref(),
@@ -650,7 +671,7 @@ mod handler_tests {
             resource_type: "Topic".into(),
             name: "orders".into(),
         }];
-        assert2::assert!(resources == expected_resources);
+        assert!(resources == expected_resources);
     }
 
     #[test]
@@ -661,13 +682,19 @@ mod handler_tests {
             (&[NodeId(1), NodeId(2)], NodeId(3), false),
         ];
         for (replicas, node_id, want) in materialize_cases {
-            assert2::assert!(should_materialize_locally(replicas, node_id) == want);
+            assert!(
+                should_materialize_locally(replicas, node_id) == want,
+                "replicas {replicas:?}, node {node_id}"
+            );
         }
 
         let leader_cases: [(crabka_raft::NodeId, crabka_raft::NodeId, bool); 2] =
             [(NodeId(1), NodeId(1), true), (NodeId(2), NodeId(1), false)];
         for (leader, node_id, want) in leader_cases {
-            assert2::assert!(is_local_leader(leader, node_id) == want);
+            assert!(
+                is_local_leader(leader, node_id) == want,
+                "leader {leader}, node {node_id}"
+            );
         }
     }
 
@@ -709,8 +736,8 @@ mod handler_tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
-        assert2::assert!(
+        assert!(resp == expected);
+        assert!(
             broker_handle
                 .controller_image_for_test()
                 .topic("orders")
@@ -758,10 +785,10 @@ mod handler_tests {
             ],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         for name in ["bad-count", "bad-rf"] {
             let image = broker_handle.controller_image_for_test();
-            assert2::assert!(image.topic(name).is_none());
+            assert!(image.topic(name).is_none(), "topic {name} not committed");
         }
         broker_handle.shutdown().await;
     }
@@ -777,8 +804,8 @@ mod handler_tests {
 
         let resp = drive(&broker, &req, &p, &peer).await;
 
-        assert2::assert!(resp.topics.len() == 1);
-        assert2::assert!(resp.topics[0].topic_id != ProtoUuid([0; 16]));
+        assert!(resp.topics.len() == 1);
+        assert!(resp.topics[0].topic_id != ProtoUuid([0; 16]));
         let expected = CreateTopicsResponse {
             throttle_time_ms: 0,
             topics: vec![CreatableTopicResult {
@@ -796,13 +823,13 @@ mod handler_tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
 
         let image = broker_handle.controller_image_for_test();
         let topic = image.topic("configured").expect("topic in image");
-        assert2::assert!(topic.partitions == 2);
+        assert!(topic.partitions == 2);
         let configs = image.topic_config("configured").expect("topic configs");
-        assert2::assert!(configs.get("retention.ms").map(String::as_str) == Some("60000"));
+        assert!(configs.get("retention.ms").map(String::as_str) == Some("60000"));
         broker_handle.shutdown().await;
     }
 
@@ -815,11 +842,11 @@ mod handler_tests {
         let peer = peer();
         let req = request(vec![topic("dupe", 1, 1)]);
         let first = drive(&broker, &req, &p, &peer).await;
-        assert2::assert!(first.topics[0].error_code == codes::NONE);
+        assert!(first.topics[0].error_code == codes::NONE);
 
         let second = drive(&broker, &req, &p, &peer).await;
 
-        assert2::assert!(second.topics.len() == 1);
+        assert!(second.topics.len() == 1);
         let expected = CreateTopicsResponse {
             throttle_time_ms: 0,
             topics: vec![CreatableTopicResult {
@@ -837,7 +864,7 @@ mod handler_tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(second == expected);
+        assert!(second == expected);
         broker_handle.shutdown().await;
     }
 
@@ -855,7 +882,7 @@ mod handler_tests {
         let resp = drive(&broker, &req, &p, &peer).await;
         let elapsed = started.elapsed();
 
-        assert2::assert!(resp.topics.len() == 1);
+        assert!(resp.topics.len() == 1);
         let expected = CreateTopicsResponse {
             throttle_time_ms: 1_000,
             topics: vec![CreatableTopicResult {
@@ -872,8 +899,11 @@ mod handler_tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
-        assert2::assert!(elapsed >= Duration::from_millis(900));
+        assert!(resp == expected);
+        assert!(
+            elapsed >= Duration::from_millis(900),
+            "handler must wait for the advertised throttle, elapsed={elapsed:?}"
+        );
         broker_handle.shutdown().await;
     }
 }

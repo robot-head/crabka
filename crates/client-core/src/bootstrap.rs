@@ -36,15 +36,16 @@ mod tests {
     #[tokio::test]
     async fn resolve_returns_addresses_for_valid_entries() {
         let addrs = resolve("127.0.0.1:9092, 127.0.0.1:9093").await.unwrap();
-        let mut ports: Vec<_> = addrs.iter().map(std::net::SocketAddr::port).collect();
-        ports.sort_unstable();
-        assert2::assert!(ports == vec![9092, 9093]);
+
+        assert_eq!(addrs.len(), 2);
+        assert!(addrs.iter().any(|addr| addr.port() == 9092));
+        assert!(addrs.iter().any(|addr| addr.port() == 9093));
     }
 
     #[tokio::test]
     async fn resolve_errors_when_no_entries_resolve() {
         let err = resolve(" , ").await.unwrap_err();
 
-        assert2::assert!(matches!(err, ClientError::Disconnected));
+        assert!(matches!(err, ClientError::Disconnected));
     }
 }

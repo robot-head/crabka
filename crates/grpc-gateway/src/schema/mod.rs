@@ -13,7 +13,6 @@
 //!   (Avro / JSON Schema / Protobuf).
 //! - [`codec`] — [`crate::codec::RecordCodec`] impl that glues the above.
 
-#[allow(clippy::module_inception)]
 pub mod client;
 pub mod codec;
 pub mod format;

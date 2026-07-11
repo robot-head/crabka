@@ -8,7 +8,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 6;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -30,11 +31,12 @@ impl Default for InitProducerIdResponse {
             producer_epoch: 0i16,
             ongoing_txn_producer_id: -1i64,
             ongoing_txn_producer_epoch: -1i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
 impl InitProducerIdResponse {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::init_producer_id_response::InitProducerIdResponse {
         crate::owned::init_producer_id_response::InitProducerIdResponse {
             throttle_time_ms: (self.throttle_time_ms),
@@ -50,10 +52,7 @@ impl InitProducerIdResponse {
 impl Encode for InitProducerIdResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -111,10 +110,7 @@ impl Encode for InitProducerIdResponse {
 impl<'de> DecodeBorrow<'de> for InitProducerIdResponse {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();

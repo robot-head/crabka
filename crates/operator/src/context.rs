@@ -62,6 +62,8 @@ impl Context {
     ///
     /// `bootstrap` is the inter-broker listener's `bootstrap_servers`
     /// string, e.g. `demo-broker-headless.default.svc.cluster.local:9092`.
+    /// # Errors
+    /// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
     pub async fn admin_client_for(
         &self,
         cluster: &str,

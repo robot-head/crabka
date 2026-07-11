@@ -17,6 +17,8 @@ pub enum TargetParseError {
     BadId(String),
 }
 
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub fn parse_targets(spec: &str) -> Result<Vec<ScrapeTarget>, TargetParseError> {
     let spec = spec.trim();
     if spec.is_empty() {

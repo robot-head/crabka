@@ -38,6 +38,8 @@ pub enum NameError {
 }
 
 impl Rule {
+    /// # Errors
+    /// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
     pub fn parse(spec: &str) -> Result<Rule, NameError> {
         let spec = spec.trim();
         if spec == "DEFAULT" {
@@ -146,6 +148,8 @@ fn expand_format(format: &str, components: &[&str], realm: &str) -> String {
     fields(mechanism = "GSSAPI", realm = %realm, mapped = tracing::field::Empty),
     err
 )]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn apply(
     rules: &[Rule],
     realm: &str,

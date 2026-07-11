@@ -195,7 +195,6 @@ async fn run_ownership_rebuilds_map_and_owns_all_as_sole_member() {
     broker.shutdown().await;
 }
 
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn concurrent_duplicates_produce_once() {
     use std::collections::BTreeMap;

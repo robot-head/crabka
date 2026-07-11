@@ -235,7 +235,6 @@ impl<S: MetricStore> PromqlEngine<S> {
     /// over-time matchers, which inspect the call's range argument). Each arm returns
     /// `Ok(Some(..))` for a supported shape and `Ok(None)` (interpreter fallback)
     /// otherwise; any function not recognized here falls back.
-    #[allow(clippy::too_many_lines)]
     async fn plan_call_expr(
         &self,
         tenant: &str,

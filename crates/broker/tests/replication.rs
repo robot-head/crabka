@@ -7,19 +7,10 @@
 
 // Test-file pragmatism: casts turn 1-based `i` into broker ids.
 // Hoisting these into named helpers would obscure the per-test narrative.
-#![allow(
-    clippy::cast_possible_truncation,
-    clippy::default_trait_access,
-    // The full propagation test reads top-to-bottom as one scenario
-    // (bring up cluster → wait for brokers → CreateTopics → wait for
-    // propagation → produce → wait for convergence). Splitting it into
-    // helpers obscures the per-stage narrative without making any
-    // individual piece reusable.
-    clippy::too_many_lines
-)]
 
 use std::sync::OnceLock;
 
+use assert2::assert;
 use crabka_client_core::Client;
 use crabka_protocol::{
     owned::{
@@ -76,7 +67,7 @@ async fn replication_factor_three_propagates_to_all_followers() {
         })
         .await
         .unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0);
     // ProduceRequest v13 wire format drops `topic.name` in favour of
     // `topic.topic_id` (KIP-516). The client negotiates the broker's
     // max supported version (v13), so we must echo the CreateTopics-
@@ -126,7 +117,7 @@ async fn replication_factor_three_propagates_to_all_followers() {
         })
         .await
         .unwrap();
-    assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
+    assert!(prod.responses[0].partition_responses[0].error_code == 0);
 
     // Wait until every broker's local log shows log_end_offset >= 20.
     for (h, _, _) in &cluster {
@@ -169,7 +160,7 @@ async fn out_of_range_truncates_and_recovers() {
         })
         .await
         .unwrap();
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0);
     let topic_id = resp.topics[0].topic_id;
 
     // Wait for the topic to propagate to every broker's MetadataImage.
@@ -218,7 +209,7 @@ async fn out_of_range_truncates_and_recovers() {
             })
             .await
             .unwrap();
-        assert2::assert!(prod.responses[0].partition_responses[0].error_code == 0);
+        assert!(prod.responses[0].partition_responses[0].error_code == 0);
     }
 
     // Wait for every broker's local log to catch up to 50.

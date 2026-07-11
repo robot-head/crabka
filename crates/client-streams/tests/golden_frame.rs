@@ -13,28 +13,14 @@ fn single_source_sink_matches_jvm_fixture() {
     let wire = topo.build("streams-app").unwrap().to_wire();
 
     // Assert the JVM-derived shape (mirrors single_source_sink.topology.json).
+    assert_eq!(wire.epoch, 0);
+    assert_eq!(wire.subtopologies.len(), 1);
     let s = &wire.subtopologies[0];
-    check!(
-        (
-            wire.epoch,
-            wire.subtopologies.len(),
-            s.subtopology_id.as_str(),
-            s.source_topics.as_slice(),
-            s.source_topic_regex.is_empty(),
-            s.repartition_sink_topics.is_empty(),
-            s.repartition_source_topics.is_empty(),
-            s.state_changelog_topics.is_empty(),
-            s.copartition_groups.is_empty(),
-        ) == (
-            0,
-            1,
-            "0",
-            ["streams-input".to_string()].as_slice(),
-            true,
-            true,
-            true,
-            true,
-            true,
-        )
-    );
+    assert_eq!(s.subtopology_id, "0");
+    assert_eq!(s.source_topics, vec!["streams-input".to_string()]);
+    check!(s.source_topic_regex.is_empty());
+    check!(s.repartition_sink_topics.is_empty());
+    check!(s.repartition_source_topics.is_empty());
+    check!(s.state_changelog_topics.is_empty());
+    check!(s.copartition_groups.is_empty());
 }

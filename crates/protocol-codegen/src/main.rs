@@ -15,7 +15,11 @@ fn parse_args() -> (PathBuf, PathBuf, Option<String>) {
             positional.push(a);
         }
     }
-    assert2::assert!(positional.len() == 2);
+    assert_eq!(
+        positional.len(),
+        2,
+        "usage: codegen [--namespace NAME] <schemas> <out>"
+    );
     (
         PathBuf::from(&positional[0]),
         PathBuf::from(&positional[1]),
@@ -116,9 +120,8 @@ fn write_common_wrapper(
         Flavor::Owned => "owned",
         Flavor::Borrowed => "borrowed",
     };
-    let allow = emit::wrappers::allow_header();
     let body = format!(
-        "{}{allow}\n\ninclude!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{message_snake}/{struct_snake}.{suffix}.rs\"\n));\n",
+        "{}include!(concat!(\n    env!(\"CARGO_MANIFEST_DIR\"),\n    \"/generated/common/{flavor_dir}/{message_snake}/{struct_snake}.{suffix}.rs\"\n));\n",
         emit::common::banner(schemas_version),
         flavor_dir = flavor.dir(),
     );
@@ -185,7 +188,6 @@ fn write_common_wrapper_tree(
     Ok(count)
 }
 
-#[allow(clippy::too_many_lines)]
 fn run(
     schemas: &std::path::Path,
     out: &std::path::Path,
@@ -277,46 +279,14 @@ fn run(
         }
     }
 
-    // Emit the message-scoped common-struct wrapper tree under
-    // src/{owned,borrowed}/common/<message_snake>/<struct_snake>.rs.
-    let has_common_owned = !all_common_owned.is_empty();
-    let has_common_borrowed = !all_common_borrowed.is_empty();
-    count += write_common_wrapper_tree(
+    count += write_module_files(
+        &specs,
         &all_common_owned,
-        emit::wrappers::Flavor::Owned,
-        &schemas_sha,
-        &protocol_src,
-    )?;
-    count += write_common_wrapper_tree(
         &all_common_borrowed,
-        emit::wrappers::Flavor::Borrowed,
         &schemas_sha,
         &protocol_src,
+        namespace,
     )?;
-
-    // Emit owned/mod.rs and borrowed/mod.rs for all active schemas.
-    let active_specs: Vec<&ir::MessageSpec> = specs.iter().filter(|s| should_emit(s)).collect();
-    let owned_mod = emit::mod_rs::emit(
-        &active_specs,
-        emit::wrappers::Flavor::Owned,
-        &schemas_sha,
-        has_common_owned,
-    );
-    let borrowed_mod = emit::mod_rs::emit(
-        &active_specs,
-        emit::wrappers::Flavor::Borrowed,
-        &schemas_sha,
-        has_common_borrowed,
-    );
-    std::fs::write(protocol_src.join("owned").join("mod.rs"), owned_mod)?;
-    std::fs::write(protocol_src.join("borrowed").join("mod.rs"), borrowed_mod)?;
-    count += 2;
-
-    // When namespaced, write the namespace-level mod.rs declaring the two flavor mods.
-    if let Some(_ns) = namespace {
-        let body = "pub mod borrowed;\npub mod owned;\n";
-        std::fs::write(protocol_src.join("mod.rs"), body)?;
-    }
 
     // Always emit the ApiKey enum and differential dispatch table at the top level,
     // but NOT inside a namespace dir — those files reference top-level types and
@@ -332,5 +302,50 @@ fn run(
         count += 1;
     }
 
+    Ok(count)
+}
+
+fn write_module_files(
+    specs: &[ir::MessageSpec],
+    common_owned: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    common_borrowed: &std::collections::BTreeMap<String, std::collections::BTreeSet<String>>,
+    schemas_sha: &str,
+    protocol_src: &std::path::Path,
+    namespace: Option<&str>,
+) -> Result<usize, RunError> {
+    let mut count = write_common_wrapper_tree(
+        common_owned,
+        emit::wrappers::Flavor::Owned,
+        schemas_sha,
+        protocol_src,
+    )?;
+    count += write_common_wrapper_tree(
+        common_borrowed,
+        emit::wrappers::Flavor::Borrowed,
+        schemas_sha,
+        protocol_src,
+    )?;
+    let active: Vec<_> = specs.iter().filter(|spec| should_emit(spec)).collect();
+    let owned = emit::mod_rs::emit(
+        &active,
+        emit::wrappers::Flavor::Owned,
+        schemas_sha,
+        !common_owned.is_empty(),
+    );
+    let borrowed = emit::mod_rs::emit(
+        &active,
+        emit::wrappers::Flavor::Borrowed,
+        schemas_sha,
+        !common_borrowed.is_empty(),
+    );
+    std::fs::write(protocol_src.join("owned/mod.rs"), owned)?;
+    std::fs::write(protocol_src.join("borrowed/mod.rs"), borrowed)?;
+    count += 2;
+    if namespace.is_some() {
+        std::fs::write(
+            protocol_src.join("mod.rs"),
+            "pub mod borrowed;\npub mod owned;\n",
+        )?;
+    }
     Ok(count)
 }

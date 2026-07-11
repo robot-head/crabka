@@ -24,9 +24,7 @@ use super::{
 const DEFAULT_KDC_URL: &str = "tcp://localhost:88";
 
 /// Max clock skew tolerated when validating an incoming AP-REQ.
-// `Duration::from_mins` is still unstable; spell the skew out in seconds.
-#[allow(clippy::duration_suboptimal_units)]
-const MAX_TIME_SKEW: std::time::Duration = std::time::Duration::from_secs(300);
+const MAX_TIME_SKEW: std::time::Duration = std::time::Duration::from_mins(5);
 
 fn kdc_url_from_env() -> String {
     std::env::var("SSPI_KDC_URL").unwrap_or_else(|_| DEFAULT_KDC_URL.to_string())

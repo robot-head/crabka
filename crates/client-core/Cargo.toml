@@ -21,7 +21,6 @@ default = []
 mock = []
 
 [dependencies]
-assert2 = { workspace = true }
 crabka-protocol = { version = "0.3.9", path = "../protocol", default-features = false }
 crabka-security = { version = "0.3.9", path = "../security" }
 crabka-ids = { version = "0.3.8", path = "../ids" }
@@ -39,6 +38,7 @@ rustls-pki-types = { workspace = true }
 tokio-rustls = { workspace = true }
 
 [dev-dependencies]
+assert2 = { workspace = true }
 mockall = { workspace = true }
 mutants = { workspace = true }
 proptest = { workspace = true }

@@ -359,6 +359,7 @@ fn resource_type_str(t: ResourceType) -> &'static str {
 mod tests {
     use std::net::SocketAddr;
 
+    use assert2::assert;
     use crabka_metadata::MetadataImage;
     use crabka_security::{AuthMethod, Principal};
     use uuid::Uuid;
@@ -388,7 +389,7 @@ mod tests {
             (AclOperation::Write, "Write"),
             (AclOperation::TwoPhaseCommit, "TwoPhaseCommit"),
         ] {
-            assert2::assert!(operation_str(op) == want);
+            assert!(operation_str(op) == want, "{op:?}");
         }
     }
 
@@ -431,9 +432,7 @@ mod tests {
         let image = img();
         let p = test_principal("admin");
         let h = host();
-        assert2::assert!(
-            auth.authorize(&image, &req(&p, &h, "anything")) == AuthorizationResult::Allow
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "anything")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -451,8 +450,8 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert2::assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
-        assert2::assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -470,14 +469,10 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert2::assert!(
-            auth.authorize(&image, &req(&p, &h, "fresh-topic")) == AuthorizationResult::Allow
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "fresh-topic")) == AuthorizationResult::Allow);
         // Cache populated; introspect by asserting a second call doesn't
         // bump the mock's request count when the assertion fires on drop.
-        assert2::assert!(
-            auth.authorize(&image, &req(&p, &h, "fresh-topic")) == AuthorizationResult::Allow
-        );
+        assert!(auth.authorize(&image, &req(&p, &h, "fresh-topic")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -507,11 +502,11 @@ mod tests {
         let p = test_principal("alice");
         let h = host();
         // Cache miss -> HTTP call #1; caches the decision with expires_at = now+10ms.
-        assert2::assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
         // Advance the mock clock past the TTL so the cached entry is now stale.
         clock.advance(Duration::from_millis(50));
         // Cache entry expired -> HTTP call #2 (verified by the mock's expect(2)).
-        assert2::assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -527,7 +522,7 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert2::assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -542,7 +537,7 @@ mod tests {
         let image = img();
         let p = test_principal("alice");
         let h = host();
-        assert2::assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
+        assert!(auth.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -562,14 +557,10 @@ mod tests {
 
         let auth_open =
             OpaAuthorizer::new(HashSet::new(), opa_url(&mock), true, 100, 60_000).unwrap();
-        assert2::assert!(
-            auth_open.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow
-        );
+        assert!(auth_open.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Allow);
 
         let auth_closed =
             OpaAuthorizer::new(HashSet::new(), opa_url(&mock), false, 100, 60_000).unwrap();
-        assert2::assert!(
-            auth_closed.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny
-        );
+        assert!(auth_closed.authorize(&image, &req(&p, &h, "t")) == AuthorizationResult::Deny);
     }
 }

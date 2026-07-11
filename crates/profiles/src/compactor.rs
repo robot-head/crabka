@@ -70,6 +70,9 @@ pub fn plan_compactions(index: &ProfileIndex, max_blocks_per_job: usize) -> Vec<
     jobs
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn compact_once(
     store: &Arc<dyn ObjectStore>,
     index: &mut ProfileIndex,
@@ -78,6 +81,9 @@ pub async fn compact_once(
     compact_once_with_policy(store, index, max_blocks_per_job, None).await
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn compact_once_with_policy(
     store: &Arc<dyn ObjectStore>,
     index: &mut ProfileIndex,
@@ -102,6 +108,9 @@ pub async fn compact_once_with_policy(
     Ok(metas)
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn compact_blocks(
     store: &Arc<dyn ObjectStore>,
     index: &mut ProfileIndex,
@@ -112,6 +121,9 @@ pub async fn compact_blocks(
     compact_blocks_with_policy(store, index, tenant, input_keys, output_key, None).await
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn compact_blocks_with_policy(
     store: &Arc<dyn ObjectStore>,
     index: &mut ProfileIndex,
@@ -239,8 +251,8 @@ fn downsample_batches(
         let sample_values = batch.column(value_idx).as_primitive::<Int64Type>();
         let partitions = batch.column(partition_idx).as_primitive::<UInt64Type>();
         let total_values = batch.column(total_idx).as_primitive::<Int64Type>();
-        let span_ids = batch.column(span_idx).as_primitive::<UInt64Type>();
-        let trace_ids = batch
+        let span_identifiers = batch.column(span_idx).as_primitive::<UInt64Type>();
+        let trace_identifiers = batch
             .column(trace_idx)
             .as_any()
             .downcast_ref::<BinaryArray>()
@@ -261,8 +273,9 @@ fn downsample_batches(
                 profile_type: profile_values.value(profile_pos).to_string(),
                 stacktrace_id: stacktrace_ids.value(row),
                 stacktrace_partition: partitions.value(row),
-                span_id: (!span_ids.is_null(row)).then(|| span_ids.value(row)),
-                trace_id: (!trace_ids.is_null(row)).then(|| trace_ids.value(row).to_vec()),
+                span_id: (!span_identifiers.is_null(row)).then(|| span_identifiers.value(row)),
+                trace_id: (!trace_identifiers.is_null(row))
+                    .then(|| trace_identifiers.value(row).to_vec()),
             };
             let entry = values.entry(key).or_insert((0, 0));
             entry.0 += sample_values.value(row);
@@ -486,7 +499,7 @@ async fn write_batches(
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use crabka_blockstore::{BlockIndex, Labels};
     use crabka_pprof::{EngineOpts, FlameEngine};
     use object_store::{ObjectStore, memory::InMemory};
@@ -533,8 +546,8 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(meta.row_count == 2);
-        assert2::assert!(
+        assert!(meta.row_count == 2);
+        assert!(
             BlockIndex::candidate_blocks(&index, "t", 0, i64::MAX) == vec![meta.object_key.clone()]
         );
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
@@ -587,7 +600,7 @@ mod tests {
         .await
         .unwrap();
 
-        assert2::assert!(meta.row_count == 2);
+        assert!(meta.row_count == 2);
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
         let engine = FlameEngine::new(cold, EngineOpts::default());
         let fg = engine
@@ -595,7 +608,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(fg.total == 13);
+        assert!(fg.total == 13);
     }
 
     #[tokio::test]
@@ -659,9 +672,12 @@ mod tests {
                 .select_merge_stacktraces("t", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
                 .await
                 .unwrap();
-            assert2::assert!(before.total == 36);
+            assert!(before.total == 36);
             for name in ["alpha", "bravo", "charlie", "delta"] {
-                assert2::assert!(before.names.iter().any(|leaf| leaf == name));
+                assert!(
+                    before.names.iter().any(|leaf| leaf == name),
+                    "{name} missing"
+                );
             }
             drop(engine);
             Arc::try_unwrap(shared).unwrap_or_else(|_| panic!("sole owner after query"))
@@ -678,15 +694,18 @@ mod tests {
         )
         .await
         .unwrap();
-        assert2::assert!(c3.row_count == 4);
+        assert!(c3.row_count == 4);
 
         // After re-compaction every input partition must survive as a distinct
         // destination partition: four source partitions (two per input block)
         // must produce four distinct destinations with no aliasing.
         let final_partitions = index.stacktrace_partitions(&c3.object_key);
-        assert2::assert!(final_partitions.len() == 4);
+        assert!(final_partitions.len() == 4, "{final_partitions:?}");
         let distinct: BTreeSet<u64> = final_partitions.iter().copied().collect();
-        assert2::assert!(distinct.len() == 4);
+        assert!(
+            distinct.len() == 4,
+            "partitions aliased: {final_partitions:?}"
+        );
 
         // Query results unchanged after the second compaction.
         let cold = Arc::new(ColdProfileStore::new(store, Arc::new(index)));
@@ -695,9 +714,9 @@ mod tests {
             .select_merge_stacktraces("t", PT, r#"{service_name="api"}"#, 0, i64::MAX, 0)
             .await
             .unwrap();
-        assert2::assert!(after.total == before_total);
+        assert!(after.total == before_total);
         for name in ["alpha", "bravo", "charlie", "delta"] {
-            assert2::assert!(after.names.iter().any(|leaf| leaf == name));
+            assert!(after.names.iter().any(|leaf| leaf == name), "{name} lost");
         }
     }
 
@@ -709,7 +728,7 @@ mod tests {
         let sources = [1_u64 << 32, 2_u64 << 32, 3_u64 << 32];
         let map = destination_partitions(1, &sources).unwrap();
         let base = 2_u64 << 32;
-        assert2::assert!(
+        assert!(
             map == BTreeMap::from([
                 (1_u64 << 32, base),
                 (2_u64 << 32, base | 1),
@@ -717,7 +736,7 @@ mod tests {
             ])
         );
         let dests: BTreeSet<u64> = map.values().copied().collect();
-        assert2::assert!(dests.len() == 3);
+        assert!(dests.len() == 3);
     }
 
     #[test]
@@ -754,11 +773,8 @@ mod tests {
 
         let jobs = plan_compactions(&index, 2);
 
-        assert2::assert!(jobs.len() == 1);
-        assert2::assert!(
-            jobs[0].input_keys.as_slice()
-                == &["a.parquet".to_string(), "b.parquet".to_string()][..]
-        );
+        assert!(jobs.len() == 1);
+        assert!(jobs[0].input_keys == vec!["a.parquet".to_string(), "b.parquet".to_string()]);
     }
 
     fn record(tenant: &str, service: &str, value: i64, function: &str) -> ProfileRecord {

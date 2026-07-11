@@ -71,19 +71,19 @@ mod tests {
     fn outer_key_roundtrips_and_sorts_by_time() {
         let k1 = outer_key(5, true, b"k");
         let k2 = outer_key(7, false, b"k");
-        assert2::assert!(outer_key_ts(&k1) == 5);
-        assert2::assert!(outer_key_side_left(&k1));
-        assert2::assert!(outer_key_key_bytes(&k1) == b"k");
-        assert2::assert!(!outer_key_side_left(&k2));
-        assert2::assert!(k2 > k1); // sorts by timestamp (8-byte BE prefix)
+        assert_eq!(outer_key_ts(&k1), 5);
+        assert!(outer_key_side_left(&k1));
+        assert_eq!(outer_key_key_bytes(&k1), b"k");
+        assert!(!outer_key_side_left(&k2));
+        assert!(k2 > k1); // sorts by timestamp (8-byte BE prefix)
     }
 
     #[test]
     fn outer_value_tags_left_and_right() {
         let l = outer_value_left(b"a");
         let r = outer_value_right(b"b");
-        assert2::assert!(outer_value_decode(&l) == (true, &b"a"[..]));
-        assert2::assert!(outer_value_decode(&r) == (false, &b"b"[..]));
+        assert_eq!(outer_value_decode(&l), (true, &b"a"[..]));
+        assert_eq!(outer_value_decode(&r), (false, &b"b"[..]));
     }
 
     #[test]
@@ -92,6 +92,6 @@ mod tests {
         t.advance(5);
         t.advance(3);
         t.advance(9);
-        assert2::assert!(t.stream_time == 9);
+        assert_eq!(t.stream_time, 9);
     }
 }

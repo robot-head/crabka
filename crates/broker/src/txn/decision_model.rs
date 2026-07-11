@@ -89,7 +89,10 @@ fn rebuild(s: &TxnProj) -> TxnEntry {
 /// Record a terminal outcome for `epoch`, asserting it has not already
 /// finalized either way (single-finalize + no-commit-and-abort per generation).
 fn record(committed: &mut Vec<i16>, aborted: &mut Vec<i16>, epoch: i16, is_commit: bool) {
-    assert2::assert!(!committed.contains(&epoch) && !aborted.contains(&epoch));
+    assert!(
+        !committed.contains(&epoch) && !aborted.contains(&epoch),
+        "epoch {epoch} finalized twice (commit={is_commit}); committed={committed:?} aborted={aborted:?}"
+    );
     let v = if is_commit { committed } else { aborted };
     v.push(epoch);
     v.sort_unstable();
@@ -153,7 +156,7 @@ impl Model for TxnModel {
                 s.state = TxnState::Empty.to_kafka_status();
                 // `pending` is intentionally retained: a pending EndTxn from the
                 // old epoch must still run Phase 3 and be REJECTED (fenced).
-                assert2::assert!(s.epoch >= last.epoch);
+                assert!(s.epoch >= last.epoch, "epoch regressed on Init");
                 Some(s)
             }
             TxnAction::BeginTxn => {
@@ -202,7 +205,12 @@ impl Model for TxnModel {
                     } => {
                         // HEADLINE: a Proceed must NOT be a fenced producer — the
                         // current epoch must still match what Phase 1 captured.
-                        assert2::assert!(p.expected_epoch == s.epoch);
+                        assert!(
+                            p.expected_epoch == s.epoch,
+                            "fenced producer finalized: expected_epoch={} current_epoch={}",
+                            p.expected_epoch,
+                            s.epoch
+                        );
                         record(
                             &mut s.committed,
                             &mut s.aborted,
@@ -212,7 +220,7 @@ impl Model for TxnModel {
                         s.state = next_state.to_kafka_status();
                         s.epoch = response_epoch; // TV_2 bumps on completion
                         s.pending = None;
-                        assert2::assert!(s.epoch >= last.epoch);
+                        assert!(s.epoch >= last.epoch, "epoch regressed on completion");
                         Some(s)
                     }
                     CompletionDecision::AlreadyComplete { .. } => {
@@ -223,7 +231,10 @@ impl Model for TxnModel {
                     CompletionDecision::Reject(_) => {
                         // Fenced or state advanced: must NOT finalize. Assert the
                         // reject is justified (producer was fenced).
-                        assert2::assert!(p.expected_epoch != s.epoch || s.state != p.prepare);
+                        assert!(
+                            p.expected_epoch != s.epoch || s.state != p.prepare,
+                            "EndTxn rejected without a fencing/state reason"
+                        );
                         s.pending = None;
                         Some(s)
                     }
@@ -278,8 +289,14 @@ fn run(model: TxnModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < MAX_STATES);
+    assert!(
+        checker.max_depth() < MAX_DEPTH,
+        "[{label}] hit depth cap {MAX_DEPTH}: depth-truncated, not exhaustive"
+    );
+    assert!(
+        checker.state_count() < MAX_STATES,
+        "[{label}] hit state cap {MAX_STATES}: truncated, not exhaustive"
+    );
     checker.assert_properties();
 }
 

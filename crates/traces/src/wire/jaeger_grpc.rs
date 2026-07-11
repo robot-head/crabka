@@ -10,11 +10,13 @@ use crate::{
     },
 };
 
-#[allow(clippy::all, clippy::pedantic, clippy::nursery)]
 pub mod api_v2 {
     tonic::include_proto!("jaeger.api_v2");
 }
 
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_jaeger_grpc_batch(batch: api_v2::Batch) -> Result<Vec<Span>, WireError> {
     let batch_process = batch
         .process

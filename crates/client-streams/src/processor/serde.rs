@@ -16,6 +16,8 @@ pub struct SerdeError(pub String);
 )]
 pub trait Serde<T>: Send + Sync + 'static {
     fn serialize(&self, topic: &str, value: &T) -> Bytes;
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     fn deserialize(&self, topic: &str, bytes: &[u8]) -> Result<T, SerdeError>;
 
     /// Pre-register any per-topic state (e.g. a schema-registry subject) before
@@ -232,12 +234,10 @@ fn write_varint(n: usize, buf: &mut Vec<u8>) {
     let mut v = (n as u64) << 1;
     loop {
         if v < 0x80 {
-            #[allow(clippy::cast_possible_truncation)]
-            buf.push(v as u8);
+            buf.push(v.to_le_bytes()[0]);
             break;
         }
-        #[allow(clippy::cast_possible_truncation)]
-        buf.push((v as u8) | 0x80);
+        buf.push(v.to_le_bytes()[0] | 0x80);
         v >>= 7;
     }
 }
@@ -443,16 +443,9 @@ mod tests {
             old: Some(4i64),
             new: None,
         };
-        for (name, value) in [
-            ("both", both),
-            ("new_only", new_only),
-            ("old_only", old_only),
-        ] {
-            check!(
-                hex(&s.serialize("topic", &value)) == g[name].as_str().unwrap(),
-                "case {name}"
-            );
-        }
+        check!(hex(&s.serialize("topic", &both)) == g["both"].as_str().unwrap());
+        check!(hex(&s.serialize("topic", &new_only)) == g["new_only"].as_str().unwrap());
+        check!(hex(&s.serialize("topic", &old_only)) == g["old_only"].as_str().unwrap());
     }
 
     #[test]

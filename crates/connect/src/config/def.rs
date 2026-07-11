@@ -143,6 +143,8 @@ impl ConfigDef {
 
     /// Add an optional configuration key with a default value.
     #[must_use]
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn default(
         mut self,
         name: impl Into<String>,
@@ -173,6 +175,8 @@ impl ConfigDef {
     }
 
     /// Validate raw configuration and resolve secret references.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn resolve(
         &self,
         raw: RawConfig,
@@ -183,6 +187,8 @@ impl ConfigDef {
     }
 
     /// Validate raw configuration and resolve secret references with options.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn resolve_with_options(
         &self,
         raw: RawConfig,

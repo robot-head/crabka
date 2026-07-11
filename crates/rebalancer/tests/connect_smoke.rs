@@ -10,8 +10,6 @@
 //! ...)` verbatim, matching the canonical Connect/gRPC path format
 //! (`<package>.<Service>/<Method>`).
 
-#![allow(clippy::pedantic)]
-
 use std::time::{Duration, Instant};
 
 use crabka_broker::{Broker, BrokerConfig};

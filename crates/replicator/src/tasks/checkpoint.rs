@@ -162,21 +162,12 @@ impl CheckpointTask {
     /// 3. Calls [`run_once`] to write translated checkpoints.
     ///
     /// Errors in any cycle are logged as warnings; the loop continues until shutdown.
-    ///
-    /// # Errors
-    /// Returns [`ReplicatorError`] only if initial setup fails (currently infallible;
-    /// error type is reserved for future validation).
-    #[allow(clippy::unused_async)]
     #[tracing::instrument(
         level = "info",
         skip_all,
         fields(source_alias = %params.source_alias, interval_ms = interval.as_millis()),
-        err,
     )]
-    pub async fn start(
-        params: CheckpointParams,
-        interval: std::time::Duration,
-    ) -> Result<Self, ReplicatorError> {
+    pub fn start(params: CheckpointParams, interval: std::time::Duration) -> Self {
         let (shutdown_tx, mut shutdown_rx) = tokio::sync::watch::channel(false);
 
         let handle = tokio::spawn(async move {
@@ -225,10 +216,10 @@ impl CheckpointTask {
             }
         });
 
-        Ok(Self {
+        Self {
             handle,
             shutdown: shutdown_tx,
-        })
+        }
     }
 
     /// Signal the task to stop and await its completion.

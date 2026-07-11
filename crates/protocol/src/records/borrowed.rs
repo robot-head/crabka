@@ -251,13 +251,15 @@ impl RecordBatch<'_> {
     /// not from the original input buffer. For uncompressed batches the
     /// backing memory is the input buffer; for compressed batches it is the
     /// batch's internal decompressed `Bytes`.
+    /// # Panics
+    /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
     pub fn iter(&self) -> RecordIter<'_> {
         let body: &[u8] = match &self.body {
             RecordBody::Borrowed(s) => s,
             RecordBody::Owned(b) => b.as_ref(),
         };
-        #[allow(clippy::cast_sign_loss)] // guarded by .max(0) above
-        let count = self.header.records_count.get().max(0) as usize;
+        let count = usize::try_from(self.header.records_count.get().max(0))
+            .expect("non-negative record count must fit in usize");
         RecordIter {
             remaining: body,
             count,
@@ -322,8 +324,7 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
     if buf.is_empty() {
         return Err(RecordsError::RecordParse("record body empty".into()));
     }
-    #[allow(clippy::cast_possible_wrap)] // intentional: Kafka attributes are i8 on the wire
-    let attributes = buf[0] as i8;
+    let attributes = i8::from_ne_bytes([buf[0]]);
     *buf = &buf[1..];
     let timestamp_delta =
         get_varlong(buf).map_err(|e| RecordsError::RecordParse(format!("timestamp_delta: {e}")))?;
@@ -343,8 +344,10 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
     // Bound pre-allocation: a record header is at least 1 byte on the wire, so
     // an honest `header_count` can never exceed the bytes left in the record
     // body. Clamp the capacity hint to reject huge declared counts.
-    #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
-    let mut headers = Vec::with_capacity((header_count as usize).min(buf.len()));
+    let header_capacity = usize::try_from(header_count)
+        .expect("non-negative header count must fit in usize")
+        .min(buf.len());
+    let mut headers = Vec::with_capacity(header_capacity);
     for i in 0..header_count {
         let key_len = get_varint(buf)
             .map_err(|e| RecordsError::RecordParse(format!("header[{i}] key length: {e}")))?;
@@ -353,8 +356,7 @@ fn parse_body<'a>(buf: &mut &'a [u8]) -> Result<Record<'a>, RecordsError> {
                 "header[{i}] negative key length"
             )));
         }
-        #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
-        let n = key_len as usize;
+        let n = usize::try_from(key_len).expect("non-negative key length must fit in usize");
         if buf.len() < n {
             return Err(RecordsError::BodyTooShort {
                 needed: n - buf.len(),
@@ -391,8 +393,7 @@ fn read_nullable_slice<'a>(
     if len < 0 {
         Ok(None)
     } else {
-        #[allow(clippy::cast_sign_loss)] // guarded by < 0 check above
-        let n = len as usize;
+        let n = usize::try_from(len).expect("non-negative value length must fit in usize");
         if buf.len() < n {
             return Err(RecordsError::BodyTooShort {
                 needed: n - buf.len(),
@@ -409,6 +410,8 @@ fn read_nullable_slice<'a>(
 impl RecordBatch<'_> {
     /// Materialise an owned `RecordBatch` by copying every byte slice into
     /// `Bytes` / `String`.
+    /// # Errors
+    /// Returns the underlying protocol error when input is truncated, contains an invalid length or tag, or cannot be encoded for the selected version.
     pub fn to_owned(&self) -> Result<super::owned::RecordBatch, RecordsError> {
         let mut records = Vec::new();
         for r in self {

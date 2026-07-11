@@ -28,8 +28,6 @@
 // Docker-driven capture harness, not production code, so the pedantic group is
 // allowed wholesale (e.g. `doc_markdown`, `redundant_closure_for_method_calls`,
 // `duration_suboptimal_units`).
-#![allow(clippy::pedantic)]
-
 use std::{
     net::SocketAddr,
     path::{Path, PathBuf},
@@ -202,7 +200,7 @@ impl Drop for ContainerGuard {
 
 /// Poll `GET /subjects` until 200 or timeout. Returns once ready.
 async fn wait_for_registry(http: &reqwest::Client, base: &str, container_id: &str) {
-    let deadline = Instant::now() + Duration::from_secs(120);
+    let deadline = Instant::now() + Duration::from_mins(2);
     let url = format!("{base}/subjects");
     let mut last: Option<String> = None;
     while Instant::now() < deadline {
@@ -273,7 +271,7 @@ fn extract_id(body: &str) -> i64 {
     let v: serde_json::Value =
         serde_json::from_str(body).unwrap_or_else(|e| panic!("parse id from {body}: {e}"));
     v.get("id")
-        .and_then(|x| x.as_i64())
+        .and_then(serde_json::Value::as_i64)
         .unwrap_or_else(|| panic!("no integer `id` in {body}"))
 }
 
@@ -290,7 +288,7 @@ fn error_fixture_json(status: reqwest::StatusCode, raw_body: &str) -> String {
 
 // ── raw _schemas read ────────────────────────────────────────────────────────
 
-/// Resolve the `_schemas` topic id via AdminClient on the direct host address.
+/// Resolve the `_schemas` topic id via `AdminClient` on the direct host address.
 async fn resolve_schemas_topic_id() -> WireUuid {
     let mut admin = AdminClient::connect(&[DIRECT_ADDR.to_string()])
         .await

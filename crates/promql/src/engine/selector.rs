@@ -1,6 +1,7 @@
 use std::{collections::BTreeSet, time::SystemTime};
 
 use crabka_blockstore::{LabelMatcher, Labels, MatchOp};
+use num_traits::ToPrimitive;
 use promql_parser::{
     label as prom_label,
     parser::{AtModifier, Offset, VectorSelector},
@@ -237,12 +238,8 @@ fn apply_offset_delta(time_ms: i64, offset_ms: i64) -> Result<i64> {
         .ok_or_else(|| PromqlError::Plan("offset evaluation time overflow".to_string()))
 }
 
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "PromQL timestamps are represented as f64 seconds"
-)]
 pub(super) fn timestamp_seconds(timestamp_ms: i64) -> f64 {
-    timestamp_ms as f64 / 1000.0
+    timestamp_ms.to_f64().unwrap_or(f64::MAX) / 1000.0
 }
 
 pub(super) fn duration_ms(duration: std::time::Duration) -> Result<i64> {

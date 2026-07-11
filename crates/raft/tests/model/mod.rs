@@ -260,9 +260,8 @@ impl ConsensusModel {
     /// minus the timer arming (timeouts are model actions here).
     // A single match over every `Action` variant: long by nature, and `action`
     // is logically consumed (translated) here, so take it by value.
-    #[allow(clippy::too_many_lines, clippy::needless_pass_by_value)]
-    fn apply_action(&self, state: &mut ModelState, id: NodeId, action: Action) {
-        match action {
+    fn apply_action(&self, state: &mut ModelState, id: NodeId, action: &Action) {
+        match action.clone() {
             Action::SendVoteRequest { epoch, pre_vote } => {
                 let cand_log = state.nodes[&id].log.log_end();
                 for &peer in &self.voter_ids {
@@ -321,46 +320,7 @@ impl ConsensusModel {
                     }
                 }
             }
-            Action::SendFetch { leader_id } => {
-                // Replicate any missing entries from the leader, then fetch at
-                // the follower's (now-advanced) tip so the leader can advance HWM.
-                if leader_id != id
-                    && state
-                        .nodes
-                        .get(&leader_id)
-                        .is_some_and(|n| n.machine.role().is_leader())
-                {
-                    let leader_log = state.nodes[&leader_id].log.clone();
-                    let leader_hwm = node_high_watermark(&state.nodes[&leader_id]);
-                    let f = state.nodes.get_mut(&id).expect("fetcher exists");
-                    f.log.replicate_from(&leader_log);
-                    f.high_watermark = leader_hwm.min(f.log.end_offset());
-                }
-                let (fetch_epoch, fetch_offset) = {
-                    let log = &state.nodes[&id].log;
-                    (log.last_epoch(), log.end_offset())
-                };
-                // Single outstanding fetch per follower (one Kafka fetch
-                // connection): a new fetch supersedes any in-flight one from this
-                // node. Without this, the unordered network could deliver a stale
-                // lower-offset fetch after a newer one, regressing the leader's
-                // recorded follower progress — which the production core forbids
-                // (`handle_fetch` overwrites `progress.fetch_offset`
-                // unconditionally, relying on per-follower fetch offsets arriving
-                // monotonically, as they do over a single TCP connection).
-                state
-                    .network
-                    .retain(|e| !(e.src == id && matches!(e.event, Event::ReceiveFetch { .. })));
-                state.network.insert(Envelope {
-                    src: id,
-                    dst: leader_id,
-                    event: Event::ReceiveFetch {
-                        from: id,
-                        fetch_epoch,
-                        fetch_offset,
-                    },
-                });
-            }
+            Action::SendFetch { leader_id } => Self::apply_fetch_action(state, id, leader_id),
             Action::AppendLeaderChange { epoch } => {
                 state
                     .nodes
@@ -400,6 +360,47 @@ impl ConsensusModel {
             // + role-transition signals have no cross-node effect in the model.
             Action::ResetTimer { .. } | Action::TransitionedTo(_) | Action::PersistQuorumState => {}
         }
+    }
+
+    fn apply_fetch_action(state: &mut ModelState, id: NodeId, leader_id: NodeId) {
+        // Replicate any missing entries from the leader, then fetch at
+        // the follower's (now-advanced) tip so the leader can advance HWM.
+        if leader_id != id
+            && state
+                .nodes
+                .get(&leader_id)
+                .is_some_and(|n| n.machine.role().is_leader())
+        {
+            let leader_log = state.nodes[&leader_id].log.clone();
+            let leader_hwm = node_high_watermark(&state.nodes[&leader_id]);
+            let f = state.nodes.get_mut(&id).expect("fetcher exists");
+            f.log.replicate_from(&leader_log);
+            f.high_watermark = leader_hwm.min(f.log.end_offset());
+        }
+        let (fetch_epoch, fetch_offset) = {
+            let log = &state.nodes[&id].log;
+            (log.last_epoch(), log.end_offset())
+        };
+        // Single outstanding fetch per follower (one Kafka fetch
+        // connection): a new fetch supersedes any in-flight one from this
+        // node. Without this, the unordered network could deliver a stale
+        // lower-offset fetch after a newer one, regressing the leader's
+        // recorded follower progress — which the production core forbids
+        // (`handle_fetch` overwrites `progress.fetch_offset`
+        // unconditionally, relying on per-follower fetch offsets arriving
+        // monotonically, as they do over a single TCP connection).
+        state
+            .network
+            .retain(|e| !(e.src == id && matches!(e.event, Event::ReceiveFetch { .. })));
+        state.network.insert(Envelope {
+            src: id,
+            dst: leader_id,
+            event: Event::ReceiveFetch {
+                from: id,
+                fetch_epoch,
+                fetch_offset,
+            },
+        });
     }
 
     /// Deliver `event` to `dst`: run the real machine and translate emitted
@@ -443,7 +444,7 @@ impl ConsensusModel {
             if fetch_from.is_some() && matches!(action, Action::TruncateTo(_)) {
                 continue;
             }
-            self.apply_action(state, dst, action);
+            self.apply_action(state, dst, &action);
         }
     }
 }
@@ -601,7 +602,7 @@ impl Model for ConsensusModel {
                     return None;
                 }
                 if !state.crashed.contains(&env.dst) {
-                    self.step(&mut state, env.dst, env.event.clone());
+                    self.step(&mut state, env.dst, env.event);
                 }
             }
             ModelAction::Crash(id) => {

@@ -10,19 +10,20 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 2;
 pub const FLEXIBLE_MIN: i16 = 2;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct RenewDelegationTokenRequest<'a> {
     pub hmac: &'a [u8],
     pub renew_period_ms: i64,
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl RenewDelegationTokenRequest<'_> {
-    pub fn to_owned(
-        &self,
-    ) -> crate::owned::renew_delegation_token_request::RenewDelegationTokenRequest {
+    #[must_use]
+    pub fn to_owned(&self) -> crate::owned::renew_delegation_token_request::RenewDelegationTokenRequest {
         crate::owned::renew_delegation_token_request::RenewDelegationTokenRequest {
             hmac: Bytes::copy_from_slice(self.hmac),
             renew_period_ms: (self.renew_period_ms),
@@ -33,18 +34,11 @@ impl RenewDelegationTokenRequest<'_> {
 impl Encode for RenewDelegationTokenRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
-            if flex {
-                put_compact_bytes(buf, self.hmac);
-            } else {
-                put_bytes(buf, self.hmac);
-            }
+            if flex { put_compact_bytes(buf, self.hmac) } else { put_bytes(buf, self.hmac) }
         }
         if version >= 0 {
             put_i64(buf, self.renew_period_ms);
@@ -60,9 +54,7 @@ impl Encode for RenewDelegationTokenRequest<'_> {
         let mut n: usize = 0;
         if version >= 0 {
             n += if flex {
-                crate::primitives::varint::uvarint_len(
-                    u32::try_from((self.hmac).len() + 1).unwrap(),
-                ) + (self.hmac).len()
+                crate::primitives::varint::uvarint_len(u32::try_from((self.hmac).len() + 1).unwrap()) + (self.hmac).len()
             } else {
                 4 + (self.hmac).len()
             };
@@ -80,19 +72,12 @@ impl Encode for RenewDelegationTokenRequest<'_> {
 impl<'de> DecodeBorrow<'de> for RenewDelegationTokenRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
         if version >= 0 {
-            out.hmac = if flex {
-                get_compact_bytes_borrowed(buf)?
-            } else {
-                get_bytes_borrowed(buf)?
-            };
+            out.hmac = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? };
         }
         if version >= 0 {
             out.renew_period_ms = get_i64(buf)?;

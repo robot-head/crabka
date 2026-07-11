@@ -19,6 +19,8 @@ use crate::{AuthError, AuthMethod, Principal};
     fields(mechanism = "PLAIN", user = %user),
     err
 )]
+/// # Errors
+/// Returns an error when credentials or key material are invalid, cryptographic verification fails, or the TLS, SASL, or Kerberos exchange is rejected.
 pub fn verify_plain<S: BuildHasher>(
     creds: &HashMap<String, String, S>,
     user: &str,

@@ -126,27 +126,28 @@ impl TxnEntry {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn empty_to_ongoing_allowed() {
-        assert2::assert!(TxnState::Empty.can_transition_to(TxnState::Ongoing));
+        assert!(TxnState::Empty.can_transition_to(TxnState::Ongoing));
     }
 
     #[test]
     fn empty_to_prepare_commit_disallowed() {
-        assert2::assert!(!TxnState::Empty.can_transition_to(TxnState::PrepareCommit));
+        assert!(!TxnState::Empty.can_transition_to(TxnState::PrepareCommit));
     }
 
     #[test]
     fn ongoing_to_complete_commit_disallowed_without_prepare() {
-        assert2::assert!(!TxnState::Ongoing.can_transition_to(TxnState::CompleteCommit));
+        assert!(!TxnState::Ongoing.can_transition_to(TxnState::CompleteCommit));
     }
 
     #[test]
     fn complete_commit_to_empty_for_reuse() {
-        assert2::assert!(TxnState::CompleteCommit.can_transition_to(TxnState::Empty));
+        assert!(TxnState::CompleteCommit.can_transition_to(TxnState::Empty));
     }
 
     #[test]
@@ -160,7 +161,7 @@ mod tests {
             TxnState::CompleteAbort,
             TxnState::Dead,
         ] {
-            assert2::assert!(TxnState::from_kafka_status(s.to_kafka_status()) == Some(s));
+            assert!(TxnState::from_kafka_status(s.to_kafka_status()) == Some(s));
         }
     }
 
@@ -172,11 +173,11 @@ mod tests {
             (TxnState::Empty, 0),
             (TxnState::Dead, 6),
         ] {
-            assert2::assert!(state.to_kafka_status() == want);
+            assert!(state.to_kafka_status() == want, "{state:?}");
         }
         // PrepareEpochFence (7) and out-of-range are not modeled.
         for status in [7, -1] {
-            assert2::assert!(TxnState::from_kafka_status(status).is_none());
+            assert!(TxnState::from_kafka_status(status).is_none(), "{status}");
         }
     }
 }

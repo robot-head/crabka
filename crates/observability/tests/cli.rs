@@ -1,3 +1,4 @@
+use assert2::assert;
 use clap::Parser;
 use crabka_observability::{
     QuerierIndexSource, Role, ServiceConfig, build_service_dependencies, run,
@@ -13,8 +14,8 @@ fn parses_explicit_service_targets() {
         let config =
             ServiceConfig::try_parse_from(["crabka-observability", "--target", target]).unwrap();
 
-        assert2::assert!(config.target == expected);
-        assert2::assert!(run(config).unwrap().role == expected);
+        assert!(config.target == expected);
+        assert!(run(config).unwrap().role == expected);
     }
 }
 
@@ -51,7 +52,7 @@ fn parses_querier_object_store_shard_catalog_config() {
     ])
     .unwrap();
 
-    assert2::assert!(
+    assert!(
         config
             == ServiceConfig {
                 target: Role::Querier,
@@ -93,7 +94,7 @@ fn parses_distributor_wal_config() {
     ])
     .unwrap();
 
-    assert2::assert!(
+    assert!(
         config
             == ServiceConfig {
                 target: Role::Distributor,
@@ -137,7 +138,7 @@ fn parses_compactor_wal_consumer_config() {
     ])
     .unwrap();
 
-    assert2::assert!(
+    assert!(
         config
             == ServiceConfig {
                 target: Role::Compactor,
@@ -177,7 +178,7 @@ fn parses_querier_wal_tail_config() {
     ])
     .unwrap();
 
-    assert2::assert!(
+    assert!(
         config
             == ServiceConfig {
                 target: Role::Querier,
@@ -228,7 +229,7 @@ async fn querier_dependencies_require_wal_bootstrap_server() {
     match build_service_dependencies(&config).await {
         Ok(_) => panic!("querier dependencies should require WAL bootstrap config"),
         Err(error) => {
-            assert2::assert!(error.to_string().contains("missing --wal-bootstrap-server"));
+            assert!(error.to_string().contains("missing --wal-bootstrap-server"));
         }
     }
 }
@@ -237,7 +238,7 @@ async fn querier_dependencies_require_wal_bootstrap_server() {
 fn rejects_missing_target() {
     let error = ServiceConfig::try_parse_from(["crabka-observability"]).unwrap_err();
 
-    assert2::assert!(error.to_string().contains("--target"));
+    assert!(error.to_string().contains("--target"));
 }
 
 #[test]
@@ -245,5 +246,5 @@ fn rejects_unknown_target() {
     let error = ServiceConfig::try_parse_from(["crabka-observability", "--target", "ingester"])
         .unwrap_err();
 
-    assert2::assert!(error.to_string().contains("invalid value"));
+    assert!(error.to_string().contains("invalid value"));
 }

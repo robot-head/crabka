@@ -125,6 +125,8 @@ impl ShareConsumer {
         ),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn start(
         #[builder(into)] bootstrap: String,
         #[builder(into, default = "crabka-share-consumer".to_string())] client_id: String,
@@ -286,6 +288,8 @@ impl ShareConsumer {
         fields(group_id = %self.group_id, member_id = %self.member_id),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn close(&mut self) -> Result<(), ConsumerError> {
         // Roll the previous poll's implicit Accepts into the explicit ack queue
         // so the final flush below covers both modes in one ShareAcknowledge.

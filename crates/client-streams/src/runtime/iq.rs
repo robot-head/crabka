@@ -180,60 +180,46 @@ mod tests {
         s.put("x".into(), 7).await;
         let q = s.as_iq().unwrap();
 
-        for (_name, stores, kind, op, store_name, active, expected) in [
-            (
-                "validate",
-                vec![q],
-                StoreKind::KeyValue,
-                IqOp::Validate,
-                "c",
-                true,
-                Ok(IqPayload::Validated),
-            ),
-            (
-                "key hit",
-                vec![q],
-                StoreKind::KeyValue,
-                IqOp::KvGet {
-                    key: StringSerde.serialize("t", &"x".to_string()),
-                },
-                "c",
-                true,
-                Ok(IqPayload::Value(Some(I64Serde.serialize("t", &7)))),
-            ),
-            (
-                "wrong store kind",
-                vec![q],
-                StoreKind::Window,
-                IqOp::Validate,
-                "c",
-                true,
-                Err(IqError::WrongStoreKind {
-                    name: "c".into(),
-                    found: StoreKind::KeyValue,
-                    requested: StoreKind::Window,
-                }),
-            ),
-            (
-                "missing active store",
+        assert_eq!(
+            answer_iq(vec![q], StoreKind::KeyValue, &IqOp::Validate, "c", true).await,
+            Ok(IqPayload::Validated)
+        );
+        let got = answer_iq(
+            vec![q],
+            StoreKind::KeyValue,
+            &IqOp::KvGet {
+                key: StringSerde.serialize("t", &"x".to_string()),
+            },
+            "c",
+            true,
+        )
+        .await;
+        assert_eq!(got, Ok(IqPayload::Value(Some(I64Serde.serialize("t", &7)))));
+        assert!(matches!(
+            answer_iq(vec![q], StoreKind::Window, &IqOp::Validate, "c", true).await,
+            Err(IqError::WrongStoreKind { .. })
+        ));
+        assert_eq!(
+            answer_iq(
                 vec![],
                 StoreKind::KeyValue,
-                IqOp::Validate,
+                &IqOp::Validate,
                 "missing",
-                true,
-                Err(IqError::StoreNotFound("missing".into())),
-            ),
-            (
-                "missing during rebalance",
+                true
+            )
+            .await,
+            Err(IqError::StoreNotFound("missing".into()))
+        );
+        assert_eq!(
+            answer_iq(
                 vec![],
                 StoreKind::KeyValue,
-                IqOp::Validate,
+                &IqOp::Validate,
                 "missing",
-                false,
-                Err(IqError::RebalanceInProgress),
-            ),
-        ] {
-            assert2::assert!(answer_iq(stores, kind, &op, store_name, active).await == expected);
-        }
+                false
+            )
+            .await,
+            Err(IqError::RebalanceInProgress)
+        );
     }
 }

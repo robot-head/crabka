@@ -18,16 +18,13 @@ pub enum ProcessingGuarantee {
 
 /// Streams group metadata for `send_offsets_to_transaction` (maps to the native
 /// `crabka_client_consumer::ConsumerGroupMetadata`).
-// Field names mirror the Kafka `ConsumerGroupMetadata` mapping (group_id /
-// generation_id / member_id / group_instance_id) — keep them verbatim.
-#[allow(clippy::struct_field_names)]
 #[derive(Debug, Clone)]
 pub struct StreamsGroupMeta {
-    pub group_id: String,
+    pub group: String,
     /// The member epoch (next-gen "generation").
-    pub generation_id: i32,
-    pub member_id: String,
-    pub group_instance_id: Option<String>,
+    pub generation: i32,
+    pub member: String,
+    pub group_instance: Option<String>,
 }
 
 /// EOS-v2 transactional producer seam (DI'd; `BrokerTransactionalProducer` in
@@ -61,6 +58,8 @@ pub(crate) mod mock {
 
     use super::*;
 
+    type SentRecord = (String, Option<i32>, Option<Bytes>, Option<Bytes>);
+
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub enum Step {
         Init,
@@ -77,8 +76,7 @@ pub(crate) mod mock {
     pub struct MockTransactionalProducer {
         pub calls: Mutex<Vec<Step>>,
         /// `(topic, partition, key, value)` of each `send` — a test-only record log.
-        #[allow(clippy::type_complexity)]
-        pub sent: Mutex<Vec<(String, Option<i32>, Option<Bytes>, Option<Bytes>)>>,
+        pub sent: Mutex<Vec<SentRecord>>,
         pub fail_at: Mutex<Option<Step>>,
     }
     impl MockTransactionalProducer {
@@ -143,15 +141,8 @@ mod tests {
 
     #[test]
     fn transactional_id_is_stable_per_thread() {
-        for (name, thread, expected) in [
-            ("first thread", 0, "word-count-0"),
-            ("second thread", 1, "word-count-1"),
-        ] {
-            check!(
-                transactional_id("word-count", thread) == expected,
-                "case {name}"
-            );
-        }
+        check!(transactional_id("word-count", 0) == "word-count-0");
+        check!(transactional_id("word-count", 1) == "word-count-1");
     }
 
     #[tokio::test]

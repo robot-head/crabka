@@ -33,6 +33,7 @@ tracing = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 regex = { workspace = true }
+num-traits = { workspace = true }
 xxhash-rust = { workspace = true }
 
 [dev-dependencies]

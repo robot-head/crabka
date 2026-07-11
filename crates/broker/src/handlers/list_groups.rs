@@ -143,8 +143,6 @@ pub(crate) async fn handle(
         GROUP_TYPE_CONSUMER,
         consumer_ids,
         &req,
-        states_active,
-        types_active,
         &authorized,
     );
     // ── KIP-932 share groups (group_type "share") ───────────────────────
@@ -157,8 +155,6 @@ pub(crate) async fn handle(
             GROUP_TYPE_SHARE,
             ng.share_group_ids(),
             &req,
-            states_active,
-            types_active,
             &authorized,
         );
     }
@@ -173,8 +169,6 @@ pub(crate) async fn handle(
             GROUP_TYPE_STREAMS,
             ng.streams_group_ids(),
             &req,
-            states_active,
-            types_active,
             &authorized,
         );
     }
@@ -194,18 +188,17 @@ pub(crate) async fn handle(
 /// the group's runtime state isn't cheaply available without an actor
 /// round-trip, so we report the constant "Stable" — `--list` filters on
 /// `types_filter`, not on the state here.
-#[allow(clippy::too_many_arguments)]
 fn append_next_gen(
     groups: &mut Vec<ListedGroup>,
     emitted: &mut HashSet<String>,
     group_type: &str,
     ids: Vec<String>,
     req: &ListGroupsRequest,
-    states_active: bool,
-    types_active: bool,
     authorized: &impl Fn(&str) -> bool,
 ) {
     const STATE: &str = "Stable";
+    let states_active = !req.states_filter.is_empty();
+    let types_active = !req.types_filter.is_empty();
     if states_active && !req.states_filter.iter().any(|v| v == STATE) {
         return;
     }
@@ -253,6 +246,8 @@ fn state_to_str(s: GroupState) -> &'static str {
 mod tests {
     use std::{collections::HashSet, sync::Arc};
 
+    use assert2::assert;
+
     use super::*;
     use crate::test_support::{peer, principal};
 
@@ -295,7 +290,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected, "{resp:?}");
         broker_handle.shutdown().await;
     }
 
@@ -321,8 +316,6 @@ mod tests {
             "share",
             vec!["already".into(), "denied".into(), "share-a".into()],
             &req,
-            true,
-            true,
             &|gid| gid != "denied",
         );
 
@@ -342,9 +335,9 @@ mod tests {
                 unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
             },
         ];
-        assert2::assert!(groups == expected_groups);
+        assert!(groups == expected_groups, "{groups:?}");
         // "denied" was rejected by the authorizer; only "share-a" was added.
-        assert2::assert!(emitted == HashSet::from(["already".to_string(), "share-a".to_string()]));
+        assert!(emitted == HashSet::from(["already".to_string(), "share-a".to_string()]));
     }
 
     #[test]
@@ -361,11 +354,9 @@ mod tests {
             "consumer",
             vec!["consumer-a".into()],
             &mismatched,
-            false,
-            true,
             &|_| true,
         );
-        assert2::assert!(groups.is_empty());
+        assert!(groups.is_empty());
 
         let matched = ListGroupsRequest {
             types_filter: vec!["consumer".into()],
@@ -377,8 +368,6 @@ mod tests {
             "consumer",
             vec!["consumer-a".into()],
             &matched,
-            false,
-            true,
             &|_| true,
         );
         let expected = vec![ListedGroup {
@@ -388,7 +377,7 @@ mod tests {
             group_type: "consumer".into(),
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         }];
-        assert2::assert!(groups == expected);
+        assert!(groups == expected, "{groups:?}");
     }
 
     #[test]
@@ -401,7 +390,7 @@ mod tests {
             (GroupState::Dead, "Dead"),
         ];
         for (state, want) in cases {
-            assert2::assert!(state_to_str(state) == want);
+            assert!(state_to_str(state) == want, "{state:?}");
         }
     }
 }

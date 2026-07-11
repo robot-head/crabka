@@ -7730,18 +7730,17 @@ async fn crabka_tail_ws_raw_error(app: axum::Router, raw_query: &str) -> Value {
     response
 }
 
-#[allow(clippy::type_complexity)]
-fn websocket_error_response(
-    result: Result<
-        (
-            tokio_tungstenite::WebSocketStream<
-                tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
-            >,
-            axum::http::Response<Option<Vec<u8>>>,
-        ),
-        TungsteniteError,
-    >,
-) -> Value {
+type WebSocketConnectResult = Result<
+    (
+        tokio_tungstenite::WebSocketStream<
+            tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+        >,
+        axum::http::Response<Option<Vec<u8>>>,
+    ),
+    TungsteniteError,
+>;
+
+fn websocket_error_response(result: WebSocketConnectResult) -> Value {
     match result {
         Ok((_socket, response)) => json!({
             "httpStatus": response.status().as_u16(),

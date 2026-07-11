@@ -386,9 +386,7 @@ async fn query_case(
                 &format!("{prefix}/api/v1/query_range"),
                 tenant,
                 promql,
-                start,
-                end,
-                step,
+                (start, end, step),
             )
             .await
         }
@@ -420,20 +418,15 @@ async fn query_instant(
         .await?)
 }
 
-#[allow(
-    clippy::too_many_arguments,
-    reason = "range query API mirrors Prometheus' parameter set"
-)]
 async fn query_range(
     client: &reqwest::Client,
     base: &str,
     path: &str,
     tenant: &str,
     promql: &str,
-    start_ms: i64,
-    end_ms: i64,
-    step_ms: i64,
+    range: (i64, i64, i64),
 ) -> TestResult<Value> {
+    let (start_ms, end_ms, step_ms) = range;
     Ok(client
         .get(query_url(
             base,

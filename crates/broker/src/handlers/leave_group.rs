@@ -90,6 +90,7 @@ pub(crate) async fn handle(
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
@@ -109,7 +110,7 @@ mod tests {
 
         let ctx = crate::test_support::request_context(&principal, &peer, "leave-client");
 
-        assert2::assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
+        assert!(group_read_denied(&authorizer, &image, &ctx, "g"));
 
         let resp = LeaveGroupResponse {
             error_code: codes::GROUP_AUTHORIZATION_FAILED,
@@ -122,7 +123,14 @@ mod tests {
         let mut cur: &[u8] = &bytes;
         let decoded =
             LeaveGroupResponse::decode(&mut cur, leave_group_response::MAX_VERSION).unwrap();
-        assert2::assert!(decoded == resp);
-        assert2::assert!(cur.is_empty());
+        assert!(
+            (
+                decoded.error_code,
+                decoded.throttle_time_ms,
+                decoded.members,
+                cur.is_empty(),
+            ) == (codes::GROUP_AUTHORIZATION_FAILED, 0, vec![], true),
+            "response decoder consumed all bytes"
+        );
     }
 }

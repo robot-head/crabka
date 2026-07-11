@@ -118,7 +118,7 @@ pub(crate) fn handle(
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_protocol::owned::alter_replica_log_dirs_request::{
         AlterReplicaLogDir, AlterReplicaLogDirTopic,
     };
@@ -168,7 +168,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

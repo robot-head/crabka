@@ -1,23 +1,22 @@
 // rustc 1.95 clippy ICEs on this file (same as throttle.rs / elect_leaders.rs).
 // Suppress locally; the workspace lint gate still applies elsewhere.
-#![allow(clippy::pedantic)]
-#![allow(clippy::unnecessary_unwrap)]
 
-//! Broker-side integration tests for DescribeUserScramCredentials
-//! (api_key 50, KIP-554 read half).
+//! Broker-side integration tests for `DescribeUserScramCredentials`
+//! (`api_key` 50, KIP-554 read half).
 //!
 //! Tests:
 //! 1. `describe_all_users_round_trip` — seed alice's SCRAM credential via
 //!    `submit_metadata_record_for_test`; describe with `users=None`; assert
 //!    mechanism=2 (SCRAM-SHA-512) in the response.
 //! 2. `describe_unknown_user_returns_error` — describe `users=[ghost]`; assert
-//!    per-user `error_code = 91` (RESOURCE_NOT_FOUND).
+//!    per-user `error_code = 91` (`RESOURCE_NOT_FOUND`).
 //!
 //! Gated to non-Windows to match the multi-broker test convention from
 //! slices 10b/12b/14/15/15b/16.
 
 use std::{io, net::SocketAddr};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerHandle, authorizer::SimpleAclAuthorizer, config::ListenerSpec};
 use crabka_metadata::{
@@ -263,11 +262,11 @@ async fn seed_scram_credential(
 // Wire driver for DescribeUserScramCredentials
 // ─────────────────────────────────────────────────────────────────────────────
 
-/// Drive `DescribeUserScramCredentials` (api_key=50) over a SASL/PLAIN
+/// Drive `DescribeUserScramCredentials` (`api_key=50`) over a SASL/PLAIN
 /// connection.
 ///
 /// Returns `(top_level_error, per_user_rows)` where each row is
-/// `(user, error_code, credential_infos)` and each credential_info is
+/// `(user, error_code, credential_infos)` and each `credential_info` is
 /// `(mechanism, iterations)`.
 async fn drive_describe_user_scram_credentials_sasl(
     addr: SocketAddr,
@@ -365,17 +364,25 @@ async fn describe_all_users_round_trip() {
         drive_describe_user_scram_credentials_sasl(addr, "admin", &admin_test_password(), None)
             .await;
 
-    assert2::assert!(top_err == 0);
+    assert!(top_err == 0, "top-level error should be 0");
 
     let alice_row = per_user
         .iter()
         .find(|(u, _, _)| u == "alice")
         .expect("alice must appear in response");
-    assert2::assert!((alice_row.1, alice_row.2.iter().any(|(mech, _)| *mech == 2),) == (0, true));
+    assert!(
+        alice_row.1 == 0,
+        "per-user error_code should be 0 for alice"
+    );
+    assert!(
+        alice_row.2.iter().any(|(mech, _)| *mech == 2),
+        "expected mechanism=2 (SCRAM-SHA-512) in credential_infos; got {:?}",
+        alice_row.2,
+    );
 }
 
 /// Test 2: describe a user that does not exist (`ghost`); assert that the
-/// per-user row carries `error_code = 91` (RESOURCE_NOT_FOUND).
+/// per-user row carries `error_code = 91` (`RESOURCE_NOT_FOUND`).
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn describe_unknown_user_returns_error() {
     let (_handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
@@ -392,13 +399,17 @@ async fn describe_unknown_user_returns_error() {
     )
     .await;
 
-    assert2::assert!(top_err == 0);
+    assert!(top_err == 0, "top-level error_code should be 0");
 
     let row = per_user
         .iter()
         .find(|(u, _, _)| u == "ghost")
         .expect("ghost must appear in response");
-    assert2::assert!(row.1 == 91);
+    assert!(
+        row.1 == 91, /* RESOURCE_NOT_FOUND */
+        "expected RESOURCE_NOT_FOUND (91) for unknown user ghost; got {}",
+        row.1
+    );
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -425,26 +436,29 @@ async fn describe_duplicate_requested_user_returns_single_duplicate_resource_row
     .await;
 
     handle.shutdown().await;
-    assert2::assert!(top_err == 0);
-    assert2::assert!(per_user.len() == 2);
+    assert!(top_err == 0, "top-level error_code should be 0");
+    assert!(
+        per_user.len() == 2,
+        "duplicate request users collapse: {per_user:?}"
+    );
 
     let alice_rows: Vec<_> = per_user
         .iter()
         .filter(|(user, _, _)| user == "alice")
         .collect();
-    assert2::assert!(
-        (
-            alice_rows.len(),
-            alice_rows[0].1,
-            alice_rows[0].2.is_empty(),
-        ) == (1, KAFKA_DUPLICATE_RESOURCE, true)
+    assert!(
+        alice_rows.len() == 1,
+        "alice should appear once: {per_user:?}"
     );
+    assert!(alice_rows[0].1 == KAFKA_DUPLICATE_RESOURCE);
+    assert!(alice_rows[0].2.is_empty());
 
     let bob = per_user
         .iter()
         .find(|(user, _, _)| user == "bob")
         .expect("distinct users remain successful");
-    assert2::assert!((bob.1, bob.2.as_slice()) == (0, &[(WIRE_MECH_SCRAM_SHA_512, 8192)][..]));
+    assert!(bob.1 == 0);
+    assert!(bob.2 == vec![(WIRE_MECH_SCRAM_SHA_512, 8192)]);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -461,8 +475,8 @@ async fn describe_allows_cluster_describe_acl() {
             .await;
 
     handle.shutdown().await;
-    assert2::assert!(top_err == 0);
-    assert2::assert!(per_user.is_empty());
+    assert!(top_err == 0, "Cluster Describe ACL should authorize");
+    assert!(per_user.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -479,6 +493,9 @@ async fn describe_rejects_without_cluster_describe_acl() {
             .await;
 
     handle.shutdown().await;
-    assert2::assert!(top_err == 31);
-    assert2::assert!(per_user.is_empty());
+    assert!(
+        top_err == 31,
+        "missing Cluster Describe ACL should be rejected"
+    );
+    assert!(per_user.is_empty());
 }

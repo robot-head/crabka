@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_i16, get_i32, get_i64, put_i16, put_i32, put_i64};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 1;
 pub const MAX_VERSION: i16 = 10;
 pub const FLEXIBLE_MIN: i16 = 6;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -28,10 +28,7 @@ pub struct OffsetFetchResponse {
 impl Encode for OffsetFetchResponse {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 3 {
@@ -70,8 +67,7 @@ impl Encode for OffsetFetchResponse {
         }
         if (0..=7).contains(&version) {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -81,8 +77,7 @@ impl Encode for OffsetFetchResponse {
         }
         if version >= 8 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.groups).len(), flex);
                 let body: usize = (self.groups).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -97,10 +92,7 @@ impl Encode for OffsetFetchResponse {
 impl Decode<'_> for OffsetFetchResponse {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -166,11 +158,7 @@ impl Encode for OffsetFetchResponseTopic {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (0..=7).contains(&version) {
-            if flex {
-                put_compact_string(buf, &self.name);
-            } else {
-                put_string(buf, &self.name);
-            }
+            if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) }
         }
         if (0..=7).contains(&version) {
             {
@@ -190,20 +178,12 @@ impl Encode for OffsetFetchResponseTopic {
         let flex = version >= 6;
         let mut n: usize = 0;
         if (0..=7).contains(&version) {
-            n += if flex {
-                compact_string_len(&self.name)
-            } else {
-                string_len(&self.name)
-            };
+            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
         }
         if (0..=7).contains(&version) {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -219,11 +199,7 @@ impl Decode<'_> for OffsetFetchResponseTopic {
         let flex = version >= 6;
         let mut out = Self::default();
         if (0..=7).contains(&version) {
-            out.name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if (0..=7).contains(&version) {
             out.partitions = {
@@ -272,7 +248,7 @@ impl Default for OffsetFetchResponsePartition {
             committed_leader_epoch: -1i32,
             metadata: None,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -317,11 +293,7 @@ impl Encode for OffsetFetchResponsePartition {
             n += 4;
         }
         if (0..=7).contains(&version) {
-            n += if flex {
-                compact_nullable_string_len(self.metadata.as_deref())
-            } else {
-                nullable_string_len(self.metadata.as_deref())
-            };
+            n += if flex { compact_nullable_string_len(self.metadata.as_deref()) } else { nullable_string_len(self.metadata.as_deref()) };
         }
         if (0..=7).contains(&version) {
             n += 2;
@@ -347,11 +319,7 @@ impl Decode<'_> for OffsetFetchResponsePartition {
             out.committed_leader_epoch = get_i32(buf)?;
         }
         if (0..=7).contains(&version) {
-            out.metadata = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.metadata = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if (0..=7).contains(&version) {
             out.error_code = get_i16(buf)?;
@@ -396,11 +364,7 @@ impl Encode for OffsetFetchResponseGroup {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if version >= 8 {
-            if flex {
-                put_compact_string(buf, &self.group_id);
-            } else {
-                put_string(buf, &self.group_id);
-            }
+            if flex { put_compact_string(buf, &self.group_id) } else { put_string(buf, &self.group_id) }
         }
         if version >= 8 {
             {
@@ -423,16 +387,11 @@ impl Encode for OffsetFetchResponseGroup {
         let flex = version >= 6;
         let mut n: usize = 0;
         if version >= 8 {
-            n += if flex {
-                compact_string_len(&self.group_id)
-            } else {
-                string_len(&self.group_id)
-            };
+            n += if flex { compact_string_len(&self.group_id) } else { string_len(&self.group_id) };
         }
         if version >= 8 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
+                let prefix = crate::primitives::array::array_len_prefix_len((self.topics).len(), flex);
                 let body: usize = (self.topics).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
@@ -452,11 +411,7 @@ impl Decode<'_> for OffsetFetchResponseGroup {
         let flex = version >= 6;
         let mut out = Self::default();
         if version >= 8 {
-            out.group_id = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.group_id = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 8 {
             out.topics = {
@@ -505,11 +460,7 @@ impl Encode for OffsetFetchResponseTopics {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 6;
         if (8..=9).contains(&version) {
-            if flex {
-                put_compact_string(buf, &self.name);
-            } else {
-                put_string(buf, &self.name);
-            }
+            if flex { put_compact_string(buf, &self.name) } else { put_string(buf, &self.name) }
         }
         if version >= 10 {
             crate::primitives::uuid::put_uuid(buf, self.topic_id);
@@ -532,23 +483,15 @@ impl Encode for OffsetFetchResponseTopics {
         let flex = version >= 6;
         let mut n: usize = 0;
         if (8..=9).contains(&version) {
-            n += if flex {
-                compact_string_len(&self.name)
-            } else {
-                string_len(&self.name)
-            };
+            n += if flex { compact_string_len(&self.name) } else { string_len(&self.name) };
         }
         if version >= 10 {
             n += 16;
         }
         if version >= 8 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
-                let body: usize = (self.partitions)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.partitions).len(), flex);
+                let body: usize = (self.partitions).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -564,11 +507,7 @@ impl Decode<'_> for OffsetFetchResponseTopics {
         let flex = version >= 6;
         let mut out = Self::default();
         if (8..=9).contains(&version) {
-            out.name = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.name = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 10 {
             out.topic_id = crate::primitives::uuid::get_uuid(buf)?;
@@ -623,7 +562,7 @@ impl Default for OffsetFetchResponsePartitions {
             committed_leader_epoch: -1i32,
             metadata: None,
             error_code: 0i16,
-            unknown_tagged_fields: Default::default(),
+            unknown_tagged_fields: UnknownTaggedFields::default(),
         }
     }
 }
@@ -668,11 +607,7 @@ impl Encode for OffsetFetchResponsePartitions {
             n += 4;
         }
         if version >= 8 {
-            n += if flex {
-                compact_nullable_string_len(self.metadata.as_deref())
-            } else {
-                nullable_string_len(self.metadata.as_deref())
-            };
+            n += if flex { compact_nullable_string_len(self.metadata.as_deref()) } else { nullable_string_len(self.metadata.as_deref()) };
         }
         if version >= 8 {
             n += 2;
@@ -698,11 +633,7 @@ impl Decode<'_> for OffsetFetchResponsePartitions {
             out.committed_leader_epoch = get_i32(buf)?;
         }
         if version >= 8 {
-            out.metadata = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.metadata = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if version >= 8 {
             out.error_code = get_i16(buf)?;

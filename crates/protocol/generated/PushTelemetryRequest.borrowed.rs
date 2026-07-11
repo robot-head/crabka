@@ -10,10 +10,12 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 0;
 pub const FLEXIBLE_MIN: i16 = 0;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Default)]
 pub struct PushTelemetryRequest<'a> {
     pub client_instance_id: crate::primitives::uuid::Uuid,
     pub subscription_id: i32,
@@ -23,6 +25,7 @@ pub struct PushTelemetryRequest<'a> {
     pub unknown_tagged_fields: UnknownTaggedFields,
 }
 impl PushTelemetryRequest<'_> {
+    #[must_use]
     pub fn to_owned(&self) -> crate::owned::push_telemetry_request::PushTelemetryRequest {
         crate::owned::push_telemetry_request::PushTelemetryRequest {
             client_instance_id: (self.client_instance_id),
@@ -37,10 +40,7 @@ impl PushTelemetryRequest<'_> {
 impl Encode for PushTelemetryRequest<'_> {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -56,11 +56,7 @@ impl Encode for PushTelemetryRequest<'_> {
             put_i8(buf, self.compression_type);
         }
         if version >= 0 {
-            if flex {
-                put_compact_bytes(buf, self.metrics);
-            } else {
-                put_bytes(buf, self.metrics);
-            }
+            if flex { put_compact_bytes(buf, self.metrics) } else { put_bytes(buf, self.metrics) }
         }
         if flex {
             let tagged = WriteTaggedFields::new();
@@ -85,9 +81,7 @@ impl Encode for PushTelemetryRequest<'_> {
         }
         if version >= 0 {
             n += if flex {
-                crate::primitives::varint::uvarint_len(
-                    u32::try_from((self.metrics).len() + 1).unwrap(),
-                ) + (self.metrics).len()
+                crate::primitives::varint::uvarint_len(u32::try_from((self.metrics).len() + 1).unwrap()) + (self.metrics).len()
             } else {
                 4 + (self.metrics).len()
             };
@@ -102,10 +96,7 @@ impl Encode for PushTelemetryRequest<'_> {
 impl<'de> DecodeBorrow<'de> for PushTelemetryRequest<'de> {
     fn decode_borrow(buf: &mut &'de [u8], version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -122,11 +113,7 @@ impl<'de> DecodeBorrow<'de> for PushTelemetryRequest<'de> {
             out.compression_type = get_i8(buf)?;
         }
         if version >= 0 {
-            out.metrics = if flex {
-                get_compact_bytes_borrowed(buf)?
-            } else {
-                get_bytes_borrowed(buf)?
-            };
+            out.metrics = if flex { get_compact_bytes_borrowed(buf)? } else { get_bytes_borrowed(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;

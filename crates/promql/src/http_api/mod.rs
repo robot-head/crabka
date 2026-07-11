@@ -310,10 +310,6 @@ async fn acquire_query_permit<S: MetricStore>(
 const REMOTE_READ_MAX_BODY_BYTES: usize = 64 * 1024 * 1024;
 
 /// Build routes for the Prometheus API and Mimir's `/prometheus` prefix.
-#[allow(
-    clippy::too_many_lines,
-    reason = "The route table intentionally keeps the Prometheus and Mimir HTTP surfaces visible in one place."
-)]
 pub fn prometheus_router<S: MetricStore + 'static>(state: Arc<PrometheusApiState<S>>) -> Router {
     Router::new()
         .route("/api/v1/query", get(query::<S>).post(query_post::<S>))

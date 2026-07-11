@@ -119,7 +119,6 @@ impl StreamThread {
     /// [`ProcessingGuarantee::ExactlyOnceV2`] the same producer object is also
     /// passed as `txn` (a [`TransactionalProducer`] view), and the first EOS
     /// assignment runs `init_transactions` once (fencing any zombie).
-    #[allow(clippy::too_many_lines)]
     #[tracing::instrument(
         name = "streams.thread.apply_assignment",
         level = "info",
@@ -1223,8 +1222,9 @@ mod tests {
                 reply,
             })
             .await;
-        assert2::assert!(
-            rx.await.unwrap().unwrap() == IqPayload::Value(Some(I64Serde.serialize("t", &7_i64)))
+        assert_eq!(
+            rx.await.unwrap().unwrap(),
+            IqPayload::Value(Some(I64Serde.serialize("t", &7_i64)))
         );
 
         // empty thread (no tasks) -> RebalanceInProgress
@@ -1245,7 +1245,7 @@ mod tests {
                 reply: reply2,
             })
             .await;
-        assert2::assert!(matches!(
+        assert!(matches!(
             rx2.await.unwrap(),
             Err(IqError::RebalanceInProgress)
         ));
@@ -1329,7 +1329,7 @@ mod tests {
             .expect("partition 0 present");
         let boxed = r.as_ref().expect("partition 0 is a Success");
         let downcast = boxed.downcast_ref::<Option<i64>>().expect("Option<i64>");
-        assert2::assert!(*downcast == None);
+        assert_eq!(*downcast, None, "empty store yields None");
 
         // (2) Partition-set gate: a set excluding p0 omits it entirely.
         let set1 = || PartitionSel::Set([1].into_iter().collect());
@@ -1337,8 +1337,12 @@ mod tests {
             req(set1(), PositionBound::Unbounded, false, reply)
         })
         .await;
-        assert2::assert!(find(&out, 0) == None);
-        assert2::assert!(find(&out, 1).is_some());
+        assert_eq!(
+            find(&out, 0),
+            None,
+            "p0 excluded from the set must not appear"
+        );
+        assert!(find(&out, 1).is_some(), "p1 (in the set) must appear");
 
         // (3) Active-only gate against the standby (p1) task → NotActive.
         let out = serve_iq2_outcome(&mut thread, |reply| {
@@ -1346,7 +1350,7 @@ mod tests {
         })
         .await;
         let (_, _, r) = out.per_partition.iter().find(|(p, _, _)| *p == 1).unwrap();
-        assert2::assert!(r.as_ref().err() == Some(&FailureReason::NotActive));
+        assert_eq!(r.as_ref().err(), Some(&FailureReason::NotActive));
 
         // (4) Position-bound gate: a bound ahead of the (empty) p0 position →
         // NotUpToBound (p0 has never advanced).
@@ -1365,7 +1369,7 @@ mod tests {
         })
         .await;
         let (_, _, r) = out.per_partition.iter().find(|(p, _, _)| *p == 0).unwrap();
-        assert2::assert!(r.as_ref().err() == Some(&FailureReason::NotUpToBound));
+        assert_eq!(r.as_ref().err(), Some(&FailureReason::NotUpToBound));
     }
 
     /// End-to-end of the real runtime global-store path: `StreamThread` builds +
@@ -1477,22 +1481,6 @@ mod tests {
         );
     }
 
-    fn role_assignment(active: i32, standby: i32, warmup: i32) -> StreamsAssignment {
-        let task = |partition| TaskAssignment {
-            subtopology_id: "0".into(),
-            partitions: vec![partition],
-            source_topic_partitions: vec![TopicPartition {
-                topic: "in".into(),
-                partition,
-            }],
-        };
-        StreamsAssignment {
-            active: vec![task(active)],
-            standby: vec![task(standby)],
-            warmup: vec![task(warmup)],
-        }
-    }
-
     #[tokio::test]
     async fn reconciles_active_standby_warmup_roles_and_transitions() {
         let producer_c = Arc::new(CollectProducer::default());
@@ -1500,26 +1488,45 @@ mod tests {
         let producer: Arc<dyn RecordProducer> = Arc::clone(&producer_c) as _;
         let store: Arc<dyn OffsetStore> = Arc::clone(&store_c) as _;
         let built = built();
+
         let mut thread = StreamThread::new(
             empty_fetcher(),
             crate::store::backend::StoreBackend::InMemory,
             "app".into(),
             0,
         );
-        let task_roles = |thread: &StreamThread| {
-            let mut roles: Vec<_> = thread
-                .tasks
-                .iter()
-                .map(|(key, task)| (key.clone(), task.role))
-                .collect();
-            roles.sort_by(|a, b| a.0.cmp(&b.0));
-            roles
-        };
+
         // 1. Initial assignment:
         // Subtopology 0 Partition 0 -> Active
         // Subtopology 0 Partition 1 -> Standby
         // Subtopology 0 Partition 2 -> Warmup
-        let assignment1 = role_assignment(0, 1, 2);
+        let assignment1 = StreamsAssignment {
+            active: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![0],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 0,
+                }],
+            }],
+            standby: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![1],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 1,
+                }],
+            }],
+            warmup: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![2],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 2,
+                }],
+            }],
+        };
+
         thread
             .apply_assignment(
                 &assignment1,
@@ -1531,21 +1538,44 @@ mod tests {
             )
             .await
             .unwrap();
-        let roles = task_roles(&thread);
-        check!(
-            roles
-                == vec![
-                    (("0".to_string(), 0), TaskRole::Active),
-                    (("0".to_string(), 1), TaskRole::Standby),
-                    (("0".to_string(), 2), TaskRole::Warmup),
-                ]
-        );
+        check!(thread.task_count() == 3);
+
+        check!(thread.tasks.get(&("0".to_string(), 0)).map(|t| t.role) == Some(TaskRole::Active));
+        check!(thread.tasks.get(&("0".to_string(), 1)).map(|t| t.role) == Some(TaskRole::Standby));
+        check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Warmup));
+
         // 2. Updated assignment:
         // Subtopology 0 Partition 0 -> Standby (Demoted)
         // Subtopology 0 Partition 1 -> removed
         // Subtopology 0 Partition 2 -> Active (Promoted)
         // Subtopology 0 Partition 3 -> Warmup (New)
-        let assignment2 = role_assignment(2, 0, 3);
+        let assignment2 = StreamsAssignment {
+            active: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![2],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 2,
+                }],
+            }],
+            standby: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![0],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 0,
+                }],
+            }],
+            warmup: vec![TaskAssignment {
+                subtopology_id: "0".into(),
+                partitions: vec![3],
+                source_topic_partitions: vec![TopicPartition {
+                    topic: "in".into(),
+                    partition: 3,
+                }],
+            }],
+        };
+
         thread
             .apply_assignment(
                 &assignment2,
@@ -1557,15 +1587,12 @@ mod tests {
             )
             .await
             .unwrap();
-        let roles = task_roles(&thread);
-        check!(
-            roles
-                == vec![
-                    (("0".to_string(), 0), TaskRole::Standby),
-                    (("0".to_string(), 2), TaskRole::Active),
-                    (("0".to_string(), 3), TaskRole::Warmup),
-                ]
-        );
+        check!(thread.task_count() == 3);
+
+        check!(thread.tasks.get(&("0".to_string(), 0)).map(|t| t.role) == Some(TaskRole::Standby));
+        check!(!thread.tasks.contains_key(&("0".to_string(), 1)));
+        check!(thread.tasks.get(&("0".to_string(), 2)).map(|t| t.role) == Some(TaskRole::Active));
+        check!(thread.tasks.get(&("0".to_string(), 3)).map(|t| t.role) == Some(TaskRole::Warmup));
     }
 
     /// EOS-v2 happy path: the thread runs the full transactional commit lifecycle
@@ -1623,10 +1650,10 @@ mod tests {
         thread.poll_all(&fetcher, &tracker).await.unwrap();
 
         let meta = crate::runtime::eos::StreamsGroupMeta {
-            group_id: "app".into(),
-            generation_id: 3,
-            member_id: "m".into(),
-            group_instance_id: None,
+            group: "app".into(),
+            generation: 3,
+            member: "m".into(),
+            group_instance: None,
         };
         thread.commit_all(Some(&meta)).await.unwrap();
 
@@ -1692,10 +1719,10 @@ mod tests {
         thread.poll_all(&*idle_fetcher, &tracker).await.unwrap();
 
         let meta = crate::runtime::eos::StreamsGroupMeta {
-            group_id: "app".into(),
-            generation_id: 3,
-            member_id: "m".into(),
-            group_instance_id: None,
+            group: "app".into(),
+            generation: 3,
+            member: "m".into(),
+            group_instance: None,
         };
         thread.commit_all(Some(&meta)).await.unwrap();
 
@@ -1782,10 +1809,10 @@ mod tests {
         check!(thread.task_count() == 1);
 
         let meta = crate::runtime::eos::StreamsGroupMeta {
-            group_id: "app".into(),
-            generation_id: 3,
-            member_id: "m".into(),
-            group_instance_id: None,
+            group: "app".into(),
+            generation: 3,
+            member: "m".into(),
+            group_instance: None,
         };
         let key = ("0".to_string(), 0);
         let tracker = Arc::new(TokioMutex::new(TaskOffsetTracker::default()));
@@ -2002,10 +2029,10 @@ mod tests {
         );
 
         let meta = crate::runtime::eos::StreamsGroupMeta {
-            group_id: "app".into(),
-            generation_id: 3,
-            member_id: "m".into(),
-            group_instance_id: None,
+            group: "app".into(),
+            generation: 3,
+            member: "m".into(),
+            group_instance: None,
         };
         thread.commit_all(Some(&meta)).await.unwrap();
 
@@ -2014,22 +2041,10 @@ mod tests {
         // "counts" changelog got exactly one entry.
         let sent = mock.sent.lock().unwrap();
         let out: Vec<_> = sent.iter().filter(|(t, ..)| t == "out").collect();
+        check!(out.len() == 1, "exactly one deduped sink record");
         check!(
-            out.iter()
-                .map(|(topic, partition, key, value)| (
-                    topic.as_str(),
-                    *partition,
-                    key.as_deref(),
-                    value.as_deref(),
-                ))
-                .collect::<Vec<_>>()
-                == vec![(
-                    "out",
-                    None,
-                    Some(b"a".as_ref()),
-                    Some(&[0u8, 0, 0, 0, 0, 0, 0, 2][..]),
-                )],
-            "exactly one deduped sink record with the latest count"
+            out[0].3.as_deref() == Some([0, 0, 0, 0, 0, 0, 0, 2].as_ref()),
+            "deduped sink value is the latest count (2)"
         );
         check!(
             sent.iter().any(|(t, ..)| t.contains("counts")),

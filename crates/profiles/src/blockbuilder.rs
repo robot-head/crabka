@@ -12,7 +12,7 @@ use crabka_blockstore::{
     BlockIndex, BlockMeta, Labels, ProfileIndex, ProfileSampleRow, encode_profile_samples,
 };
 use crabka_client_consumer::{AutoOffsetReset, Consumer, ConsumerRecord};
-use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, SymbolDb};
+use crabka_pprof::{FunctionRec, LineRec, LocationRec, MappingRec, MappingSymbolization, SymbolDb};
 use object_store::{ObjectStore, ObjectStoreExt, PutPayload, path::Path};
 use parquet::arrow::ArrowWriter;
 use tracing::Instrument as _;
@@ -97,6 +97,9 @@ pub fn object_key(
     )
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn intern_record(symdb: &mut SymbolDb, rec: &ProfileRecord) -> Result<Vec<u32>, ProfilesError> {
     let symbols = intern_symbols(symdb, &rec.symbols)?;
     rec.samples
@@ -117,6 +120,9 @@ pub fn profile_timestamp_ms(timestamp_ns: i64) -> i64 {
     timestamp_ns.div_euclid(NANOS_PER_MILLI)
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub fn samples_batch(rows: &[BuiltSample]) -> Result<RecordBatch, ProfilesError> {
     let rows = rows
         .iter()
@@ -135,6 +141,9 @@ pub fn samples_batch(rows: &[BuiltSample]) -> Result<RecordBatch, ProfilesError>
     encode_profile_samples(&rows).map_err(|err| ProfilesError::Block(err.to_string()))
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn build_block(
     store: &Arc<dyn ObjectStore>,
     tenant: &str,
@@ -264,6 +273,9 @@ impl ConsumerRecordAccumulator {
     }
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesError> {
     let mut index = match ProfileIndex::load_latest_snapshot(&config.store, &config.index_key).await
     {
@@ -340,11 +352,17 @@ pub async fn run_with_config(config: BlockBuilderConfig) -> Result<(), ProfilesE
     }
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn run() -> Result<(), ProfilesError> {
     let store: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
     run_with_config(BlockBuilderConfig::new("127.0.0.1:9092".to_string(), store)).await
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn flush_consumer_records(
     store: &Arc<dyn ObjectStore>,
     records: &[ConsumerRecord],
@@ -354,6 +372,9 @@ pub async fn flush_consumer_records(
     flush_consumer_records_with_index(store, &mut index, records, flush_records).await
 }
 
+///
+/// # Errors
+/// Returns an error when the query is invalid, required profile data is malformed, or the backing profile store cannot satisfy the request.
 pub async fn flush_consumer_records_with_index(
     store: &Arc<dyn ObjectStore>,
     index: &mut ProfileIndex,
@@ -470,10 +491,12 @@ fn mapping_rec(mapping: &WalMapping, strings: &[u32]) -> MappingRec {
         file_offset: mapping.file_offset,
         filename: remap_ref(mapping.filename, strings),
         build_id: remap_ref(mapping.build_id, strings),
-        has_functions: mapping.has_functions,
-        has_filenames: mapping.has_filenames,
-        has_line_numbers: mapping.has_line_numbers,
-        has_inline_frames: mapping.has_inline_frames,
+        symbolization: MappingSymbolization::from_parts((
+            mapping.has_functions.get(),
+            mapping.has_filenames.get(),
+            mapping.has_line_numbers.get(),
+            mapping.has_inline_frames.get(),
+        )),
     }
 }
 
@@ -496,7 +519,7 @@ fn remap_ref(reference: u32, table: &[u32]) -> u32 {
 mod tests {
     use std::sync::Arc;
 
-    use assert2::check;
+    use assert2::{assert, check};
     use bytes::Bytes;
     use crabka_client_consumer::ConsumerRecord;
     use crabka_pprof::SymbolDb;
@@ -543,49 +566,43 @@ mod tests {
             file_offset: 0x10,
             filename: 1,
             build_id: 2,
-            has_functions: true,
-            has_filenames: false,
-            has_line_numbers: true,
-            has_inline_frames: false,
+            has_functions: true.into(),
+            has_filenames: false.into(),
+            has_line_numbers: true.into(),
+            has_inline_frames: false.into(),
         };
         let strings = [0_u32, 10, 20];
 
         let rec = mapping_rec(&mapping, &strings);
 
-        assert2::assert!(
+        assert!(
             rec == MappingRec {
                 memory_start: 0x1000,
                 memory_limit: 0x2000,
                 file_offset: 0x10,
                 filename: 10,
                 build_id: 20,
-                has_functions: true,
-                has_filenames: false,
-                has_line_numbers: true,
-                has_inline_frames: false,
+                symbolization: MappingSymbolization::from_parts((true, false, true, false)),
             }
         );
 
         // And the inverse pattern, to ensure no field is hard-wired.
         let inverted = WalMapping {
-            has_functions: false,
-            has_filenames: true,
-            has_line_numbers: false,
-            has_inline_frames: true,
+            has_functions: false.into(),
+            has_filenames: true.into(),
+            has_line_numbers: false.into(),
+            has_inline_frames: true.into(),
             ..mapping
         };
         let rec = mapping_rec(&inverted, &strings);
-        assert2::assert!(
+        assert!(
             rec == MappingRec {
                 memory_start: 0x1000,
                 memory_limit: 0x2000,
                 file_offset: 0x10,
                 filename: 10,
                 build_id: 20,
-                has_functions: false,
-                has_filenames: true,
-                has_line_numbers: false,
-                has_inline_frames: true,
+                symbolization: MappingSymbolization::from_parts((false, true, false, true)),
             }
         );
     }
@@ -596,8 +613,8 @@ mod tests {
         let b = object_key("t", 0, 10, 20, 100, 200);
         let c = object_key("t", 0, 10, 21, 100, 200);
 
-        assert2::assert!(a == b);
-        assert2::assert!(a != c);
+        assert!(a == b);
+        assert!(a != c);
     }
 
     #[test]
@@ -608,7 +625,7 @@ mod tests {
         let ids1 = intern_record(&mut symdb, &r).unwrap();
         let ids2 = intern_record(&mut symdb, &r).unwrap();
 
-        assert2::assert!(ids1 == ids2);
+        assert!(ids1 == ids2);
     }
 
     #[test]
@@ -626,8 +643,8 @@ mod tests {
         }])
         .unwrap();
 
-        assert2::assert!(batch.schema() == crabka_blockstore::profile_samples_schema());
-        assert2::assert!(batch.num_rows() == 1);
+        assert!(batch.schema() == crabka_blockstore::profile_samples_schema());
+        assert!(batch.num_rows() == 1);
     }
 
     #[tokio::test]
@@ -639,13 +656,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(metas.len() == 1);
-        assert2::assert!(metas[0].tenant.as_str() == "t");
-        assert2::assert!(metas[0].row_count == 2);
-        assert2::assert!(metas[0].min_ts == 1_700_000_000_000);
-        assert2::assert!(metas[0].max_ts == 1_700_000_000_000);
+        assert!(metas.len() == 1);
+        check!(metas[0].tenant == "t");
+        check!(metas[0].row_count == 2);
+        check!(metas[0].min_ts == 1_700_000_000_000);
+        check!(metas[0].max_ts == 1_700_000_000_000);
         let symdb_key = format!("{}.symdb", metas[0].object_key);
-        assert2::assert!(
+        assert!(
             store
                 .head(&object_store::path::Path::from(symdb_key))
                 .await
@@ -669,16 +686,16 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(metas.len() == 2);
-        assert2::assert!(
-            [("t", 2), ("u", 1)].map(|(tenant, row_count)| {
+        check!(metas.len() == 2);
+        for (tenant, row_count) in [("t", 2), ("u", 1)] {
+            check!(
                 metas
                     .iter()
                     .any(|meta| meta.tenant == tenant && meta.row_count == row_count)
-            }) == [true, true]
-        );
+            );
+        }
         for meta in metas {
-            assert2::assert!(
+            assert!(
                 store
                     .head(&object_store::path::Path::from(meta.object_key))
                     .await
@@ -697,7 +714,7 @@ mod tests {
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
-        assert2::assert!(!accumulator.should_flush(start));
+        assert!(!accumulator.should_flush(start));
 
         accumulator.push(
             vec![consumer_record(0, 11, rec("cpu", 7))],
@@ -714,11 +731,13 @@ mod tests {
         let start = Instant::now();
 
         accumulator.push(vec![consumer_record(0, 10, rec("cpu", 5))], start);
-        assert2::assert!(!accumulator.should_flush(start + Duration::from_secs(9)));
-        assert2::assert!(accumulator.should_flush(start + Duration::from_secs(10)));
+        assert!(!accumulator.should_flush(start + Duration::from_secs(9)));
+        assert!(accumulator.should_flush(start + Duration::from_secs(10)));
     }
 
     fn consumer_record(partition: i32, offset: i64, record: ProfileRecord) -> ConsumerRecord {
+        let value = Bytes::from(record.encode().unwrap());
+        drop(record);
         ConsumerRecord {
             topic: PROFILES_WAL_TOPIC.to_string(),
             partition,
@@ -726,7 +745,7 @@ mod tests {
             leader_epoch: -1,
             timestamp: 0,
             key: None,
-            value: Some(Bytes::from(record.encode().unwrap())),
+            value: Some(value),
             headers: Vec::new(),
         }
     }

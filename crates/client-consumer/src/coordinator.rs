@@ -713,8 +713,12 @@ async fn refind_after(state: &CoordinatorState, ctx: &str) {
 )]
 async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, ConsumerError> {
     let owned: Vec<(String, i32)> = state.assigned.lock().await.clone();
-    let (new_assignment, new_generation, _protocol_name, topic_partitions) =
-        join_and_sync(state, &owned).await?;
+    let JoinOutcome {
+        assignment: new_assignment,
+        generation: new_generation,
+        topic_partitions,
+        ..
+    } = join_and_sync(state, &owned).await?;
 
     let old_set: HashSet<(String, i32)> = owned.iter().cloned().collect();
     let new_set: HashSet<(String, i32)> = new_assignment.iter().cloned().collect();
@@ -808,8 +812,12 @@ async fn rejoin(state: &mut CoordinatorState) -> Result<HashMap<String, i32>, Co
 
                 // Phase 2: rejoin with the reduced owned-set.
                 let owned_after_revoke: Vec<(String, i32)> = state.assigned.lock().await.clone();
-                let (assignment2, gen2, _, topic_partitions2) =
-                    join_and_sync(state, &owned_after_revoke).await?;
+                let JoinOutcome {
+                    assignment: assignment2,
+                    generation: gen2,
+                    topic_partitions: topic_partitions2,
+                    ..
+                } = join_and_sync(state, &owned_after_revoke).await?;
                 let owned_after_revoke_set: HashSet<(String, i32)> =
                     owned_after_revoke.iter().cloned().collect();
                 let added2: Vec<(String, i32)> = assignment2
@@ -975,32 +983,16 @@ fn build_sync_group_request(
     }
 }
 
-/// Issue `JoinGroup` (handling the `MEMBER_ID_REQUIRED` two-step when
-/// our `member_id` is empty), assign as leader if we won the election,
-/// then `SyncGroup`. Returns `(assignment, generation_id, protocol_name)`.
-// Sequential join/sync state machine; splitting fragments the linear
-// MEMBER_ID_REQUIRED → leader-assign → SyncGroup flow.
-#[allow(clippy::too_many_lines)]
-#[tracing::instrument(
-    name = "consumer.join_and_sync",
-    level = "info",
-    skip_all,
-    fields(
-        group_id = %state.group_id,
-        member_id = tracing::field::Empty,
-        generation = tracing::field::Empty,
-        is_leader = tracing::field::Empty,
-        protocol = tracing::field::Empty,
-        assigned_partitions = tracing::field::Empty,
-    ),
-    err
-)]
-// `#[instrument]` on this async fn surfaces the pre-existing complex tuple return.
-#[allow(clippy::type_complexity)]
-async fn join_and_sync(
+struct JoinOutcome {
+    assignment: Vec<(String, i32)>,
+    generation: i32,
+    topic_partitions: HashMap<String, i32>,
+}
+
+async fn perform_join(
     state: &mut CoordinatorState,
     owned: &[(String, i32)],
-) -> Result<(Vec<(String, i32)>, i32, String, HashMap<String, i32>), ConsumerError> {
+) -> Result<JoinGroupResponse, ConsumerError> {
     let session_timeout_ms = i32::try_from(state.session_timeout.as_millis()).unwrap_or(i32::MAX);
     let rebalance_timeout_ms =
         i32::try_from(state.rebalance_timeout.as_millis()).unwrap_or(i32::MAX);
@@ -1111,6 +1103,33 @@ async fn join_and_sync(
         return Err(ConsumerError::Server(r1.error_code));
     };
 
+    Ok(join_resp)
+}
+
+/// Issue `JoinGroup` (handling the `MEMBER_ID_REQUIRED` two-step when
+/// our `member_id` is empty), assign as leader if we won the election,
+/// then `SyncGroup`. Returns `(assignment, generation_id, protocol_name)`.
+// Sequential join/sync state machine; splitting fragments the linear
+// MEMBER_ID_REQUIRED → leader-assign → SyncGroup flow.
+#[tracing::instrument(
+    name = "consumer.join_and_sync",
+    level = "info",
+    skip_all,
+    fields(
+        group_id = %state.group_id,
+        member_id = tracing::field::Empty,
+        generation = tracing::field::Empty,
+        is_leader = tracing::field::Empty,
+        protocol = tracing::field::Empty,
+        assigned_partitions = tracing::field::Empty,
+    ),
+    err
+)]
+async fn join_and_sync(
+    state: &mut CoordinatorState,
+    owned: &[(String, i32)],
+) -> Result<JoinOutcome, ConsumerError> {
+    let join_resp = perform_join(state, owned).await?;
     // The broker may have refreshed our member_id on this join too.
     if !join_resp.member_id.is_empty() {
         state.member_id.clone_from(&join_resp.member_id);
@@ -1118,7 +1137,7 @@ async fn join_and_sync(
     let chosen_protocol = join_resp
         .protocol_name
         .clone()
-        .unwrap_or_else(|| protocol_name.clone());
+        .unwrap_or_else(|| state.assignor.protocol_name().to_string());
     let generation_id = join_resp.generation_id;
 
     // Leader: resolve partition counts via Metadata and run the assignor.
@@ -1134,102 +1153,130 @@ async fn join_and_sync(
     // captured from the SAME Metadata the leader runs the assignor on (empty for
     // a non-leader). Returned so the coordinator's rejoin baseline tracks exactly
     // what was assigned rather than a divergent later fetch.
-    let mut topic_partitions: HashMap<String, i32> = HashMap::new();
-    let assignments_for_sync: Vec<SyncGroupRequestAssignment> = if is_leader {
-        let md = state.client.send(MetadataRequest::default()).await?;
-        let mut resolved_ids: HashMap<String, WireUuid> = HashMap::new();
-        for t in &md.topics {
-            let Some(name) = &t.name else { continue };
-            if state.subscribed_topics.iter().any(|s| s == name) {
-                let count = i32::try_from(t.partitions.len()).unwrap_or(i32::MAX);
-                topic_partitions.insert(name.clone(), count);
-                resolved_ids.insert(name.clone(), t.topic_id);
-            }
-        }
-        // Push the freshly resolved topic_ids into the shared map so
-        // poll() can satisfy newly added partitions on Fetch v ≥ 13.
-        {
-            let mut ids = state.topic_ids.lock().await;
-            for (k, v) in resolved_ids {
-                ids.insert(k, v);
-            }
-        }
+    let leader = compute_leader_assignment(state, &join_resp, is_leader).await?;
+    let my_assignment =
+        sync_assignment(state, generation_id, &chosen_protocol, leader.assignments).await?;
+    tracing::Span::current().record("assigned_partitions", my_assignment.len());
+    Ok(JoinOutcome {
+        assignment: my_assignment,
+        generation: generation_id,
+        topic_partitions: leader.topic_partitions,
+    })
+}
 
-        let decoded: Vec<(String, crate::builder::DecodedSubscription)> = join_resp
-            .members
+struct LeaderAssignment {
+    assignments: Vec<SyncGroupRequestAssignment>,
+    topic_partitions: HashMap<String, i32>,
+}
+
+async fn compute_leader_assignment(
+    state: &CoordinatorState,
+    response: &JoinGroupResponse,
+    is_leader: bool,
+) -> Result<LeaderAssignment, ConsumerError> {
+    if !is_leader {
+        return Ok(LeaderAssignment {
+            assignments: Vec::new(),
+            topic_partitions: HashMap::new(),
+        });
+    }
+    let metadata = state.client.send(MetadataRequest::default()).await?;
+    let mut topic_partitions = HashMap::new();
+    let mut resolved_ids = HashMap::new();
+    for topic in &metadata.topics {
+        let Some(name) = &topic.name else { continue };
+        if state
+            .subscribed_topics
             .iter()
-            .map(|m| (m.member_id.clone(), decode_subscription(&m.metadata)))
-            .collect();
-
-        let assignments = match state.assignor {
-            Assignor::Range => {
-                let inputs: Vec<(String, Vec<String>)> = decoded
-                    .into_iter()
-                    .map(|(id, sub)| (id, sub.topics))
-                    .collect();
-                crate::assignor::range::assign(inputs, &topic_partitions)
-            }
-            Assignor::CooperativeSticky => {
-                let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = decoded
-                    .into_iter()
-                    .map(|(id, sub)| (id, sub.topics, sub.owned, sub.generation_id))
-                    .collect();
-                crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
-            }
-        };
-        assignments
-            .into_iter()
-            .map(|(m, partitions)| build_sync_group_assignment(m, &partitions))
-            .collect()
-    } else {
-        Vec::new()
+            .any(|subscribed| subscribed == name)
+        {
+            topic_partitions.insert(
+                name.clone(),
+                i32::try_from(topic.partitions.len()).unwrap_or(i32::MAX),
+            );
+            resolved_ids.insert(name.clone(), topic.topic_id);
+        }
+    }
+    state.topic_ids.lock().await.extend(resolved_ids);
+    let decoded: Vec<(String, crate::builder::DecodedSubscription)> = response
+        .members
+        .iter()
+        .map(|member| {
+            (
+                member.member_id.clone(),
+                decode_subscription(&member.metadata),
+            )
+        })
+        .collect();
+    let assignments = match state.assignor {
+        Assignor::Range => {
+            let inputs: Vec<(String, Vec<String>)> = decoded
+                .into_iter()
+                .map(|(id, subscription)| (id, subscription.topics))
+                .collect();
+            crate::assignor::range::assign(inputs, &topic_partitions)
+        }
+        Assignor::CooperativeSticky => {
+            let inputs: Vec<crate::assignor::cooperative_sticky::MemberInput> = decoded
+                .into_iter()
+                .map(|(id, subscription)| {
+                    (
+                        id,
+                        subscription.topics,
+                        subscription.owned,
+                        subscription.generation_id,
+                    )
+                })
+                .collect();
+            crate::assignor::cooperative_sticky::assign(&inputs, &topic_partitions)
+        }
     };
+    Ok(LeaderAssignment {
+        assignments: assignments
+            .into_iter()
+            .map(|(member, partitions)| build_sync_group_assignment(member, &partitions))
+            .collect(),
+        topic_partitions,
+    })
+}
 
-    let sync_resp = with_coordinator_refind(
-        &client,
-        &group_id,
-        &coordinator_id,
+async fn sync_assignment(
+    state: &CoordinatorState,
+    generation_id: i32,
+    protocol: &str,
+    assignments: Vec<SyncGroupRequestAssignment>,
+) -> Result<Vec<(String, i32)>, ConsumerError> {
+    let response = with_coordinator_refind(
+        &state.client,
+        &state.group_id,
+        &state.coordinator_id,
         COORDINATOR_RETRY_TIMEOUT,
-        |r: &SyncGroupResponse| r.error_code,
+        |response: &SyncGroupResponse| response.error_code,
         || {
-            let group_id = group_id.clone();
-            let member_id = state.member_id.clone();
-            let chosen_protocol = chosen_protocol.clone();
-            let assignments_for_sync = assignments_for_sync.clone();
-            let group_instance_id = group_instance_id.clone();
-            let client = &client;
-            let target = coordinator_id.load(Ordering::Relaxed);
+            let request = build_sync_group_request(
+                state.group_id.clone(),
+                generation_id,
+                state.member_id.clone(),
+                state.group_instance_id.clone(),
+                protocol.to_string(),
+                assignments.clone(),
+            );
+            let target = state.coordinator_id.load(Ordering::Relaxed);
             async move {
-                client
+                state
+                    .client
                     .broker(target)
-                    .send(build_sync_group_request(
-                        group_id,
-                        generation_id,
-                        member_id,
-                        group_instance_id.clone(),
-                        chosen_protocol,
-                        assignments_for_sync,
-                    ))
+                    .send(request)
                     .await
                     .map_err(ConsumerError::from)
             }
         },
     )
     .await?;
-    // Any coordinator move discovered during this join/sync round is already
-    // published into the shared `coordinator_id` cell (same `Arc` as
-    // `state.coordinator_id`), so heartbeats/commits see it immediately.
-    if sync_resp.error_code != 0 {
-        return Err(ConsumerError::Server(sync_resp.error_code));
+    if response.error_code != 0 {
+        return Err(ConsumerError::Server(response.error_code));
     }
-    let my_assignment = decode_assignment(&sync_resp.assignment);
-    tracing::Span::current().record("assigned_partitions", my_assignment.len());
-    Ok((
-        my_assignment,
-        generation_id,
-        chosen_protocol,
-        topic_partitions,
-    ))
+    Ok(decode_assignment(&response.assignment))
 }
 
 /// Populate `next_offsets` for newly added partitions by batch-fetching

@@ -126,6 +126,8 @@ impl Consumer {
         ),
         err
     )]
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn commit_sync(&self) -> Result<(), ConsumerError> {
         let Some((partitions, topics)) =
             snapshot_commit_topics(&self.next_offsets, &self.positions, &self.topic_ids).await

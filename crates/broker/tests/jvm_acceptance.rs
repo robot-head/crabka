@@ -23,14 +23,13 @@
 // `clippy::unnecessary_unwrap` fires on the `l.unwrap()` inside
 // `if l.is_some() && l != Some(1)` in `jvm_kafka_leader_election_preferred`
 // and its span computation ICEs in annotate-snippets on Rust 1.95.
-#![allow(clippy::unnecessary_unwrap)]
 
 use std::{
     io::Write,
     process::{Command, Stdio},
 };
 
-use assert2::check;
+use assert2::{assert, check};
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_log::LogConfig;
 
@@ -147,7 +146,12 @@ fn docker_run_kafka_tool_with_image(image: &str, args: &[&str]) -> std::process:
         out.status,
         out.stderr.len(),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "docker run image={image} {args:?} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     out
 }
 
@@ -208,7 +212,11 @@ async fn console_producer_round_trip() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // 3. Consume them back via --partition 0 (bypasses groups entirely).
     let consumer_out = docker_run_kafka_tool(&[
@@ -227,7 +235,7 @@ async fn console_producer_round_trip() {
     ]);
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["alpha", "bravo", "charlie"] {
-        assert2::assert!(s.contains(needle));
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -268,8 +276,14 @@ async fn kafka_topics_describe_smokes_metadata() {
         BOOTSTRAP,
     ]);
     let stdout = String::from_utf8_lossy(&out.stdout);
-    assert2::assert!(stdout.contains("Topic: described"));
-    assert2::assert!(stdout.contains("PartitionCount: 2"));
+    assert!(
+        stdout.contains("Topic: described"),
+        "describe missing topic line: {stdout}"
+    );
+    assert!(
+        stdout.contains("PartitionCount: 2"),
+        "describe missing partition count: {stdout}"
+    );
 
     broker.shutdown().await;
     let _ = HOST_PORT; // silence dead_code on Windows builds
@@ -320,7 +334,7 @@ async fn rust_producer_to_console_consumer() {
             })
             .await;
         let m = fut.await.expect("oneshot").expect("ack");
-        assert2::assert!(m.partition == 0);
+        assert!(m.partition == 0);
     }
     producer.flush().await.expect("flush");
     producer.close().await.expect("close");
@@ -342,7 +356,7 @@ async fn rust_producer_to_console_consumer() {
     ]);
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["x", "y", "z"] {
-        assert2::assert!(s.contains(needle));
+        assert!(s.contains(needle), "missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -401,7 +415,11 @@ async fn console_consumer_with_group_round_trip() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // 3. Consume WITHOUT --partition. The default `console-consumer`
     //    group will JoinGroup → SyncGroup → Heartbeat → Fetch through
@@ -422,7 +440,7 @@ async fn console_consumer_with_group_round_trip() {
     ]);
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["x", "y", "z"] {
-        assert2::assert!(s.contains(needle));
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -486,7 +504,11 @@ async fn console_consumer_with_static_membership() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // Consume with `group.instance.id` set. The JVM consumer sends this
     // as `group_instance_id` in JoinGroup v5+ / SyncGroup v3+ / Heartbeat
@@ -510,7 +532,7 @@ async fn console_consumer_with_static_membership() {
     ]);
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["a", "b", "c"] {
-        assert2::assert!(s.contains(needle));
+        assert!(s.contains(needle), "consumer didn't emit {needle}: {s:?}");
     }
 
     // `kafka-consumer-groups --describe` exercises the broker's
@@ -525,7 +547,7 @@ async fn console_consumer_with_static_membership() {
         BOOTSTRAP,
     ]);
     let s = String::from_utf8_lossy(&desc_out.stdout);
-    assert2::assert!(s.contains(TOPIC));
+    assert!(s.contains(TOPIC), "describe missing topic {TOPIC}: {s}");
 
     broker.shutdown().await;
 }
@@ -545,7 +567,6 @@ async fn console_consumer_with_static_membership() {
 // listener.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn three_node_jvm_round_trip() {
     const TOPIC: &str = "crabka-quorum-itest";
 
@@ -709,7 +730,12 @@ async fn three_node_jvm_round_trip() {
         .expect("write stdin");
     drop(producer_child.stdin.take());
     let producer_out = producer_child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "JVM producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // 4. Consume via node 3.
     let out = docker_run_kafka_tool(&[
@@ -728,14 +754,14 @@ async fn three_node_jvm_round_trip() {
     ]);
     let s = String::from_utf8_lossy(&out.stdout);
     for needle in ["a", "b", "c"] {
-        assert2::assert!(s.contains(needle));
+        assert!(s.contains(needle), "missing {needle} in {s:?}");
     }
 
     // 5. Find the controller leader, kill it.
     let mut leader_idx = None;
     for (i, (h, _)) in cluster.iter().enumerate() {
         let want = u64::try_from(i + 1).unwrap();
-        if h.controller_leader_id().await == Some(crabka_broker::NodeId(want)) {
+        if h.controller_leader_id() == Some(crabka_broker::NodeId(want)) {
             leader_idx = Some(i);
             break;
         }
@@ -761,7 +787,10 @@ async fn three_node_jvm_round_trip() {
         &survivor_bootstrap,
     ]);
     let list_s = String::from_utf8_lossy(&list_out.stdout);
-    assert2::assert!(list_s.contains(TOPIC));
+    assert!(
+        list_s.contains(TOPIC),
+        "topic missing after leader kill: {list_s:?}"
+    );
 
     for (h, _) in cluster {
         h.shutdown().await;
@@ -788,7 +817,6 @@ async fn three_node_jvm_round_trip() {
 // container as `-v <host>:/data:ro` and dump the first segment file.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn three_node_replication_byte_compare() {
     const TOPIC: &str = "crabka-replication-itest";
 
@@ -958,7 +986,12 @@ async fn three_node_replication_byte_compare() {
     }
     drop(producer_child.stdin.take());
     let prod_out = producer_child.wait_with_output().expect("wait producer");
-    assert2::assert!(prod_out.status.success());
+    assert!(
+        prod_out.status.success(),
+        "producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&prod_out.stdout),
+        String::from_utf8_lossy(&prod_out.stderr),
+    );
 
     // 4. Wait for replication lag to drain: every broker's local partition log
     //    must reach the full 100 records before we dump them. With acks=all the
@@ -974,10 +1007,14 @@ async fn three_node_replication_byte_compare() {
     //    broker's on-disk partition directory visible to the tool
     //    container.
     let mut dumps = Vec::with_capacity(3);
-    for (_, dir) in &cluster {
+    for (i, (_, dir)) in cluster.iter().enumerate() {
         let partition_dir = dir.path().join(format!("{TOPIC}-0"));
         let log_file = partition_dir.join("00000000000000000000.log");
-        assert2::assert!(log_file.exists());
+        assert!(
+            log_file.exists(),
+            "broker {} missing log file: {log_file:?}",
+            i + 1,
+        );
         let mount = format!("{}:/data:ro", partition_dir.display());
         let out = Command::new("docker")
             .args([
@@ -993,13 +1030,19 @@ async fn three_node_replication_byte_compare() {
             ])
             .output()
             .expect("spawn dump-log");
-        assert2::assert!(out.status.success());
+        assert!(
+            out.status.success(),
+            "dump-log failed for broker {}: stdout={}, stderr={}",
+            i + 1,
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
         dumps.push(String::from_utf8_lossy(&out.stdout).to_string());
     }
 
     // 6. All three dumps should be byte-identical.
-    assert2::assert!(dumps[0] == dumps[1]);
-    assert2::assert!(dumps[1] == dumps[2]);
+    assert!(dumps[0] == dumps[1], "broker 1 vs broker 2 dump differ");
+    assert!(dumps[1] == dumps[2], "broker 2 vs broker 3 dump differ");
 
     for (h, _) in cluster {
         h.shutdown().await;
@@ -1018,7 +1061,6 @@ async fn three_node_replication_byte_compare() {
 // Same multi-thread runtime caveat as the other multi-broker tests.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker and CRABKA_RUN_TXN_JVM_TEST=1"]
-#[allow(clippy::too_many_lines)]
 async fn transactional_console_producer_eos() {
     const TOPIC: &str = "crabka-txn-itest";
 
@@ -1152,7 +1194,12 @@ async fn transactional_console_producer_eos() {
         String::from_utf8_lossy(&producer_out.stdout),
         String::from_utf8_lossy(&producer_out.stderr),
     );
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "kafka-verifiable-producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // 3. Brief pause to let commit markers propagate through the log.
     // intentional: transactional commit-marker propagation and LSO advance are
@@ -1178,7 +1225,10 @@ async fn transactional_console_producer_eos() {
     ]);
     let s = String::from_utf8_lossy(&consume_out.stdout);
     let line_count = s.lines().filter(|l| !l.trim().is_empty()).count();
-    assert2::assert!(line_count >= 6);
+    assert!(
+        line_count >= 6,
+        "read_committed should see at least 6 committed records, got {line_count}: {s}",
+    );
 
     for (h, _) in cluster {
         h.shutdown().await;
@@ -1196,7 +1246,6 @@ async fn transactional_console_producer_eos() {
 // when JVM tests run sequentially via the nextest broker-jvm-acceptance test group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn acks_all_durability() {
     const TOPIC: &str = "crabka-acks-all-itest";
 
@@ -1350,7 +1399,12 @@ async fn acks_all_durability() {
         String::from_utf8_lossy(&producer_out.stdout),
         String::from_utf8_lossy(&producer_out.stderr),
     );
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "kafka-console-producer failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // intentional: wait for the produced records (acks=-1) to replicate to
     // node 3 and its high-watermark to advance before the read_committed
@@ -1375,7 +1429,10 @@ async fn acks_all_durability() {
     ]);
     let stdout = String::from_utf8_lossy(&consume_out.stdout);
     let line_count = stdout.lines().filter(|l| !l.trim().is_empty()).count();
-    assert2::assert!(line_count >= 100);
+    assert!(
+        line_count >= 100,
+        "expected at least 100 records; got {line_count}: stdout={stdout}"
+    );
 
     for (h, _) in cluster {
         h.shutdown().await;
@@ -1394,7 +1451,6 @@ async fn acks_all_durability() {
 // broker-jvm-acceptance test group.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn acks_all_survives_leader_crash() {
     const TOPIC: &str = "crabka-acks-all-crash-itest";
 
@@ -1636,7 +1692,10 @@ async fn acks_all_survives_leader_crash() {
     ]);
     let stdout = String::from_utf8_lossy(&consume_out.stdout);
     let line_count = stdout.lines().filter(|l| !l.trim().is_empty()).count();
-    assert2::assert!(line_count >= 1);
+    assert!(
+        line_count >= 1,
+        "expected at least 1 readable record after leader crash; got {line_count}: {stdout}"
+    );
 
     for (h, _) in cluster {
         h.shutdown().await;
@@ -1692,7 +1751,10 @@ async fn kafka_configs_alter_round_trip() {
         BOOTSTRAP,
     ]);
     let s = String::from_utf8_lossy(&out.stdout);
-    assert2::assert!(s.contains("retention.ms=60000"));
+    assert!(
+        s.contains("retention.ms=60000"),
+        "describe output missing retention.ms=60000: {s}"
+    );
 }
 
 /// `kafka-topics --alter --topic t --partitions 3` then `--describe`
@@ -1740,7 +1802,10 @@ async fn kafka_topics_alter_partitions() {
         BOOTSTRAP,
     ]);
     let s = String::from_utf8_lossy(&out.stdout);
-    assert2::assert!(s.contains("PartitionCount: 3") || s.contains("Partitions: 3"));
+    assert!(
+        s.contains("PartitionCount: 3") || s.contains("Partitions: 3"),
+        "describe missing PartitionCount: 3 — got: {s}"
+    );
 }
 
 /// `kafka-delete-records --offset-json-file <(...)`: produce 20
@@ -1795,7 +1860,12 @@ async fn kafka_delete_records_trims_log() {
     }
     drop(child.stdin.take());
     let prod_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(prod_out.status.success());
+    assert!(
+        prod_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&prod_out.stdout),
+        String::from_utf8_lossy(&prod_out.stderr),
+    );
 
     // Build offset-json on the host so we can pass it into the container.
     // The cp-kafka container runs as a non-root user; on Linux,
@@ -1833,9 +1903,17 @@ async fn kafka_delete_records_trims_log() {
         ])
         .output()
         .expect("spawn delete-records");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "delete-records failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     let s = String::from_utf8_lossy(&out.stdout);
-    assert2::assert!(s.contains("low_watermark") || s.contains("10"));
+    assert!(
+        s.contains("low_watermark") || s.contains("10"),
+        "delete-records output missing low_watermark: {s}"
+    );
 }
 
 /// `kafka-consumer-groups --list` and `--describe` round-trip after a
@@ -1912,7 +1990,7 @@ async fn kafka_consumer_groups_list_describe() {
         BOOTSTRAP,
     ]);
     let s = String::from_utf8_lossy(&list_out.stdout);
-    assert2::assert!(s.contains(GROUP));
+    assert!(s.contains(GROUP), "list output missing {GROUP}: {s}");
 
     let desc_out = docker_run_kafka_tool(&[
         "kafka-consumer-groups",
@@ -1923,7 +2001,10 @@ async fn kafka_consumer_groups_list_describe() {
         BOOTSTRAP,
     ]);
     let s = String::from_utf8_lossy(&desc_out.stdout);
-    assert2::assert!(s.contains(TOPIC));
+    assert!(
+        s.contains(TOPIC),
+        "describe output missing topic {TOPIC}: {s}"
+    );
 }
 
 /// `kafka-consumer-groups --delete-offsets` exercises `OffsetDelete`
@@ -1934,7 +2015,6 @@ async fn kafka_consumer_groups_list_describe() {
 /// path runs.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn kafka_consumer_groups_delete_offsets() {
     const TOPIC: &str = "crabka-cg-delete-offsets-itest";
     const GROUP: &str = "crabka-cg-delete-offsets-grp";
@@ -2013,7 +2093,10 @@ async fn kafka_consumer_groups_delete_offsets() {
         BOOTSTRAP,
     ]);
     let pre_s = String::from_utf8_lossy(&pre_desc.stdout);
-    assert2::assert!(pre_s.contains(TOPIC));
+    assert!(
+        pre_s.contains(TOPIC),
+        "pre-delete --describe missing {TOPIC}: {pre_s}"
+    );
 
     // Run --delete-offsets via a piped-stdin spawn so any Y/N prompt the
     // 2.7 build may emit is satisfied. `kafka-consumer-groups` in 2.7
@@ -2047,12 +2130,20 @@ async fn kafka_consumer_groups_delete_offsets() {
     }
     drop(child.stdin.take());
     let out = child.wait_with_output().expect("wait delete-offsets");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "delete-offsets failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     let s = String::from_utf8_lossy(&out.stdout);
     // Kafka 2.7 prints a "TOPIC | PARTITION | STATUS" table with
     // "Successful" per row on success. Be lenient: any of the indicators
     // is enough since header formatting drifts across CLI versions.
-    assert2::assert!(s.contains("Successful") || s.contains(TOPIC));
+    assert!(
+        s.contains("Successful") || s.contains(TOPIC),
+        "delete-offsets stdout missing success indicator: {s}"
+    );
 
     // Post-delete --describe: no data row should reference TOPIC for
     // GROUP. Header text may still mention column names, so guard with a
@@ -2070,7 +2161,10 @@ async fn kafka_consumer_groups_delete_offsets() {
     let leaked = post_s
         .lines()
         .any(|l| l.starts_with(GROUP) && l.contains(TOPIC));
-    assert2::assert!(!leaked);
+    assert!(
+        !leaked,
+        "post-delete --describe still shows {TOPIC} for {GROUP}: {post_s}"
+    );
 }
 
 /// `kafka-cluster cluster-id` exercises `DescribeCluster` (`api_key` 60).
@@ -2097,8 +2191,9 @@ async fn kafka_cluster_describe() {
     let s = String::from_utf8_lossy(&out.stdout);
     // `kafka-cluster cluster-id` prints a line like:
     //   "Cluster ID: <uuid>"
-    assert2::assert!(
-        s.contains("Cluster ID") || s.contains("cluster ID") || s.contains("00000000")
+    assert!(
+        s.contains("Cluster ID") || s.contains("cluster ID") || s.contains("00000000"),
+        "cluster-id output missing cluster id: {s}"
     );
 }
 
@@ -2326,7 +2421,12 @@ fn docker_run_kafka_tool_with_image_and_mount(
         out.status,
         out.stderr.len(),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "docker run image={image} mount={mount} {args:?} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     out
 }
 
@@ -2411,7 +2511,12 @@ async fn jvm_sasl_plain_produce_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // 4. Consume them back. `kafka-console-consumer` uses `--consumer.config`.
     let consumer_out = docker_run_kafka_tool_with_mount(
@@ -2436,7 +2541,7 @@ async fn jvm_sasl_plain_produce_consume() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..10 {
         let needle = format!("msg-{i}");
-        assert2::assert!(s.contains(&needle));
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -2584,7 +2689,12 @@ async fn jvm_sasl_oauthbearer_produce_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     let consumer_out = docker_run_kafka_tool_with_mount(
         &mount,
@@ -2608,7 +2718,7 @@ async fn jvm_sasl_oauthbearer_produce_consume() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..10 {
         let needle = format!("msg-{i}");
-        assert2::assert!(s.contains(&needle));
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -2633,7 +2743,6 @@ async fn jvm_sasl_oauthbearer_produce_consume() {
 ///    machine end-to-end through the official Kafka client.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_sasl_scram_sha512_produce_consume() {
     const TOPIC: &str = "crabka-sasl-scram-itest";
     const ADMIN: &str = "admin";
@@ -2774,7 +2883,12 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // 3. Consume them back (`--consumer.config`).
     let consumer_out = docker_run_kafka_tool_with_image_and_mount(
@@ -2800,7 +2914,7 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..10 {
         let needle = format!("msg-{i}");
-        assert2::assert!(s.contains(&needle));
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -2812,7 +2926,6 @@ async fn jvm_sasl_scram_sha512_produce_consume() {
 /// produce + consume with `sasl.mechanism=SCRAM-SHA-256`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_sasl_scram_sha256_produce_consume() {
     const TOPIC: &str = "crabka-sasl-scram256-itest";
     const ADMIN: &str = "admin";
@@ -2937,7 +3050,12 @@ async fn jvm_sasl_scram_sha256_produce_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // Consume them back.
     let consumer_out = docker_run_kafka_tool_with_image_and_mount(
@@ -2963,7 +3081,7 @@ async fn jvm_sasl_scram_sha256_produce_consume() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..10 {
         let needle = format!("msg-{i}");
-        assert2::assert!(s.contains(&needle));
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -3004,8 +3122,16 @@ async fn start_ssl_broker() -> (crabka_broker::BrokerHandle, tempfile::TempDir) 
         .join("tests")
         .join("fixtures")
         .join("dev_key.pem");
-    assert2::assert!(cert_path.exists());
-    assert2::assert!(key_path.exists());
+    assert!(
+        cert_path.exists(),
+        "dev_cert.pem missing at {}",
+        cert_path.display(),
+    );
+    assert!(
+        key_path.exists(),
+        "dev_key.pem missing at {}",
+        key_path.display(),
+    );
 
     let config = BrokerConfig {
         broker_id: 1,
@@ -3109,8 +3235,17 @@ fn prepare_jks_truststore() -> std::path::PathBuf {
             ])
             .output()
             .expect("spawn keytool");
-        assert2::assert!(out.status.success());
-        assert2::assert!(ts_path.exists());
+        assert!(
+            out.status.success(),
+            "keytool import failed: stdout={} stderr={}",
+            String::from_utf8_lossy(&out.stdout),
+            String::from_utf8_lossy(&out.stderr),
+        );
+        assert!(
+            ts_path.exists(),
+            "keytool reported success but ts.jks missing at {}",
+            ts_path.display(),
+        );
     }
 
     ts_path
@@ -3171,7 +3306,12 @@ async fn jvm_ssl_handshake_succeeds() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "ssl handshake failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 
     broker.shutdown().await;
 }
@@ -3204,7 +3344,12 @@ fn docker_run_kafka_tool_with_image_and_mounts(
         out.status,
         out.stderr.len(),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "docker run image={image} mounts={mounts:?} {args:?} failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
     out
 }
 
@@ -3311,7 +3456,6 @@ async fn start_sasl_ssl_broker(
 /// `IncrementalAlterConfigs (44)` path that the broker doesn't implement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_sasl_ssl_full_stack() {
     const TOPIC: &str = "crabka-sasl-ssl-itest";
     const ADMIN: &str = "admin";
@@ -3451,7 +3595,12 @@ async fn jvm_sasl_ssl_full_stack() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // 3. Consume them back.
     let consumer_out = docker_run_kafka_tool_with_image_and_mounts(
@@ -3477,7 +3626,7 @@ async fn jvm_sasl_ssl_full_stack() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..10 {
         let needle = format!("msg-{i}");
-        assert2::assert!(s.contains(&needle));
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -3500,7 +3649,6 @@ const LISTEN_B1: &str = "0.0.0.0:9094";
 /// name on both is `"SASL_PLAINTEXT"`, so the broker peers dial each
 /// other's advertised host (which we set to `host.docker.internal:<port>`
 /// so the JVM containers can use the same metadata response).
-#[allow(clippy::too_many_lines)]
 async fn start_two_sasl_brokers(
     admin: &str,
     admin_pass: &str,
@@ -3656,7 +3804,6 @@ async fn start_two_sasl_brokers(
 /// 4. Broker 0's local log has all 50 records after produce returns.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_inter_broker_replication_authed() {
     const TOPIC: &str = "crabka-jvm-inter-broker-itest";
     const ADMIN: &str = "admin";
@@ -3747,7 +3894,12 @@ async fn jvm_inter_broker_replication_authed() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // Verify the leader has 50 records on disk. We don't know in advance
     // which broker leads partition 0 (raft picks one), so wait for whichever
@@ -3770,7 +3922,6 @@ async fn jvm_inter_broker_replication_authed() {
 /// `host.docker.internal:<port>` so the JVM containers can reach them via
 /// `--add-host=host.docker.internal:host-gateway` AND so each broker can
 /// dial its peer using the same host name.
-#[allow(clippy::too_many_lines)]
 async fn start_two_sasl_ssl_brokers_with_controller_protocol(
     ctrl_protocol: crabka_security::ListenerProtocol,
     admin: &str,
@@ -3941,7 +4092,6 @@ async fn start_two_sasl_ssl_brokers_with_controller_protocol(
 /// offset check even though `SASL_SSL` itself is correctly wired.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_inter_broker_sasl_ssl_raft_replication() {
     use crabka_security::ListenerProtocol;
 
@@ -4099,7 +4249,12 @@ async fn jvm_inter_broker_sasl_ssl_raft_replication() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // Assert BOTH brokers reach offset 50 on partition 0 — proves rf=2
     // follower replication completed over the SASL_SSL inter-broker
@@ -4296,7 +4451,10 @@ async fn jvm_kafka_acls_provision_via_cli() {
         ],
     );
     let listed2 = String::from_utf8_lossy(&list_out2.stdout);
-    assert2::assert!(!listed2.contains("User:alice"));
+    assert!(
+        !listed2.contains("User:alice"),
+        "alice should be gone after --remove; got: {listed2}"
+    );
 
     broker.shutdown().await;
 }
@@ -4321,7 +4479,6 @@ async fn jvm_kafka_acls_provision_via_cli() {
 /// short-circuit on a missing topic.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_authorized_produce_consume() {
     const TOPIC: &str = "foo";
     const GROUP: &str = "cg-foo";
@@ -4465,7 +4622,12 @@ async fn jvm_authorized_produce_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // Consume via `--group cg-foo --from-beginning` (the group-coordinator
     // path; exercises JoinGroup/OffsetFetch/OffsetCommit authorize).
@@ -4492,7 +4654,7 @@ async fn jvm_authorized_produce_consume() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..10 {
         let needle = format!("msg-{i}");
-        assert2::assert!(s.contains(&needle));
+        assert!(s.contains(&needle), "consumer missing {needle}: {s:?}");
     }
 
     broker.shutdown().await;
@@ -4514,7 +4676,6 @@ async fn jvm_authorized_produce_consume() {
 /// must contain `TopicAuthorizationException`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_unauthorized_produce_fails() {
     const TOPIC: &str = "foo";
     const ADMIN: &str = "admin";
@@ -4633,7 +4794,10 @@ async fn jvm_unauthorized_produce_fails() {
         "CRABKA[test] bob producer status={} stderr={stderr} stdout={stdout}",
         bob_out.status,
     );
-    assert2::assert!(stderr.contains("TopicAuthorizationException"));
+    assert!(
+        stderr.contains("TopicAuthorizationException"),
+        "bob producer should log TopicAuthorizationException; stderr={stderr} stdout={stdout}",
+    );
 
     broker.shutdown().await;
 }
@@ -4650,7 +4814,6 @@ async fn jvm_unauthorized_produce_fails() {
 /// contract stable across cp-kafka versions.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_unauthorized_consumer_fails_group_check() {
     const TOPIC: &str = "foo";
     const GROUP: &str = "cg-other";
@@ -4757,7 +4920,10 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
         "CRABKA[test] alice consumer group-denied status={} stderr={stderr} stdout={stdout}",
         out.status,
     );
-    assert2::assert!(stderr.contains("GroupAuthorizationException"));
+    assert!(
+        stderr.contains("GroupAuthorizationException"),
+        "consumer should log GroupAuthorizationException; stderr={stderr} stdout={stdout}",
+    );
 
     broker.shutdown().await;
 }
@@ -4778,7 +4944,6 @@ async fn jvm_unauthorized_consumer_fails_group_check() {
 /// 2. `--topic other-foo` fails with `TopicAuthorizationException`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_prefixed_topic_acl_works() {
     const PREFIX: &str = "team-";
     const TOPIC_OK: &str = "team-foo";
@@ -4913,7 +5078,11 @@ async fn jvm_prefixed_topic_acl_works() {
             .expect("write seed");
         drop(child.stdin.take());
         let seed_out = child.wait_with_output().expect("wait seed producer");
-        assert2::assert!(seed_out.status.success());
+        assert!(
+            seed_out.status.success(),
+            "admin seed producer failed for {topic}: stderr={}",
+            String::from_utf8_lossy(&seed_out.stderr),
+        );
     }
 
     // ---- Alice: consume team-foo (allowed by prefix).
@@ -4947,7 +5116,10 @@ async fn jvm_prefixed_topic_acl_works() {
     );
     let stdout = String::from_utf8_lossy(&consumer_out.stdout);
     let needle = format!("seed-{TOPIC_OK}");
-    assert2::assert!(stdout.contains(&needle));
+    assert!(
+        stdout.contains(&needle),
+        "alice should read {needle} from prefixed topic; got: {stdout}",
+    );
 
     // ---- Alice: consume other-foo (denied — no matching prefix).
     let denied_out = Command::new("docker")
@@ -4983,7 +5155,10 @@ async fn jvm_prefixed_topic_acl_works() {
         "CRABKA[test] alice denied consumer status={} stderr={denied_stderr} stdout={denied_stdout}",
         denied_out.status,
     );
-    assert2::assert!(denied_stderr.contains("TopicAuthorizationException"));
+    assert!(
+        denied_stderr.contains("TopicAuthorizationException"),
+        "alice should be denied on {TOPIC_DENIED}; stderr={denied_stderr} stdout={denied_stdout}",
+    );
 
     broker.shutdown().await;
 }
@@ -5008,8 +5183,6 @@ const LISTEN_B2: &str = "0.0.0.0:9096";
 /// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
 /// The `cfg*` values are needed to revive a broker after shutdown
 /// (pass with `BootstrapMode::Rejoin`).
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_lines)]
 async fn start_three_broker_sasl_plaintext_jvm_cluster(
     admin: &str,
     admin_pass: &str,
@@ -5247,7 +5420,6 @@ async fn wait_three_brokers_registered(
 /// 7. Poll until broker 1 is leader again.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_leader_election_preferred() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -5299,7 +5471,10 @@ async fn jvm_kafka_leader_election_preferred() {
     // For the preferred election to do anything interesting we need broker 1
     // to be the preferred (replicas[0]). The scheduler should assign [1, 2]
     // since broker 1 is node_id=1 (lowest). Assert this assumption.
-    assert2::assert!(initial_leader == 1);
+    assert!(
+        initial_leader == 1,
+        "expected broker 1 to be the initial/preferred leader; got {initial_leader}"
+    );
 
     // Inject a PartitionRecord that makes broker 2 the current leader while
     // keeping broker 1 in the ISR as a non-leader replica.
@@ -5381,7 +5556,10 @@ async fn jvm_kafka_leader_election_preferred() {
         "CRABKA[test] kafka-leader-election status={} stdout={election_stdout} stderr={election_stderr}",
         out.status
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "kafka-leader-election failed: stdout={election_stdout} stderr={election_stderr}",
+    );
 
     // Poll until broker 1 is the leader again on broker 2's view.
     wait_jvm_partition_leader(&h2, TOPIC, 0, 1).await;
@@ -5430,8 +5608,6 @@ fn write_temp_file(filename: &str, contents: &str) -> TempFileMount {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 async fn jvm_kafka_reassign_partitions_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -5523,7 +5699,11 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "kafka-reassign-partitions --execute failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Inject ISR including new_node so the background reassignment-completion
     // task can see the new broker in ISR without relying on inter-broker
@@ -5567,7 +5747,10 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
         .expect("partition record after reassignment");
     let got: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
     let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
-    assert2::assert!(got == want);
+    assert!(
+        got == want,
+        "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
+    );
     eprintln!("CRABKA[test] reassignment completed; running --verify");
 
     // --verify should report completion.
@@ -5600,7 +5783,11 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
     );
     // Broker-scoped IncrementalAlterConfigs (resource_type=4) is supported,
     // so --verify can clear throttles and exit 0.
-    assert2::assert!(verify_out.status.success());
+    assert!(
+        verify_out.status.success(),
+        "kafka-reassign-partitions --verify failed: stderr={}",
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
 
     h1.shutdown().await;
     h2.shutdown().await;
@@ -5613,8 +5800,6 @@ async fn jvm_kafka_reassign_partitions_end_to_end() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
-#[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
 async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -5706,7 +5891,11 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "kafka-reassign-partitions --execute --throttle failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Verify throttle configs were applied via kafka-configs --describe.
     let desc = std::process::Command::new("docker")
@@ -5737,7 +5926,10 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         String::from_utf8_lossy(&desc.stderr),
     );
     let desc_stdout = String::from_utf8_lossy(&desc.stdout);
-    assert2::assert!(desc_stdout.contains("leader.replication.throttled.rate=1024"));
+    assert!(
+        desc_stdout.contains("leader.replication.throttled.rate=1024"),
+        "leader.replication.throttled.rate=1024 not visible in kafka-configs output: {desc_stdout}"
+    );
 
     // Inject ISR including new_node so the background reassignment-completion
     // task can see the new broker in ISR without relying on inter-broker
@@ -5781,7 +5973,10 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         .expect("partition record after reassignment");
     let got: std::collections::HashSet<u64> = pr.replicas.iter().map(|n| n.0).collect();
     let want: std::collections::HashSet<u64> = [staying, new_node].into_iter().collect();
-    assert2::assert!(got == want);
+    assert!(
+        got == want,
+        "reassignment completed but replicas mismatch: got={got:?} want={want:?}"
+    );
     eprintln!("CRABKA[test] reassignment completed; running --verify");
 
     // --verify clears throttle configs and exits 0 (broker-scoped
@@ -5813,7 +6008,11 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
         String::from_utf8_lossy(&verify_out.stdout),
         String::from_utf8_lossy(&verify_out.stderr),
     );
-    assert2::assert!(verify_out.status.success());
+    assert!(
+        verify_out.status.success(),
+        "kafka-reassign-partitions --verify failed: stderr={}",
+        String::from_utf8_lossy(&verify_out.stderr)
+    );
 
     // Confirm throttle configs were cleared from the metadata image after --verify.
     h1.wait_for_image(|img| {
@@ -5834,8 +6033,6 @@ async fn jvm_kafka_reassign_partitions_with_throttle_end_to_end() {
 /// `extra_users` as PLAIN credentials on all three brokers.
 ///
 /// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_lines)]
 async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
     admin: &str,
     admin_pass: &str,
@@ -6005,7 +6202,6 @@ async fn start_three_broker_sasl_plaintext_jvm_cluster_with_users(
 /// user-scoped `producer_byte_rate` via the JVM admin CLI.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -6056,7 +6252,11 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "alter failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Describe — confirm visibility.
     // api_key 50 (DescribeUserScramCredentials) is implemented,
@@ -6077,9 +6277,16 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(desc.status.success());
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
+    );
     let stdout = String::from_utf8_lossy(&desc.stdout);
-    assert2::assert!(stdout.contains("producer_byte_rate=1024"));
+    assert!(
+        stdout.contains("producer_byte_rate=1024"),
+        "expected quota in describe output: {stdout}"
+    );
 
     // Delete the config.
     let del_out = docker_run_kafka_tool_with_image_and_mount(
@@ -6100,7 +6307,11 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(del_out.status.success());
+    assert!(
+        del_out.status.success(),
+        "delete-config failed: {}",
+        String::from_utf8_lossy(&del_out.stderr)
+    );
 
     // Confirm the quota was cleared from the committed metadata image.
     h1.wait_for_image(|img| {
@@ -6125,7 +6336,6 @@ async fn jvm_kafka_configs_alter_client_quota_end_to_end() {
 /// the rate limit); the Rust integration test in `tests/ip_quotas.rs` covers that.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -6169,7 +6379,11 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "alter failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Describe — confirm visibility.
     // api_key 50 (DescribeUserScramCredentials) is implemented,
@@ -6190,9 +6404,16 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(desc.status.success());
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
+    );
     let stdout = String::from_utf8_lossy(&desc.stdout);
-    assert2::assert!(stdout.contains("connection_creation_rate=2"));
+    assert!(
+        stdout.contains("connection_creation_rate=2"),
+        "expected ip quota in describe output: {stdout}"
+    );
 
     // Delete the config.
     let del_out = docker_run_kafka_tool_with_image_and_mount(
@@ -6213,7 +6434,11 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(del_out.status.success());
+    assert!(
+        del_out.status.success(),
+        "delete-config failed: {}",
+        String::from_utf8_lossy(&del_out.stderr)
+    );
 
     // Confirm the quota was cleared from the committed metadata image.
     h1.wait_for_image(|img| {
@@ -6240,7 +6465,6 @@ async fn jvm_kafka_configs_alter_ip_quota_end_to_end() {
 /// covers enforcement.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -6291,7 +6515,11 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
     );
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "alter failed: {}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // Describe — confirm visibility.
     // api_key 50 (DescribeUserScramCredentials) is implemented,
@@ -6312,9 +6540,16 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(desc.status.success());
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
+    );
     let stdout = String::from_utf8_lossy(&desc.stdout);
-    assert2::assert!(stdout.contains("controller_mutation_rate=2"));
+    assert!(
+        stdout.contains("controller_mutation_rate=2"),
+        "expected quota in describe output: {stdout}"
+    );
 
     // Delete the config.
     let del_out = docker_run_kafka_tool_with_image_and_mount(
@@ -6335,7 +6570,11 @@ async fn jvm_kafka_configs_alter_controller_mutation_rate_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(del_out.status.success());
+    assert!(
+        del_out.status.success(),
+        "delete-config failed: {}",
+        String::from_utf8_lossy(&del_out.stderr)
+    );
 
     // Confirm the quota was cleared from the committed metadata image.
     h1.wait_for_image(|img| {
@@ -6395,7 +6634,11 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(alter.status.success());
+    assert!(
+        alter.status.success(),
+        "alter SCRAM failed: {}",
+        String::from_utf8_lossy(&alter.stderr)
+    );
 
     // Describe — should exit 0 cleanly (api_key 50 now implemented).
     let desc = docker_run_kafka_tool_with_image_and_mount(
@@ -6414,9 +6657,16 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
             "/client.properties",
         ],
     );
-    assert2::assert!(desc.status.success());
+    assert!(
+        desc.status.success(),
+        "describe failed: {}",
+        String::from_utf8_lossy(&desc.stderr)
+    );
     let stdout = String::from_utf8_lossy(&desc.stdout);
-    assert2::assert!(stdout.contains("SCRAM-SHA-512"));
+    assert!(
+        stdout.contains("SCRAM-SHA-512"),
+        "expected SCRAM-SHA-512 in describe output: {stdout}"
+    );
 
     let _ = h1; // keep alive
 }
@@ -6440,7 +6690,6 @@ async fn jvm_kafka_configs_describe_users_scram_credentials_end_to_end() {
 /// 7. Assert stdout does NOT contain `v1` or `v2` (stale values compacted away).
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
     const TOPIC: &str = "compacted-jvm";
 
@@ -6510,7 +6759,10 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         {
             break;
         }
-        assert2::assert!(std::time::Instant::now() <= cfg_deadline);
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "cleanup.policy/segment.bytes never propagated within 10s"
+        );
         // intentional: bounded poll of the local reconciled LogConfig override;
         // `partition_log_config_for_test` is not surfaced by any awaiter/metric.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -6569,7 +6821,11 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
     eprintln!("CRABKA[test] produced 5 records; waiting for cleaner to compact...");
 
     // 3. Wait until the cleaner completes at least two compaction passes over
@@ -6615,11 +6871,17 @@ async fn jvm_kafka_console_consumer_sees_compacted_topic_end_to_end() {
 
     // Latest values for each key must be present.
     for needle in ["v4", "v3", "v5"] {
-        assert2::assert!(stdout.contains(needle));
+        assert!(
+            stdout.contains(needle),
+            "expected {needle} in consumer output (latest per-key); got: {stdout:?}"
+        );
     }
     // Stale values for k1 must have been compacted away.
     for stale in ["v1", "v2"] {
-        assert2::assert!(!stdout.contains(stale));
+        assert!(
+            !stdout.contains(stale),
+            "stale value {stale} still present after compaction; got: {stdout:?}"
+        );
     }
 
     broker.shutdown().await;
@@ -6747,8 +7009,6 @@ async fn jvm_kafka_log_dirs_describe_reports_jbod_spread() {
 /// password).
 ///
 /// Returns `(h1, h2, h3, cfg1, cfg2, cfg3, dir1, dir2, dir3)`.
-#[allow(clippy::type_complexity)]
-#[allow(clippy::too_many_lines)]
 async fn start_three_broker_sasl_plaintext_jvm_cluster_with_delegation_tokens(
     admin: &str,
     admin_pass: &str,
@@ -6995,7 +7255,6 @@ fn extract_jvm_kv(stdout: &str, key: &str) -> String {
 /// `#[ignore = "requires Docker"]` — run with `--ignored`.
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker"]
-#[allow(clippy::too_many_lines)]
 async fn jvm_kafka_delegation_tokens_end_to_end() {
     const ADMIN: &str = "admin";
     const ADMIN_PASS: &str = "admin-secret";
@@ -7041,8 +7300,11 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
 
     let token_id = extract_jvm_kv(&create_stdout, "TOKENID");
     let hmac = extract_jvm_kv(&create_stdout, "HMAC");
-    assert2::assert!(!token_id.is_empty());
-    assert2::assert!(!hmac.is_empty());
+    assert!(
+        !token_id.is_empty(),
+        "empty TOKENID; stdout: {create_stdout}"
+    );
+    assert!(!hmac.is_empty(), "empty HMAC; stdout: {create_stdout}");
 
     // 2. Build token.properties referencing the new credentials via
     //    SCRAM-SHA-256 (the JVM client SASL mechanism for delegation
@@ -7110,7 +7372,12 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "token producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // 5. Describe — confirm the token is visible to the owner principal.
     let desc_out = docker_run_kafka_tool_with_image_and_mount(
@@ -7128,7 +7395,10 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
         ],
     );
     let desc_stdout = String::from_utf8_lossy(&desc_out.stdout);
-    assert2::assert!(desc_stdout.contains(&token_id));
+    assert!(
+        desc_stdout.contains(&token_id),
+        "--describe stdout missing token_id={token_id}: {desc_stdout}",
+    );
 
     // 6. Expire the token; `--expiry-time-period -1` deletes immediately.
     let exp_out = docker_run_kafka_tool_with_image_and_mount(
@@ -7147,7 +7417,12 @@ async fn jvm_kafka_delegation_tokens_end_to_end() {
             &hmac,
         ],
     );
-    assert2::assert!(exp_out.status.success());
+    assert!(
+        exp_out.status.success(),
+        "--expire failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&exp_out.stdout),
+        String::from_utf8_lossy(&exp_out.stderr),
+    );
 
     h1.shutdown().await;
     h2.shutdown().await;
@@ -7212,7 +7487,11 @@ async fn cooperative_sticky_kafka_console_consumer() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 
     // 3. Consume via kafka-console-consumer with CooperativeStickyAssignor.
     //    Use cp-kafka:7.5.0 (Kafka 3.5) — cooperative-sticky in 2.7 had
@@ -7238,7 +7517,11 @@ async fn cooperative_sticky_kafka_console_consumer() {
     );
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["alpha", "bravo", "charlie"] {
-        assert2::assert!(s.contains(needle));
+        assert!(
+            s.contains(needle),
+            "consumer didn't emit {needle}: stdout={s:?} stderr={:?}",
+            String::from_utf8_lossy(&consumer_out.stderr)
+        );
     }
 
     broker.shutdown().await;
@@ -7312,7 +7595,7 @@ impl MinioContainer {
             .stderr(Stdio::inherit())
             .status()
             .expect("spawn docker run minio");
-        assert2::assert!(status.success());
+        assert!(status.success(), "docker run minio failed");
         wait_for_minio_ready();
         Self { name }
     }
@@ -7363,7 +7646,12 @@ fn minio_make_bucket(bucket: &str) {
         ])
         .output()
         .expect("spawn mc mb");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "mc mb failed: stdout={}, stderr={}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr),
+    );
 }
 
 /// `mc ls --recursive local/<bucket>` for assertion-side bucket inspection.
@@ -7385,7 +7673,11 @@ fn minio_list_objects(bucket: &str) -> String {
         ])
         .output()
         .expect("spawn mc ls");
-    assert2::assert!(out.status.success());
+    assert!(
+        out.status.success(),
+        "mc ls failed: stderr={}",
+        String::from_utf8_lossy(&out.stderr),
+    );
     String::from_utf8_lossy(&out.stdout).into_owned()
 }
 
@@ -7514,7 +7806,11 @@ async fn create_tiered_topic(broker: &crabka_broker::BrokerHandle, topic: &str) 
         {
             break;
         }
-        assert2::assert!(std::time::Instant::now() <= cfg_deadline);
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated within 10s; saw {:?}",
+            broker.partition_log_config_for_test(topic, 0)
+        );
         // intentional: bounded poll of the local reconciled LogConfig override;
         // `partition_log_config_for_test` is not surfaced by any awaiter/metric.
         tokio::time::sleep(std::time::Duration::from_millis(100)).await;
@@ -7566,7 +7862,11 @@ fn produce_records(topic: &str, n: usize) {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "producer failed: {}",
+        String::from_utf8_lossy(&producer_out.stderr)
+    );
 }
 
 /// Poll `mc ls --recursive local/<bucket>` until at least `min_log_objects`
@@ -7678,7 +7978,10 @@ async fn tiered_storage_round_trip_through_minio() {
     // are guaranteed to come from MinIO because their segment was evicted
     // before consume started.
     let consumed = consume_records(TOPIC, RECORDS, 20_000, BOOTSTRAP);
-    assert2::assert!(consumed >= RECORDS);
+    assert!(
+        consumed >= RECORDS,
+        "expected >={RECORDS} records from remote tier, got {consumed}"
+    );
 
     broker.shutdown().await;
     // `_minio` is dropped here; the container is removed via `docker rm -f`.
@@ -7801,9 +8104,16 @@ async fn tiered_storage_topic_rlmm_survives_restart() {
     // Spot-check a sample across the offset range.
     for i in [0usize, 1, 50, 100, 150, RECORDS - 1] {
         let needle = format!("record-{i:04}");
-        assert2::assert!(stdout.contains(&needle));
+        assert!(
+            stdout.contains(&needle),
+            "consumer missing {needle} post-restart; partial output:\n{}",
+            stdout.chars().take(2_000).collect::<String>()
+        );
     }
-    assert2::assert!(consumed >= RECORDS);
+    assert!(
+        consumed >= RECORDS,
+        "expected >={RECORDS} records from remote tier after restart, got {consumed}"
+    );
 
     broker.shutdown().await;
     // `_minio` is dropped here; `_dir` (log.dir) is also dropped — cleanup.
@@ -7869,7 +8179,12 @@ async fn jvm_legacy_010_round_trip() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait legacy producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "legacy producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // 3. Consume them back via the 0.10.1 console-consumer.
     //    0.10.0 added `--new-consumer` + `--bootstrap-server`; the
@@ -7903,9 +8218,13 @@ async fn jvm_legacy_010_round_trip() {
         .output()
         .expect("spawn legacy consumer");
     let s = String::from_utf8_lossy(&consumer_out.stdout);
-    let _stderr = String::from_utf8_lossy(&consumer_out.stderr);
+    let stderr = String::from_utf8_lossy(&consumer_out.stderr);
     for needle in ["alpha", "bravo", "charlie"] {
-        assert2::assert!(s.contains(needle));
+        assert!(
+            s.contains(needle),
+            "legacy consumer didn't emit {needle}: status={} stdout={s:?} stderr={stderr:?}",
+            consumer_out.status,
+        );
     }
 
     broker.shutdown().await;
@@ -7967,7 +8286,12 @@ async fn jvm_legacy_010_produce_modern_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait legacy producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "legacy producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // Consume via modern (cp-kafka:6.1.1, uses Fetch v11+).
     let consumer_out = docker_run_kafka_tool(&[
@@ -7986,7 +8310,10 @@ async fn jvm_legacy_010_produce_modern_consume() {
     ]);
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for needle in ["alpha", "bravo", "charlie"] {
-        assert2::assert!(s.contains(needle));
+        assert!(
+            s.contains(needle),
+            "modern consumer didn't emit {needle}: stdout={s:?}"
+        );
     }
 
     broker.shutdown().await;
@@ -8049,7 +8376,12 @@ async fn jvm_modern_produce_legacy_010_consume() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait modern producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "modern producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // Consume via legacy (cp-kafka:3.1.2, Fetch v0-3).
     // The 0.10.x console-consumer can exit non-zero after
@@ -8080,9 +8412,13 @@ async fn jvm_modern_produce_legacy_010_consume() {
         .output()
         .expect("spawn legacy consumer");
     let s = String::from_utf8_lossy(&consumer_out.stdout);
-    let _stderr = String::from_utf8_lossy(&consumer_out.stderr);
+    let stderr = String::from_utf8_lossy(&consumer_out.stderr);
     for needle in ["alpha", "bravo", "charlie"] {
-        assert2::assert!(s.contains(needle));
+        assert!(
+            s.contains(needle),
+            "legacy consumer didn't emit {needle}: status={} stdout={s:?} stderr={stderr:?}",
+            consumer_out.status,
+        );
     }
 
     broker.shutdown().await;
@@ -8160,7 +8496,12 @@ async fn jvm_legacy_010_compressed_round_trip() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait legacy producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "legacy gzip producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // Consume all 50 via modern.
     let consumer_out = docker_run_kafka_tool(&[
@@ -8180,7 +8521,10 @@ async fn jvm_legacy_010_compressed_round_trip() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..50 {
         let needle = format!("record-{i:03}");
-        assert2::assert!(s.contains(&needle));
+        assert!(
+            s.contains(&needle),
+            "modern consumer didn't emit {needle} after legacy gzip produce"
+        );
     }
 
     broker.shutdown().await;
@@ -8263,7 +8607,12 @@ async fn jvm_legacy_010_snappy_round_trip() {
         .expect("write stdin");
     drop(child.stdin.take());
     let producer_out = child.wait_with_output().expect("wait legacy producer");
-    assert2::assert!(producer_out.status.success());
+    assert!(
+        producer_out.status.success(),
+        "legacy snappy producer failed: stdout={} stderr={}",
+        String::from_utf8_lossy(&producer_out.stdout),
+        String::from_utf8_lossy(&producer_out.stderr),
+    );
 
     // Consume all 50 via modern.
     let consumer_out = docker_run_kafka_tool(&[
@@ -8283,7 +8632,10 @@ async fn jvm_legacy_010_snappy_round_trip() {
     let s = String::from_utf8_lossy(&consumer_out.stdout);
     for i in 0..50 {
         let needle = format!("record-{i:03}");
-        assert2::assert!(s.contains(&needle));
+        assert!(
+            s.contains(&needle),
+            "modern consumer didn't emit {needle} after legacy snappy produce"
+        );
     }
 
     broker.shutdown().await;
@@ -8579,7 +8931,13 @@ async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
         if b1_ok || b2_ok {
             break;
         }
-        assert2::assert!(std::time::Instant::now() <= cfg_deadline);
+        assert!(
+            std::time::Instant::now() <= cfg_deadline,
+            "tiered-storage topic config never propagated to either broker within 15s; \
+             b1={:?} b2={:?}",
+            b1.partition_log_config_for_test(TOPIC, 0),
+            b2.partition_log_config_for_test(TOPIC, 0),
+        );
         // intentional: bounded poll of the local reconciled LogConfig override;
         // `partition_log_config_for_test` is not surfaced by any awaiter/metric.
         tokio::time::sleep(std::time::Duration::from_millis(200)).await;
@@ -8622,7 +8980,12 @@ async fn tiered_storage_topic_rlmm_multi_broker_metadata_sharing() {
     let consumed = consume_records(TOPIC, RECORDS, 40_000, BOOTSTRAP_B1);
     eprintln!("CRABKA[test] consumed {consumed} records from surviving broker 2");
 
-    assert2::assert!(consumed >= RECORDS);
+    assert!(
+        consumed >= RECORDS,
+        "expected >={RECORDS} records served from the remote tier by the surviving broker, \
+         got {consumed}. Broker 2 should have learned segment locations from \
+         __remote_log_metadata (rf=2) without having run the copy task itself."
+    );
 
     b2.shutdown().await;
     // `_minio`, `_d1`, `_d2` dropped here.

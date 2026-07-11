@@ -1,6 +1,5 @@
 // Rust 1.95 annotate-snippets ICE on `clippy::pedantic` (see
 // elect_leaders.rs / acl_handlers.rs preamble).
-#![allow(clippy::pedantic)]
 
 //! `BrokerHandle::controlled_shutdown` integration test.
 //!
@@ -18,6 +17,7 @@
 
 use std::{io, net::SocketAddr, time::Duration};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::BrokerHandle;
 use crabka_protocol::{
@@ -105,7 +105,12 @@ async fn create_topic(addr: SocketAddr, name: &str, partitions: i32, rf: i16) {
     let mut cur: &[u8] = &resp_bytes;
     let resp = CreateTopicsResponse::decode(&mut cur, CREATE_TOPICS_VERSION)
         .expect("decode CreateTopicsResponse");
-    assert2::assert!((resp.topics.len(), resp.topics[0].error_code) == (1, 0));
+    assert!(resp.topics.len() == 1);
+    assert!(
+        resp.topics[0].error_code == 0,
+        "CreateTopics({name}) must succeed: {:?}",
+        resp.topics[0].error_message
+    );
 }
 
 /// Wait until `(topic, partition)` appears in `handle`'s metadata
@@ -117,7 +122,7 @@ async fn wait_partition_exists(handle: &BrokerHandle, topic: &str, partition: i3
 /// Inject a `PartitionRecord` forcing `target` to be the leader for
 /// every partition of `topic`. Uses `submit_metadata_record_for_test`
 /// to bypass the public wire path so the test doesn't have to drive
-/// ElectLeaders. Returns once every partition is observed as
+/// `ElectLeaders`. Returns once every partition is observed as
 /// `leader=target` in the image.
 async fn force_leadership_for_test(
     leader_handle: &BrokerHandle,
@@ -216,12 +221,12 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
 
     // Create topic on the cluster leader's listen addr.
     let addr = cluster[raft_leader_idx].1.listen_addr;
-    const TOPIC: &str = "drain-me";
-    const PARTITIONS: i32 = 4;
-    create_topic(addr, TOPIC, PARTITIONS, 3).await;
-    for p in 0..PARTITIONS {
+    let topic: &str = "drain-me";
+    let partitions: i32 = 4;
+    create_topic(addr, topic, partitions, 3).await;
+    for p in 0..partitions {
         for (h, _, _) in &cluster {
-            wait_partition_exists(h, TOPIC, p).await;
+            wait_partition_exists(h, topic, p).await;
         }
     }
 
@@ -231,11 +236,11 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // exhaustive, so concentrate every leader onto the target first.
     let mut replicas: Vec<u64> = (1..=3).collect();
     // Put target first so its `replicas[0]` is itself (preferred).
-    replicas.sort_by_key(|n| if *n == target_node_id { 0 } else { 1 });
+    replicas.sort_by_key(|n| i32::from(*n != target_node_id));
     force_leadership_for_test(
         &cluster[raft_leader_idx].0,
-        TOPIC,
-        PARTITIONS,
+        topic,
+        partitions,
         target_node_id.0,
         &replicas,
     )
@@ -245,20 +250,21 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     // leader's image since the target is about to be drained.
     for (h, _, _) in &cluster {
         h.wait_for_image(|img| {
-            (0..PARTITIONS).all(|p| {
-                img.partition(TOPIC, p)
+            (0..partitions).all(|p| {
+                img.partition(topic, p)
                     .is_some_and(|pr| pr.leader == target_node_id)
             })
         })
         .await;
     }
-    assert2::assert!(
+    assert!(
         leader_count(
             &cluster[raft_leader_idx].0,
-            TOPIC,
-            PARTITIONS,
+            topic,
+            partitions,
             target_node_id.0
-        ) == PARTITIONS as usize
+        ) == usize::try_from(partitions).unwrap(),
+        "target should lead all partitions before shutdown"
     );
 
     // Pop the target out of the cluster vec — `controlled_shutdown`
@@ -284,8 +290,8 @@ async fn controlled_shutdown_drains_leadership_and_returns_ok() {
     for (observer, _, _) in &cluster {
         observer
             .wait_for_image(|img| {
-                (0..PARTITIONS)
-                    .all(|p| img.partition(TOPIC, p).map(|pr| pr.leader) != Some(target_node_id))
+                (0..partitions)
+                    .all(|p| img.partition(topic, p).map(|pr| pr.leader) != Some(target_node_id))
             })
             .await;
     }

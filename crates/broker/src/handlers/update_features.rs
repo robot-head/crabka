@@ -56,7 +56,6 @@ fn downgrade_allowed(version: i16, allow_downgrade: bool, upgrade_type: i8) -> b
     }
 }
 
-#[allow(clippy::too_many_lines)]
 #[tracing::instrument(
     name = "handle_update_features",
     level = "info",
@@ -99,11 +98,48 @@ pub(crate) async fn handle(
         );
     }
 
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    let mut results: Vec<UpdatableFeatureResult> = Vec::new();
-    let mut records: Vec<MetadataRecord> = Vec::new();
+    let (results, records) = validate_updates(&req, &image, version);
 
-    for upd in &req.feature_updates {
+    // validate_only: never persist.
+    if req.validate_only {
+        return finalize(results, version);
+    }
+
+    if !records.is_empty() {
+        match broker.controller.submit_change(records).await {
+            Ok(()) => {}
+            Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
+                return apply_request_wide(
+                    results,
+                    codes::NOT_CONTROLLER,
+                    "This broker is not the active controller.",
+                    version,
+                );
+            }
+            Err(e) => {
+                tracing::warn!(error = %e, "UpdateFeatures: submit_change failed");
+                return apply_request_wide(
+                    results,
+                    codes::FEATURE_UPDATE_FAILED,
+                    "Failed to persist the feature update.",
+                    version,
+                );
+            }
+        }
+    }
+
+    finalize(results, version)
+}
+
+fn validate_updates(
+    request: &UpdateFeaturesRequest,
+    image: &crabka_metadata::MetadataImage,
+    version: i16,
+) -> (Vec<UpdatableFeatureResult>, Vec<MetadataRecord>) {
+    let mut seen = std::collections::HashSet::new();
+    let mut results = Vec::new();
+    let mut records = Vec::new();
+    for upd in &request.feature_updates {
         let name = upd.feature.clone();
         if !seen.insert(name.clone()) {
             results.push(row(
@@ -139,7 +175,7 @@ pub(crate) async fn handle(
         // finalize below the level the live image requires is rejected even
         // with the downgrade flag set. `level == 0` (delete) is handled by the
         // tombstone path below, not the floor.
-        let floor = feat.min_required_floor(&image);
+        let floor = feat.min_required_floor(image);
         if level > 0 && level < floor {
             results.push(row(
                 name,
@@ -150,7 +186,7 @@ pub(crate) async fn handle(
         }
         // KIP-1022 dependencies: every dependency must already be finalized
         // at >= its required level in the target image.
-        if !dependencies_met(&image, feat.dependencies(level)) {
+        if !dependencies_met(image, feat.dependencies(level)) {
             results.push(row(
                 name,
                 codes::INVALID_UPDATE_VERSION,
@@ -196,36 +232,7 @@ pub(crate) async fn handle(
         }));
         results.push(row(name, codes::NONE, ""));
     }
-
-    // validate_only: never persist.
-    if req.validate_only {
-        return finalize(results, version);
-    }
-
-    if !records.is_empty() {
-        match broker.controller.submit_change(records).await {
-            Ok(()) => {}
-            Err(RaftError::NotLeader { .. } | RaftError::LeaderUnknown) => {
-                return apply_request_wide(
-                    results,
-                    codes::NOT_CONTROLLER,
-                    "This broker is not the active controller.",
-                    version,
-                );
-            }
-            Err(e) => {
-                tracing::warn!(error = %e, "UpdateFeatures: submit_change failed");
-                return apply_request_wide(
-                    results,
-                    codes::FEATURE_UPDATE_FAILED,
-                    "Failed to persist the feature update.",
-                    version,
-                );
-            }
-        }
-    }
-
-    finalize(results, version)
+    (results, records)
 }
 
 fn row(feature: String, error_code: i16, msg: &str) -> UpdatableFeatureResult {
@@ -290,6 +297,7 @@ fn finalize(results: Vec<UpdatableFeatureResult>, version: i16) -> UpdateFeature
 mod tests {
     use std::{net::SocketAddr, sync::Arc};
 
+    use assert2::assert;
     use crabka_protocol::owned::update_features_request::FeatureUpdateKey;
     use crabka_security::Principal;
 
@@ -362,20 +370,14 @@ mod tests {
         (resp, broker_handle, dir)
     }
 
-    fn assert_ok_response(resp: &UpdateFeaturesResponse, feature: &str) {
-        let expected = UpdateFeaturesResponse {
-            throttle_time_ms: 0,
-            error_code: codes::NONE,
-            error_message: None,
-            results: vec![UpdatableFeatureResult {
-                feature: feature.to_string(),
-                error_code: codes::NONE,
-                error_message: None,
-                unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
-            }],
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
-        };
-        assert2::assert!(resp == &expected);
+    fn assert_ok_row(resp: &UpdateFeaturesResponse, feature: &str) {
+        let row = resp
+            .results
+            .iter()
+            .find(|row| row.feature == feature)
+            .expect("feature result row");
+        assert!(row.error_code == codes::NONE, "{resp:?}");
+        assert!(row.error_message.is_none(), "{resp:?}");
     }
 
     fn assert_row_error(resp: &UpdateFeaturesResponse, feature: &str, message: &str) {
@@ -384,11 +386,12 @@ mod tests {
             .iter()
             .find(|row| row.feature == feature)
             .expect("feature result row");
-        assert2::assert!(row.error_code == codes::INVALID_UPDATE_VERSION);
-        assert2::assert!(
+        assert!(row.error_code == codes::INVALID_UPDATE_VERSION, "{resp:?}");
+        assert!(
             row.error_message
                 .as_deref()
-                .is_some_and(|m| m.contains(message))
+                .is_some_and(|m| m.contains(message)),
+            "{resp:?}"
         );
     }
 
@@ -409,8 +412,8 @@ mod tests {
 
     #[test]
     fn downgrade_flag_v0_uses_allow_downgrade() {
-        assert2::assert!(downgrade_allowed(0, true, 1));
-        assert2::assert!(!downgrade_allowed(0, false, 2));
+        assert!(downgrade_allowed(0, true, 1));
+        assert!(!downgrade_allowed(0, false, 2));
     }
 
     #[test]
@@ -419,38 +422,31 @@ mod tests {
         let cases = [
             // (allow_downgrade, upgrade_type, want); allow_downgrade is
             // ignored at v1+ — only upgrade_type decides.
-            ("upgrade", true, 1, false),
-            ("safe downgrade", false, 2, true),
-            ("unsafe downgrade", false, 3, true),
+            (true, 1, false),
+            (false, 2, true),
+            (false, 3, true),
         ];
-        for (_case, allow_downgrade, upgrade_type, want) in cases {
-            assert2::assert!(downgrade_allowed(1, allow_downgrade, upgrade_type) == want);
+        for (allow_downgrade, upgrade_type, want) in cases {
+            assert!(
+                downgrade_allowed(1, allow_downgrade, upgrade_type) == want,
+                "allow_downgrade {allow_downgrade}, upgrade_type {upgrade_type}"
+            );
         }
     }
 
     #[test]
     fn row_sets_message_only_on_error() {
         let ok = row("metadata.version".into(), codes::NONE, "x");
-        let expected_ok = UpdatableFeatureResult {
-            feature: "metadata.version".into(),
-            error_code: codes::NONE,
-            error_message: None,
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
-        };
-        assert2::assert!(ok == expected_ok);
+        assert!(ok.feature == "metadata.version");
+        assert!(ok.error_message.is_none());
 
         let err = row(
             "metadata.version".into(),
             codes::INVALID_UPDATE_VERSION,
             "bad",
         );
-        let expected_err = UpdatableFeatureResult {
-            feature: "metadata.version".into(),
-            error_code: codes::INVALID_UPDATE_VERSION,
-            error_message: Some("bad".into()),
-            unknown_tagged_fields: crabka_protocol::UnknownTaggedFields::default(),
-        };
-        assert2::assert!(err == expected_err);
+        assert!(err.feature == "metadata.version");
+        assert!(err.error_message.as_deref() == Some("bad"));
     }
 
     #[test]
@@ -464,7 +460,7 @@ mod tests {
             results: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -510,7 +506,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -540,7 +536,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -559,7 +555,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
     }
 
     #[test]
@@ -568,7 +564,7 @@ mod tests {
         // registry trait path returns that floor.
         let image = crabka_metadata::MetadataImage::new(uuid::Uuid::nil());
         let feat = crabka_metadata::feature("metadata.version").unwrap();
-        assert2::assert!(feat.min_required_floor(&image) == crate::features::METADATA_VERSION_MIN);
+        assert!(feat.min_required_floor(&image) == crate::features::METADATA_VERSION_MIN);
     }
 
     #[test]
@@ -576,16 +572,16 @@ mod tests {
         use crabka_metadata::{FeatureLevelRecord, MetadataImage, MetadataRecord};
         let mut image = MetadataImage::new(uuid::Uuid::nil());
         // No deps → trivially met.
-        assert2::assert!(dependencies_met(&image, &[]));
+        assert!(dependencies_met(&image, &[]));
         // Unmet: metadata.version not finalized at all.
-        assert2::assert!(!dependencies_met(&image, &[("metadata.version", 22)]));
+        assert!(!dependencies_met(&image, &[("metadata.version", 22)]));
         // Finalize metadata.version=25 → a >=22 dependency is now met, >=26 not.
         image.apply(&MetadataRecord::V1FeatureLevel(FeatureLevelRecord {
             name: "metadata.version".into(),
             level: 25,
         }));
-        assert2::assert!(dependencies_met(&image, &[("metadata.version", 22)]));
-        assert2::assert!(!dependencies_met(&image, &[("metadata.version", 26)]));
+        assert!(dependencies_met(&image, &[("metadata.version", 22)]));
+        assert!(!dependencies_met(&image, &[("metadata.version", 26)]));
     }
 
     #[tokio::test]
@@ -604,7 +600,7 @@ mod tests {
             results: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -625,7 +621,7 @@ mod tests {
             results: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -651,7 +647,7 @@ mod tests {
             }],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -671,7 +667,8 @@ mod tests {
 
         let resp = handle(&broker, req, version, &ctx).await;
 
-        assert_ok_response(&resp, crate::features::METADATA_VERSION);
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
         wait_for_finalized_feature(
             &broker,
             crate::features::METADATA_VERSION,
@@ -714,7 +711,7 @@ mod tests {
             ],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(Vec::new()),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -753,7 +750,8 @@ mod tests {
         let (resp, broker_handle, _dir) =
             call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
 
-        assert_ok_response(&resp, crate::features::METADATA_VERSION);
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
         broker_handle.shutdown().await;
     }
 
@@ -782,7 +780,8 @@ mod tests {
         let (resp, broker_handle, _dir) =
             call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
 
-        assert_ok_response(&resp, crate::features::METADATA_VERSION);
+        assert!(resp.error_code == codes::NONE, "{resp:?}");
+        assert_ok_row(&resp, crate::features::METADATA_VERSION);
         broker_handle.shutdown().await;
     }
 

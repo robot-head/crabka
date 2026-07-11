@@ -153,6 +153,8 @@ pub(crate) async fn handle(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
+
     use super::*;
     use crate::test_support::{
         peer, principal, start_broker_with_authorizer_no_audit as start_broker,
@@ -161,20 +163,16 @@ mod tests {
     #[test]
     fn txn_state_str_matches_jvm_names() {
         let cases = [
-            ("empty", TxnState::Empty, "Empty"),
-            ("ongoing", TxnState::Ongoing, "Ongoing"),
-            ("prepare commit", TxnState::PrepareCommit, "PrepareCommit"),
-            ("prepare abort", TxnState::PrepareAbort, "PrepareAbort"),
-            (
-                "complete commit",
-                TxnState::CompleteCommit,
-                "CompleteCommit",
-            ),
-            ("complete abort", TxnState::CompleteAbort, "CompleteAbort"),
-            ("dead", TxnState::Dead, "Dead"),
+            (TxnState::Empty, "Empty"),
+            (TxnState::Ongoing, "Ongoing"),
+            (TxnState::PrepareCommit, "PrepareCommit"),
+            (TxnState::PrepareAbort, "PrepareAbort"),
+            (TxnState::CompleteCommit, "CompleteCommit"),
+            (TxnState::CompleteAbort, "CompleteAbort"),
+            (TxnState::Dead, "Dead"),
         ];
-        for (_case, state, want) in cases {
-            assert2::assert!(txn_state_str(state) == want);
+        for (state, want) in cases {
+            assert!(txn_state_str(state) == want, "{state:?}");
         }
     }
 
@@ -203,7 +201,7 @@ mod tests {
         // the coordinator can persist the seeded entry.
         let tid = "txn-list-pid-filter";
         let coord = &broker.txn_coordinator;
-        let p = coord.partition_for(tid);
+        let p = crate::txn::coordinator::TxnCoordinator::partition_for(tid);
         let part_dir =
             crate::log_dir::partition_dir(dir.path(), crate::txn::bootstrap::TOPIC, p.get());
         std::fs::create_dir_all(&part_dir).unwrap();
@@ -246,7 +244,10 @@ mod tests {
             .iter()
             .map(|s| s.producer_id)
             .collect();
-        assert2::assert!(pids == vec![100]);
+        assert!(
+            pids == vec![100],
+            "pid filter must keep the matching entry, got {pids:?}"
+        );
         broker_handle.shutdown().await;
     }
 
@@ -280,7 +281,7 @@ mod tests {
             transaction_states: vec![],
             unknown_tagged_fields: crabka_protocol::UnknownTaggedFields(vec![]),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 }

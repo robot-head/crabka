@@ -55,7 +55,7 @@ impl Assignor for RangeAssignor {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use crabka_protocol::primitives::uuid::Uuid;
 
     use super::*;
@@ -72,91 +72,82 @@ mod tests {
     }
 
     #[test]
-    fn assignment_scenarios() {
+    fn contiguous_ranges() {
+        let t = tid(1);
+        let topics = TopicMetadata {
+            partitions_per_topic: [(t, 6)].into(),
+            ..Default::default()
+        };
+        let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
+        assert!(a["m1"][&t] == vec![0, 1, 2]);
+        assert!(a["m2"][&t] == vec![3, 4, 5]);
+    }
+
+    #[test]
+    fn non_divisible_extra_goes_to_first_members() {
+        let t = tid(1);
+        let topics = TopicMetadata {
+            partitions_per_topic: [(t, 7)].into(),
+            ..Default::default()
+        };
+        let a = RangeAssignor.assign(
+            &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
+            &topics,
+        );
+        for (m, want) in [
+            ("m1", vec![0, 1, 2]),
+            ("m2", vec![3, 4]),
+            ("m3", vec![5, 6]),
+        ] {
+            assert!(a[m][&t] == want);
+        }
+    }
+
+    #[test]
+    fn co_partitioning_two_topics_equal_size() {
         let t1 = tid(1);
         let t2 = tid(2);
-        let cases = [
-            (
-                "contiguous ranges",
-                vec![member("m1", &[t1]), member("m2", &[t1])],
-                TopicMetadata {
-                    partitions_per_topic: [(t1, 6)].into(),
-                    ..Default::default()
-                },
-                HashMap::from([
-                    ("m1".into(), HashMap::from([(t1, vec![0, 1, 2])])),
-                    ("m2".into(), HashMap::from([(t1, vec![3, 4, 5])])),
-                ]),
-            ),
-            (
-                "non-divisible remainder",
-                vec![
-                    member("m1", &[t1]),
-                    member("m2", &[t1]),
-                    member("m3", &[t1]),
-                ],
-                TopicMetadata {
-                    partitions_per_topic: [(t1, 7)].into(),
-                    ..Default::default()
-                },
-                HashMap::from([
-                    ("m1".into(), HashMap::from([(t1, vec![0, 1, 2])])),
-                    ("m2".into(), HashMap::from([(t1, vec![3, 4])])),
-                    ("m3".into(), HashMap::from([(t1, vec![5, 6])])),
-                ]),
-            ),
-            (
-                "co-partitioned topics",
-                vec![member("m1", &[t1, t2]), member("m2", &[t1, t2])],
-                TopicMetadata {
-                    partitions_per_topic: [(t1, 4), (t2, 4)].into(),
-                    ..Default::default()
-                },
-                HashMap::from([
-                    (
-                        "m1".into(),
-                        HashMap::from([(t1, vec![0, 1]), (t2, vec![0, 1])]),
-                    ),
-                    (
-                        "m2".into(),
-                        HashMap::from([(t1, vec![2, 3]), (t2, vec![2, 3])]),
-                    ),
-                ]),
-            ),
-            (
-                "fewer partitions than members",
-                vec![
-                    member("m1", &[t1]),
-                    member("m2", &[t1]),
-                    member("m3", &[t1]),
-                ],
-                TopicMetadata {
-                    partitions_per_topic: [(t1, 2)].into(),
-                    ..Default::default()
-                },
-                HashMap::from([
-                    ("m1".into(), HashMap::from([(t1, vec![0])])),
-                    ("m2".into(), HashMap::from([(t1, vec![1])])),
-                    ("m3".into(), HashMap::new()),
-                ]),
-            ),
-            (
-                "unsubscribed member",
-                vec![member("m1", &[t1]), member("m2", &[])],
-                TopicMetadata {
-                    partitions_per_topic: [(t1, 4)].into(),
-                    ..Default::default()
-                },
-                HashMap::from([
-                    ("m1".into(), HashMap::from([(t1, vec![0, 1, 2, 3])])),
-                    ("m2".into(), HashMap::new()),
-                ]),
-            ),
-        ];
-
-        for (_case, members, topics, expected) in cases {
-            assert2::assert!(RangeAssignor.assign(&members, &topics) == expected);
+        let topics = TopicMetadata {
+            partitions_per_topic: [(t1, 4), (t2, 4)].into(),
+            ..Default::default()
+        };
+        let a = RangeAssignor.assign(&[member("m1", &[t1, t2]), member("m2", &[t1, t2])], &topics);
+        for (m, topic, want) in [
+            ("m1", t1, vec![0, 1]),
+            ("m1", t2, vec![0, 1]),
+            ("m2", t1, vec![2, 3]),
+            ("m2", t2, vec![2, 3]),
+        ] {
+            assert!(a[m][&topic] == want);
         }
+    }
+
+    #[test]
+    fn fewer_partitions_than_members() {
+        let t = tid(1);
+        let topics = TopicMetadata {
+            partitions_per_topic: [(t, 2)].into(),
+            ..Default::default()
+        };
+        let a = RangeAssignor.assign(
+            &[member("m1", &[t]), member("m2", &[t]), member("m3", &[t])],
+            &topics,
+        );
+        for (m, want) in [("m1", vec![0]), ("m2", vec![1])] {
+            assert!(a[m][&t] == want);
+        }
+        assert!(!a["m3"].contains_key(&t) || a["m3"][&t].is_empty());
+    }
+
+    #[test]
+    fn unsubscribed_skipped() {
+        let t = tid(1);
+        let topics = TopicMetadata {
+            partitions_per_topic: [(t, 4)].into(),
+            ..Default::default()
+        };
+        let a = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[])], &topics);
+        assert!(a["m1"][&t] == vec![0, 1, 2, 3]);
     }
 
     #[test]
@@ -168,6 +159,6 @@ mod tests {
         };
         let a1 = RangeAssignor.assign(&[member("m1", &[t]), member("m2", &[t])], &topics);
         let a2 = RangeAssignor.assign(&[member("m2", &[t]), member("m1", &[t])], &topics);
-        assert2::assert!(a1 == a2);
+        assert!(a1 == a2);
     }
 }

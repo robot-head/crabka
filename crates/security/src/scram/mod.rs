@@ -24,6 +24,8 @@ pub struct ScramCredential {
 /// SCRAM mechanism: 32 for SHA-256, 64 for SHA-512. Panics on a
 /// non-SCRAM mechanism.
 #[must_use]
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn scram_hash_len(mechanism: SaslMechanism) -> usize {
     match mechanism {
         SaslMechanism::ScramSha256 => 32,
@@ -35,6 +37,8 @@ pub fn scram_hash_len(mechanism: SaslMechanism) -> usize {
 }
 
 #[must_use]
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn hash_scram_password(
     password: &[u8],
     mechanism: SaslMechanism,
@@ -50,6 +54,8 @@ pub fn hash_scram_password(
 
 /// Test-only entry that lets callers fix the salt (for golden vectors).
 #[must_use]
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn hash_scram_password_with_salt(
     password: &[u8],
     mechanism: SaslMechanism,
@@ -90,6 +96,8 @@ pub fn hash_scram_password_with_salt(
 /// or the raw password into the operator. Panics on a non-SCRAM
 /// mechanism.
 #[must_use]
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn pbkdf2_salted(
     password: &[u8],
     mechanism: SaslMechanism,
@@ -131,6 +139,8 @@ pub fn pbkdf2_salted(
 /// The mechanism argument selects which `H` to use. Panics on a
 /// non-SCRAM mechanism.
 #[must_use]
+/// # Panics
+/// Panics if validated key material has an impossible size or synchronized credential state is poisoned.
 pub fn derive_keys_from_salted(mechanism: SaslMechanism, salted: &[u8]) -> (Vec<u8>, Vec<u8>) {
     match mechanism {
         SaslMechanism::ScramSha512 => derive_keys_sha512(salted),

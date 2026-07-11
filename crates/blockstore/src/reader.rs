@@ -30,6 +30,8 @@ pub struct RowGroupMeta {
 ///
 /// The block is rejected with an error when its on-disk size exceeds
 /// [`MAX_BLOCK_BYTES`], before any bytes are streamed.
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_block(store: Arc<dyn ObjectStore>, object_key: &str) -> Result<Vec<RecordBatch>> {
     read_block_with_cap(store, object_key, MAX_BLOCK_BYTES).await
 }
@@ -62,6 +64,8 @@ async fn read_block_with_cap(
 }
 
 /// Read row-group sizes from Parquet metadata without scanning row data.
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_row_group_metadata(
     store: Arc<dyn ObjectStore>,
     object_key: &str,
@@ -107,6 +111,8 @@ async fn read_row_group_metadata_with_cap(
 ///
 /// As with [`read_block`], the block is rejected when its on-disk size exceeds
 /// [`MAX_BLOCK_BYTES`], before any bytes are streamed.
+/// # Errors
+/// Returns an error when object-store I/O fails, persisted metadata is malformed, or a block cannot be encoded or decoded.
 pub async fn read_block_row_groups(
     store: Arc<dyn ObjectStore>,
     object_key: &str,

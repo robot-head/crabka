@@ -46,8 +46,8 @@ fn name_for(api_key: i16, is_request: bool) -> Option<&'static str> {
         .map(|c| c.name)
 }
 
-#[allow(clippy::unnecessary_wraps)]
 fn corpus_entry_round_trips(path: &Path) -> datatest_stable::Result<()> {
+    std::fs::metadata(path)?;
     let stem = path.with_extension("");
     let (meta, bytes) = load_pair(&stem);
     let is_request = match meta.direction.as_str() {

@@ -19,6 +19,8 @@ pub struct PermanentQ {
 
 /// `DELETE /subjects/{subject}/versions/{version}[?permanent=true] -> <version:int>`
 #[tracing::instrument(level = "info", name = "sr.delete_version", skip_all, fields(subject = %subject, version = %version, permanent = q.permanent), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn delete_version(
     State(st): State<AppState>,
     Path((subject, version)): Path<(String, String)>,
@@ -44,6 +46,8 @@ pub async fn delete_version(
 
 /// `DELETE /subjects/{subject}[?permanent=true] -> [<versions>]`
 #[tracing::instrument(level = "info", name = "sr.delete_subject", skip_all, fields(subject = %subject, permanent = q.permanent), err)]
+/// # Errors
+/// Returns an error when a schema is invalid or incompatible, registry storage fails, or serialized data does not conform to the selected schema.
 pub async fn delete_subject(
     State(st): State<AppState>,
     Path(subject): Path<String>,

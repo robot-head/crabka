@@ -519,10 +519,6 @@ fn jaeger_compact_batch() -> Vec<u8> {
 /// Build one `DistributorState` over a recording sink, drive EVERY ingest door
 /// against it, and return the captured `SpanRecord`s. All six doors write to the
 /// same `CapturingSink`, so the snapshot is read only after every door has run.
-#[allow(
-    clippy::too_many_lines,
-    reason = "drives all six ingest doors against one shared sink in sequence"
-)]
 async fn ingest_all_doors() -> TestResult<Vec<SpanRecord>> {
     let sink = CapturingSink::default();
     let state = Arc::new(DistributorState::new(Arc::new(sink.clone())));
@@ -1078,12 +1074,15 @@ fn search_contains_span_id_hex(search: &JsonValue, span_id_hex: &str) -> bool {
 // THE test.
 // ---------------------------------------------------------------------------
 
+struct QueryWindow {
+    now_secs: u64,
+    metric_start: u64,
+    metric_end: u64,
+    range: String,
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 #[ignore = "requires Docker (Grafana + Prometheus containers)"]
-#[allow(
-    clippy::too_many_lines,
-    reason = "single end-to-end probe deliberately exercises every integration leg in one flow"
-)]
 async fn grafana_e2e_full_surface() -> TestResult {
     let client = reqwest::Client::new();
 
@@ -1249,6 +1248,38 @@ async fn grafana_e2e_full_surface() -> TestResult {
     assert2::assert!(status == ReqwestStatusCode::NOT_FOUND);
     assert2::assert!(body.contains("trace not found"));
 
+    grafana_e2e_search(
+        client,
+        crabka,
+        grafana,
+        grafana_base,
+        QueryWindow {
+            now_secs,
+            metric_start,
+            metric_end,
+            range,
+        },
+    )
+    .await
+}
+
+async fn grafana_e2e_search(
+    client: reqwest::Client,
+    crabka: CrabkaPair,
+    grafana: ContainerAsync<GenericImage>,
+    grafana_base: String,
+    window: QueryWindow,
+) -> TestResult {
+    let QueryWindow {
+        now_secs,
+        metric_start,
+        metric_end,
+        range,
+    } = window;
+    let proxy = |path: &str| {
+        format!("{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/{path}")
+    };
+
     // E8 — TraceQL selector search.
     let q = enc("{ resource.service.name = \"checkout-frontend\" }");
     let search = get_json(&client, &proxy(&format!("api/search?q={q}&{range}"))).await?;
@@ -1325,7 +1356,39 @@ async fn grafana_e2e_full_surface() -> TestResult {
     );
     assert2::assert!(search_contains_span_id_hex(&search, ERROR_SPAN_ID_HEX));
 
-    // E13 — v2 tags: scopes present (resource w/ service.name; intrinsic; link/event/instrumentation).
+    grafana_e2e_tags(
+        client,
+        crabka,
+        grafana,
+        grafana_base,
+        QueryWindow {
+            now_secs,
+            metric_start,
+            metric_end,
+            range,
+        },
+    )
+    .await
+}
+
+async fn grafana_e2e_tags(
+    client: reqwest::Client,
+    crabka: CrabkaPair,
+    grafana: ContainerAsync<GenericImage>,
+    grafana_base: String,
+    window: QueryWindow,
+) -> TestResult {
+    let QueryWindow {
+        now_secs,
+        metric_start,
+        metric_end,
+        range,
+    } = window;
+    let proxy = |path: &str| {
+        format!("{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/{path}")
+    };
+
+    // E13 — v2 tags: scopes present (resource w/ service.name; intrinsic, link/event/instrumentation).
     let tags = get_json(&client, &proxy(&format!("api/v2/search/tags?{range}"))).await?;
     let scope_names: Vec<&str> = tags["scopes"]
         .as_array()
@@ -1430,6 +1493,38 @@ async fn grafana_e2e_full_surface() -> TestResult {
         .filter_map(JsonValue::as_str)
         .collect();
     assert2::assert!(plain.contains(&"checkout-frontend"));
+
+    grafana_e2e_metrics(
+        client,
+        crabka,
+        grafana,
+        grafana_base,
+        QueryWindow {
+            now_secs,
+            metric_start,
+            metric_end,
+            range,
+        },
+    )
+    .await
+}
+
+async fn grafana_e2e_metrics(
+    client: reqwest::Client,
+    crabka: CrabkaPair,
+    grafana: ContainerAsync<GenericImage>,
+    grafana_base: String,
+    window: QueryWindow,
+) -> TestResult {
+    let QueryWindow {
+        now_secs,
+        metric_start,
+        metric_end,
+        range,
+    } = window;
+    let proxy = |path: &str| {
+        format!("{grafana_base}/api/datasources/proxy/uid/{GRAFANA_TEMPO_DATASOURCE_UID}/{path}")
+    };
 
     // E20 — TraceQL metrics query_range (poll until ingested samples appear).
     let mq = enc("{ resource.service.name = \"checkout-frontend\" } | rate()");
@@ -1583,6 +1678,15 @@ async fn grafana_e2e_full_surface() -> TestResult {
     assert2::assert!(status == ReqwestStatusCode::BAD_REQUEST);
     assert2::assert!(body.contains("end must be >= start"));
 
+    grafana_e2e_service_graph(client, crabka, grafana, grafana_base).await
+}
+
+async fn grafana_e2e_service_graph(
+    client: reqwest::Client,
+    crabka: CrabkaPair,
+    grafana: ContainerAsync<GenericImage>,
+    grafana_base: String,
+) -> TestResult {
     // ----- §5: Service Graph full loop through real Prometheus. -----
     let prom = start_prometheus().await?;
     let prom_mapped = mapped_base_url(&prom, PROM_HTTP_PORT).await?;

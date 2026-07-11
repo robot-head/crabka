@@ -151,7 +151,7 @@ impl FlowSupervisor {
                 group_selector,
             };
 
-            let worker = FlowWorker::start(make_params(&spec)).await?;
+            let worker = Box::pin(FlowWorker::start(make_params(&spec))).await?;
             tracing::info!(
                 flow = %flow_name,
                 source = %flow.from,
@@ -185,7 +185,7 @@ impl FlowSupervisor {
                                 // replace it with a freshly built one.
                                 let old = std::mem::replace(
                                     worker,
-                                    match FlowWorker::start(make_params(spec)).await {
+                            match Box::pin(FlowWorker::start(make_params(spec))).await {
                                         Ok(w) => w,
                                         Err(e) => {
                                             tracing::error!(

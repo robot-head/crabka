@@ -101,12 +101,12 @@ pub(crate) async fn tick_all(
         }
         match partition.compact_log().await {
             Ok(()) => {
-                metrics.record_compaction(&partition.topic, partition.partition_id.get());
+                metrics.record_compaction(&partition.topic, partition.index.get());
             }
             Err(e) => {
                 warn!(
                     topic = %partition.topic,
-                    partition_id = partition.partition_id.get(),
+                    partition_id = partition.index.get(),
                     error = %e,
                     "compaction failed for partition",
                 );
@@ -123,6 +123,7 @@ pub(crate) async fn tick_all(
 mod tests {
     use std::sync::atomic::Ordering;
 
+    use assert2::assert;
     use bytes::Bytes;
     use crabka_ids::PartitionIndex;
     use crabka_protocol::records::{Record, RecordBatch};
@@ -220,16 +221,19 @@ mod tests {
         // A single `tick_all` is exactly one cleaner sweep, so the run counter
         // must advance by one. This pins `record_cleaner_run` against a no-op
         // mutation (nothing else asserts on `log_cleaner_runs_total`).
-        assert2::assert!(metrics.log_cleaner_runs_total.get() == 1);
+        assert_eq!(metrics.log_cleaner_runs_total.get(), 1);
 
-        for (_topic, partition, before, expect_compacted) in cases {
+        for (topic, partition, before, expect_compacted) in cases {
             let after = record_count(&partition);
             let count_ok = if expect_compacted {
                 after < before
             } else {
                 after == before
             };
-            assert2::assert!(count_ok);
+            assert!(
+                count_ok,
+                "case: {topic} (before={before}, after={after}, expect_compacted={expect_compacted})"
+            );
         }
     }
 
@@ -282,8 +286,14 @@ mod tests {
         })
         .await
         .unwrap();
-        assert2::assert!(parked);
-        assert2::assert!(record_count(&partition) < before);
+        assert!(
+            parked,
+            "cleaner should park on the interval sleep after the first sweep"
+        );
+        assert!(
+            record_count(&partition) < before,
+            "immediate first sweep should compact the eligible partition"
+        );
 
         // Advance one interval to fire a second sweep, then confirm the loop
         // re-parks — proving it keeps ticking on the injected cadence with no
@@ -296,8 +306,11 @@ mod tests {
         })
         .await
         .unwrap();
-        assert2::assert!(parked_again);
-        assert2::assert!(record_count(&partition) < before);
+        assert!(
+            parked_again,
+            "cleaner should re-park on the interval sleep after the second sweep"
+        );
+        assert!(record_count(&partition) < before, "log stays compacted");
 
         shutdown.cancel();
         task.await.expect("cleaner task exits");

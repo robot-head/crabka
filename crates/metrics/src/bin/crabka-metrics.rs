@@ -412,7 +412,7 @@ fn unix_time_ms() -> i64 {
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
     use axum::{body::Body, http::Request};
     use clap::Parser;
     use tower::ServiceExt;
@@ -423,7 +423,7 @@ mod tests {
     fn parses_distributor_target() {
         let cli = Cli::try_parse_from(["crabka-metrics", "--target", "distributor"]).unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::Distributor));
+        assert!(matches!(cli.target, Target::Distributor));
     }
 
     #[test]
@@ -443,36 +443,32 @@ mod tests {
         ])
         .unwrap();
 
-        check!(
-            (
-                cli.ha_tracker_topic.as_str(),
-                cli.ha_tracker_group_id.as_str(),
-                cli.ha_tracker_client_id.as_str(),
-                cli.ha_tracker_poll_timeout_ms,
-            ) == ("__tenant_a_ha", "metrics-ha", "metrics-ha-1", 250)
-        );
+        check!(cli.ha_tracker_topic == "__tenant_a_ha");
+        check!(cli.ha_tracker_group_id == "metrics-ha");
+        check!(cli.ha_tracker_client_id == "metrics-ha-1");
+        check!(cli.ha_tracker_poll_timeout_ms == 250);
     }
 
     #[test]
     fn parses_query_frontend_target() {
         let cli = Cli::try_parse_from(["crabka-metrics", "--target", "query-frontend"]).unwrap();
 
-        assert2::assert!(matches!(cli.target, Target::QueryFrontend));
+        assert!(matches!(cli.target, Target::QueryFrontend));
     }
 
     #[test]
     fn querier_target_is_runnable() {
-        assert2::assert!(runnable_targets().contains(&Target::Querier));
+        assert!(runnable_targets().contains(&Target::Querier));
     }
 
     #[test]
     fn query_frontend_target_is_runnable() {
-        assert2::assert!(runnable_targets().contains(&Target::QueryFrontend));
+        assert!(runnable_targets().contains(&Target::QueryFrontend));
     }
 
     #[test]
     fn ruler_target_is_runnable() {
-        assert2::assert!(runnable_targets().contains(&Target::Ruler));
+        assert!(runnable_targets().contains(&Target::Ruler));
     }
 
     #[tokio::test]
@@ -487,7 +483,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -500,7 +496,7 @@ mod tests {
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert2::assert!(bound.port() != 0);
+        assert!(bound.port() != 0);
     }
 
     #[tokio::test]
@@ -515,7 +511,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -528,7 +524,7 @@ mod tests {
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert2::assert!(bound.port() != 0);
+        assert!(bound.port() != 0);
     }
 
     #[tokio::test]
@@ -543,7 +539,7 @@ mod tests {
             .await
             .unwrap();
 
-        assert2::assert!(response.status() == StatusCode::OK);
+        assert!(response.status() == StatusCode::OK);
     }
 
     #[tokio::test]
@@ -556,7 +552,7 @@ mod tests {
         .unwrap();
         let _ = stop_tx.send(());
 
-        assert2::assert!(bound.port() != 0);
+        assert!(bound.port() != 0);
     }
 
     #[test]
@@ -578,27 +574,16 @@ mod tests {
         ])
         .unwrap();
 
-        check!(
-            (
-                cli.target,
-                cli.bootstrap.as_str(),
-                cli.compactor_group_id.as_str(),
-                cli.compactor_poll_timeout_ms,
-                cli.compactor_retention_ms,
-                cli.compactor_retention_sweep_ms,
-            ) == (
-                Target::Compactor,
-                "broker:9092",
-                "metrics-c",
-                250,
-                3_600_000,
-                30_000,
-            )
-        );
+        assert!(matches!(cli.target, Target::Compactor));
+        check!(cli.bootstrap == "broker:9092");
+        check!(cli.compactor_group_id == "metrics-c");
+        check!(cli.compactor_poll_timeout_ms == 250);
+        check!(cli.compactor_retention_ms == 3_600_000);
+        check!(cli.compactor_retention_sweep_ms == 30_000);
     }
 
     #[test]
     fn rejects_unknown_target() {
-        assert2::assert!(Cli::try_parse_from(["crabka-metrics", "--target", "bogus"]).is_err());
+        assert!(Cli::try_parse_from(["crabka-metrics", "--target", "bogus"]).is_err());
     }
 }

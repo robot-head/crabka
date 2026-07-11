@@ -31,8 +31,7 @@ impl Attributes {
     #[must_use]
     pub fn compression(self) -> CompressionType {
         // The low 3 bits are the codec id. Wider attribute bits are ignored.
-        #[allow(clippy::cast_sign_loss, clippy::cast_possible_truncation)]
-        let byte = (self.0 & 0x07) as u8;
+        let byte = (self.0 & 0x07).to_le_bytes()[0];
         CompressionType::from_attribute_bits(byte).unwrap_or(CompressionType::None)
     }
 

@@ -1,7 +1,4 @@
-// Rust 1.95 annotate-snippets ICE on clippy::pedantic in test files.
-#![allow(clippy::pedantic)]
-
-//! KIP-966 `DescribeTopicPartitions` (api_key 75) — paginated topic
+//! KIP-966 `DescribeTopicPartitions` (`api_key` 75) — paginated topic
 //! listing the JVM admin client uses for `kafka-topics --describe`
 //! against Kafka 3.7+ brokers.
 //!
@@ -14,7 +11,7 @@
 //!     `next_cursor` round-trip
 //!   * Stable sort order on fetch-all (alphabetical)
 
-use assert2::check;
+use assert2::{assert, check};
 mod support;
 
 use crabka_protocol::owned::{
@@ -57,7 +54,7 @@ async fn create_topic(p: &support::InProcess, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0, "{name} create: {resp:?}");
 }
 
 #[tokio::test]
@@ -86,28 +83,25 @@ async fn named_request_returns_listed_topics_with_partitions() {
         .await
         .expect("DescribeTopicPartitions");
 
+    assert!(resp.topics.len() == 2);
     // Named-request order preserves the request order.
-    let alpha_partitions: Vec<_> = resp.topics[0]
-        .partitions
-        .iter()
-        .map(|part| (part.error_code, part.partition_index, part.leader_id))
-        .collect();
+    check!(resp.topics[0].name.as_deref() == Some("alpha"));
+    check!(resp.topics[0].error_code == 0);
+    check!(resp.topics[0].partitions.len() == 2);
+    for (i, part) in resp.topics[0].partitions.iter().enumerate() {
+        check!(part.error_code == 0);
+        check!(part.partition_index == i32::try_from(i).unwrap());
+        check!(part.leader_id == 1);
+    }
+    check!(resp.topics[1].name.as_deref() == Some("beta"));
+    check!(resp.topics[1].partitions.len() == 1);
+
+    // No truncation expected — every partition fits under the default
+    // 2000-partition budget.
     check!(
-        (
-            resp.topics.len(),
-            resp.topics[0].name.as_deref(),
-            alpha_partitions,
-            resp.topics[1].name.as_deref(),
-            resp.topics[1].partitions.len(),
-            resp.next_cursor.is_none(),
-        ) == (
-            2,
-            Some("alpha"),
-            vec![(0, 0, 1), (0, 1, 1)],
-            Some("beta"),
-            1,
-            true,
-        )
+        resp.next_cursor.is_none(),
+        "no cursor expected: {:?}",
+        resp.next_cursor,
     );
 
     p.broker.shutdown().await;
@@ -143,7 +137,7 @@ async fn fetch_all_returns_topics_in_alphabetical_order() {
         .copied()
         .filter(|n| !n.starts_with("__"))
         .collect();
-    assert2::assert!(user_topics == vec!["alpha", "beta", "gamma"]);
+    assert!(user_topics == vec!["alpha", "beta", "gamma"]);
 
     p.broker.shutdown().await;
 }
@@ -172,19 +166,15 @@ async fn unknown_topic_in_named_request_returns_error_row() {
         })
         .await
         .expect("DescribeTopicPartitions");
+    assert!(resp.topics.len() == 2);
     // Unknown topic row carries UNKNOWN_TOPIC_OR_PARTITION (3).
+    check!(resp.topics[0].name.as_deref() == Some("ghost"));
+    check!(resp.topics[0].error_code == 3);
+    check!(resp.topics[0].partitions.is_empty());
     // Known sibling still served on the same response.
-    check!(
-        (
-            resp.topics.len(),
-            resp.topics[0].name.as_deref(),
-            resp.topics[0].error_code,
-            resp.topics[0].partitions.is_empty(),
-            resp.topics[1].name.as_deref(),
-            resp.topics[1].error_code,
-            resp.topics[1].partitions.len(),
-        ) == (2, Some("ghost"), 3, true, Some("real-topic"), 0, 1)
-    );
+    check!(resp.topics[1].name.as_deref() == Some("real-topic"));
+    check!(resp.topics[1].error_code == 0);
+    check!(resp.topics[1].partitions.len() == 1);
 
     p.broker.shutdown().await;
 }
@@ -218,7 +208,10 @@ async fn internal_topics_carry_is_internal_flag() {
             n,
             "__consumer_offsets" | "__transaction_state" | "__remote_log_metadata"
         );
-        assert2::assert!(row.is_internal == expect_internal);
+        assert!(
+            row.is_internal == expect_internal,
+            "is_internal mismatch for {n}: {row:?}"
+        );
     }
 
     p.broker.shutdown().await;
@@ -248,16 +241,18 @@ async fn elr_lists_are_empty_not_null_for_jvm_3_8_admin_compatibility() {
         .await
         .expect("DescribeTopicPartitions");
 
+    assert!(resp.topics.len() == 1);
+    assert!(resp.topics[0].partitions.len() == 1);
     let part = &resp.topics[0].partitions[0];
     // MUST be Some(_), not None. Both fields stay as empty vecs so the
     // JVM 3.8 admin client's unconditional `.stream()` call doesn't NPE.
-    assert2::assert!(
-        (
-            resp.topics.len(),
-            resp.topics[0].partitions.len(),
-            part.eligible_leader_replicas.as_deref(),
-            part.last_known_elr.as_deref()
-        ) == (1, 1, Some(&[][..]), Some(&[][..]))
+    assert!(
+        part.eligible_leader_replicas.as_deref() == Some(&[][..]),
+        "eligible_leader_replicas must be empty list, not null"
+    );
+    assert!(
+        part.last_known_elr.as_deref() == Some(&[][..]),
+        "last_known_elr must be empty list, not null"
     );
 
     p.broker.shutdown().await;
@@ -282,9 +277,16 @@ async fn topic_authorized_operations_populated_for_super_user() {
         .await
         .expect("DescribeTopicPartitions");
 
-    assert2::assert!(resp.topics.len() == 1);
+    assert!(resp.topics.len() == 1);
     let row = &resp.topics[0];
-    assert2::assert!((row.error_code, row.topic_authorized_operations) == (0, TOPIC_FULL_MASK));
+    assert!(row.error_code == 0);
+    // `support::start` uses `AllowAllAuthorizer` by default, so every
+    // supported topic operation is authorized → full mask.
+    assert!(
+        row.topic_authorized_operations == TOPIC_FULL_MASK,
+        "expected full topic mask, got 0b{:b}",
+        row.topic_authorized_operations
+    );
 
     p.broker.shutdown().await;
 }
@@ -310,16 +312,12 @@ async fn pagination_caps_response_at_partition_limit_and_returns_next_cursor() {
         .await
         .expect("DescribeTopicPartitions");
 
+    assert!(resp.topics.len() == 1);
+    check!(resp.topics[0].name.as_deref() == Some("big"));
+    check!(resp.topics[0].partitions.len() == 3);
     let cursor = resp.next_cursor.expect("next_cursor must be set");
-    check!(
-        (
-            resp.topics.len(),
-            resp.topics[0].name.as_deref(),
-            resp.topics[0].partitions.len(),
-            cursor.topic_name.as_str(),
-            cursor.partition_index,
-        ) == (1, Some("big"), 3, "big", 3)
-    );
+    assert!(cursor.topic_name == "big");
+    assert!(cursor.partition_index == 3);
 
     // Resume from the cursor — should return partitions 3 and 4 only.
     let resp2 = p
@@ -339,14 +337,18 @@ async fn pagination_caps_response_at_partition_limit_and_returns_next_cursor() {
         })
         .await
         .expect("DescribeTopicPartitions (resume)");
-    assert2::assert!(resp2.topics.len() == 1);
+    assert!(resp2.topics.len() == 1);
     let parts: Vec<i32> = resp2.topics[0]
         .partitions
         .iter()
         .map(|p| p.partition_index)
         .collect();
-    assert2::assert!(parts == vec![3, 4]);
-    assert2::assert!(resp2.next_cursor.is_none());
+    assert!(parts == vec![3, 4]);
+    assert!(
+        resp2.next_cursor.is_none(),
+        "no more data should remain after the resume: {:?}",
+        resp2.next_cursor,
+    );
 
     p.broker.shutdown().await;
 }

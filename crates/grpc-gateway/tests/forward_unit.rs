@@ -136,7 +136,6 @@ async fn forward_maps_owner_responses() {
     }
 }
 
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_handler_error_arm_returns_retriable() {
     // Consts before any statements (clippy::items_after_statements).
@@ -239,7 +238,6 @@ async fn forward_handler_error_arm_returns_retriable() {
 /// The `/internal/v1/forward` gate: when `config.tls` is `Some` and NO
 /// principal extension is present (anonymous caller), the handler returns
 /// `403 FORBIDDEN` with `retriable: false` — before any broker interaction.
-#[allow(clippy::too_many_lines)]
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn forward_handler_rejects_anonymous_when_tls_enabled() {
     // Consts before any statements (clippy::items_after_statements).

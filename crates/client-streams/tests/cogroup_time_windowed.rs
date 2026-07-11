@@ -11,7 +11,7 @@ fn assert_matches_fixture(wire: &crabka_client_streams::topology::WireTopology, 
     )
     .unwrap();
     let actual = serde_json::to_value(wire).unwrap();
-    assert2::assert!(actual == expected);
+    assert_eq!(actual, expected, "wire topology != JVM fixture {fixture}");
 }
 
 #[test]
@@ -101,5 +101,8 @@ fn cogroup_time_matches_jvm_behavior() {
         &std::fs::read_to_string("tests/testdata/cogroup/behavior_time.json").unwrap(),
     )
     .unwrap();
-    assert2::assert!(got == golden);
+    assert_eq!(
+        got, golden,
+        "cogroup-time output sequence != JVM behavioral golden"
+    );
 }

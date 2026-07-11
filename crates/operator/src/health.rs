@@ -42,6 +42,8 @@ pub fn router(state: HealthState) -> Router {
 }
 
 /// Bind and serve forever. Returns only on socket error or shutdown signal.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn serve(addr: SocketAddr, state: HealthState) -> anyhow::Result<()> {
     let listener = tokio::net::TcpListener::bind(addr).await?;
     tracing::info!(%addr, "health server listening");
@@ -80,7 +82,7 @@ async fn metrics(State(s): State<HealthState>) -> impl IntoResponse {
 
 #[cfg(test)]
 mod tests {
-
+    use assert2::assert;
     use axum::{body::Body, http::Request};
     use http::StatusCode as Code;
     use tokio::sync::Mutex;
@@ -104,7 +106,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(resp.status() == Code::OK);
+        assert!(resp.status() == Code::OK);
     }
 
     #[tokio::test]
@@ -121,7 +123,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(resp.status() == Code::SERVICE_UNAVAILABLE);
+        assert!(resp.status() == Code::SERVICE_UNAVAILABLE);
 
         state.mark_ready();
         let resp = app
@@ -133,7 +135,7 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(resp.status() == Code::OK);
+        assert!(resp.status() == Code::OK);
     }
 
     #[tokio::test]
@@ -148,14 +150,14 @@ mod tests {
             )
             .await
             .unwrap();
-        assert2::assert!(resp.status() == Code::OK);
+        assert!(resp.status() == Code::OK);
         let ct = resp
             .headers()
             .get("content-type")
             .unwrap()
             .to_str()
             .unwrap();
-        assert2::assert!(ct.starts_with("application/openmetrics-text"));
+        assert!(ct.starts_with("application/openmetrics-text"));
 
         // Body should be valid OpenMetrics text: encoder always emits `# EOF`
         // as the terminator. Catches a future regression where the route is
@@ -164,6 +166,6 @@ mod tests {
             .await
             .unwrap();
         let body = std::str::from_utf8(&body_bytes).unwrap();
-        assert2::assert!(body.contains("# EOF"));
+        assert!(body.contains("# EOF"), "metrics body missing # EOF: {body}");
     }
 }

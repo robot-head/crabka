@@ -19,6 +19,7 @@
 
 use std::{collections::HashSet, sync::Arc};
 
+use assert2::assert;
 use bytes::{Buf, BufMut, BytesMut};
 use crabka_broker::{Broker, BrokerConfig, authorizer::SimpleAclAuthorizer};
 use crabka_client_core::Client;
@@ -125,7 +126,7 @@ async fn create_topic(client: &Client, name: &str, partitions: i32) {
         })
         .await
         .expect("CreateTopics");
-    assert2::assert!(resp.topics[0].error_code == 0);
+    assert!(resp.topics[0].error_code == 0, "topic create: {resp:?}");
 }
 
 // ── Metadata ────────────────────────────────────────────────────────────────
@@ -156,7 +157,10 @@ async fn metadata_topic_authorized_operations_default_is_not_present() {
         .iter()
         .find(|t| t.name.as_deref() == Some("foo"))
         .expect("foo row present");
-    assert2::assert!(row.topic_authorized_operations == i32::MIN);
+    assert!(
+        row.topic_authorized_operations == i32::MIN,
+        "opt-out must leave the sentinel: {row:?}"
+    );
     h.shutdown().await;
 }
 
@@ -188,7 +192,11 @@ async fn metadata_topic_authorized_operations_super_user_gets_full_mask() {
         .iter()
         .find(|t| t.name.as_deref() == Some("foo"))
         .expect("foo row present");
-    assert2::assert!(row.topic_authorized_operations == TOPIC_FULL_MASK);
+    assert!(
+        row.topic_authorized_operations == TOPIC_FULL_MASK,
+        "super-user must see the full topic mask, got 0b{:b}",
+        row.topic_authorized_operations
+    );
     h.shutdown().await;
 }
 
@@ -205,7 +213,11 @@ async fn describe_cluster_authorized_operations_default_is_not_present() {
         .send(DescribeClusterRequest::default())
         .await
         .expect("DescribeCluster");
-    assert2::assert!((resp.error_code, resp.cluster_authorized_operations) == (0, i32::MIN));
+    assert!(resp.error_code == 0, "DescribeCluster error: {resp:?}");
+    assert!(
+        resp.cluster_authorized_operations == i32::MIN,
+        "opt-out must leave the sentinel"
+    );
     h.shutdown().await;
 }
 
@@ -222,8 +234,11 @@ async fn describe_cluster_authorized_operations_super_user_gets_full_mask() {
         })
         .await
         .expect("DescribeCluster");
-    assert2::assert!(
-        (resp.error_code, resp.cluster_authorized_operations) == (0, CLUSTER_FULL_MASK)
+    assert!(resp.error_code == 0, "DescribeCluster error: {resp:?}");
+    assert!(
+        resp.cluster_authorized_operations == CLUSTER_FULL_MASK,
+        "super-user must see the full cluster mask, got 0b{:b}",
+        resp.cluster_authorized_operations
     );
     h.shutdown().await;
 }
@@ -246,9 +261,13 @@ async fn describe_groups_authorized_operations_default_is_not_present() {
         })
         .await
         .expect("DescribeGroups");
-    assert2::assert!(resp.groups.len() == 1);
+    assert!(resp.groups.len() == 1);
     let g = &resp.groups[0];
-    assert2::assert!((g.error_code, g.authorized_operations) == (0, i32::MIN));
+    assert!(g.error_code == 0, "DescribeGroups error: {g:?}");
+    assert!(
+        g.authorized_operations == i32::MIN,
+        "opt-out must leave the sentinel"
+    );
     h.shutdown().await;
 }
 
@@ -268,9 +287,14 @@ async fn describe_groups_authorized_operations_super_user_gets_full_mask() {
         })
         .await
         .expect("DescribeGroups");
-    assert2::assert!(resp.groups.len() == 1);
+    assert!(resp.groups.len() == 1);
     let g = &resp.groups[0];
-    assert2::assert!((g.error_code, g.authorized_operations) == (0, GROUP_FULL_MASK));
+    assert!(g.error_code == 0, "DescribeGroups error: {g:?}");
+    assert!(
+        g.authorized_operations == GROUP_FULL_MASK,
+        "super-user must see the full group mask, got 0b{:b}",
+        g.authorized_operations
+    );
     h.shutdown().await;
 }
 
@@ -332,6 +356,10 @@ async fn metadata_cluster_authorized_operations_super_user_gets_full_mask_v9() {
     let _hdr_tagged = cur.get_u8();
     let resp = MetadataResponse::decode(&mut cur, version).expect("Metadata decode");
 
-    assert2::assert!(resp.cluster_authorized_operations == CLUSTER_FULL_MASK);
+    assert!(
+        resp.cluster_authorized_operations == CLUSTER_FULL_MASK,
+        "super-user must see the full cluster mask on Metadata v9, got 0b{:b}",
+        resp.cluster_authorized_operations
+    );
     h.shutdown().await;
 }

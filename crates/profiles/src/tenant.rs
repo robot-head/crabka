@@ -82,14 +82,14 @@ pub fn tenant_from_header(value: Option<&str>) -> Result<String, ProfilesError> 
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
 
     #[test]
     fn valid_tenant_is_returned() {
         let ok = validate_tenant("tenant-a");
-        assert2::assert!(ok == Ok("tenant-a".to_string()));
+        assert!(ok == Ok("tenant-a".to_string()));
     }
 
     #[test]
@@ -101,17 +101,17 @@ mod tests {
 
     #[test]
     fn header_none_is_anonymous() {
-        assert2::assert!(tenant_from_header(None) == Ok("anonymous".to_string()));
+        assert!(tenant_from_header(None) == Ok("anonymous".to_string()));
     }
 
     #[test]
     fn header_empty_is_anonymous() {
-        assert2::assert!(tenant_from_header(Some("")) == Ok("anonymous".to_string()));
+        assert!(tenant_from_header(Some("")) == Ok("anonymous".to_string()));
     }
 
     #[test]
     fn header_present_validates() {
-        assert2::assert!(tenant_from_header(Some("tenant-a")) == Ok("tenant-a".to_string()));
+        assert!(tenant_from_header(Some("tenant-a")) == Ok("tenant-a".to_string()));
         check!(tenant_from_header(Some("a/b")).is_err());
     }
 

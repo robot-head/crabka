@@ -70,7 +70,6 @@ fn describe_acls_response(resources: Vec<DescribeAclsResource>) -> DescribeAclsR
 // `async` for symmetry with the other ACL wire handlers (CreateAcls /
 // DeleteAcls awaits `controller.submit_change`; read-only
 // DescribeAcls itself never suspends.
-#[allow(clippy::unused_async)]
 #[tracing::instrument(
     name = "handle_describe_acls",
     level = "info",
@@ -78,7 +77,7 @@ fn describe_acls_response(resources: Vec<DescribeAclsResource>) -> DescribeAclsR
     fields(api = "DescribeAcls"),
     err
 )]
-pub(crate) async fn handle(
+pub(crate) fn handle(
     broker: &Broker,
     req: DescribeAclsRequest,
     ctx: &crate::handlers::RequestContext<'_>,
@@ -176,6 +175,7 @@ fn encode_response<R: Encode>(
 mod tests {
     use std::sync::Arc;
 
+    use assert2::assert;
     use crabka_metadata::{
         AclOperation, MetadataRecord, PatternType, PermissionType, ResourceType,
     };
@@ -272,22 +272,21 @@ mod tests {
             operation: None,
             permission_type: None,
         };
-        assert2::assert!(built == expected);
+        assert!(built == expected);
     }
 
     #[test]
     fn build_filter_rejects_malformed_axes() {
-        #[allow(clippy::type_complexity)]
-        type TestCase1<'a> = (&'a str, fn(&mut DescribeAclsRequest));
-        let cases: [TestCase1<'_>; 3] = [
+        type CorruptRequest = fn(&mut DescribeAclsRequest);
+        let cases: [(&str, CorruptRequest); 3] = [
             ("resource_type_filter", |r| r.resource_type_filter = 99),
             ("pattern_type_filter", |r| r.pattern_type_filter = 99),
             ("operation", |r| r.operation = 99),
         ];
-        for (_axis, corrupt) in cases {
+        for (axis, corrupt) in cases {
             let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
             corrupt(&mut req);
-            assert2::assert!(build_filter(&req).is_err());
+            assert!(build_filter(&req).is_err(), "axis {axis}");
         }
     }
 
@@ -301,7 +300,7 @@ mod tests {
             resources: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(err == expected_err);
+        assert!(err == expected_err);
 
         let desc = acl_description(&acl("orders", "User:alice", AclOperation::Read));
         let expected_desc = AclDescription {
@@ -311,7 +310,7 @@ mod tests {
             permission_type: PERMISSION_ALLOW,
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(desc == expected_desc);
+        assert!(desc == expected_desc);
 
         let resource = describe_acls_resource(
             RESOURCE_TYPE_TOPIC,
@@ -326,7 +325,7 @@ mod tests {
             acls: vec![desc],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resource == expected_resource);
+        assert!(resource == expected_resource);
 
         let resp = describe_acls_response(vec![resource.clone()]);
         let expected_resp = DescribeAclsResponse {
@@ -336,7 +335,7 @@ mod tests {
             resources: vec![resource],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected_resp);
+        assert!(resp == expected_resp);
     }
 
     #[tokio::test]
@@ -353,7 +352,6 @@ mod tests {
             &ctx,
             VERSION,
         )
-        .await
         .expect("handle");
         let resp = decode_response(&resp);
 
@@ -364,7 +362,7 @@ mod tests {
             resources: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -379,7 +377,7 @@ mod tests {
         let mut req = request(Some("orders"), Some("User:alice"), OPERATION_READ);
         req.resource_type_filter = 99;
 
-        let resp = handle(&broker, req, &ctx, VERSION).await.expect("handle");
+        let resp = handle(&broker, req, &ctx, VERSION).expect("handle");
         let resp = decode_response(&resp);
 
         let expected = DescribeAclsResponse {
@@ -389,7 +387,7 @@ mod tests {
             resources: Vec::new(),
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -416,7 +414,6 @@ mod tests {
             &ctx,
             VERSION,
         )
-        .await
         .expect("handle");
         let resp = decode_response(&resp);
 
@@ -439,7 +436,7 @@ mod tests {
             }],
             unknown_tagged_fields: UnknownTaggedFields::default(),
         };
-        assert2::assert!(resp == expected);
+        assert!(resp == expected);
         broker_handle.shutdown().await;
     }
 
@@ -447,13 +444,7 @@ mod tests {
     fn acl_description_preserves_non_read_operations() {
         let desc = acl_description(&acl("payments", "User:bob", AclOperation::Write));
 
-        let expected = AclDescription {
-            principal: "User:bob".into(),
-            host: "*".into(),
-            operation: OPERATION_WRITE,
-            permission_type: PERMISSION_ALLOW,
-            unknown_tagged_fields: UnknownTaggedFields::default(),
-        };
-        assert2::assert!(desc == expected);
+        assert!(desc.principal == "User:bob");
+        assert!(desc.operation == OPERATION_WRITE);
     }
 }

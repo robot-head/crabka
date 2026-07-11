@@ -23,6 +23,8 @@ use crate::scenario::Stack;
 /// `serviceAccount` token). When running outside the cluster — useful for
 /// `cargo test` — this returns an `Err` and the caller should report the
 /// failover as skipped.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub async fn try_client() -> Result<KubeClient> {
     KubeClient::try_default()
         .await
@@ -30,6 +32,8 @@ pub async fn try_client() -> Result<KubeClient> {
 }
 
 /// Query topic metadata and return partition 0's current leader broker id.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub async fn partition0_leader_from_metadata(
     bootstrap: &str,
     topic: &str,
@@ -56,6 +60,8 @@ pub async fn partition0_leader_from_metadata(
 /// ordinal matches that broker id is targeted; otherwise the first matching pod
 /// is deleted for backwards-compatible smoke runs. `grace_period_seconds = 0`
 /// means SIGKILL.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub async fn kill_broker_pod(
     client: &KubeClient,
     stack: Stack,
@@ -90,6 +96,8 @@ pub async fn kill_broker_pod(
 
 /// Delete the first broker pod (alphabetical) matching the stack's pod-name
 /// regex root. Kept as a compatibility wrapper for non-partition-targeted runs.
+/// # Errors
+/// Returns an error when input data is invalid, required I/O fails, or the destination rejects the generated report or audit event.
 pub async fn kill_first_broker(
     client: &KubeClient,
     stack: Stack,

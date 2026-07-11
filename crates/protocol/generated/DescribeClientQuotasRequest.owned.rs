@@ -2,9 +2,8 @@
 
 use crate::primitives::fixed::{get_bool, get_i8, put_bool, put_i8};
 use crate::primitives::string_bytes::{
-    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned,
-    get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len,
-    put_compact_nullable_string, put_compact_string, put_nullable_string, put_string, string_len,
+    compact_nullable_string_len, compact_string_len, get_compact_nullable_string_owned, get_compact_string_owned, get_nullable_string_owned, get_string_owned, nullable_string_len, put_compact_nullable_string, put_compact_string,
+    put_nullable_string, put_string, string_len,
 };
 use crate::tagged_fields::{WriteTaggedFields, read_tagged_fields, tagged_fields_len};
 use crate::{Decode, Encode, ProtocolError, UnknownTaggedFields};
@@ -14,7 +13,8 @@ pub const MIN_VERSION: i16 = 0;
 pub const MAX_VERSION: i16 = 1;
 pub const FLEXIBLE_MIN: i16 = 1;
 #[inline]
-fn is_flexible(version: i16) -> bool {
+#[must_use]
+pub fn is_flexible(version: i16) -> bool {
     version >= FLEXIBLE_MIN
 }
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
@@ -26,10 +26,7 @@ pub struct DescribeClientQuotasRequest {
 impl Encode for DescribeClientQuotasRequest {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         if version >= 0 {
@@ -54,12 +51,8 @@ impl Encode for DescribeClientQuotasRequest {
         let mut n: usize = 0;
         if version >= 0 {
             n += {
-                let prefix =
-                    crate::primitives::array::array_len_prefix_len((self.components).len(), flex);
-                let body: usize = (self.components)
-                    .iter()
-                    .map(|it| it.encoded_len(version))
-                    .sum();
+                let prefix = crate::primitives::array::array_len_prefix_len((self.components).len(), flex);
+                let body: usize = (self.components).iter().map(|it| it.encoded_len(version)).sum();
                 prefix + body
             };
         }
@@ -76,10 +69,7 @@ impl Encode for DescribeClientQuotasRequest {
 impl Decode<'_> for DescribeClientQuotasRequest {
     fn decode<B: Buf>(buf: &mut B, version: i16) -> Result<Self, ProtocolError> {
         if !(MIN_VERSION..=MAX_VERSION).contains(&version) {
-            return Err(ProtocolError::UnsupportedVersion {
-                api_key: API_KEY,
-                version,
-            });
+            return Err(ProtocolError::UnsupportedVersion { api_key: API_KEY, version });
         }
         let flex = is_flexible(version);
         let mut out = Self::default();
@@ -127,11 +117,7 @@ impl Encode for ComponentData {
     fn encode<B: BufMut>(&self, buf: &mut B, version: i16) -> Result<(), ProtocolError> {
         let flex = version >= 1;
         if version >= 0 {
-            if flex {
-                put_compact_string(buf, &self.entity_type);
-            } else {
-                put_string(buf, &self.entity_type);
-            }
+            if flex { put_compact_string(buf, &self.entity_type) } else { put_string(buf, &self.entity_type) }
         }
         if version >= 0 {
             put_i8(buf, self.match_type);
@@ -153,21 +139,13 @@ impl Encode for ComponentData {
         let flex = version >= 1;
         let mut n: usize = 0;
         if version >= 0 {
-            n += if flex {
-                compact_string_len(&self.entity_type)
-            } else {
-                string_len(&self.entity_type)
-            };
+            n += if flex { compact_string_len(&self.entity_type) } else { string_len(&self.entity_type) };
         }
         if version >= 0 {
             n += 1;
         }
         if version >= 0 {
-            n += if flex {
-                compact_nullable_string_len(self.match_.as_deref())
-            } else {
-                nullable_string_len(self.match_.as_deref())
-            };
+            n += if flex { compact_nullable_string_len(self.match_.as_deref()) } else { nullable_string_len(self.match_.as_deref()) };
         }
         if flex {
             let known_pairs: Vec<(u32, usize)> = Vec::new();
@@ -181,21 +159,13 @@ impl Decode<'_> for ComponentData {
         let flex = version >= 1;
         let mut out = Self::default();
         if version >= 0 {
-            out.entity_type = if flex {
-                get_compact_string_owned(buf)?
-            } else {
-                get_string_owned(buf)?
-            };
+            out.entity_type = if flex { get_compact_string_owned(buf)? } else { get_string_owned(buf)? };
         }
         if version >= 0 {
             out.match_type = get_i8(buf)?;
         }
         if version >= 0 {
-            out.match_ = if flex {
-                get_compact_nullable_string_owned(buf)?
-            } else {
-                get_nullable_string_owned(buf)?
-            };
+            out.match_ = if flex { get_compact_nullable_string_owned(buf)? } else { get_nullable_string_owned(buf)? };
         }
         if flex {
             out.unknown_tagged_fields = read_tagged_fields(buf, |_tag, _payload| Ok(false))?;
@@ -224,7 +194,7 @@ impl ComponentData {
 /// Only includes fields valid for the given version.
 #[must_use]
 #[allow(unused_comparisons)]
-pub fn default_json(version: i16) -> ::serde_json::Value {
+pub fn default_json(_version: i16) -> ::serde_json::Value {
     let mut obj = ::serde_json::Map::new();
     obj.insert("components".to_string(), ::serde_json::Value::Array(vec![]));
     obj.insert("strict".to_string(), ::serde_json::Value::Bool(false));

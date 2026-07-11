@@ -46,6 +46,8 @@ impl AdminClient {
     /// `[("user", Some(username))]`; broker entries whose entity also
     /// carries a `client-id` axis do not match (matches Kafka admin-tool
     /// strict-component semantics).
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn describe_user_quotas(
         &mut self,
         username: &str,
@@ -85,6 +87,8 @@ impl AdminClient {
     ///
     /// `validate_only` mirrors the wire flag — when `true` the broker
     /// runs validation but writes no metadata record.
+    /// # Errors
+    /// Returns an error when configuration is invalid, protocol encoding fails, the broker rejects the request, or transport I/O fails.
     pub async fn alter_user_quotas(
         &mut self,
         username: &str,

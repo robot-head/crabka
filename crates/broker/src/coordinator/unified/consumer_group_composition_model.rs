@@ -182,7 +182,7 @@ fn rebuild_group(s: &CgcState) -> GroupState {
             client_host: String::new(),
             subscribed_topic_names: subs,
             subscribed_topic_regex: None,
-            compiled_regex: None,
+            compiled_regex: crate::coordinator::unified::consumer_state::CompiledRegex::Absent,
             server_assignor: None,
             rebalance_timeout: Duration::from_mins(1),
             member_epoch: m.member_epoch,
@@ -329,7 +329,13 @@ fn advertised_of(step: &HeartbeatStep) -> Vec<i32> {
 fn assert_epoch_monotonic(pre: &CgcState, post: &GroupState) {
     for pm in &pre.members {
         if let Some(m) = post.members.get(&pm.id) {
-            assert2::assert!(m.member_epoch >= pm.member_epoch);
+            assert!(
+                m.member_epoch >= pm.member_epoch,
+                "member_epoch regressed for {}: {} -> {}",
+                pm.id,
+                pm.member_epoch,
+                m.member_epoch
+            );
         }
     }
 }
@@ -351,7 +357,10 @@ fn do_commit(last: &CgcState, id: &str, part: i32, kind: EpochKind) -> Option<Cg
     };
     let real = g.validate_commit_decision(id, epoch);
     let oracle = oracle_commit(&g, id, epoch);
-    assert2::assert!(real == oracle);
+    assert_eq!(
+        real, oracle,
+        "OffsetCommit fence diverges from oracle: member={id} epoch={epoch}"
+    );
     if real.is_err() {
         return None; // fenced (stale/forward/unknown) — cannot touch the offset
     }
@@ -600,8 +609,8 @@ fn run(model: CgcModel, label: &str) {
         checker.state_count(),
         checker.max_depth()
     );
-    assert2::assert!(checker.max_depth() < MAX_DEPTH);
-    assert2::assert!(checker.state_count() < MAX_STATES);
+    assert!(checker.max_depth() < MAX_DEPTH, "[{label}] depth cap hit");
+    assert!(checker.state_count() < MAX_STATES, "[{label}] truncated");
     checker.assert_properties();
 }
 

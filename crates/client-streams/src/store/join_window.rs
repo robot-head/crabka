@@ -169,18 +169,18 @@ mod tests {
         s.put("k".into(), 5, "a".into()).await;
         s.put("k".into(), 5, "b".into()).await; // SAME (key, ts) → kept (seqnum increments)
         s.put("k".into(), 7, "c".into()).await;
-        assert2::assert!(
-            s.fetch(&"k".to_string(), 5, 7).await
-                == vec![
-                    (5, "a".to_string()),
-                    (5, "b".to_string()),
-                    (7, "c".to_string())
-                ]
+        assert_eq!(
+            s.fetch(&"k".to_string(), 5, 7).await,
+            vec![
+                (5, "a".to_string()),
+                (5, "b".to_string()),
+                (7, "c".to_string())
+            ]
         );
-        assert2::assert!(
-            s.fetch(&"k".to_string(), 5, 5).await
-                == vec![(5, "a".to_string()), (5, "b".to_string())]
+        assert_eq!(
+            s.fetch(&"k".to_string(), 5, 5).await,
+            vec![(5, "a".to_string()), (5, "b".to_string())]
         );
-        assert2::assert!(s.take_changelog().len() == 3);
+        assert_eq!(s.take_changelog().len(), 3);
     }
 }

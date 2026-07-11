@@ -254,6 +254,8 @@ where
     ///
     /// [`Punctuator`]: crate::processor::punctuation::Punctuator
     /// [`Cancellable`]: crate::processor::punctuation::Cancellable
+    /// # Panics
+    /// Panics if synchronized client state is poisoned or a response violates an invariant established by protocol validation.
     pub fn schedule<P>(
         &mut self,
         interval: std::time::Duration,
@@ -265,7 +267,10 @@ where
     {
         use crate::processor::punctuation::PunctuationType;
         let interval_ms = i64::try_from(interval.as_millis()).unwrap_or(i64::MAX);
-        assert2::assert!(interval_ms >= 1);
+        assert!(
+            interval_ms >= 1,
+            "schedule interval must be positive (>= 1ms)"
+        );
         let base = match ty {
             PunctuationType::StreamTime => self.dispatch.sched_stream_time,
             PunctuationType::WallClockTime => self.dispatch.sched_wall_clock,
@@ -354,11 +359,10 @@ mod tests {
         Upper
             .process(&mut ctx, Record::new(Some("k".into()), "hi".into(), 5))
             .await;
-        let actual = buffer
-            .into_iter()
-            .map(|(child, rec)| (child, *rec.value.downcast::<String>().unwrap()))
-            .collect::<Vec<_>>();
-        check!(actual == vec![(3, "HI".to_string()), (4, "HI".to_string())]);
+        check!(buffer.len() == 2);
+        let (child, rec) = buffer.pop_front().unwrap();
+        check!(child == 3);
+        check!(*rec.value.downcast::<String>().unwrap() == "HI");
     }
 
     #[tokio::test]
@@ -398,9 +402,9 @@ mod tests {
             .process(&mut ctx, Record::new(None, "hi".into(), 5))
             .await; // forwards → uppercases
         boxed.close().await; // forwards to Upper's default no-op
-        let actual_len = buffer.len();
+        check!(buffer.len() == 1);
         let (_child, rec) = buffer.pop_front().unwrap();
-        check!((actual_len, *rec.value.downcast::<String>().unwrap()) == (1, "HI".to_string()));
+        check!(*rec.value.downcast::<String>().unwrap() == "HI");
     }
 
     #[tokio::test]

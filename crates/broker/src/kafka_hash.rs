@@ -4,13 +4,12 @@ const MURMUR2_SEED: u32 = 0x9747_b28c;
 const MURMUR2_M: u32 = 0x5bd1_e995;
 const MURMUR2_R: u32 = 24;
 
-// Intentional truncation: Kafka's murmur2 uses a 32-bit length, matching
-// JVM int-cast semantics for byte arrays longer than i32::MAX.
-#[allow(clippy::cast_possible_truncation)]
 #[must_use]
 pub(crate) fn murmur2(data: &[u8]) -> u32 {
     let length = data.len();
-    let mut h: u32 = MURMUR2_SEED ^ (length as u32);
+    let length_bytes = length.to_le_bytes();
+    let length32 = u32::from_le_bytes(length_bytes[..4].try_into().expect("usize is at least u32"));
+    let mut h: u32 = MURMUR2_SEED ^ length32;
     let chunks = data.chunks_exact(4);
     let rem = chunks.remainder();
 
@@ -59,36 +58,37 @@ pub(crate) fn murmur2_partition(data: &[u8], num_partitions: i32) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
 
     #[test]
     fn murmur2_matches_kafka_vectors_for_remainder_lengths() {
-        let cases: &[(&str, &[u8], u32)] = &[
-            ("empty", b"", 0x106e_08d9),
-            ("one-byte remainder", b"a", 0xa2d0_b27c),
-            ("two-byte remainder", b"ab", 0x12d8_262a),
-            ("three-byte remainder", b"abc", 0x1c94_221b),
-            ("one full word", b"abcd", 0xb11a_b5f4),
-            ("word plus remainder", b"abcde", 0x1b89_7edd),
+        let cases: &[(&[u8], u32)] = &[
+            (b"", 0x106e_08d9),
+            (b"a", 0xa2d0_b27c),
+            (b"ab", 0x12d8_262a),
+            (b"abc", 0x1c94_221b),
+            (b"abcd", 0xb11a_b5f4),
+            (b"abcde", 0x1b89_7edd),
         ];
 
-        for (_case, input, expected) in cases {
-            assert2::assert!(murmur2(input) == *expected);
+        for (input, expected) in cases {
+            assert!(murmur2(input) == *expected);
         }
     }
 
     #[test]
     fn murmur2_partition_matches_kafka_utils_abs_mod() {
-        let cases: &[(&str, &[u8], i32, i32)] = &[
-            ("transactional id", b"my-tid", 50, 43),
-            ("producer id", b"producer-1", 50, 45),
-            ("orders id", b"tx-orders-prod", 50, 26),
-            ("seven partitions", b"abcde", 7, 4),
+        let cases: &[(&[u8], i32, i32)] = &[
+            (b"my-tid", 50, 43),
+            (b"producer-1", 50, 45),
+            (b"tx-orders-prod", 50, 26),
+            (b"abcde", 7, 4),
         ];
 
-        for (_case, input, partitions, expected) in cases {
-            assert2::assert!(murmur2_partition(input, *partitions) == *expected);
+        for (input, partitions, expected) in cases {
+            assert!(murmur2_partition(input, *partitions) == *expected);
         }
     }
 }

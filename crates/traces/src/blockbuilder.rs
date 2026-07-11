@@ -247,6 +247,9 @@ pub fn group_by_trace(records: &[SpanRecord]) -> BTreeMap<(String, [u8; 16]), Ve
 ///
 /// Tombstones / records without values are ignored and do not extend the
 /// inclusive offset range.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub fn decode_consumer_records(
     records: &[ConsumerRecord],
 ) -> Result<BTreeMap<i32, PartitionWindow>, TracesError> {
@@ -268,6 +271,9 @@ pub fn decode_consumer_records(
 }
 
 /// Build and write one span block for `tenant` from the supplied WAL records.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn build_blocks(
     writer: &BlockWriter,
     index: &mut TraceIndex,
@@ -281,6 +287,9 @@ pub async fn build_blocks(
 }
 
 /// Build and write one span block with an object-store prefix applied to its key.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn build_blocks_with_prefix(
     writer: &BlockWriter,
     index: &mut TraceIndex,
@@ -305,6 +314,9 @@ pub async fn build_blocks_with_prefix(
     .await
 }
 
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn build_blocks_with_promoted_attrs(
     writer: &BlockWriter,
     index: &mut TraceIndex,
@@ -413,6 +425,9 @@ async fn build_blocks_with_options(
 /// oldest buffered record reaches [`BlockBuilderConfig::flush_max_age`]. WAL
 /// offsets are committed only after the merged block(s) are durably written, and
 /// the remaining buffer is drained on shutdown so no spans are lost.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn run<C>(
     mut consumer: C,
     writer: BlockWriter,
@@ -561,6 +576,9 @@ where
 /// the number of span blocks durably written.
 ///
 /// The caller should commit WAL offsets only after this returns `Ok(_)`.
+///
+/// # Errors
+/// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
 pub async fn flush_partition_windows(
     writer: &BlockWriter,
     index: &mut TraceIndex,

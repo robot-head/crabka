@@ -20,13 +20,12 @@
 //! Windows-gated like the other multi-broker tests (openraft's `debug_assert!`
 //! races on the hosted Windows scheduler).
 
-#![allow(clippy::too_many_lines)]
-
 use std::{
     collections::HashSet,
     time::{Duration, Instant},
 };
 
+use assert2::assert;
 use bytes::Bytes;
 use crabka_client_consumer::{AutoOffsetReset, Consumer};
 use crabka_client_core::Client;
@@ -155,7 +154,7 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
         })
         .await
         .unwrap();
-    assert2::assert!(cr.topics[0].error_code == 0);
+    assert!(cr.topics[0].error_code == 0, "create_topic: {cr:?}");
     let topic_id = cr.topics[0].topic_id;
 
     // Wait until node 1's controller image knows every partition AND its
@@ -185,7 +184,11 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
                 .is_some_and(|l| l != bootstrap_node)
         })
         .collect();
-    assert2::assert!(!non_bootstrap_partitions.is_empty());
+    assert!(
+        !non_bootstrap_partitions.is_empty(),
+        "all {n_partitions} partitions are led by the bootstrap node — \
+         no cross-broker routing to exercise; test would be vacuous"
+    );
     eprintln!(
         "partitions led by non-bootstrap brokers: {non_bootstrap_partitions:?} \
          (bootstrap = node {bootstrap_node})"
@@ -249,7 +252,13 @@ async fn consumer_fetches_from_non_bootstrap_leaders() {
             seen.insert(String::from_utf8_lossy(r.value.as_deref().unwrap_or(&[])).into_owned());
         }
     }
-    assert2::assert!(seen == expected);
+    assert!(
+        seen == expected,
+        "consumer must deliver every partition's record (incl. those on non-bootstrap leaders);\n\
+         missing: {:?}\n\
+         non-bootstrap partitions: {non_bootstrap_partitions:?}",
+        expected.difference(&seen).collect::<Vec<_>>()
+    );
 
     consumer.close().await.unwrap();
     for (h, _, _) in cluster {

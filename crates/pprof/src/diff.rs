@@ -33,8 +33,7 @@ struct Bar {
 }
 
 #[must_use]
-#[allow(clippy::needless_pass_by_value)]
-pub fn diff_trees(left: Tree, right: Tree, max_nodes: i64) -> FlameGraphDiff {
+pub fn diff_trees(left: &Tree, right: &Tree, max_nodes: i64) -> FlameGraphDiff {
     let (left_root, left_nodes) = left.snapshot();
     let (right_root, right_nodes) = right.snapshot();
     let mut merged = Vec::new();
@@ -264,6 +263,7 @@ fn name_slot(names: &mut Vec<String>, index: &mut HashMap<String, i64>, name: &s
 
 #[cfg(test)]
 mod tests {
+    use assert2::assert;
 
     use super::*;
     use crate::{Frame, Tree};
@@ -284,18 +284,18 @@ mod tests {
         right.add_stack(&[frame("a")], 10);
         right.add_stack(&[frame("b")], 5);
 
-        let diff = diff_trees(left, right, 0);
-        assert2::assert!(diff.left_ticks == 10);
-        assert2::assert!(diff.right_ticks == 15);
+        let diff = diff_trees(&left, &right, 0);
+        assert!(diff.left_ticks == 10);
+        assert!(diff.right_ticks == 15);
         for level in &diff.levels {
-            assert2::assert!(level.values.len() % 7 == 0);
+            assert!(level.values.len() % 7 == 0);
         }
 
         let b_idx = i64::try_from(diff.names.iter().position(|name| name == "b").unwrap()).unwrap();
         let level1 = &diff.levels[1].values;
         let b_bar = level1.chunks(7).find(|chunk| chunk[6] == b_idx).unwrap();
         for (index, want) in [(1, 0), (2, 0), (4, 5), (5, 5)] {
-            assert2::assert!(b_bar[index] == want);
+            assert!(b_bar[index] == want, "b_bar[{index}]");
         }
     }
 
@@ -306,10 +306,10 @@ mod tests {
         let mut right = Tree::new();
         right.add_stack(&[frame("a")], 9);
 
-        let diff = diff_trees(left, right, 0);
+        let diff = diff_trees(&left, &right, 0);
         let root = &diff.levels[0].values;
-        assert2::assert!(root[1] == 3 && root[4] == 9);
-        assert2::assert!(diff.names[usize::try_from(root[6]).unwrap()] == "total");
+        assert!(root[1] == 3 && root[4] == 9);
+        assert!(diff.names[usize::try_from(root[6]).unwrap()] == "total");
     }
 
     #[test]
@@ -322,17 +322,15 @@ mod tests {
         right.add_stack(&[frame("hot_leaf"), frame("m_parent")], 8);
         right.add_stack(&[frame("leaf_z"), frame("z_hidden")], 4);
 
-        let diff = diff_trees(left, right, 3);
+        let diff = diff_trees(&left, &right, 3);
 
-        assert2::assert!(diff.left_ticks == 15);
-        assert2::assert!(diff.right_ticks == 12);
+        assert!(diff.left_ticks == 15);
+        assert!(diff.right_ticks == 12);
         let parent = name_index(&diff, "m_parent");
         let leaf = name_index(&diff, "hot_leaf");
         let other = name_index(&diff, "other");
-        assert2::assert!(
-            &diff.levels[1].values == &vec![2, 10, 0, 0, 8, 0, parent, -2, 5, 5, 0, 4, 4, other]
-        );
-        assert2::assert!(&diff.levels[2].values == &vec![2, 10, 10, 0, 8, 8, leaf]);
+        assert!(diff.levels[1].values == vec![2, 10, 0, 0, 8, 0, parent, -2, 5, 5, 0, 4, 4, other]);
+        assert!(diff.levels[2].values == vec![2, 10, 10, 0, 8, 8, leaf]);
     }
 
     #[test]
@@ -343,11 +341,11 @@ mod tests {
         let mut right = Tree::new();
         right.add_stack(&[frame("balanced")], 3);
 
-        let diff = diff_trees(left, right, 2);
+        let diff = diff_trees(&left, &right, 2);
 
         let left_only = name_index(&diff, "left_only");
         let other = name_index(&diff, "other");
-        assert2::assert!(
+        assert!(
             diff.levels[1].values == vec![3, 9, 9, 3, 0, 0, left_only, -3, 3, 3, -3, 3, 3, other]
         );
 
@@ -356,13 +354,11 @@ mod tests {
         let mut right = Tree::new();
         right.add_stack(&[frame("right_only")], 4);
 
-        let diff = diff_trees(left, right, 2);
+        let diff = diff_trees(&left, &right, 2);
 
         let kept = name_index(&diff, "kept");
         let other = name_index(&diff, "other");
-        assert2::assert!(
-            diff.levels[1].values == vec![0, 10, 10, 0, 0, 0, kept, 0, 0, 0, 0, 4, 4, other]
-        );
+        assert!(diff.levels[1].values == vec![0, 10, 10, 0, 0, 0, kept, 0, 0, 0, 0, 4, 4, other]);
     }
 
     #[test]
@@ -374,11 +370,11 @@ mod tests {
         right.add_stack(&[frame("a")], 2);
         right.add_stack(&[frame("b")], 3);
 
-        let diff = diff_trees(left, right, 0);
+        let diff = diff_trees(&left, &right, 0);
 
         let a = name_index(&diff, "a");
         let b = name_index(&diff, "b");
-        assert2::assert!(diff.levels[1].values == vec![0, 2, 2, 0, 2, 2, a, 0, 3, 3, 0, 3, 3, b]);
+        assert!(diff.levels[1].values == vec![0, 2, 2, 0, 2, 2, a, 0, 3, 3, 0, 3, 3, b]);
     }
 
     fn name_index(diff: &FlameGraphDiff, name: &str) -> i64 {

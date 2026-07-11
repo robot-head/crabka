@@ -51,6 +51,8 @@ use crate::{
 const FINALIZER: &str = "crabka.io/user-finalizer";
 
 /// Run the controller forever.
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let user_api: Api<KafkaUser> = Api::all(ctx.client.clone());
     let kafka_api: Api<Kafka> = Api::all(ctx.client.clone());
@@ -77,7 +79,7 @@ pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, _ctx: Arc<Contex
 }
 
 /// Reconcile entry point. Times the pass and records the reconcile
-/// counter/histogram, then delegates to [`reconcile_inner`].
+/// counter/histogram, then delegates to the internal `reconcile_inner` operation.
 #[tracing::instrument(
     level = "info",
     skip_all,
@@ -88,6 +90,8 @@ pub fn error_policy(_obj: Arc<KafkaUser>, err: &ReconcileError, _ctx: Arc<Contex
         generation = ?obj.meta().generation,
     )
 )]
+/// # Errors
+/// Returns an error when cluster state cannot be loaded, the proposed plan is invalid, or a broker, Kubernetes, or persistence operation fails.
 pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     common::record_reconcile(
         &ctx,
@@ -97,129 +101,33 @@ pub async fn reconcile(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action,
     .await
 }
 
-#[allow(clippy::too_many_lines)] // linear pipeline; extraction hurts more than helps
-async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
-    let ns = obj.namespace().unwrap_or_else(|| "default".into());
-    let name = obj.name_any();
-    let user_api: Api<KafkaUser> = Api::namespaced(ctx.client.clone(), &ns);
-    // Failure paths below preserve whatever `quotasInSync` / `tls*` was
-    // already published — they haven't touched broker state, so the
-    // prior value is still the truth.
-    let prior_quotas_in_sync = obj.status.as_ref().is_some_and(|s| s.quotas_in_sync);
-    let prior_tls = obj.status.as_ref().is_some_and(|s| s.tls);
-    let prior_external = obj.status.as_ref().is_some_and(|s| s.external);
-    let prior_tls_not_after = obj
-        .status
-        .as_ref()
-        .and_then(|s| s.tls_cert_not_after.clone());
-    let prior_tls_principal = obj.status.as_ref().and_then(|s| s.tls_principal.clone());
-
-    // 1. Cluster label
-    let cluster = obj
-        .meta()
-        .labels
-        .as_ref()
-        .and_then(|l| l.get("crabka.io/cluster").cloned());
-    let Some(cluster) = cluster else {
-        patch_status(
-            &user_api,
-            &name,
-            StatusPatch {
-                obj: &obj,
-                status: "False",
-                reason: "MissingClusterLabel",
-                message: "metadata.labels[\"crabka.io/cluster\"] is required",
-                scram_sha512: false,
-                scram_sha256: false,
-                tls: prior_tls,
-                external: prior_external,
-                tls_cert_not_after: prior_tls_not_after.clone(),
-                tls_principal: prior_tls_principal.clone(),
-                advance_generation: false,
-                quotas_in_sync: prior_quotas_in_sync,
-            },
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_mins(1)));
-    };
-
-    // 2. Validate spec
-    if let Err(msg) = validate_spec(&obj.spec) {
-        patch_status(
-            &user_api,
-            &name,
-            StatusPatch {
-                obj: &obj,
-                status: "False",
-                reason: "InvalidSpec",
-                message: &msg,
-                scram_sha512: false,
-                scram_sha256: false,
-                tls: prior_tls,
-                external: prior_external,
-                tls_cert_not_after: prior_tls_not_after.clone(),
-                tls_principal: prior_tls_principal.clone(),
-                advance_generation: false,
-                quotas_in_sync: prior_quotas_in_sync,
-            },
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_mins(5)));
-    }
-
-    // 3. Look up the Kafka + bootstrap
-    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &ns);
-    let kafka = kafka_api.get_opt(&cluster).await?;
-    let bootstrap = kafka.as_ref().and_then(internal_listener_bootstrap);
-    let Some(bootstrap) = bootstrap else {
-        patch_status(
-            &user_api,
-            &name,
-            StatusPatch {
-                obj: &obj,
-                status: "False",
-                reason: "ClusterNotReady",
-                message: &format!("Kafka/{cluster} not Ready or no internal listener"),
-                scram_sha512: false,
-                scram_sha256: false,
-                tls: prior_tls,
-                external: prior_external,
-                tls_cert_not_after: prior_tls_not_after.clone(),
-                tls_principal: prior_tls_principal.clone(),
-                advance_generation: false,
-                quotas_in_sync: prior_quotas_in_sync,
-            },
-        )
-        .await?;
-        return Ok(Action::requeue(Duration::from_secs(30)));
-    };
-
-    let principal = principal_for(&name, &obj.spec.authentication);
-    // For TLS users the broker stores quotas keyed by the cert DN
-    // (i.e. `principal` without the `User:` prefix).  For SCRAM users
-    // this is just `name`.
-    let quota_username: String = principal
-        .strip_prefix("User:")
-        .unwrap_or(&principal)
-        .to_string();
-
+// linear pipeline; extraction hurts more than helps
+async fn handle_user_lifecycle(
+    obj: &KafkaUser,
+    ctx: &Context,
+    user_api: &Api<KafkaUser>,
+    identity: (&str, &str, &str),
+    cluster: &str,
+    bootstrap: &str,
+) -> Result<Option<Action>, ReconcileError> {
+    let (name, principal, quota_username) = identity;
     // 4. Finalizer / delete path
     if obj.meta().deletion_timestamp.is_some() {
         // Best-effort cleanup; errors are logged but don't block finalizer removal.
-        if let Ok(client) = ctx.admin_client_for(&cluster, &bootstrap).await {
+        if let Ok(client) = ctx.admin_client_for(cluster, bootstrap).await {
             let mut admin = client.lock().await;
             // SCRAM-SHA-256 + SCRAM-SHA-512 both reach
             // `alter_user_scram_credentials_*` for the finalizer
             // deletion — the broker stores credentials per mechanism,
             // so we tear down whichever mechanism this user used.
-            let scram_finalizer = match &obj.spec.authentication {
+            let scram_finalizer = match obj.spec.authentication {
                 Authentication::ScramSha512(_) => Some(true),
                 Authentication::ScramSha256(_) => Some(false),
                 _ => None,
             };
             if let Some(is_sha512) = scram_finalizer {
                 let deletion = ScramDeletion {
-                    username: name.clone(),
+                    username: name.to_string(),
                 };
                 let result = if is_sha512 {
                     admin
@@ -246,9 +154,9 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
             // `user_delegation_token.rs`), but we already hold the mutex
             // guard `admin` here, so we drop it briefly so the trait impl
             // can re-acquire.
-            if matches!(&obj.spec.authentication, Authentication::DelegationToken(_)) {
+            if matches!(obj.spec.authentication, Authentication::DelegationToken(_)) {
                 drop(admin);
-                if let Err(e) = user_delegation_token::expire_owned_tokens(&name, &client).await {
+                if let Err(e) = user_delegation_token::expire_owned_tokens(name, &client).await {
                     tracing::warn!(
                         error = %e,
                         %name,
@@ -259,7 +167,7 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 admin = client.lock().await;
             }
             let filter = AclEntryFilter {
-                principal: Some(principal.clone()),
+                principal: Some(principal.to_string()),
                 ..Default::default()
             };
             match admin.delete_acls(&[filter]).await {
@@ -270,13 +178,13 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
             // currently has for this user. Same posture as the SCRAM
             // and ACL paths above — log on error, never block the
             // finalizer.  Keyed by DN-minus-`User:` for TLS users.
-            match admin.describe_user_quotas(&quota_username).await {
+            match admin.describe_user_quotas(quota_username).await {
                 Ok(cur) if !cur.is_empty() => {
                     let ops: Vec<_> = cur
                         .into_keys()
                         .map(|key| crabka_client_admin::QuotaOp::Remove { key })
                         .collect();
-                    if let Err(e) = admin.alter_user_quotas(&quota_username, &ops, false).await {
+                    if let Err(e) = admin.alter_user_quotas(quota_username, &ops, false).await {
                         tracing::warn!(error = %e, %name, "quota delete during finalizer failed");
                     }
                 }
@@ -286,14 +194,354 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                 }
             }
         }
-        remove_finalizer(&user_api, &name).await?;
-        return Ok(Action::await_change());
+        remove_finalizer(user_api, name).await?;
+        return Ok(Some(Action::await_change()));
     }
 
     // 5. Ensure finalizer
-    if !has_finalizer(&obj) {
-        add_finalizer(&user_api, &name).await?;
-        return Ok(Action::requeue(Duration::ZERO));
+    if !has_finalizer(obj) {
+        add_finalizer(user_api, name).await?;
+        return Ok(Some(Action::requeue(Duration::ZERO)));
+    }
+
+    Ok(None)
+}
+
+struct UserSyncContext<'a> {
+    obj: &'a KafkaUser,
+    ctx: &'a Context,
+    user_api: &'a Api<KafkaUser>,
+    name: &'a str,
+    cluster: &'a str,
+    bootstrap: &'a str,
+    principal: &'a str,
+    quota_username: &'a str,
+    tls_not_after: Option<String>,
+    prior_tls_principal: &'a Option<String>,
+}
+
+async fn reconcile_access(sync: UserSyncContext<'_>) -> Result<Action, ReconcileError> {
+    let UserSyncContext {
+        obj,
+        ctx,
+        user_api,
+        name,
+        cluster,
+        bootstrap,
+        principal,
+        quota_username,
+        tls_not_after,
+        prior_tls_principal,
+    } = sync;
+    // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
+    // to both auth arms.
+    let admin_handle = match ctx.admin_client_for(cluster, bootstrap).await {
+        Ok(h) => h,
+        Err(e) => {
+            tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
+            return Ok(Action::requeue(Duration::from_secs(15)));
+        }
+    };
+    let mut admin = admin_handle.lock().await;
+
+    // 8. Reconcile ACLs
+    let desired: BTreeSet<AclEntry> = expand_spec_acls(obj.spec.authorization.as_ref(), principal)
+        .into_iter()
+        .collect();
+    let filter = AclEntryFilter {
+        principal: Some(principal.to_string()),
+        ..Default::default()
+    };
+    let current_vec = match admin.describe_acls(&filter).await {
+        Ok(v) => v,
+        Err(e) => {
+            tracing::warn!(error = %e, "DescribeAcls failure");
+            let is_transport = matches!(e, AdminError::Transport(_));
+            drop(admin);
+            if is_transport {
+                ctx.drop_admin_client(cluster).await;
+            }
+            return Ok(Action::requeue(Duration::from_secs(15)));
+        }
+    };
+    let current: BTreeSet<AclEntry> = current_vec.into_iter().collect();
+    let (additions, deletions) = diff_acls(&current, &desired);
+
+    if !additions.is_empty()
+        && let Err(e) = apply_create_acls(&mut admin, &additions).await
+    {
+        let is_transport = matches!(e, AdminError::Transport(_));
+        drop(admin);
+        if is_transport {
+            ctx.drop_admin_client(cluster).await;
+        }
+        return user_broker_error(user_api, name, obj, e, "CreateAcls").await;
+    }
+    if !deletions.is_empty()
+        && let Err(e) = apply_delete_acls(&mut admin, &deletions).await
+    {
+        let is_transport = matches!(e, AdminError::Transport(_));
+        drop(admin);
+        if is_transport {
+            ctx.drop_admin_client(cluster).await;
+        }
+        return user_broker_error(user_api, name, obj, e, "DeleteAcls").await;
+    }
+
+    // 9. Reconcile quotas. `spec.quotas == None` leaves the
+    // broker's quota state untouched — a deliberate opt-in posture
+    // matching Strimzi (the quotas section being absent ≠ "wipe all
+    // quotas"). To clear quotas via the CRD, set `quotas: {}` (empty
+    // object) — that desired-state map is empty and the diff
+    // tombstones whatever the broker has.
+    let quotas_in_sync = if let Some(spec_quotas) = obj.spec.quotas.as_ref() {
+        let desired = spec_quotas.to_quota_map();
+        let current = match admin.describe_user_quotas(quota_username).await {
+            Ok(c) => c,
+            Err(e) => {
+                tracing::warn!(error = %e, "DescribeClientQuotas failure");
+                let is_transport = matches!(e, AdminError::Transport(_));
+                drop(admin);
+                if is_transport {
+                    ctx.drop_admin_client(cluster).await;
+                }
+                return Ok(Action::requeue(Duration::from_secs(15)));
+            }
+        };
+        let ops = crabka_client_admin::diff_user_quotas(&current, &desired);
+        if !ops.is_empty()
+            && let Err(e) = apply_alter_user_quotas(&mut admin, quota_username, &ops).await
+        {
+            let is_transport = matches!(e, AdminError::Transport(_));
+            drop(admin);
+            if is_transport {
+                ctx.drop_admin_client(cluster).await;
+            }
+            return user_broker_error(user_api, name, obj, e, "AlterClientQuotas").await;
+        }
+        true
+    } else {
+        false
+    };
+
+    let is_scram_sha512 = matches!(&obj.spec.authentication, Authentication::ScramSha512(_));
+    let is_scram_sha256 = matches!(&obj.spec.authentication, Authentication::ScramSha256(_));
+    let is_tls = matches!(&obj.spec.authentication, Authentication::Tls(_));
+    let is_external = matches!(&obj.spec.authentication, Authentication::TlsExternal);
+    patch_status(
+        user_api,
+        name,
+        StatusPatch {
+            obj,
+            status: "True",
+            reason: "Ready",
+            message: "user in sync",
+            credentials: CredentialStatus::new((
+                is_scram_sha512,
+                is_scram_sha256,
+                is_tls && tls_not_after.is_some(),
+                is_external,
+            )),
+            tls_cert_not_after: tls_not_after.clone(),
+            // `tls_principal` is the principal the operator pinned in ACLs.
+            // For TLS users that's `User:CN=<name>`; for `tls-external`
+            // users it's `User:<name>`. SCRAM users skip this — `username`
+            // already carries the same string for them.
+            tls_principal: if is_tls || is_external {
+                Some(principal.to_string())
+            } else {
+                prior_tls_principal.clone()
+            },
+            advance_generation: true,
+            quotas_in_sync,
+        },
+    )
+    .await?;
+    // TLS certs live ~365d by default with a 30d renewal window — once
+    // a minute requeue is overkill. SCRAM stays at the existing
+    // cadence (password rotation is operator-driven, not time-driven,
+    // but the per-minute requeue covers external drift in ACLs /
+    // quotas).
+    // `tls-external` users have no operator-owned credential to rotate,
+    // but ACLs + quotas can drift externally — keep the per-minute
+    // requeue to detect that (same cadence as SCRAM, different reason).
+    // Delegation-token users do not reach this match — that
+    // arm returns its renew-driven `Action` earlier (see the
+    // `Authentication::DelegationToken(dt)` arm above).
+    let requeue = match &obj.spec.authentication {
+        Authentication::ScramSha512(_)
+        | Authentication::ScramSha256(_)
+        | Authentication::TlsExternal => Duration::from_mins(1),
+        Authentication::Tls(_) => Duration::from_hours(6),
+        Authentication::DelegationToken(_) => unreachable!(
+            "delegation-token arm returns early after user_delegation_token::reconcile",
+        ),
+    };
+    Ok(Action::requeue(requeue))
+}
+
+struct PreparedUser {
+    namespace: String,
+    name: String,
+    user_api: Api<KafkaUser>,
+    cluster: String,
+    bootstrap: String,
+    kafka: Kafka,
+    prior_quotas_in_sync: bool,
+    prior_tls: bool,
+    prior_external: bool,
+    prior_tls_not_after: Option<String>,
+    prior_tls_principal: Option<String>,
+}
+
+enum UserPreparation {
+    Ready(Box<PreparedUser>),
+    Done(Action),
+}
+
+async fn prepare_user(obj: &KafkaUser, ctx: &Context) -> Result<UserPreparation, ReconcileError> {
+    let namespace = obj.namespace().unwrap_or_else(|| "default".into());
+    let name = obj.name_any();
+    let user_api: Api<KafkaUser> = Api::namespaced(ctx.client.clone(), &namespace);
+    let prior_quotas_in_sync = obj
+        .status
+        .as_ref()
+        .is_some_and(|status| status.quotas_in_sync);
+    let prior_tls = obj.status.as_ref().is_some_and(|status| status.tls);
+    let prior_external = obj.status.as_ref().is_some_and(|status| status.external.0);
+    let prior_tls_not_after = obj
+        .status
+        .as_ref()
+        .and_then(|status| status.tls_cert_not_after.clone());
+    let prior_tls_principal = obj
+        .status
+        .as_ref()
+        .and_then(|status| status.tls_principal.clone());
+    let prior_credentials = CredentialStatus::new((false, false, prior_tls, prior_external));
+    let Some(cluster) = obj
+        .meta()
+        .labels
+        .as_ref()
+        .and_then(|labels| labels.get("crabka.io/cluster").cloned())
+    else {
+        patch_status(
+            &user_api,
+            &name,
+            StatusPatch {
+                obj,
+                status: "False",
+                reason: "MissingClusterLabel",
+                message: "metadata.labels[\"crabka.io/cluster\"] is required",
+                credentials: prior_credentials,
+                tls_cert_not_after: prior_tls_not_after,
+                tls_principal: prior_tls_principal,
+                advance_generation: false,
+                quotas_in_sync: prior_quotas_in_sync,
+            },
+        )
+        .await?;
+        return Ok(UserPreparation::Done(Action::requeue(Duration::from_mins(
+            1,
+        ))));
+    };
+    if let Err(message) = validate_spec(&obj.spec) {
+        patch_status(
+            &user_api,
+            &name,
+            StatusPatch {
+                obj,
+                status: "False",
+                reason: "InvalidSpec",
+                message: &message,
+                credentials: prior_credentials,
+                tls_cert_not_after: prior_tls_not_after,
+                tls_principal: prior_tls_principal,
+                advance_generation: false,
+                quotas_in_sync: prior_quotas_in_sync,
+            },
+        )
+        .await?;
+        return Ok(UserPreparation::Done(Action::requeue(Duration::from_mins(
+            5,
+        ))));
+    }
+    let kafka_api: Api<Kafka> = Api::namespaced(ctx.client.clone(), &namespace);
+    let kafka = kafka_api.get_opt(&cluster).await?;
+    let bootstrap = kafka.as_ref().and_then(internal_listener_bootstrap);
+    let (Some(kafka), Some(bootstrap)) = (kafka, bootstrap) else {
+        patch_status(
+            &user_api,
+            &name,
+            StatusPatch {
+                obj,
+                status: "False",
+                reason: "ClusterNotReady",
+                message: &format!("Kafka/{cluster} not Ready or no internal listener"),
+                credentials: prior_credentials,
+                tls_cert_not_after: prior_tls_not_after,
+                tls_principal: prior_tls_principal,
+                advance_generation: false,
+                quotas_in_sync: prior_quotas_in_sync,
+            },
+        )
+        .await?;
+        return Ok(UserPreparation::Done(Action::requeue(Duration::from_secs(
+            30,
+        ))));
+    };
+    Ok(UserPreparation::Ready(Box::new(PreparedUser {
+        namespace,
+        name,
+        user_api,
+        cluster,
+        bootstrap,
+        kafka,
+        prior_quotas_in_sync,
+        prior_tls,
+        prior_external,
+        prior_tls_not_after,
+        prior_tls_principal,
+    })))
+}
+
+async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
+    let PreparedUser {
+        namespace: ns,
+        name,
+        user_api,
+        cluster,
+        bootstrap,
+        kafka,
+        prior_quotas_in_sync,
+        prior_tls,
+        prior_external,
+        prior_tls_not_after,
+        prior_tls_principal,
+    } = match prepare_user(&obj, &ctx).await? {
+        UserPreparation::Ready(prepared) => *prepared,
+        UserPreparation::Done(action) => return Ok(action),
+    };
+
+    let principal = principal_for(&name, &obj.spec.authentication);
+    // For TLS users the broker stores quotas keyed by the cert DN
+    // (i.e. `principal` without the `User:` prefix).  For SCRAM users
+    // this is just `name`.
+    let quota_username: String = principal
+        .strip_prefix("User:")
+        .unwrap_or(&principal)
+        .to_string();
+
+    if let Some(action) = handle_user_lifecycle(
+        &obj,
+        &ctx,
+        &user_api,
+        (&name, &principal, &quota_username),
+        &cluster,
+        &bootstrap,
+    )
+    .await?
+    {
+        return Ok(action);
     }
 
     // 6. Provision credentials per auth type.
@@ -379,10 +627,12 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
                         status: "False",
                         reason: "BrokerError",
                         message: &format!("AlterUserScramCredentials: {} ({})", err.name, err.code),
-                        scram_sha512: false,
-                        scram_sha256: false,
-                        tls: prior_tls,
-                        external: prior_external,
+                        credentials: CredentialStatus::new((
+                            false,
+                            false,
+                            prior_tls,
+                            prior_external,
+                        )),
                         tls_cert_not_after: prior_tls_not_after.clone(),
                         tls_principal: prior_tls_principal.clone(),
                         advance_generation: false,
@@ -395,12 +645,9 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
             None
         }
         Authentication::Tls(tls_auth) => {
-            let kafka_ref = kafka
-                .as_ref()
-                .expect("bootstrap presence implies Kafka resource is Some");
             let ca_outcome = match crate::controller::cluster_ca::reconcile_ca(
                 &secret_api,
-                kafka_ref,
+                &kafka,
                 crate::controller::cluster_ca::WhichCa::Clients,
                 false,
                 false,
@@ -490,149 +737,19 @@ async fn reconcile_inner(obj: Arc<KafkaUser>, ctx: Arc<Context>) -> Result<Actio
         }
     };
 
-    // Open admin for ACL + quota reconciliation (steps 8 + 9). Common
-    // to both auth arms.
-    let admin_handle = match ctx.admin_client_for(&cluster, &bootstrap).await {
-        Ok(h) => h,
-        Err(e) => {
-            tracing::warn!(error = %e, %cluster, "AdminClient connect failed");
-            return Ok(Action::requeue(Duration::from_secs(15)));
-        }
-    };
-    let mut admin = admin_handle.lock().await;
-
-    // 8. Reconcile ACLs
-    let desired: BTreeSet<AclEntry> = expand_spec_acls(obj.spec.authorization.as_ref(), &principal)
-        .into_iter()
-        .collect();
-    let filter = AclEntryFilter {
-        principal: Some(principal.clone()),
-        ..Default::default()
-    };
-    let current_vec = match admin.describe_acls(&filter).await {
-        Ok(v) => v,
-        Err(e) => {
-            tracing::warn!(error = %e, "DescribeAcls failure");
-            let is_transport = matches!(e, AdminError::Transport(_));
-            drop(admin);
-            if is_transport {
-                ctx.drop_admin_client(&cluster).await;
-            }
-            return Ok(Action::requeue(Duration::from_secs(15)));
-        }
-    };
-    let current: BTreeSet<AclEntry> = current_vec.into_iter().collect();
-    let (additions, deletions) = diff_acls(&current, &desired);
-
-    if !additions.is_empty()
-        && let Err(e) = apply_create_acls(&mut admin, &additions).await
-    {
-        let is_transport = matches!(e, AdminError::Transport(_));
-        drop(admin);
-        if is_transport {
-            ctx.drop_admin_client(&cluster).await;
-        }
-        return user_broker_error(&user_api, &name, &obj, e, "CreateAcls").await;
-    }
-    if !deletions.is_empty()
-        && let Err(e) = apply_delete_acls(&mut admin, &deletions).await
-    {
-        let is_transport = matches!(e, AdminError::Transport(_));
-        drop(admin);
-        if is_transport {
-            ctx.drop_admin_client(&cluster).await;
-        }
-        return user_broker_error(&user_api, &name, &obj, e, "DeleteAcls").await;
-    }
-
-    // 9. Reconcile quotas. `spec.quotas == None` leaves the
-    // broker's quota state untouched — a deliberate opt-in posture
-    // matching Strimzi (the quotas section being absent ≠ "wipe all
-    // quotas"). To clear quotas via the CRD, set `quotas: {}` (empty
-    // object) — that desired-state map is empty and the diff
-    // tombstones whatever the broker has.
-    let quotas_in_sync = if let Some(spec_quotas) = obj.spec.quotas.as_ref() {
-        let desired = spec_quotas.to_quota_map();
-        let current = match admin.describe_user_quotas(&quota_username).await {
-            Ok(c) => c,
-            Err(e) => {
-                tracing::warn!(error = %e, "DescribeClientQuotas failure");
-                let is_transport = matches!(e, AdminError::Transport(_));
-                drop(admin);
-                if is_transport {
-                    ctx.drop_admin_client(&cluster).await;
-                }
-                return Ok(Action::requeue(Duration::from_secs(15)));
-            }
-        };
-        let ops = crabka_client_admin::diff_user_quotas(&current, &desired);
-        if !ops.is_empty()
-            && let Err(e) = apply_alter_user_quotas(&mut admin, &quota_username, &ops).await
-        {
-            let is_transport = matches!(e, AdminError::Transport(_));
-            drop(admin);
-            if is_transport {
-                ctx.drop_admin_client(&cluster).await;
-            }
-            return user_broker_error(&user_api, &name, &obj, e, "AlterClientQuotas").await;
-        }
-        true
-    } else {
-        false
-    };
-
-    let is_scram_sha512 = matches!(&obj.spec.authentication, Authentication::ScramSha512(_));
-    let is_scram_sha256 = matches!(&obj.spec.authentication, Authentication::ScramSha256(_));
-    let is_tls = matches!(&obj.spec.authentication, Authentication::Tls(_));
-    let is_external = matches!(&obj.spec.authentication, Authentication::TlsExternal);
-    patch_status(
-        &user_api,
-        &name,
-        StatusPatch {
-            obj: &obj,
-            status: "True",
-            reason: "Ready",
-            message: "user in sync",
-            scram_sha512: is_scram_sha512,
-            scram_sha256: is_scram_sha256,
-            tls: is_tls && tls_not_after.is_some(),
-            external: is_external,
-            tls_cert_not_after: tls_not_after.clone(),
-            // `tls_principal` is the principal the operator pinned in ACLs.
-            // For TLS users that's `User:CN=<name>`; for `tls-external`
-            // users it's `User:<name>`. SCRAM users skip this — `username`
-            // already carries the same string for them.
-            tls_principal: if is_tls || is_external {
-                Some(principal.clone())
-            } else {
-                prior_tls_principal.clone()
-            },
-            advance_generation: true,
-            quotas_in_sync,
-        },
-    )
-    .await?;
-    // TLS certs live ~365d by default with a 30d renewal window — once
-    // a minute requeue is overkill. SCRAM stays at the existing
-    // cadence (password rotation is operator-driven, not time-driven,
-    // but the per-minute requeue covers external drift in ACLs /
-    // quotas).
-    // `tls-external` users have no operator-owned credential to rotate,
-    // but ACLs + quotas can drift externally — keep the per-minute
-    // requeue to detect that (same cadence as SCRAM, different reason).
-    // Delegation-token users do not reach this match — that
-    // arm returns its renew-driven `Action` earlier (see the
-    // `Authentication::DelegationToken(dt)` arm above).
-    #[allow(clippy::match_same_arms)]
-    let requeue = match &obj.spec.authentication {
-        Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => Duration::from_mins(1),
-        Authentication::Tls(_) => Duration::from_hours(6),
-        Authentication::TlsExternal => Duration::from_mins(1),
-        Authentication::DelegationToken(_) => unreachable!(
-            "delegation-token arm returns early after user_delegation_token::reconcile",
-        ),
-    };
-    Ok(Action::requeue(requeue))
+    reconcile_access(UserSyncContext {
+        obj: &obj,
+        ctx: &ctx,
+        user_api: &user_api,
+        name: &name,
+        cluster: &cluster,
+        bootstrap: &bootstrap,
+        principal: &principal,
+        quota_username: &quota_username,
+        tls_not_after,
+        prior_tls_principal: &prior_tls_principal,
+    })
+    .await
 }
 
 async fn apply_alter_user_quotas(
@@ -699,7 +816,7 @@ async fn user_broker_error(
     };
     let prior_qis = obj.status.as_ref().is_some_and(|s| s.quotas_in_sync);
     let prior_tls = obj.status.as_ref().is_some_and(|s| s.tls);
-    let prior_external = obj.status.as_ref().is_some_and(|s| s.external);
+    let prior_external = obj.status.as_ref().is_some_and(|s| s.external.0);
     let prior_tls_not_after = obj
         .status
         .as_ref()
@@ -713,10 +830,7 @@ async fn user_broker_error(
             status: "False",
             reason: "BrokerError",
             message: &detail,
-            scram_sha512: false,
-            scram_sha256: false,
-            tls: prior_tls,
-            external: prior_external,
+            credentials: CredentialStatus::new((false, false, prior_tls, prior_external)),
             tls_cert_not_after: prior_tls_not_after,
             tls_principal: prior_tls_principal,
             advance_generation: false,
@@ -745,20 +859,13 @@ pub(crate) fn entry_to_exact_filter(e: &AclEntry) -> AclEntryFilter {
 /// bare `User:<name>`; TLS users use `User:CN=<name>` (matches the
 /// cert's Subject DN, which is what the broker's
 /// `extract_principal_from_cert` returns at runtime).
-#[allow(clippy::match_same_arms)]
 pub(crate) fn principal_for(name: &str, auth: &Authentication) -> String {
     match auth {
-        Authentication::ScramSha512(_) | Authentication::ScramSha256(_) => format!("User:{name}"),
+        Authentication::ScramSha512(_)
+        | Authentication::ScramSha256(_)
+        | Authentication::TlsExternal
+        | Authentication::DelegationToken(_) => format!("User:{name}"),
         Authentication::Tls(_) => user_tls::tls_principal(name),
-        // `tls-external` credentials are managed out-of-band (OIDC for
-        // OAUTHBEARER, or an external CA whose certs carry the bare
-        // metadata.name as the principal). Same string shape as SCRAM
-        // but different rationale — kept as a distinct arm.
-        Authentication::TlsExternal => format!("User:{name}"),
-        // Delegation tokens carry the owner principal
-        // (`User:<metadata.name>`); ACLs continue to be authored
-        // against the owner, not the token-id.
-        Authentication::DelegationToken(_) => format!("User:{name}"),
     }
 }
 
@@ -988,23 +1095,39 @@ async fn remove_finalizer(api: &Api<KafkaUser>, name: &str) -> Result<(), Reconc
     Ok(())
 }
 
-// Five bools = "status flags" — each is an independent axis of the
-// reconcile outcome. A state machine here would just rename the
-// problem; keep the flat shape.
-#[allow(clippy::struct_excessive_bools)]
+struct CredentialStatus(u8);
+
+impl CredentialStatus {
+    const SCRAM_SHA512: u8 = 1;
+    const SCRAM_SHA256: u8 = 1 << 1;
+    const TLS: u8 = 1 << 2;
+    const EXTERNAL: u8 = 1 << 3;
+
+    fn new(statuses: (bool, bool, bool, bool)) -> Self {
+        let (scram_sha512, scram_sha256, tls, external) = statuses;
+        let flags = [
+            (scram_sha512, Self::SCRAM_SHA512),
+            (scram_sha256, Self::SCRAM_SHA256),
+            (tls, Self::TLS),
+            (external, Self::EXTERNAL),
+        ];
+        Self(flags.into_iter().fold(
+            0,
+            |bits, (enabled, flag)| if enabled { bits | flag } else { bits },
+        ))
+    }
+
+    fn contains(&self, flag: u8) -> bool {
+        self.0 & flag != 0
+    }
+}
+
 struct StatusPatch<'a> {
     obj: &'a KafkaUser,
     status: &'a str,
     reason: &'a str,
     message: &'a str,
-    scram_sha512: bool,
-    /// `true` iff SCRAM-SHA-256 credentials are
-    /// provisioned. Mirrors `scram_sha512`.
-    scram_sha256: bool,
-    tls: bool,
-    /// True iff this is a credential-less (`tls-external`) user that
-    /// has reached Ready. Sticky in `patch_status`.
-    external: bool,
+    credentials: CredentialStatus,
     tls_cert_not_after: Option<String>,
     tls_principal: Option<String>,
     advance_generation: bool,
@@ -1025,7 +1148,10 @@ async fn patch_status(
     };
     // Once any credential (SCRAM password or TLS cert) is provisioned,
     // the secret name == metadata.name.
-    let secret_name = if p.scram_sha512 || p.scram_sha256 || p.tls {
+    let secret_name = if p.credentials.contains(CredentialStatus::SCRAM_SHA512)
+        || p.credentials.contains(CredentialStatus::SCRAM_SHA256)
+        || p.credentials.contains(CredentialStatus::TLS)
+    {
         Some(name.to_string())
     } else {
         p.obj.status.as_ref().and_then(|s| s.secret.clone())
@@ -1036,10 +1162,10 @@ async fn patch_status(
             "observedGeneration": observed_generation,
             "username": name,
             "secret": secret_name,
-            "scramSha512": p.scram_sha512 || p.obj.status.as_ref().is_some_and(|s| s.scram_sha512),
-            "scramSha256": p.scram_sha256 || p.obj.status.as_ref().is_some_and(|s| s.scram_sha256),
-            "tls": p.tls || p.obj.status.as_ref().is_some_and(|s| s.tls),
-            "external": p.external || p.obj.status.as_ref().is_some_and(|s| s.external),
+            "scramSha512": p.credentials.contains(CredentialStatus::SCRAM_SHA512) || p.obj.status.as_ref().is_some_and(|s| s.scram_sha512.0),
+            "scramSha256": p.credentials.contains(CredentialStatus::SCRAM_SHA256) || p.obj.status.as_ref().is_some_and(|s| s.scram_sha256.0),
+            "tls": p.credentials.contains(CredentialStatus::TLS) || p.obj.status.as_ref().is_some_and(|s| s.tls),
+            "external": p.credentials.contains(CredentialStatus::EXTERNAL) || p.obj.status.as_ref().is_some_and(|s| s.external.0),
             "tlsCertNotAfter": p.tls_cert_not_after,
             "tlsPrincipal": p.tls_principal,
             "quotasInSync": p.quotas_in_sync,
@@ -1056,7 +1182,7 @@ async fn patch_status(
 
 #[cfg(test)]
 mod tests {
-    use assert2::check;
+    use assert2::{assert, check};
 
     use super::*;
     use crate::crd::{
@@ -1078,26 +1204,22 @@ mod tests {
     }
 
     #[test]
-    fn principal_cases() {
-        for (_name, authentication, expected) in [
-            (
-                "SCRAM user",
-                Authentication::ScramSha512(crate::crd::ScramSha512Auth::default()),
-                "User:alice",
-            ),
-            (
-                "TLS certificate user",
-                Authentication::Tls(crate::crd::user::TlsAuth::default()),
-                "User:CN=alice",
-            ),
-        ] {
-            assert2::assert!(principal_for("alice", &authentication) == expected);
-        }
+    fn principal_uses_user_prefix_for_scram() {
+        let scram = Authentication::ScramSha512(crate::crd::ScramSha512Auth::default());
+        assert!(principal_for("alice", &scram) == "User:alice");
+    }
+
+    #[test]
+    fn principal_for_dispatches_on_auth_type() {
+        let scram = Authentication::ScramSha512(crate::crd::ScramSha512Auth::default());
+        let tls = Authentication::Tls(crate::crd::user::TlsAuth::default());
+        assert!(principal_for("alice", &scram) == "User:alice");
+        assert!(principal_for("alice", &tls) == "User:CN=alice");
     }
 
     #[test]
     fn expand_spec_acls_with_no_authorization_is_empty() {
-        assert2::assert!(expand_spec_acls(None, "User:alice").is_empty());
+        assert!(expand_spec_acls(None, "User:alice").is_empty());
     }
 
     #[test]
@@ -1106,7 +1228,7 @@ mod tests {
             acls: vec![rule(AclResourceKind::Topic, "orders", &[AclOp::Read])],
         });
         let entries = expand_spec_acls(Some(&auth), "User:alice");
-        assert2::assert!(
+        assert!(
             entries
                 == vec![AclEntry {
                     resource_type: ResourceType::Topic,
@@ -1130,14 +1252,15 @@ mod tests {
             )],
         });
         let entries = expand_spec_acls(Some(&auth), "User:alice");
+        assert!(entries.len() == 3);
         let ops: Vec<_> = entries.iter().map(|e| e.operation).collect();
-        assert2::assert!(
-            ops == [
-                AclOperation::Read,
-                AclOperation::Describe,
-                AclOperation::Write
-            ]
-        );
+        for op in [
+            AclOperation::Read,
+            AclOperation::Describe,
+            AclOperation::Write,
+        ] {
+            assert!(ops.contains(&op), "missing {op:?} in {ops:?}");
+        }
     }
 
     #[test]
@@ -1178,8 +1301,8 @@ mod tests {
         desired.insert(add.clone());
 
         let (adds, dels) = diff_acls(&current, &desired);
-        assert2::assert!(adds == vec![add]);
-        assert2::assert!(dels == vec![drop]);
+        assert!(adds == vec![add]);
+        assert!(dels == vec![drop]);
     }
 
     #[test]
@@ -1196,8 +1319,8 @@ mod tests {
         };
         s.insert(e);
         let (adds, dels) = diff_acls(&s, &s);
-        assert2::assert!(adds == vec![]);
-        assert2::assert!(dels == vec![]);
+        assert!(adds.is_empty());
+        assert!(dels.is_empty());
     }
 
     #[test]
@@ -1219,7 +1342,7 @@ mod tests {
             quotas: None,
         };
         let err = validate_spec(&spec).unwrap_err();
-        assert2::assert!(err.contains("operations is empty"));
+        assert!(err.contains("operations is empty"), "got: {err}");
     }
 
     #[test]
@@ -1232,7 +1355,7 @@ mod tests {
             quotas: None,
         };
         let err = validate_spec(&spec).unwrap_err();
-        assert2::assert!(err.contains("resource.name is empty"));
+        assert!(err.contains("resource.name is empty"), "got: {err}");
     }
 
     #[test]
@@ -1247,7 +1370,7 @@ mod tests {
             permission_type: PermissionType::Allow,
         };
         let f = entry_to_exact_filter(&e);
-        assert2::assert!(
+        assert!(
             f == AclEntryFilter {
                 resource_type: Some(ResourceType::Topic),
                 resource_name: Some("orders".into()),
@@ -1278,7 +1401,7 @@ mod tests {
         // `tls-external` users share SCRAM's bare-name principal shape:
         // credentials are managed out-of-band but the operator still
         // pins ACLs / quotas under `User:<metadata.name>`.
-        assert2::assert!(principal_for("alice", &Authentication::TlsExternal) == "User:alice");
+        assert!(principal_for("alice", &Authentication::TlsExternal) == "User:alice");
     }
 
     #[test]
@@ -1288,7 +1411,7 @@ mod tests {
             authorization: None,
             quotas: None,
         };
-        assert2::assert!(validate_spec(&spec).is_ok());
+        assert!(validate_spec(&spec).is_ok());
     }
 
     #[test]
@@ -1303,6 +1426,6 @@ mod tests {
                 ..Default::default()
             }),
         };
-        assert2::assert!(validate_spec(&spec).is_ok());
+        assert!(validate_spec(&spec).is_ok());
     }
 }

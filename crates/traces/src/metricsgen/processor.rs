@@ -47,6 +47,9 @@ impl MetricsGenerator {
         state.edges.record_span(span, self.clock.now_ns());
     }
 
+    ///
+    /// # Errors
+    /// Returns an error when the query is malformed, an expression has incompatible operand types, or the backing span store fails.
     pub fn restore_edge_checkpoint(
         &mut self,
         tenant: &str,

@@ -2,6 +2,8 @@
 
 use std::collections::{HashMap, HashSet};
 
+use num_traits::ToPrimitive as _;
+
 use crate::metricsgen::{
     config::MetricsGenConfig,
     contract::{SpanKind, SpanRecord, StatusCode},
@@ -41,10 +43,6 @@ impl LatencyHistogram {
         self.count += 1;
     }
 
-    #[expect(
-        clippy::cast_precision_loss,
-        reason = "Prometheus histogram samples are f64 values on the output edge"
-    )]
     fn cumulative_seconds(&self) -> (Vec<(f64, f64)>, f64, f64) {
         let mut cumulative = 0_u64;
         let buckets = self
@@ -53,11 +51,18 @@ impl LatencyHistogram {
             .enumerate()
             .map(|(i, edge_ns)| {
                 cumulative += self.bucket_counts[i];
-                (*edge_ns / NS_PER_SEC, cumulative as f64)
+                (
+                    *edge_ns / NS_PER_SEC,
+                    cumulative.to_f64().unwrap_or(f64::MAX),
+                )
             })
             .collect();
 
-        (buckets, self.sum_ns / NS_PER_SEC, self.count as f64)
+        (
+            buckets,
+            self.sum_ns / NS_PER_SEC,
+            self.count.to_f64().unwrap_or(f64::MAX),
+        )
     }
 }
 
@@ -240,20 +245,12 @@ fn status_dim(status: StatusCode) -> &'static str {
     }
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Prometheus counter samples are f64 values on the output edge"
-)]
 fn size_as_f64(size_bytes: u64) -> f64 {
-    size_bytes as f64
+    size_bytes.to_f64().unwrap_or(f64::MAX)
 }
 
-#[expect(
-    clippy::cast_precision_loss,
-    reason = "Prometheus latency samples are f64 seconds on the output edge"
-)]
 fn duration_as_f64(duration_ns: i64) -> f64 {
-    duration_ns.max(0) as f64
+    duration_ns.max(0).to_f64().unwrap_or(f64::MAX)
 }
 
 #[cfg(test)]

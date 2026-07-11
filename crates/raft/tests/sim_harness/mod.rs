@@ -152,7 +152,7 @@ impl SimNodeLog for SimLog {
 
 /// A message in flight on the bus: a destination node plus the event it will
 /// observe. `src` is recorded for partition filtering.
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Copy)]
 struct Message {
     src: NodeId,
     dst: NodeId,
