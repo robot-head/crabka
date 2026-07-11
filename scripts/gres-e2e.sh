@@ -60,11 +60,12 @@ fail() {
 }
 
 is_kafka_authorization_denial() {
-    local status="$1"
+    local _status="$1"
     local output_file="$2"
 
-    [ "$status" -ne 0 ] &&
-        grep -Eqi 'TopicAuthorizationException|not authorized|TOPIC_AUTHORIZATION_FAILED|UNKNOWN \(29\)' "$output_file"
+    # kafka-console-consumer may report a broker authorization exception yet
+    # exit zero, so the explicit broker/client signature is authoritative.
+    grep -Eqi 'TopicAuthorizationException|not authorized|TOPIC_AUTHORIZATION_FAILED|UNKNOWN \(29\)' "$output_file"
 }
 
 # Shell-level contract test hook: keep denial classification deterministic and
