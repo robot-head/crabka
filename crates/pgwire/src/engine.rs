@@ -57,8 +57,13 @@ pub enum ResultPage {
         rows: Vec<Vec<Option<Cell>>>,
         tag: Option<String>,
     },
-    Command { result_index: usize, tag: String },
-    Empty { result_index: usize },
+    Command {
+        result_index: usize,
+        tag: String,
+    },
+    Empty {
+        result_index: usize,
+    },
 }
 
 /// Backpressured consumer for bounded simple-query result pages.
@@ -79,32 +84,57 @@ impl CollectingResultSink {
         &self.pages
     }
 
-    #[must_use]
-    pub fn finish(self) -> Vec<QueryResult> {
+    pub fn finish(self) -> Result<Vec<QueryResult>, PgError> {
         let mut results = Vec::new();
         for page in self.pages {
             match page {
                 ResultPage::Command { result_index, tag } => {
-                    debug_assert_eq!(result_index, results.len());
+                    if result_index != results.len() {
+                        return Err(malformed_result_pages(result_index, results.len()));
+                    }
                     results.push(QueryResult::Command { tag });
                 }
                 ResultPage::Empty { result_index } => {
-                    debug_assert_eq!(result_index, results.len());
+                    if result_index != results.len() {
+                        return Err(malformed_result_pages(result_index, results.len()));
+                    }
                     results.push(QueryResult::Empty);
                 }
-                ResultPage::Rows { result_index, fields, mut rows, tag } => {
+                ResultPage::Rows {
+                    result_index,
+                    fields,
+                    mut rows,
+                    tag,
+                } => {
                     if result_index == results.len() {
+                        let fields = fields.ok_or_else(|| {
+                            PgError::protocol("first row page is missing field descriptions")
+                        })?;
                         results.push(QueryResult::Rows {
-                            fields: fields.unwrap_or_default(),
+                            fields,
                             rows: Vec::new(),
                             tag: String::new(),
                         });
+                    } else if result_index.checked_add(1) != Some(results.len()) {
+                        return Err(malformed_result_pages(result_index, results.len()));
+                    } else if fields.is_some() {
+                        return Err(PgError::protocol(
+                            "continuation row page repeated field descriptions",
+                        ));
                     }
-                    let QueryResult::Rows { rows: all, tag: final_tag, .. } =
-                        &mut results[result_index]
+                    let Some(QueryResult::Rows {
+                        rows: all,
+                        tag: final_tag,
+                        ..
+                    }) = results.get_mut(result_index)
                     else {
-                        unreachable!("row page changed result kind")
+                        return Err(PgError::protocol("result page changed result kind"));
                     };
+                    if !final_tag.is_empty() {
+                        return Err(PgError::protocol(
+                            "row page followed a completed row result",
+                        ));
+                    }
                     all.append(&mut rows);
                     if let Some(tag) = tag {
                         *final_tag = tag;
@@ -112,8 +142,20 @@ impl CollectingResultSink {
                 }
             }
         }
-        results
+        if results
+            .iter()
+            .any(|result| matches!(result, QueryResult::Rows { tag, .. } if tag.is_empty()))
+        {
+            return Err(PgError::protocol("row result is missing a completion tag"));
+        }
+        Ok(results)
     }
+}
+
+fn malformed_result_pages(actual: usize, expected: usize) -> PgError {
+    PgError::protocol(format!(
+        "result page index {actual} does not match expected index {expected}"
+    ))
 }
 
 #[async_trait::async_trait]
@@ -222,7 +264,9 @@ pub trait Session: Send {
     ) -> impl Future<Output = Result<(), PgError>> + Send {
         async move {
             if page_rows == 0 {
-                return Err(PgError::protocol("result page size must be greater than zero"));
+                return Err(PgError::protocol(
+                    "result page size must be greater than zero",
+                ));
             }
             for (result_index, result) in self.simple_query(sql).await?.into_iter().enumerate() {
                 match result {
@@ -233,7 +277,8 @@ pub trait Session: Send {
                                 fields: Some(fields),
                                 rows,
                                 tag: Some(tag),
-                            }).await?;
+                            })
+                            .await?;
                             continue;
                         }
                         let mut fields = Some(fields);
@@ -244,12 +289,13 @@ pub trait Session: Send {
                                 fields: fields.take(),
                                 rows: rows.to_vec(),
                                 tag: (index + 1 == chunks).then(|| tag.clone()),
-                            }).await?;
+                            })
+                            .await?;
                         }
                     }
-                    QueryResult::Command { tag } => sink
-                        .send(ResultPage::Command { result_index, tag })
-                        .await?,
+                    QueryResult::Command { tag } => {
+                        sink.send(ResultPage::Command { result_index, tag }).await?
+                    }
                     QueryResult::Empty => sink.send(ResultPage::Empty { result_index }).await?,
                 }
             }
@@ -342,6 +388,41 @@ pub struct FieldDescription {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn collecting_sink_rejects_skipped_result_index() {
+        let mut sink = CollectingResultSink::default();
+        sink.send(ResultPage::Empty { result_index: 1 })
+            .await
+            .expect("collect page");
+
+        let error = sink.finish().expect_err("skipped index is malformed");
+        assert_eq!(error.code, crate::error::sqlstate::PROTOCOL_VIOLATION);
+    }
+
+    #[tokio::test]
+    async fn collecting_sink_rejects_row_page_after_command() {
+        let mut sink = CollectingResultSink::default();
+        sink.send(ResultPage::Command {
+            result_index: 0,
+            tag: "UPDATE 1".into(),
+        })
+        .await
+        .expect("collect command");
+        sink.send(ResultPage::Rows {
+            result_index: 0,
+            fields: None,
+            rows: Vec::new(),
+            tag: Some("SELECT 0".into()),
+        })
+        .await
+        .expect("collect malformed continuation");
+
+        let error = sink
+            .finish()
+            .expect_err("a result cannot change kind between pages");
+        assert_eq!(error.code, crate::error::sqlstate::PROTOCOL_VIOLATION);
+    }
     use crate::stub::StubEngine;
 
     struct RecordingSession;
