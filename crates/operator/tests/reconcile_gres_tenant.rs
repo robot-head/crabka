@@ -1,9 +1,7 @@
 use std::{sync::Arc, time::Duration};
 
 use assert2::assert;
-use crabka_gres_control::{
-    RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord, TenantState,
-};
+use crabka_gres_control::{SqlUser, TenantId, TenantName, TenantRecord, TenantState};
 use crabka_operator::{
     context::{GresControlLike, GresControlWriteError},
     controller::gres_tenant::reconcile,
@@ -273,27 +271,8 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
     record
 }
 
-fn split_registry_record() -> TenantRecord {
-    let mut record = tenant_record(TenantState::Active, 0);
-    record.ranges = vec![
-        RangeLayoutEntry {
-            range_id: 0,
-            end_key: Some(crabka_gres_control::RangeBoundary::new(100, 55)),
-            endpoint: "tenant-a-gres.ns.svc.cluster.local:5432".into(),
-            wal_generation: 1,
-        },
-        RangeLayoutEntry {
-            range_id: 1,
-            end_key: None,
-            endpoint: "tenant-a-gres-r1.ns.svc.cluster.local:5432".into(),
-            wal_generation: 2,
-        },
-    ];
-    record
-}
-
 fn multi_range_reconcile_rules() -> Vec<MockRule> {
-    vec![
+    let mut rules = vec![
         MockRule {
             method: Method::GET,
             path_substr: "/greses/fleet".into(),
@@ -306,18 +285,50 @@ fn multi_range_reconcile_rules() -> Vec<MockRule> {
         },
         MockRule {
             method: Method::GET,
-            path_substr: "/deployments/tenant-a-gres".into(),
-            response: json_response(
-                404,
-                &serde_json::json!({"apiVersion":"v1","kind":"Status","status":"Failure","reason":"NotFound","code":404}),
-            ),
+            path_substr: "/secrets/pw".into(),
+            response: json_response(200, &secret_body("pw", "ns", "hunter2")),
         },
-        MockRule {
+    ];
+    for name in [
+        "tenant-a-gres-pg",
+        "tenant-a-gres",
+        "tenant-a-gres-r1",
+        "tenant-a-gres-r2",
+    ] {
+        rules.push(MockRule { method: Method::PATCH, path_substr: format!("/services/{name}"), response: json_response(200, &serde_json::json!({"apiVersion":"v1","kind":"Service","metadata":{"name":name,"namespace":"ns"}})) });
+    }
+    for name in ["tenant-a-gres", "tenant-a-gres-r1", "tenant-a-gres-r2"] {
+        rules.push(MockRule {
             method: Method::PATCH,
-            path_substr: "/grestenants/tenant-a/status".into(),
-            response: json_response(200, &tenant_body()),
+            path_substr: format!("/deployments/{name}"),
+            response: json_response(200, &ready_deployment_body(name, 1)),
+        });
+        rules.push(MockRule {
+            method: Method::GET,
+            path_substr: format!("/deployments/{name}"),
+            response: json_response(200, &ready_deployment_body(name, 1)),
+        });
+    }
+    rules.push(MockRule { method: Method::PATCH, path_substr: "/networkpolicies/tenant-a-gres-range-policy".into(), response: json_response(200, &serde_json::json!({"apiVersion":"networking.k8s.io/v1","kind":"NetworkPolicy","metadata":{"name":"tenant-a-gres-range-policy","namespace":"ns"}})) });
+    rules.push(MockRule {
+        method: Method::PATCH,
+        path_substr: "/grestenants/tenant-a/status".into(),
+        response: json_response(200, &tenant_body()),
+    });
+    rules
+}
+
+fn ready_deployment_body(name: &str, replicas: i32) -> serde_json::Value {
+    serde_json::json!({
+        "apiVersion": "apps/v1", "kind": "Deployment",
+        "metadata": { "name": name, "namespace": "ns", "generation": 1 },
+        "spec": {
+            "replicas": replicas,
+            "selector": { "matchLabels": { "app": name } },
+            "template": { "metadata": { "labels": { "app": name } }, "spec": { "containers": [{ "name": "gres", "image": "gres" }] } }
         },
-    ]
+        "status": { "observedGeneration": 1, "availableReplicas": replicas }
+    })
 }
 
 fn final_checkpoint(generation: u64) -> crabka_gres_control::FinalCheckpoint {
@@ -363,7 +374,7 @@ async fn fake_gres_control_matches_canonical_replace_and_retry_semantics() {
 }
 
 #[tokio::test]
-async fn multi_range_tenant_is_rejected_before_creating_wal_or_compute_deployments() {
+async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all_deployments() {
     let state = MockState::new(multi_range_reconcile_rules());
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
@@ -378,9 +389,14 @@ async fn multi_range_tenant_is_rejected_before_creating_wal_or_compute_deploymen
         .await
         .unwrap();
 
-    assert!(action == Action::requeue(Duration::from_mins(5)));
-    assert!(control.upserts.lock().await.is_empty());
-    assert!(admin.lock().await.calls().is_empty());
+    assert!(action == Action::requeue(Duration::from_secs(5)));
+    let records = control.upserts.lock().await;
+    assert!(records.len() == 1);
+    assert!(records[0].ranges.len() == 3);
+    assert!(records[0].ranges[0].endpoint == "tenant-a-gres.ns.svc.cluster.local:5432");
+    assert!(records[0].ranges[1].endpoint == "tenant-a-gres-r1.ns.svc.cluster.local:5432");
+    assert!(records[0].ranges[2].endpoint == "tenant-a-gres-r2.ns.svc.cluster.local:5432");
+    drop(records);
 
     let observed = state.take_observed();
     let status = observed
@@ -395,39 +411,30 @@ async fn multi_range_tenant_is_rejected_before_creating_wal_or_compute_deploymen
         .expect("status patch captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     assert!(body["status"]["conditions"][0]["type"] == "Ready");
-    assert!(body["status"]["conditions"][0]["status"] == "False");
-    assert!(body["status"]["conditions"][0]["reason"] == "MultiRangeUnsupported");
+    assert!(body["status"]["conditions"][0]["status"] == "True");
+    assert!(body["status"]["conditions"][0]["reason"] == "Ready");
+    for service in [
+        "tenant-a-gres-pg",
+        "tenant-a-gres",
+        "tenant-a-gres-r1",
+        "tenant-a-gres-r2",
+    ] {
+        assert!(observed.iter().any(|request| {
+            request.method() == Method::PATCH
+                && request
+                    .uri()
+                    .path()
+                    .contains(&format!("/services/{service}"))
+        }));
+    }
     assert!(
-        body["status"]["conditions"][0]["message"]
-            .as_str()
-            .is_some_and(|message| message.contains("r0 WAL"))
-    );
-    assert!(
-        !observed
+        observed
             .iter()
-            .any(|request| request.uri().path().contains("/deployments/"))
+            .filter(|request| request.method() == Method::GET
+                && request.uri().path().contains("/deployments/"))
+            .count()
+            == 3
     );
-}
-
-#[tokio::test]
-async fn explicit_multi_range_tenant_is_rejected_before_unready_dependencies_can_overwrite_status()
-{
-    let state = MockState::new(vec![MockRule {
-        method: Method::PATCH,
-        path_substr: "/grestenants/tenant-a/status".into(),
-        response: json_response(200, &tenant_body()),
-    }]);
-    let ctx = fixture_ctx(mock_client(&state, "ns"), "ns");
-
-    let action = reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx))
-        .await
-        .expect("explicit multi-range layout does not read dependencies");
-
-    assert!(action == Action::requeue(Duration::from_mins(5)));
-    let observed = state.take_observed();
-    assert!(observed.len() == 1);
-    let body: serde_json::Value = serde_json::from_slice(observed[0].body()).unwrap();
-    assert!(body["status"]["conditions"][0]["reason"] == "MultiRangeUnsupported");
 }
 
 #[tokio::test]
@@ -483,58 +490,6 @@ async fn deleting_multi_range_tenant_cleans_up_and_removes_its_finalizer() {
         .expect("finalizer removal patch captured");
     let body: serde_json::Value = serde_json::from_slice(finalizer_patch.body()).unwrap();
     assert!(body["metadata"]["finalizers"] == serde_json::json!([]));
-}
-
-#[tokio::test]
-async fn registry_multi_range_layout_is_rejected_without_rendering_a_duplicate_r0_host() {
-    let mut rules = tenant_reconcile_rules();
-    rules.retain(|rule| {
-        !rule.path_substr.contains("/secrets/pw")
-            && !rule.path_substr.contains("/services/")
-            && !rule.path_substr.contains("/deployments/")
-            && !rule.path_substr.contains("/networkpolicies/")
-    });
-    let state = MockState::new(rules);
-    let client = mock_client(&state, "ns");
-    let ctx = fixture_ctx(client, "ns");
-    let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
-    let control = Arc::new(FakeGresControl {
-        current: Mutex::new(Some(split_registry_record())),
-        ..Default::default()
-    });
-    ctx.insert_admin_client_for_test("demo", admin).await;
-    ctx.insert_gres_control_for_test("demo", control.clone())
-        .await;
-
-    let mut legacy_tenant = tenant();
-    legacy_tenant.status = Some(GresTenantStatus {
-        lifecycle_phase: Some("suspended".into()),
-        ..Default::default()
-    });
-    let action = reconcile(Arc::new(legacy_tenant), Arc::new(ctx))
-        .await
-        .unwrap();
-
-    assert!(action == Action::requeue(Duration::from_mins(5)));
-    assert!(control.upserts.lock().await.is_empty());
-    let observed = state.take_observed();
-    let status = observed
-        .iter()
-        .find(|request| {
-            request
-                .uri()
-                .to_string()
-                .contains("/grestenants/tenant-a/status")
-        })
-        .expect("status patch captured");
-    let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
-    assert!(body["status"]["conditions"][0]["reason"] == "MultiRangeUnsupported");
-    assert!(body["status"]["lifecyclePhase"] == "active");
-    assert!(
-        !observed
-            .iter()
-            .any(|request| request.uri().path().contains("/deployments/"))
-    );
 }
 
 #[tokio::test]
@@ -658,6 +613,11 @@ fn tenant_reconcile_rules() -> Vec<MockRule> {
                 200,
                 &serde_json::json!({"apiVersion":"apps/v1","kind":"Deployment","metadata":{"name":"tenant-a-gres","namespace":"ns"}}),
             ),
+        },
+        MockRule {
+            method: Method::GET,
+            path_substr: "/deployments/tenant-a-gres".into(),
+            response: json_response(200, &ready_deployment_body("tenant-a-gres", 1)),
         },
         MockRule {
             method: Method::PATCH,
