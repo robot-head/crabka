@@ -69,12 +69,13 @@ cargo run -p crabka-gres-conformance -- \
 ```
 
 Each `.json` file is discovered recursively and contains cases with `name`,
-`sql`, typed `params`, `setup`, and `teardown`. Supported parameter types are
-`int4`, `text`, and `bool`; `"value": null` sends a typed SQL NULL. The F-0
-gate covers parameterized `SELECT`, `WHERE`, and `INSERT ... RETURNING` cases
-against both oracle and subject. It writes `extended-parity.json` and
-`extended-parity.md`; `--extended-baseline` pins the extended statement total and
-ratchets the matched count exactly like the simple corpus baseline.
+`sql`, typed `params`, `setup`, and `teardown`; `baseline.json` is the reserved
+parity-metadata filename and is not a case file. Supported parameter types are
+`int4`, `text`, and `bool`; `"value": null` sends a typed SQL NULL. The F-0 gate
+covers parameterized `SELECT`, `WHERE`, and `INSERT ... RETURNING` cases against
+both oracle and subject. It writes `extended-parity.json` and
+`extended-parity.md`; `--extended-baseline` pins the extended statement total
+and ratchets the matched count exactly like the simple corpus baseline.
 
 CI runs this six-case baseline twice: against the standalone subject, producing
 `extended-parity-standalone.{json,md}`, and against the substrate-backed subject,
