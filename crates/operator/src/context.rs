@@ -256,12 +256,22 @@ impl CheckpointManifestVerifier for ObjectStoreCheckpointManifestVerifier {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct PgdogReloadRequest {
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct PgdogExpectedRoute {
+    pub database: String,
     pub host: String,
     pub port: u16,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PgdogReloadRequest {
+    /// DNS name used for PostgreSQL host identity and TLS verification.
+    pub host: String,
+    /// Optional per-replica TCP destination, while retaining `host` for SNI.
+    pub connect_addr: Option<std::net::IpAddr>,
+    pub port: u16,
     pub password: String,
-    pub expected_databases: Vec<String>,
+    pub expected_routes: Vec<PgdogExpectedRoute>,
     pub maintenance_mode: bool,
     pub tls_ca_pem: Option<Vec<u8>>,
 }
@@ -272,13 +282,15 @@ pub enum PgdogAdminError {
     Connect(#[from] tokio_postgres::Error),
     #[error("pgdog admin TLS: {0}")]
     Tls(#[from] native_tls::Error),
+    #[error("pgdog fleet admin: {0}")]
+    Fleet(String),
 }
 
 #[async_trait::async_trait]
 pub trait PgdogAdminLike: Send + Sync {
-    async fn reload_and_database_view_matches(
+    async fn reload_and_database_views_match(
         &self,
-        request: &PgdogReloadRequest,
+        requests: &[PgdogReloadRequest],
     ) -> Result<bool, PgdogAdminError>;
 }
 
@@ -287,44 +299,323 @@ struct TokioPostgresPgdogAdmin;
 
 #[async_trait::async_trait]
 impl PgdogAdminLike for TokioPostgresPgdogAdmin {
-    async fn reload_and_database_view_matches(
+    async fn reload_and_database_views_match(
         &self,
-        request: &PgdogReloadRequest,
+        requests: &[PgdogReloadRequest],
     ) -> Result<bool, PgdogAdminError> {
-        let mut config = tokio_postgres::Config::new();
-        config
-            .host(&request.host)
-            .port(request.port)
-            .user("admin")
-            .password(&request.password)
-            .dbname("admin");
-        let client = connect_pgdog_admin(config, request.tls_ca_pem.as_deref()).await?;
-        if request.maintenance_mode {
-            client.simple_query("MAINTENANCE ON").await?;
+        if requests.is_empty() {
+            return Err(PgdogAdminError::Fleet(
+                "reload request must address at least one PgDog replica".into(),
+            ));
         }
-        let operation = async {
-            client.simple_query("RELOAD").await?;
-            // PgDog's supported effective-routing view is SHOW POOLS. The G-4
-            // plan called this SHOW DATABASES, but that command does not exist
-            // upstream. Column 1 is the exposed database name.
-            client.query("SHOW POOLS", &[]).await
+        let mut clients = Vec::with_capacity(requests.len());
+        for request in requests {
+            let mut config = tokio_postgres::Config::new();
+            config
+                .host(&request.host)
+                .port(request.port)
+                .user("admin")
+                .password(&request.password)
+                .dbname("admin");
+            if let Some(connect_addr) = request.connect_addr {
+                config.hostaddr(connect_addr);
+            }
+            clients.push(connect_pgdog_admin(config, request.tls_ca_pem.as_deref()).await?);
         }
-        .await;
-        if request.maintenance_mode {
-            let maintenance_off = client.simple_query("MAINTENANCE OFF").await;
-            if operation.is_ok() {
-                maintenance_off?;
+        let connections = clients
+            .iter()
+            .map(|client| client as &dyn PgdogAdminConnectionLike)
+            .collect::<Vec<_>>();
+        reload_and_match_connections(&connections, requests).await
+    }
+}
+
+#[async_trait::async_trait]
+trait PgdogAdminConnectionLike: Send + Sync {
+    async fn execute(&self, command: &str) -> Result<(), PgdogAdminError>;
+    async fn routes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<PgdogExpectedRoute>, PgdogAdminError>;
+}
+
+#[async_trait::async_trait]
+impl PgdogAdminConnectionLike for tokio_postgres::Client {
+    async fn execute(&self, command: &str) -> Result<(), PgdogAdminError> {
+        self.simple_query(command).await?;
+        Ok(())
+    }
+
+    async fn routes(
+        &self,
+    ) -> Result<std::collections::BTreeSet<PgdogExpectedRoute>, PgdogAdminError> {
+        // PgDog 0.1.47 exposes effective routes through SHOW POOLS. Columns
+        // 1, 3, and 4 are database, configured address, and port. This view
+        // contains configured database pools, not the admin pseudo-database.
+        let rows = self.query("SHOW POOLS", &[]).await?;
+        let mut routes = std::collections::BTreeSet::new();
+        for (index, row) in rows.iter().enumerate() {
+            let database = row.try_get::<usize, String>(1)?;
+            let host = row.try_get::<usize, String>(3)?;
+            let port = row.try_get::<usize, i32>(4)?;
+            routes.insert(pgdog_route_from_fields(index, database, host, port)?);
+        }
+        Ok(routes)
+    }
+}
+
+fn pgdog_route_from_fields(
+    row_index: usize,
+    database: String,
+    host: String,
+    port: i32,
+) -> Result<PgdogExpectedRoute, PgdogAdminError> {
+    let port = u16::try_from(port).map_err(|error| {
+        PgdogAdminError::Fleet(format!(
+            "SHOW POOLS row {row_index} has invalid port {port}: {error}"
+        ))
+    })?;
+    if database.is_empty() || host.is_empty() {
+        return Err(PgdogAdminError::Fleet(format!(
+            "SHOW POOLS row {row_index} has an empty database or address"
+        )));
+    }
+    Ok(PgdogExpectedRoute {
+        database,
+        host,
+        port,
+    })
+}
+
+async fn reload_and_match_connections(
+    clients: &[&dyn PgdogAdminConnectionLike],
+    requests: &[PgdogReloadRequest],
+) -> Result<bool, PgdogAdminError> {
+    let maintenance = requests.iter().any(|request| request.maintenance_mode);
+    let mut maintenance_clients = 0;
+    if maintenance {
+        for client in clients {
+            if let Err(error) = client.execute("MAINTENANCE ON").await {
+                let mut cleanup_errors = Vec::new();
+                // The failing command may have reached PgDog before its
+                // response failed. OFF is idempotent, so clean every
+                // connected replica, including this and later clients.
+                for entered in clients {
+                    if let Err(cleanup_error) = entered.execute("MAINTENANCE OFF").await {
+                        cleanup_errors.push(cleanup_error.to_string());
+                    }
+                }
+                if !cleanup_errors.is_empty() {
+                    return Err(PgdogAdminError::Fleet(format!(
+                        "{error}; maintenance rollback failed: {}",
+                        cleanup_errors.join("; ")
+                    )));
+                }
+                return Err(error);
+            }
+            maintenance_clients += 1;
+        }
+    }
+    let operation = reload_and_match_all(clients, requests).await;
+    let mut cleanup_errors = Vec::new();
+    if maintenance {
+        for client in &clients[..maintenance_clients] {
+            if let Err(error) = client.execute("MAINTENANCE OFF").await {
+                cleanup_errors.push(error.to_string());
             }
         }
-        let rows = operation?;
-        let observed_databases = rows
-            .iter()
-            .filter_map(|row| row.try_get::<usize, String>(1).ok())
-            .collect::<std::collections::BTreeSet<_>>();
-        Ok(request
-            .expected_databases
-            .iter()
-            .all(|database| observed_databases.contains(database)))
+    }
+    match (operation, cleanup_errors.is_empty()) {
+        (Ok(matches), true) => Ok(matches),
+        (Ok(_), false) => Err(PgdogAdminError::Fleet(format!(
+            "maintenance cleanup failed: {}",
+            cleanup_errors.join("; ")
+        ))),
+        (Err(operation), true) => Err(operation),
+        (Err(operation), false) => Err(PgdogAdminError::Fleet(format!(
+            "{operation}; maintenance cleanup failed: {}",
+            cleanup_errors.join("; ")
+        ))),
+    }
+}
+
+async fn reload_and_match_all(
+    clients: &[&dyn PgdogAdminConnectionLike],
+    requests: &[PgdogReloadRequest],
+) -> Result<bool, PgdogAdminError> {
+    for (client, request) in clients.iter().zip(requests) {
+        client.execute("RELOAD").await?;
+        let observed = client.routes().await?;
+        if !route_view_matches(&request.expected_routes, &observed) {
+            return Ok(false);
+        }
+    }
+    Ok(true)
+}
+
+fn route_view_matches(
+    expected: &[PgdogExpectedRoute],
+    observed: &std::collections::BTreeSet<PgdogExpectedRoute>,
+) -> bool {
+    expected
+        .iter()
+        .cloned()
+        .collect::<std::collections::BTreeSet<_>>()
+        == *observed
+}
+
+#[cfg(test)]
+mod pgdog_reload_tests {
+    use super::{
+        PgdogAdminConnectionLike, PgdogAdminError, PgdogExpectedRoute, PgdogReloadRequest,
+        pgdog_route_from_fields, reload_and_match_connections, route_view_matches,
+    };
+    use std::{collections::BTreeSet, sync::Mutex};
+
+    struct FakeConnection {
+        fail_execute: Option<&'static str>,
+        fail_routes: bool,
+        calls: Mutex<Vec<String>>,
+        routes: BTreeSet<PgdogExpectedRoute>,
+    }
+
+    impl FakeConnection {
+        fn new(fail_execute: Option<&'static str>, fail_routes: bool) -> Self {
+            Self {
+                fail_execute,
+                fail_routes,
+                calls: Mutex::new(Vec::new()),
+                routes: BTreeSet::from([expected_route()]),
+            }
+        }
+
+        fn calls(&self) -> Vec<String> {
+            self.calls.lock().unwrap().clone()
+        }
+    }
+
+    #[async_trait::async_trait]
+    impl PgdogAdminConnectionLike for FakeConnection {
+        async fn execute(&self, command: &str) -> Result<(), PgdogAdminError> {
+            self.calls.lock().unwrap().push(command.into());
+            if self.fail_execute == Some(command) {
+                return Err(PgdogAdminError::Fleet(format!("{command} failed")));
+            }
+            Ok(())
+        }
+
+        async fn routes(&self) -> Result<BTreeSet<PgdogExpectedRoute>, PgdogAdminError> {
+            self.calls.lock().unwrap().push("SHOW POOLS".into());
+            if self.fail_routes {
+                return Err(PgdogAdminError::Fleet("SHOW POOLS failed".into()));
+            }
+            Ok(self.routes.clone())
+        }
+    }
+
+    fn expected_route() -> PgdogExpectedRoute {
+        PgdogExpectedRoute {
+            database: "tenant-a".into(),
+            host: "tenant-a-gres.ns.svc.cluster.local".into(),
+            port: 5_432,
+        }
+    }
+
+    #[test]
+    fn malformed_show_pools_route_is_rejected_instead_of_discarded() {
+        assert!(pgdog_route_from_fields(7, "tenant-a".into(), "host".into(), -1).is_err());
+        assert!(pgdog_route_from_fields(8, "".into(), "host".into(), 5_432).is_err());
+    }
+
+    fn requests() -> Vec<PgdogReloadRequest> {
+        ["10.0.0.10", "10.0.0.11"]
+            .into_iter()
+            .map(|ip| PgdogReloadRequest {
+                host: "fleet-pgdog.ns.svc.cluster.local".into(),
+                connect_addr: Some(ip.parse().unwrap()),
+                port: 6_432,
+                password: "pw".into(),
+                expected_routes: vec![expected_route()],
+                maintenance_mode: true,
+                tls_ca_pem: Some(b"ca".to_vec()),
+            })
+            .collect()
+    }
+
+    #[tokio::test]
+    async fn maintenance_on_failure_rolls_back_every_connected_replica() {
+        let first = FakeConnection::new(None, false);
+        let second = FakeConnection::new(Some("MAINTENANCE ON"), false);
+
+        let error = reload_and_match_connections(&[&first, &second], &requests())
+            .await
+            .unwrap_err();
+
+        assert!(error.to_string().contains("MAINTENANCE ON failed"));
+        assert!(first.calls().contains(&"MAINTENANCE OFF".into()));
+        assert!(second.calls().contains(&"MAINTENANCE OFF".into()));
+    }
+
+    #[tokio::test]
+    async fn reload_and_show_failures_still_exit_maintenance_on_every_replica() {
+        for (fail_execute, fail_routes) in [(Some("RELOAD"), false), (None, true)] {
+            let first = FakeConnection::new(fail_execute, fail_routes);
+            let second = FakeConnection::new(None, false);
+
+            assert!(
+                reload_and_match_connections(&[&first, &second], &requests())
+                    .await
+                    .is_err()
+            );
+            assert!(first.calls().contains(&"MAINTENANCE OFF".into()));
+            assert!(second.calls().contains(&"MAINTENANCE OFF".into()));
+        }
+    }
+
+    #[tokio::test]
+    async fn operation_and_maintenance_off_errors_are_both_preserved() {
+        let first = FakeConnection::new(Some("RELOAD"), false);
+        let second = FakeConnection::new(Some("MAINTENANCE OFF"), false);
+
+        let error = reload_and_match_connections(&[&first, &second], &requests())
+            .await
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("RELOAD failed"));
+        assert!(error.contains("MAINTENANCE OFF failed"));
+    }
+
+    #[test]
+    fn route_confirmation_rejects_same_database_on_wrong_endpoint() {
+        let expected = vec![PgdogExpectedRoute {
+            database: "tenant-a".into(),
+            host: "tenant-a-gres.ns.svc.cluster.local".into(),
+            port: 5_432,
+        }];
+        let observed = BTreeSet::from([PgdogExpectedRoute {
+            database: "tenant-a".into(),
+            host: "stale-tenant-a-gres.ns.svc.cluster.local".into(),
+            port: 5_432,
+        }]);
+
+        assert!(!route_view_matches(&expected, &observed));
+    }
+
+    #[test]
+    fn route_confirmation_rejects_stale_extra_database() {
+        let expected_route = PgdogExpectedRoute {
+            database: "tenant-a".into(),
+            host: "tenant-a-gres.ns.svc.cluster.local".into(),
+            port: 5_432,
+        };
+        let stale_route = PgdogExpectedRoute {
+            database: "deleted-tenant".into(),
+            host: "deleted-tenant-gres.ns.svc.cluster.local".into(),
+            port: 5_432,
+        };
+        let observed = BTreeSet::from([expected_route.clone(), stale_route]);
+
+        assert!(!route_view_matches(&[expected_route], &observed));
     }
 }
 

@@ -36,6 +36,12 @@ fi
 
 grep -Fq 'timeout 10s docker info' scripts/gres-e2e.sh
 grep -Fq 'timeout 120s docker pull "$KAFKA_IMAGE"' scripts/gres-e2e.sh
+grep -Fq 'timeout 120s docker pull "$PGDOG_IMAGE"' scripts/gres-e2e.sh
+grep -Fq 'timeout 120s docker pull "$POSTGRES_IMAGE"' scripts/gres-e2e.sh
+grep -Fq 'timeout 15s docker rm -f' scripts/gres-e2e.sh
+grep -Fq 'tenant-c-reloaded.gres.svc' scripts/gres-e2e.sh
+grep -Fq 'auth: passthrough' scripts/gres-e2e.sh
+grep -Fq 'auth=scram' scripts/gres-e2e.sh
 grep -Fq 'chmod 600 "$client_properties"' scripts/gres-e2e.sh
 grep -Fq 'crabka gres probe-topic-read' scripts/gres-e2e.sh
 grep -Fq -- '--password-file "$client_properties"' scripts/gres-e2e.sh

@@ -1079,13 +1079,34 @@ mod tests {
 
         let pgdog = std::fs::read_to_string(dir.path().join("pgdog.toml")).expect("pgdog file");
         let users = std::fs::read_to_string(dir.path().join("users.toml")).expect("users file");
-        check!(pgdog.contains("name = \"tenant-a\""));
-        check!(pgdog.contains("host = \"tenant-a.gres.svc\""));
-        assert!(users.contains("name = \"alice\""));
-        assert!(users.contains("database = \"tenant-a\""));
         assert!(
-            !users.contains("password"),
-            "passthrough skeleton leaked a credential: {users}"
+            pgdog
+                == concat!(
+                    "[general]\n",
+                    "port = 6432\n",
+                    "pooler_mode = \"transaction\"\n",
+                    "passthrough_auth = \"enabled\"\n",
+                    "connect_timeout = 10000\n",
+                    "connect_attempts = 3\n",
+                    "checkout_timeout = 30000\n",
+                    "idle_timeout = 60000\n",
+                    "server_lifetime = 300000\n",
+                    "tls_client_required = false\n",
+                    "\n",
+                    "[[databases]]\n",
+                    "name = \"tenant-a\"\n",
+                    "host = \"tenant-a.gres.svc\"\n",
+                    "port = 5432\n",
+                    "pooler_mode = \"transaction\"\n",
+                )
+        );
+        assert!(
+            users
+                == concat!(
+                    "[[users]]\n",
+                    "name = \"alice\"\n",
+                    "database = \"tenant-a\"\n",
+                )
         );
     }
 
