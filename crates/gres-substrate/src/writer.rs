@@ -408,7 +408,7 @@ impl ProducerWalWriter {
 
 #[async_trait::async_trait]
 impl FenceLease for ProducerWalWriter {
-    async fn assert_current(&self, _generation: WriterGeneration) -> Result<(), SubstrateError> {
+    async fn assert_current(&self, generation: WriterGeneration) -> Result<(), SubstrateError> {
         if self.is_pause_reserved() {
             return Err(SubstrateError::Unavailable("WAL writer is paused".into()));
         }
@@ -422,16 +422,15 @@ impl FenceLease for ProducerWalWriter {
         if self.fenced.load(Ordering::SeqCst) {
             return Err(SubstrateError::Fenced);
         }
-        let transaction = self
-            .producer
-            .clone()
-            .begin_transaction_owned()
-            .await
-            .map_err(|error| self.map_producer_error(&error))?;
-        transaction
-            .commit()
-            .await
-            .map_err(|error| self.map_producer_error(&error.source))
+        self.commit_group_while_permitted(GroupCommitRequest {
+            generation,
+            frames: vec![WalFrame {
+                journal_seq: crate::frame::BARRIER_SEQ,
+                ops: Vec::new(),
+            }],
+        })
+        .await
+        .map(|_| ())
     }
 }
 

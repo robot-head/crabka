@@ -6,8 +6,8 @@ use crabka_client_admin::{AdminClient, DeleteRecordsOp, DeleteRecordsOutcome};
 use crabka_client_producer::{Acks, Producer};
 use crabka_gres_ranges::{RangeId, TenantName};
 use crabka_gres_substrate::{
-    CommittedWalReader, GroupCommitRequest, InMemoryWalLog, ProducerWalWriter, SubstrateError,
-    TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
+    CommittedWalReader, FenceLease, GroupCommitRequest, InMemoryWalLog, ProducerWalWriter,
+    SubstrateError, TransactionalWalWriter, WalFrame, WriterGeneration, apply_frame,
     checkpoint::{
         CheckpointConfig, CheckpointService, CheckpointSnapshot, CheckpointStats, CheckpointStore,
         CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN, DEFAULT_PART_MAX_BYTES,
@@ -19,6 +19,32 @@ use crabka_gres_substrate::{
 use crabka_object_store::{ObjectOps, ObjectStoreClient, ObjectStoreConfig, build_object_store};
 use crabka_pgkv::{Kv, MemKv, SnapshotKv, WriteOp};
 use tokio::sync::Mutex;
+
+#[tokio::test]
+async fn live_fence_check_registers_a_transaction_before_end_txn() {
+    let (_broker, bootstrap, _dir) = boot_broker().await;
+    let tenant = TenantName::parse("fence-check").expect("tenant");
+    let topic = create_wal_topic(&bootstrap, &tenant, RangeId::new(0)).await;
+    let writer = live_wal_writer(
+        &bootstrap,
+        &topic,
+        transactional_id_for_range(&tenant, RangeId::new(0)),
+    )
+    .await;
+
+    writer
+        .assert_current(WriterGeneration(7))
+        .await
+        .expect("fence check must produce before EndTxn");
+
+    writer
+        .commit_group(GroupCommitRequest {
+            generation: WriterGeneration(7),
+            frames: vec![frame(0, b"after-fence-check", b"committed")],
+        })
+        .await
+        .expect("writer remains usable after fence check");
+}
 
 #[tokio::test]
 async fn spawned_checkpoint_service_prunes_wal_and_recovery_replays_retained_tail() {
