@@ -9,6 +9,7 @@ use clap::{ArgGroup, Args, Subcommand, ValueEnum};
 use crabka_client_admin::{
     AclEntry, AclOperation, AdminClient, PatternType, PermissionType, ResourceType, ScramUpsertion,
 };
+use crabka_client_core::security::{ClientSecurity, SaslCredentials};
 use crabka_gres_balancer::{
     BalanceOperation, BalancerConfig, ExecutionPolicy, ExecutionReport, Planner, TenantMetrics,
     UnsupportedExecutor, execute_plan,
@@ -18,7 +19,7 @@ use crabka_gres_control::{
     Registry, SqlUser, TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState,
     render_pgdog_toml, render_users_toml, tenant_config_topic,
 };
-use crabka_security::scram::PgScramVerifier;
+use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
 use serde::Serialize;
 
 const EXIT_OK: i32 = 0;
@@ -55,6 +56,21 @@ enum GresCommand {
     BalanceDryRun(BalanceDryRunArgs),
     /// Validate or apply a Gres range balancing plan from a JSON metrics snapshot.
     BalanceApply(BalanceApplyArgs),
+    /// Probe named-topic metadata using SCRAM credentials.
+    #[command(hide = true)]
+    ProbeTopicRead(ProbeTopicReadArgs),
+}
+
+#[derive(Args, Debug)]
+struct ProbeTopicReadArgs {
+    #[arg(long)]
+    bootstrap: String,
+    #[arg(long)]
+    topic: String,
+    #[arg(long)]
+    username: String,
+    #[arg(long)]
+    password_file: PathBuf,
 }
 
 #[derive(Args, Debug)]
@@ -246,7 +262,54 @@ async fn run_inner(args: GresArgs) -> Result<(), String> {
         GresCommand::RenderPgdog(args) => render_pgdog(args).await,
         GresCommand::BalanceDryRun(args) => balance_dry_run(&args),
         GresCommand::BalanceApply(args) => balance_apply(&args),
+        GresCommand::ProbeTopicRead(args) => probe_topic_read(&args).await,
     }
+}
+
+async fn probe_topic_read(args: &ProbeTopicReadArgs) -> Result<(), String> {
+    let password = std::fs::read_to_string(&args.password_file)
+        .map_err(|error| format!("read Kafka password file: {error}"))?;
+    let password = password.trim_end_matches(['\r', '\n']);
+    if password.is_empty() {
+        return Err("Kafka password file is empty".to_string());
+    }
+    let bootstrap_addrs = args
+        .bootstrap
+        .split(',')
+        .map(str::trim)
+        .filter(|address| !address.is_empty())
+        .map(str::to_string)
+        .collect::<Vec<_>>();
+    let security = ClientSecurity {
+        protocol: ListenerProtocol::SaslPlaintext,
+        tls: None,
+        sasl: Some(SaslCredentials::Scram {
+            mechanism: SaslMechanism::ScramSha512,
+            username: args.username.clone(),
+            password: password.to_string(),
+        }),
+        sasl_host: None,
+    };
+    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, Some(security))
+        .await
+        .map_err(|error| format!("Kafka probe connect: {error}"))?;
+    let metadata = admin
+        .metadata(&[args.topic.as_str()])
+        .await
+        .map_err(|error| format!("Kafka probe metadata: {error}"))?;
+    let topic = metadata
+        .topics
+        .into_iter()
+        .find(|topic| topic.name == args.topic)
+        .ok_or_else(|| format!("Kafka probe response omitted topic {}", args.topic))?;
+    if let Some(error) = topic.error {
+        return Err(format!(
+            "topic {} metadata: {} ({})",
+            args.topic, error.name, error.code
+        ));
+    }
+    println!("topic {} is readable", args.topic);
+    Ok(())
 }
 
 fn balance_dry_run(args: &BalanceDryRunArgs) -> Result<(), String> {
