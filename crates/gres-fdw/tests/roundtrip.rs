@@ -449,5 +449,30 @@ async fn kafka_fdw_roundtrip_avro_and_raw_fallback() {
     let default_value: Vec<u8> = default_rows[0].get("value");
     assert_eq!(default_value, raw_payload.to_vec());
 
+    // An explicit server bootstrap must win even when the substrate-derived
+    // default is unusable. This drives the precedence rule through real broker
+    // metadata/fetch I/O instead of proving it only in config units.
+    let override_client =
+        connect(serve_engine_with_default_bootstrap(Some("127.0.0.1:1".to_string())).await).await;
+    override_client
+        .batch_execute(&format!(
+            "CREATE SERVER override_s FOREIGN DATA WRAPPER crabka_gres_fdw \
+             OPTIONS (bootstrap '{}', registry_url '{}')",
+            stack.bootstrap(),
+            stack.registry_url(),
+        ))
+        .await
+        .expect("create explicit override server");
+    override_client
+        .batch_execute("IMPORT FOREIGN SCHEMA kafka LIMIT TO (events) FROM SERVER override_s")
+        .await
+        .expect("import via explicit bootstrap override");
+    let override_rows = override_client
+        .query("SELECT value FROM events ORDER BY _offset", &[])
+        .await
+        .expect("select events via explicit bootstrap override");
+    assert_eq!(override_rows.len(), 1, "explicit override sees events");
+    assert_eq!(override_rows[0].get::<_, Vec<u8>>("value"), raw_payload);
+
     stack.shutdown().await;
 }

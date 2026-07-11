@@ -540,10 +540,10 @@ mod tests {
         let result = fetch_partition_with_isolation_progress_response(&response, 0, 5, 1)
             .expect("successful fetch response");
 
-        assert!(result.records.len() == 1);
-        assert!(result.records[0].offset == 6);
-        assert!(result.records[0].value == Some(Bytes::from_static(b"keep")));
-        assert!(result.next_offset == Some(7));
+        assert_eq!(result.records.len(), 1);
+        assert_eq!(result.records[0].offset, 6);
+        assert_eq!(result.records[0].value, Some(Bytes::from_static(b"keep")));
+        assert_eq!(result.next_offset, Some(7));
     }
 
     // ── socket-free end-to-end drive via MockFetchTransport ──────────────────

@@ -322,7 +322,6 @@ mod tests {
         },
     };
 
-    use assert2::assert;
     use bytes::{Bytes, BytesMut};
     use crabka_metadata::{MetadataRecord, TopicRecord};
     use crabka_protocol::{
