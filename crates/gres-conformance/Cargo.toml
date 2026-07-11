@@ -29,6 +29,10 @@ path = "src/bin/parser_commands.rs"
 name = "crabka-gres-driver-smoke"
 path = "src/bin/driver_smoke.rs"
 
+[[bin]]
+name = "crabka-gres-driver-golden-replay"
+path = "src/bin/driver_golden_replay.rs"
+
 [dependencies]
 tokio = { workspace = true, features = ["full"] }
 tokio-postgres = { workspace = true }

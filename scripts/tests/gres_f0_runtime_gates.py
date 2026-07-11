@@ -131,6 +131,8 @@ contract_step = workflow_step("F-0 runtime wiring contract")
 assert "python3 scripts/tests/gres_f0_runtime_gates.py" in contract_step
 front_door = workflow_step("Front-door PgDog e2e gate")
 assert "--skip-pgdog" not in front_door and "CRABKA_GRES_E2E_KEEP_ARTIFACTS=1" in front_door
+driver_goldens = workflow_step("Captured driver startup replay")
+assert "timeout 30s ./scripts/gres-driver-goldens-gate.sh" in driver_goldens
 
 for step_name, artifact in (
     ("Conformance harness against the parity baseline", "extended-parity-standalone"),
