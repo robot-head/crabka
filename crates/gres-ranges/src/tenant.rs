@@ -33,8 +33,8 @@ use crate::{
     barrier::{Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{
-        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc, RemoteForward,
-        RemoteRangeSession,
+        ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc,
+        RemoteExplicitGateLease, RemoteForward, RemoteRangeSession,
     },
     registry::RangeRegistry,
     run_split,
@@ -1711,12 +1711,19 @@ pub struct GatewaySession {
     remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
     serving_epoch: MapEpoch,
     explicit_transaction: bool,
-    explicit_transaction_guard: Option<tokio::sync::OwnedMutexGuard<()>>,
+    explicit_transaction_guard: Option<ExplicitTransactionGuard>,
     transaction: GatewayTransaction,
     status: TxStatus,
     prepared: BTreeMap<String, GatewayPrepared>,
     portals: BTreeMap<String, GatewayPortal>,
     next_internal_statement: u64,
+}
+
+enum ExplicitTransactionGuard {
+    Local {
+        _guard: tokio::sync::OwnedMutexGuard<()>,
+    },
+    Distributed(RemoteExplicitGateLease),
 }
 
 #[derive(Debug, Clone)]
@@ -2510,6 +2517,12 @@ impl GatewaySession {
         });
         let _table_write_gate = self.acquire_routed_dml_gate(&route).await?;
 
+        if self.explicit_transaction
+            && !matches!(route.kind, StatementKind::Begin | StatementKind::Rollback)
+        {
+            self.renew_explicit_transaction().await?;
+        }
+
         if let Some(ranges) = route.scatter_ranges.clone() {
             return self
                 .execute_timestamp_scatter(statement, ranges)
@@ -2543,13 +2556,32 @@ impl GatewaySession {
         if !matches!(self.transaction, GatewayTransaction::Idle) {
             return Err(PgError::error("25001", "transaction already in progress"));
         }
-        self.explicit_transaction_guard = Some(
-            self.inner
-                .explicit_transaction_gate
-                .clone()
-                .lock_owned()
-                .await,
-        );
+        self.explicit_transaction_guard = if let Some(forward) = &self.inner.remote_forward {
+            match forward
+                .acquire_explicit_gate()
+                .await
+                .map_err(ForwardError::into_pg)?
+            {
+                Some(lease) => Some(ExplicitTransactionGuard::Distributed(lease)),
+                None => Some(ExplicitTransactionGuard::Local {
+                    _guard: self
+                        .inner
+                        .explicit_transaction_gate
+                        .clone()
+                        .lock_owned()
+                        .await,
+                }),
+            }
+        } else {
+            Some(ExplicitTransactionGuard::Local {
+                _guard: self
+                    .inner
+                    .explicit_transaction_gate
+                    .clone()
+                    .lock_owned()
+                    .await,
+            })
+        };
         self.transaction = GatewayTransaction::Open {
             touched: Vec::new(),
             escalated: false,
@@ -3681,6 +3713,14 @@ impl GatewaySession {
         self.inner
             .active_explicit_transactions
             .fetch_sub(1, Ordering::AcqRel);
+    }
+
+    async fn renew_explicit_transaction(&self) -> Result<(), PgError> {
+        if let Some(ExplicitTransactionGuard::Distributed(lease)) = &self.explicit_transaction_guard
+        {
+            lease.renew().await.map_err(ForwardError::into_pg)?;
+        }
+        Ok(())
     }
 }
 

@@ -51,6 +51,8 @@ pub enum RangeRequest {
     },
     /// Allocate and durably publish one global transaction id on range 0.
     GlobalBegin { range_id: RangeId },
+    /// Acquire, renew, or release the range-0 ordinary transaction lease.
+    ExplicitGate(ExplicitGateReq),
     /// Ask an owning range to scan a table rowid interval under caller snapshots.
     ScanRange(ScanRangeReq),
     /// Pull one bounded page from an owner-issued range cursor token.
@@ -92,6 +94,8 @@ pub enum RangeResponse {
     GlobalStatus { status: WireGlobalStatus },
     /// Newly allocated global transaction id.
     GlobalXid { global_xid: u64 },
+    /// Range-0 ordinary transaction lease result.
+    ExplicitGate(ExplicitGateResp),
     /// Visible rows returned by a range scan.
     ScanRange(ScanRangeResp),
     /// One bounded owner-cursor page.
@@ -111,6 +115,23 @@ pub enum RangeResponse {
         error: WireErrorKind,
         message: String,
     },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation")]
+pub enum ExplicitGateReq {
+    Acquire,
+    Renew { token: u64 },
+    Release { token: u64 },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "result")]
+pub enum ExplicitGateResp {
+    Acquired { token: u64, lease_millis: u64 },
+    Renewed { lease_millis: u64 },
+    Released,
+    Stale,
 }
 
 /// Serializable simple-query result returned by a range owner.
@@ -1374,6 +1395,7 @@ mod tests {
                 | RangeRequest::SessionClose { .. }
                 | RangeRequest::GlobalDecision { .. }
                 | RangeRequest::GlobalBegin { .. }
+                | RangeRequest::ExplicitGate(_)
                 | RangeRequest::TimestampPrewrite(_)
                 | RangeRequest::TimestampResolve(_)
                 | RangeRequest::TimestampRecover(_) => RangeResponse::Error {
