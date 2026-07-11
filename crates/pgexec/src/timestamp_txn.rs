@@ -991,6 +991,7 @@ pub struct TimestampTxnParticipant {
     kv: std::sync::Arc<dyn crabka_pgkv::Kv>,
     primary_kv: std::sync::Arc<dyn crabka_pgkv::Kv>,
     committer: std::sync::Arc<dyn Committer>,
+    primary_barrier: Option<std::sync::Arc<dyn crate::read_gate::Linearizer>>,
     range_id: u32,
 }
 
@@ -1014,8 +1015,26 @@ impl TimestampTxnParticipant {
             kv,
             primary_kv,
             committer,
+            primary_barrier: None,
             range_id,
         }
+    }
+
+    /// Require the range-0 primary replica to be current before validating it.
+    #[must_use]
+    pub(crate) fn with_primary_barrier(
+        mut self,
+        barrier: Option<std::sync::Arc<dyn crate::read_gate::Linearizer>>,
+    ) -> Self {
+        self.primary_barrier = barrier;
+        self
+    }
+
+    async fn ensure_primary_readable(&self) -> Result<(), ExecError> {
+        if let Some(barrier) = &self.primary_barrier {
+            barrier.ensure_readable().await?;
+        }
+        Ok(())
     }
 
     /// Prewrite durable intents after first-committer-wins conflict checks.
@@ -1037,6 +1056,7 @@ impl TimestampTxnParticipant {
         identity: TimestampTxnIdentity,
         writes: &[TimestampWrite],
     ) -> Result<(), ExecError> {
+        self.ensure_primary_readable().await?;
         validate_primary_identity(self.primary_kv.as_ref(), identity, self.range_id)
             .map_err(map_ts_error)?;
         let ops = prewrite_with_identity_ops(self.kv.as_ref(), identity, self.range_id, writes)
@@ -1131,6 +1151,7 @@ impl TimestampTxnParticipant {
         decision: TimestampTxnDecision,
         writes: &[TimestampWrite],
     ) -> Result<(), ExecError> {
+        self.ensure_primary_readable().await?;
         validate_primary_identity_for_resolution(self.primary_kv.as_ref(), identity, decision)
             .map_err(map_ts_error)?;
         let mut ops =
@@ -1151,6 +1172,7 @@ impl TimestampTxnParticipant {
         decision: TimestampTxnDecision,
         operations: &[TimestampTxnOperation],
     ) -> Result<(), ExecError> {
+        self.ensure_primary_readable().await?;
         validate_primary_identity_for_resolution(self.primary_kv.as_ref(), identity, decision)
             .map_err(map_ts_error)?;
         let mut ops = Vec::with_capacity(operations.len());
@@ -2164,6 +2186,56 @@ mod tests {
     use crabka_pgkv::Kv;
 
     use super::*;
+
+    struct PublishingPrimaryBarrier {
+        primary: Arc<dyn crabka_pgkv::Kv>,
+        descriptor: TimestampTxnDescriptor,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::read_gate::Linearizer for PublishingPrimaryBarrier {
+        async fn ensure_readable(&self) -> Result<(), ExecError> {
+            self.primary
+                .write_batch(&[timestamp_txn_descriptor_op(&self.descriptor)])?;
+            Ok(())
+        }
+    }
+
+    #[tokio::test]
+    async fn primary_prewrite_waits_for_range0_replica_barrier() {
+        let local: Arc<dyn crabka_pgkv::Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let primary: Arc<dyn crabka_pgkv::Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
+        let identity = TimestampTxnIdentity {
+            start_ts,
+            global_xid: 10,
+            primary_range: 0,
+        };
+        let participant = TimestampTxnParticipant::new(
+            Arc::clone(&local),
+            Arc::clone(&primary),
+            Arc::new(crate::commit::LocalCommitter {
+                kv: Arc::clone(&local),
+            }),
+            1,
+        )
+        .with_primary_barrier(Some(Arc::new(PublishingPrimaryBarrier {
+            primary,
+            descriptor: TimestampTxnDescriptor::begun(start_ts, 10, vec![1]),
+        })));
+        let write = TimestampWrite {
+            table_id: 7,
+            rowid: 9,
+            row: vec![crabka_pgtypes::Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+
+        participant
+            .prewrite_with_primary(identity, std::slice::from_ref(&write))
+            .await
+            .expect("barrier publishes the primary before validation");
+    }
 
     #[tokio::test]
     async fn bare_prewrite_reports_a_memkv_reservation_collision() {
