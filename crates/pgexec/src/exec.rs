@@ -2812,23 +2812,31 @@ fn build_table_expr(
                 partial_aggregate: distributed_plan.partial_aggregate.clone(),
                 top_k: distributed_plan.top_k.clone(),
             };
-            let rows = match range_scanner.scan(scan_request) {
+            let rows = match crate::scanner::collect_cursor_bounded(
+                range_scanner,
+                scan_request,
+                crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+            ) {
                 Ok(rows) => rows,
                 Err(error) if should_retry_without_scan_pushdown(&error, distributed_plan) => {
-                    range_scanner.scan(ScanRequest {
-                        local: kv,
-                        global,
-                        global_snapshot: gsnap,
-                        snapshot,
-                        own_xid: own,
-                        read_ts: None,
-                        table: &t,
-                        interval: RowInterval::ALL,
-                        predicate: PredicatePushdown::FullScan,
-                        projection: crate::ProjectionPushdown::All,
-                        partial_aggregate: None,
-                        top_k: None,
-                    })?
+                    crate::scanner::collect_cursor_bounded(
+                        range_scanner,
+                        ScanRequest {
+                            local: kv,
+                            global,
+                            global_snapshot: gsnap,
+                            snapshot,
+                            own_xid: own,
+                            read_ts: None,
+                            table: &t,
+                            interval: RowInterval::ALL,
+                            predicate: PredicatePushdown::FullScan,
+                            projection: crate::ProjectionPushdown::All,
+                            partial_aggregate: None,
+                            top_k: None,
+                        },
+                        crate::scanner::BLOCKING_QUERY_MEMORY_BYTES,
+                    )?
                 }
                 Err(error) => return Err(error),
             }

@@ -278,6 +278,67 @@ pub trait RangeScanner: Send + Sync + 'static {
     }
 }
 
+/// Default cap for rows retained by a blocking executor fallback.
+pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
+
+/// Collect a cursor for a blocking operator while charging one central byte budget.
+pub fn collect_cursor_bounded(
+    scanner: &dyn RangeScanner,
+    request: ScanRequest<'_>,
+    max_bytes: usize,
+) -> Result<Vec<ScannedRow>, ExecError> {
+    std::thread::scope(|scope| {
+        scope
+            .spawn(move || {
+                let mut cursor = scanner.scan_cursor(request)?;
+                let runtime = tokio::runtime::Builder::new_current_thread()
+                    .enable_all()
+                    .build()
+                    .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+                runtime.block_on(async move {
+                    let mut rows = Vec::new();
+                    let mut used = 0usize;
+                    loop {
+                        let page = cursor.next_page(1024).await?;
+                        for row in page.rows {
+                            let bytes = scanned_row_bytes(&row);
+                            if used.saturating_add(bytes) > max_bytes {
+                                return Err(ExecError::Remote(
+                                    crabka_pgwire::error::PgError::error(
+                                        "53200",
+                                        "blocking query exceeded the memory budget",
+                                    ),
+                                ));
+                            }
+                            used += bytes;
+                            rows.push(row);
+                        }
+                        if page.is_last {
+                            return Ok(rows);
+                        }
+                    }
+                })
+            })
+            .join()
+            .map_err(|_| ExecError::Unsupported("blocking cursor worker panicked".into()))?
+    })
+}
+
+fn scanned_row_bytes(row: &ScannedRow) -> usize {
+    let payload = row.row.iter().fold(0usize, |bytes, datum| {
+        let variable = match datum {
+            crabka_pgtypes::Datum::Text(value) => value.len(),
+            crabka_pgtypes::Datum::Bytea(value) => value.len(),
+            crabka_pgtypes::Datum::Numeric(value) => value.to_string().len(),
+            _ => 0,
+        };
+        bytes
+            .saturating_add(std::mem::size_of::<crabka_pgtypes::Datum>())
+            .saturating_add(variable)
+    });
+    std::mem::size_of::<ScannedRow>().saturating_add(payload)
+}
+
 /// Decorates a scanner with the read point allocated once for a SQL statement.
 /// Retries and every participating range receive the same typed timestamp.
 #[derive(Clone)]
@@ -1158,5 +1219,61 @@ mod cursor_contract_tests {
         assert!(page.is_last);
         assert_eq!(inner.cursor_calls.load(Ordering::Relaxed), 1);
         assert_eq!(inner.scan_calls.load(Ordering::Relaxed), 0);
+    }
+
+    #[test]
+    fn blocking_cursor_collection_returns_out_of_memory_before_crossing_budget() {
+        let scanner = CursorSpy::default();
+        let local = MemKv::new();
+        let snapshot = Snapshot {
+            xmin: 1,
+            xmax: 2,
+            xip: Vec::new(),
+        };
+        let table = Table {
+            id: 42,
+            name: "items".into(),
+            columns: vec![Column::new("id", ColumnType::Int8)],
+            sharded: false,
+            sharding: None,
+            foreign: None,
+        };
+        let error = super::collect_cursor_bounded(
+            &MaterializedOnlyScanner(vec![super::ScannedRow {
+                rowid: 1,
+                xmin: 1,
+                row: vec![Datum::Text("x".repeat(128))],
+            }]),
+            ScanRequest {
+                local: &local,
+                global: &local,
+                global_snapshot: &snapshot,
+                snapshot: &snapshot,
+                own_xid: None,
+                read_ts: None,
+                table: &table,
+                interval: RowInterval::ALL,
+                predicate: PredicatePushdown::FullScan,
+                projection: ProjectionPushdown::All,
+                partial_aggregate: None,
+                top_k: None,
+            },
+            64,
+        )
+        .expect_err("row must be rejected before exceeding budget");
+
+        assert_eq!(error.into_pg().code, "53200");
+        assert_eq!(scanner.scan_calls.load(Ordering::Relaxed), 0);
+    }
+
+    struct MaterializedOnlyScanner(Vec<super::ScannedRow>);
+
+    impl RangeScanner for MaterializedOnlyScanner {
+        fn scan(
+            &self,
+            _request: ScanRequest<'_>,
+        ) -> Result<Vec<super::ScannedRow>, super::ExecError> {
+            Ok(self.0.clone())
+        }
     }
 }
