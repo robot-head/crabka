@@ -230,8 +230,8 @@ replay, bounded Gres gate, and mandatory CI wiring.
 
 ## Independent-review remediation (2026-07-11)
 
-Status: **INCOMPLETE pending clean re-review**. Commit `1ed678a4` addresses all
-findings from the first review.
+Status: **INCOMPLETE pending clean re-review**. Commits `1ed678a4` and
+`01ddcbb9` address all findings from the first review and its cleanup follow-up.
 
 ### RED/GREEN
 
@@ -248,9 +248,15 @@ findings from the first review.
   SQL grammar/values, and exact dependency/image provenance. Deletion,
   reordering, private values, and digest mutation all fail focused tests.
 - RED: recorder accept/session time and recapture subprocesses were not all
-  absolutely bounded. GREEN: the recorder has one non-renewing absolute
+  absolutely bounded, config failure could leak a recorder, ambiguous Docker
+  start timeout could leave a named container, and one removal timeout could
+  skip later cleanup. GREEN: the recorder has one non-renewing absolute
   deadline; every subprocess, image pull, Docker action, and driver has a
-  timeout; failure cleanup kills and reaps recorder and containers.
+  timeout; ownership is registered before each ambiguous start; every cleanup
+  action runs independently in reverse ownership order; and safe aggregation
+  reports the primary exception class plus every cleanup resource/class without
+  payload-bearing messages. Injected config-write, Docker-start-timeout, and
+  Docker-remove-timeout tests prove recorder reap and PgDog/PostgreSQL removal.
 - RED: new tooling paths did not trigger the Gres CI job. GREEN: every capture,
   recorder, test, gate, and structural-test path is asserted in the Gres filter,
   and CI runs the Python safety contract.
@@ -274,12 +280,17 @@ findings from the first review.
 
 ### Reverification after remediation
 
-- 10 Python payload/timeout/anti-rot tests: PASS.
+- 13 Python payload/timeout/anti-rot/lifecycle tests: PASS.
 - 4 Rust schema/provenance/exact-evidence tests: PASS.
 - Matrix self-test/normal, relevant all-target test/check/clippy with
   `-D warnings`, nightly fmt, F-0 structural filter/CI contract, six-startup
   replay, and diff check: PASS.
 - Full provisioned PgDog 0.1.6 E2E: PASS; lifecycle 3/3, base 666/688,
   extended 6/6, exact Rust/Python drivers, and F-1 two-client GUC gate green.
+- After cleanup-only commit `01ddcbb9`, deterministic digest-addressed recapture
+  again reproduced fixture SHA-256 `25251f3ed66931c0f2f4c6fb0e073515b27171abcc97c7f99ca26275b7b69211`;
+  Python, Rust-golden, structural/F-0, clippy/fmt, and diff checks passed. The
+  live gate was not rerun because this follow-up changes cleanup tooling only,
+  not the checked fixture, replay, or runtime semantics.
 - ACL was explicitly skipped and is not claimed; the prior reviewed exact-topic
   code-29 evidence remains unchanged.
