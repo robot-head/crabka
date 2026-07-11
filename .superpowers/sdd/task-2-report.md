@@ -125,3 +125,13 @@ git diff --check
 ```
 
 Results: multirange 31/31, sharded_visibility 7/7, gres-ranges lib 105/105, pgexec lib 337/337; all-target check and diff check passed.
+
+## Final binary-UUID review fix
+
+- Split UUID rendering by wire format. Text UUID parameters retain UTF-8 validation, quote escaping, explicit `::uuid`, and the existing pgtypes UUID validation during execution.
+- Binary UUID parameters now require exactly 16 bytes and render those bytes as canonical lower-case `8-4-4-4-12` hyphenated UUID text with an explicit UUID cast. Wrong-length binary values fail with SQLSTATE `22P03`.
+- Added an explicit timestamp integration test that inserts a 16-byte binary UUID into a non-shard column, observes the canonical value through read-your-writes, commits, and separately verifies malformed length rejection.
+
+RED: the focused test initially failed with `22021 invalid UTF-8 parameter`, proving raw binary UUIDs incorrectly entered the text renderer.
+
+GREEN verification: focused binary UUID test 1/1; multirange 32/32; gres-ranges lib 105/105; pgexec lib 337/337; all-target check and diff check passed.

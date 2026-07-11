@@ -550,6 +550,48 @@ async fn extended_timestamp_dml_accepts_non_shard_parameter_types() {
     session.simple_query("COMMIT").await.expect("commit");
 }
 
+#[tokio::test]
+async fn extended_timestamp_dml_accepts_binary_uuid_non_shard_parameter() {
+    let (gateway, _handles) = MultiRangeTenant::start(row_split_tenant_config()).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t150 (id int4, token uuid) SHARDED")
+        .await
+        .expect("create");
+    session.simple_query("BEGIN").await.expect("begin");
+    let uuid = [
+        0x55, 0x0e, 0x84, 0x00, 0xe2, 0x9b, 0x41, 0xd4, 0xa7, 0x16, 0x44, 0x66, 0x55, 0x44, 0x00,
+        0x00,
+    ];
+    session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES (20, $1), (120, '550e8400-e29b-41d4-a716-446655440001')",
+            &[binary_typed_param(&uuid, crabka_pgtypes::oids::UUID)],
+        )
+        .await
+        .expect("binary UUID write");
+    let visible = session
+        .simple_query("SELECT token FROM t150 WHERE id = 20")
+        .await
+        .expect("read own UUID write");
+    assert!(format!("{visible:?}").contains("550e8400-e29b-41d4-a716-446655440000"));
+    session.simple_query("COMMIT").await.expect("commit");
+
+    session
+        .simple_query("BEGIN")
+        .await
+        .expect("begin malformed");
+    let error = session
+        .extended_query_v2(
+            "INSERT INTO t150 VALUES (30, $1), (130, '550e8400-e29b-41d4-a716-446655440002')",
+            &[binary_typed_param(&uuid[..15], crabka_pgtypes::oids::UUID)],
+        )
+        .await
+        .expect_err("wrong binary UUID length");
+    assert_eq!(error.code, "22P03");
+    session.simple_query("ROLLBACK").await.expect("rollback");
+}
+
 #[test]
 fn dropping_timestamp_session_without_caller_runtime_cleans_up() {
     let runtime = tokio::runtime::Runtime::new().expect("runtime");
