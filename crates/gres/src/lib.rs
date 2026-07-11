@@ -2194,21 +2194,6 @@ fn open_live_multirange_tenant(
     mut live_engines: LiveMultirangeEngines,
     config: &SubstrateRuntimeConfig,
 ) -> std::io::Result<GresRuntime> {
-    let Some(tso_horizon) = live_engines.range0_tso_horizon.take() else {
-        return invalid_input("live multi-range substrate requires hosted range r0 for TSO");
-    };
-    let persisted_max_ts = tso_horizon
-        .load_max_ts()
-        .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
-    let tso_rpc = crabka_gres_ranges::tso_rpc_from_horizon(
-        tso_horizon.clone(),
-        tso_horizon.clone(),
-        tso_horizon.epoch(),
-        persisted_max_ts,
-    )
-    .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))?;
-    let timestamp_oracle =
-        crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc(Arc::clone(&tso_rpc));
     let transfer = Arc::new(LiveMultiRangeTransfer::new(
         live_engines
             .engines
@@ -2217,8 +2202,41 @@ fn open_live_multirange_tenant(
             .collect(),
         (*config).clone(),
     ));
-    let (gateway, _handles) =
-        crabka_gres_ranges::MultiRangeTenant::start_with_engine_factory_and_timestamp_oracle(
+    let (gateway, _handles, tso_rpc) = if let Some(tso_horizon) =
+        live_engines.range0_tso_horizon.take()
+    {
+        let persisted_max_ts = tso_horizon
+            .load_max_ts()
+            .map_err(|error| std::io::Error::other(format!("range-0 TSO horizon: {error}")))?;
+        let tso_rpc = crabka_gres_ranges::tso_rpc_from_horizon(
+            tso_horizon.clone(),
+            tso_horizon.clone(),
+            tso_horizon.epoch(),
+            persisted_max_ts,
+        )
+        .map_err(|error| std::io::Error::other(format!("range-0 TSO oracle: {error}")))?;
+        let timestamp_oracle =
+            crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc(Arc::clone(&tso_rpc));
+        let (gateway, handles) =
+            crabka_gres_ranges::MultiRangeTenant::start_with_engine_factory_and_timestamp_oracle(
+                tenant_config,
+                |_data_dir, range_id| {
+                    live_engines
+                        .engines
+                        .remove(&range_id)
+                        .map(|engine| engine.engine)
+                        .ok_or_else(|| {
+                            crabka_pgexec::ExecError::Unsupported(format!(
+                                "recovered live substrate engine for range r{range_id} is missing"
+                            ))
+                        })
+                },
+                Some(timestamp_oracle),
+            )
+            .map_err(|error| std::io::Error::other(format!("multi-range tenant: {error}")))?;
+        (gateway, handles, Some(tso_rpc))
+    } else {
+        let (gateway, handles) = crabka_gres_ranges::MultiRangeTenant::start_with_engine_factory(
             tenant_config,
             |_data_dir, range_id| {
                 live_engines
@@ -2231,13 +2249,16 @@ fn open_live_multirange_tenant(
                         ))
                     })
             },
-            Some(timestamp_oracle),
         )
         .map_err(|error| std::io::Error::other(format!("multi-range tenant: {error}")))?;
-    let range_service = Arc::new(
-        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
-            .with_tso(tso_rpc),
-    );
+        (gateway, handles, None)
+    };
+    let mut range_service =
+        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines());
+    if let Some(tso_rpc) = tso_rpc {
+        range_service = range_service.with_tso(tso_rpc);
+    }
+    let range_service = Arc::new(range_service);
     Ok(GresRuntime {
         engine: RuntimeEngine::Multi(Box::new(gateway)),
         checkpoint_runtime: None,
