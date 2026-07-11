@@ -2,6 +2,8 @@
 
 This matrix is the SQL-Parity Program anti-rot ledger. Every row has an explicit disposition; no row may be left undecided. `Wave-assigned(...)` means the command is intentionally not complete yet and names the parity wave that owns it. M5 is reached when no command row remains wave-assigned.
 
+Published milestone state: [M0, 2026-07-11](superpowers/evidence/2026-07-11-gres-m0.md).
+
 Run:
 
 ```bash
@@ -200,7 +202,7 @@ The implemented rows reflect the checked-in parser/executor surface after G-1 an
 | SECURITY LABEL | Non-goal(C-bound security labels) | Explicitly excluded. |
 | SELECT | Implemented | Baseline query expression; Q waves own breadth. |
 | SELECT INTO | Wave-assigned(Q1) | Statement completeness. |
-| SET | Implemented | F-1 GUC registry supports common client/session settings with transaction-local semantics. |
+| SET | Implemented | F-1 typed GUC registry supports common client/session settings with PostgreSQL 18 transaction-local semantics; pinned tokio-postgres, SQLx, and psycopg startup/SET captures are validated and replayed directly against Gres in CI. |
 | SET CONSTRAINTS | Wave-assigned(D6) | DEFERRABLE constraints. |
 | SET ROLE | Implemented | Starter subset: `SET ROLE name` switches `current_user` only to an existing role; `SET ROLE NONE`/`RESET ROLE` restore the initial `public` session user. Membership checks are not implemented. |
 | SET SESSION AUTHORIZATION | Wave-assigned(D8) | Roles and privileges. |
