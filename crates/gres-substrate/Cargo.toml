@@ -17,6 +17,15 @@ categories = ["database-implementations"]
 [lints]
 workspace = true
 
+[features]
+# Compile-time-only deterministic crash hooks. This is deliberately absent from
+# default builds and exists solely for the production-service crash matrix.
+checkpoint-test-hooks = []
+
+[[test]]
+name = "checkpoint_crashes"
+required-features = ["checkpoint-test-hooks"]
+
 [dependencies]
 crabka-pgexec = { version = "0.3.9", path = "../pgexec" }
 crabka-pgkv = { version = "0.3.9", path = "../pgkv" }

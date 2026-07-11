@@ -9,6 +9,8 @@ mod store;
 
 use crabka_gres_ranges::{RangeId, TenantName, checkpoint_prefix as range_checkpoint_prefix};
 
+#[cfg(feature = "checkpoint-test-hooks")]
+pub use self::service::{CheckpointFailpoint, CheckpointServiceStep};
 pub use self::{
     codec::{CheckpointFilter, CheckpointPart, PartPayload},
     horizon::{

@@ -2255,8 +2255,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         })?;
         let run = checkpoint
             .handle
-            .checkpoint(
-                checkpoint.snapshot_source.snapshot(),
+            .checkpoint_from_source(
+                Arc::clone(&checkpoint.snapshot_source),
                 crabka_gres_substrate::CheckpointTrigger::Manual,
             )
             .await
@@ -2507,8 +2507,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         })?;
         let run = checkpoint
             .handle
-            .checkpoint(
-                snapshot_source.snapshot(),
+            .checkpoint_from_source(
+                Arc::clone(&snapshot_source),
                 crabka_gres_substrate::CheckpointTrigger::Manual,
             )
             .await
@@ -2651,8 +2651,8 @@ impl FinalCheckpointer for StartedCheckpointRuntime {
     async fn force_final_checkpoint(&self) -> std::io::Result<FinalCheckpoint> {
         let run = self
             .handle
-            .checkpoint(
-                self.snapshot_source.snapshot(),
+            .checkpoint_from_source(
+                Arc::clone(&self.snapshot_source),
                 crabka_gres_substrate::CheckpointTrigger::Manual,
             )
             .await
