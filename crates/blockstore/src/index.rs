@@ -1559,10 +1559,9 @@ mod tests {
             panic!("expected InvalidBlock for oversized index snapshot");
         };
         assert2::assert!(
-            msg
-                == format!(
-                    "index snapshot `index/snapshot.json` is {size} bytes, exceeds cap of 1 bytes"
-                )
+            msg == format!(
+                "index snapshot `index/snapshot.json` is {size} bytes, exceeds cap of 1 bytes"
+            )
         );
 
         // A cap at/above the real size still loads.

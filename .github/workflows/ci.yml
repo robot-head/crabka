@@ -246,6 +246,7 @@ jobs:
               - 'NOTICE'
               - 'crates/gres-control/**'
               - 'crates/operator/src/controller/gres.rs'
+              - 'crates/operator/src/controller/gres_tenant.rs'
               - 'crates/operator/src/crd/gres.rs'
               - 'crates/operator/tests/reconcile_gres*.rs'
               - 'crates/operator/tests/shared/**'
@@ -271,6 +272,12 @@ jobs:
               - 'scripts/gres-driver-goldens-gate.sh'
               - 'scripts/tests/gres_f0_runtime_gates.py'
               - 'scripts/gres-coldstart.sh'
+              - 'scripts/gres-kind-lifecycle.sh'
+              - 'scripts/tests/gres-kind-lifecycle-structure.sh'
+              - 'packaging/apko/crabka-gres*.yaml'
+              - 'packaging/docker/Dockerfile.local-binary'
+              - 'packaging/melange/crabka.yaml'
+              - 'charts/crabka-operator/**'
               - 'scripts/gres-range-scaling.sh'
               - 'scripts/gres-sharded-conformance.sh'
 
@@ -902,7 +909,7 @@ jobs:
     needs: changes
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
-    timeout-minutes: 45
+    timeout-minutes: 90
     services:
       oracle:
         image: postgres:18
@@ -948,7 +955,12 @@ jobs:
       - name: Front-door PgDog e2e gate
         run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_E2E_KEEP_ARTIFACTS=1 ./scripts/gres-e2e.sh
       - name: Cold-start SLO gate
-        run: CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_COLDSTART_KEEP_ARTIFACTS=1 ./scripts/gres-coldstart.sh
+        run: |
+          curl -fsSLo /tmp/kind https://kind.sigs.k8s.io/dl/v0.30.0/kind-linux-amd64
+          chmod +x /tmp/kind
+          sudo mv /tmp/kind /usr/local/bin/kind
+          CRABKA_GRES_KIND_ARTIFACT_DIR=target/gres-coldstart-artifacts \
+            ./scripts/gres-coldstart.sh
       - name: Conformance harness against the parity baseline
         run: |
           ./target/debug/crabka-gres --listen 127.0.0.1:54333 &

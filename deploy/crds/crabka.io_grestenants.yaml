@@ -47,6 +47,12 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  suspendMaxCheckpointBytes:
+                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                   walReplication:
                     description: Replication factor for tenant WAL topics.
                     format: int32
@@ -201,6 +207,15 @@ spec:
               observedGeneration:
                 description: '`metadata.generation` of the last successfully-reconciled spec.'
                 format: int64
+                nullable: true
+                type: integer
+              pgdogCredentialGraceUntilUnixMs:
+                description: |-
+                  Bounded compatibility window for `PgDog` 0.1.47 after a resumed compute
+                  becomes Active. The fleet reconciler removes the temporary backend
+                  credential after this Unix-millisecond deadline.
+                format: uint64
+                minimum: 0.0
                 nullable: true
                 type: integer
               ready:

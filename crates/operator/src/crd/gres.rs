@@ -235,6 +235,10 @@ pub struct TenantDefaults {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub checkpoint_bytes: Option<u64>,
 
+    /// Keep the tenant warm when its latest checkpoint exceeds this size.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub suspend_max_checkpoint_bytes: Option<u64>,
+
     /// Idle timeout in seconds; unset means never suspend by idleness.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub idle_seconds: Option<u64>,
@@ -348,6 +352,7 @@ mod tests {
                 wal_replication: Some(3),
                 checkpoint_frames: Some(10_000),
                 checkpoint_bytes: None,
+                suspend_max_checkpoint_bytes: None,
                 idle_seconds: Some(3_600),
             }),
             balancer: Some(GresBalancerSpec {

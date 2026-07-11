@@ -165,6 +165,12 @@ spec:
                     minimum: 0.0
                     nullable: true
                     type: integer
+                  suspendMaxCheckpointBytes:
+                    description: Keep the tenant warm when its latest checkpoint exceeds this size.
+                    format: uint64
+                    minimum: 0.0
+                    nullable: true
+                    type: integer
                   walReplication:
                     description: Replication factor for tenant WAL topics.
                     format: int32

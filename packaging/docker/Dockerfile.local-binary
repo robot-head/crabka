@@ -1,0 +1,11 @@
+FROM ubuntu:24.04
+ARG BINARY
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends ca-certificates libssl3t64 \
+    && rm -rf /var/lib/apt/lists/*
+COPY --from=binaries /${BINARY} /usr/local/bin/service
+COPY --from=binaries /${BINARY} /usr/bin/${BINARY}
+COPY --from=binaries /crabka /usr/bin/crabka
+RUN chmod 0755 /usr/local/bin/service /usr/bin/${BINARY} /usr/bin/crabka
+USER 65532:65532
+ENTRYPOINT ["/usr/local/bin/service"]

@@ -219,6 +219,7 @@ fn reconcile_rules(include_status: bool) -> Vec<MockRule> {
 }
 
 #[tokio::test]
+#[allow(clippy::too_many_lines)]
 async fn renders_pgdog_config_secret_and_status_hash() {
     let admin = FakePgdogAdmin::new(vec![false, true]);
     let rules = reconcile_rules(true);
