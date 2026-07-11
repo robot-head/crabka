@@ -4,7 +4,12 @@
   "source": "https://github.com/postgres/postgres/blob/REL_18_0/doc/src/sgml/ref/allfiles.sgml",
   "source_snapshot": "pg18-allfiles-REL_18_0.sgml",
   "source_sha256": "4240987b5fddaa5ab5ffa2562551cb1325f2e5527b552c3bbe5be7ca6fd42fc7",
-  "source_description": "PostgreSQL REL_18_0 SQL-command entity list. The checker expands documented filename abbreviations and seven separately tracked ALTER/CREATE TABLE syntax families deterministically.",
+  "syntax_snapshots": [
+    {"file": "pg18-alter_table-REL_18_0.sgml", "sha256": "dc44b2b50476dff8ed0e7f79d425e6b404f3b0860a91f18f536490f912c02dbe"},
+    {"file": "pg18-create_table-REL_18_0.sgml", "sha256": "8f281d48523129f41a81d6c6e1fdc4d6de7637cf31f36f5c63940fd2d1b51972"},
+    {"file": "pg18-select-REL_18_0.sgml", "sha256": "300d0d5eb2bc5b7a1ef69f528c2a673c11819bb4dc975f9a7f82dff7fe2c560d"}
+  ],
+  "source_description": "PostgreSQL REL_18_0 SQL-command entity list plus hashed ALTER TABLE, CREATE TABLE, and SELECT SGML synopses. The checker derives every title from these artifacts.",
   "commands": [
     "ABORT",
     "ALTER AGGREGATE",
