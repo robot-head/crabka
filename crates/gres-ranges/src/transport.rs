@@ -226,6 +226,8 @@ pub enum RangeControlResp {
     },
     Markers {
         markers: Vec<WireInDoubtMarker>,
+        left_markers: Vec<WireInDoubtMarker>,
+        right_markers: Vec<WireInDoubtMarker>,
         digest: String,
     },
 }
@@ -1693,6 +1695,8 @@ mod tests {
                         rowid: 12,
                     },
                 }],
+                left_markers: vec![],
+                right_markers: vec![],
                 digest: "fixture-digest".into(),
             },
         ];

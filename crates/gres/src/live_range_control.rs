@@ -484,6 +484,12 @@ impl LiveRangeControlExecutor {
                 Ok(RangeControlResp::Markers {
                     digest: marker_digest(&markers),
                     markers,
+                    left_markers: left.iter().map(wire_marker).collect(),
+                    right_markers: right
+                        .unwrap_or_default()
+                        .iter()
+                        .map(wire_marker)
+                        .collect(),
                 })
             }
             RangeControlOperation::RetirePredecessor => {

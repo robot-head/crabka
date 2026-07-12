@@ -653,13 +653,19 @@ impl GenerationFencedRangeControl {
                         (
                             RangeControlResp::Markers {
                                 markers: expected_markers,
+                                left_markers: expected_left_markers,
+                                right_markers: expected_right_markers,
                                 digest: expected_digest,
                             },
                             RangeControlResp::Markers {
                                 markers: actual_markers,
+                                left_markers: actual_left_markers,
+                                right_markers: actual_right_markers,
                                 digest: actual_digest,
                             },
                         ) if expected_markers == actual_markers
+                            && expected_left_markers == actual_left_markers
+                            && expected_right_markers == actual_right_markers
                             && expected_digest == actual_digest =>
                         {
                             true

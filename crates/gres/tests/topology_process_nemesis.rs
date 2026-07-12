@@ -5,6 +5,7 @@ mod process;
 
 use std::{
     collections::BTreeMap,
+    io::Write as _,
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
     sync::Arc,
@@ -77,6 +78,54 @@ struct RetirementDeleteLedger {
     requested_topics: Vec<String>,
     unrelated_delete_attempted: bool,
     injected_after_delete_errors: usize,
+}
+
+#[derive(Debug, Clone)]
+struct MarkerObservation {
+    endpoint: String,
+    request: crabka_gres_ranges::RangeControlReq,
+    markers: Vec<crabka_gres_ranges::WireInDoubtMarker>,
+    left_markers: Vec<crabka_gres_ranges::WireInDoubtMarker>,
+    right_markers: Vec<crabka_gres_ranges::WireInDoubtMarker>,
+    digest: String,
+}
+
+struct RecordingRangeMutationClient {
+    inner: MtlsRangeMutationClient,
+    marker_observations: Arc<Mutex<Vec<MarkerObservation>>>,
+}
+
+#[async_trait]
+impl RangeMutationClient for RecordingRangeMutationClient {
+    async fn mutate(
+        &self,
+        endpoint: &str,
+        request: crabka_gres_ranges::RangeControlReq,
+    ) -> Result<crabka_gres_ranges::RangeControlResp, SplitReconcileError> {
+        let records_markers = matches!(
+            &request.operation,
+            crabka_gres_ranges::RangeControlOperation::InheritMarkers { .. }
+        );
+        let response = self.inner.mutate(endpoint, request.clone()).await?;
+        if records_markers
+            && let crabka_gres_ranges::RangeControlResp::Markers {
+                markers,
+                left_markers,
+                right_markers,
+                digest,
+            } = &response
+        {
+            self.marker_observations.lock().await.push(MarkerObservation {
+                endpoint: endpoint.to_owned(),
+                request,
+                markers: markers.clone(),
+                left_markers: left_markers.clone(),
+                right_markers: right_markers.clone(),
+                digest: digest.clone(),
+            });
+        }
+        Ok(response)
+    }
 }
 
 struct CountingRetirementAdmin {
@@ -856,13 +905,21 @@ async fn initiate_split_with_cli(
     );
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct SplitLedgerRow {
+    rowid: u64,
+    seq: i32,
+    route_key: i32,
+    checksum: String,
+}
+
 async fn direct_successor_rows(
     system: &ProcessHarness,
     range_id: u32,
     table_id: u64,
     start: Option<u64>,
     end: Option<u64>,
-) -> Vec<u64> {
+) -> Vec<SplitLedgerRow> {
     let scan = crabka_gres_ranges::transport::ScanRangeReq {
         range_id: crabka_gres_ranges::RangeId::new(range_id),
         table_name: format!("live_ledger{table_id}"),
@@ -896,7 +953,28 @@ async fn direct_successor_rows(
     let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
         panic!("direct r{range_id} scan returned {response:?}");
     };
-    response.rows.into_iter().map(|row| row.rowid).collect()
+    response
+        .rows
+        .into_iter()
+        .map(|row| {
+            let (_, _, values) = crabka_pgmvcc::version::decode_tuple(&row.tuple)
+                .expect("decode direct split ledger tuple");
+            let [
+                crabka_pgtypes::Datum::Int4(seq),
+                crabka_pgtypes::Datum::Int4(route_key),
+                crabka_pgtypes::Datum::Text(checksum),
+            ] = values.as_slice()
+            else {
+                panic!("unexpected direct split ledger tuple {values:?}");
+            };
+            SplitLedgerRow {
+                rowid: row.rowid,
+                seq: *seq,
+                route_key: *route_key,
+                checksum: checksum.clone(),
+            }
+        })
+        .collect()
 }
 
 async fn load_operation(bootstrap: &str, tenant: &str, operation_id: &str) -> SplitOperationRecord {
@@ -933,7 +1011,11 @@ async fn drive_operation(
     operation_id: &str,
     max_operation_duration: std::time::Duration,
     kill_injection: Option<KillInjection<'_>>,
-) -> (SplitOperationRecord, Option<KillObservation>) {
+) -> (
+    SplitOperationRecord,
+    Option<KillObservation>,
+    Vec<MarkerObservation>,
+) {
     let tenant = TenantName::try_from(system.tenant()).expect("tenant");
     let mut registry = Registry::connect(system.bootstrap())
         .await
@@ -942,7 +1024,11 @@ async fn drive_operation(
     let mut control: GresControlHandle = Arc::new(BrokerControl {
         registry: Mutex::new(registry),
     });
-    let mut mutation_client = MtlsRangeMutationClient::new(system.operator_control_client());
+    let marker_observations = Arc::new(Mutex::new(Vec::new()));
+    let mut mutation_client = RecordingRangeMutationClient {
+        inner: MtlsRangeMutationClient::new(system.operator_control_client()),
+        marker_observations: Arc::clone(&marker_observations),
+    };
     let predecessor_topic = format!("__gres_wal.{}.r1", system.tenant());
     let delete_ledger = Arc::new(std::sync::Mutex::new(RetirementDeleteLedger::default()));
     let admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
@@ -1025,7 +1111,10 @@ async fn drive_operation(
             control = Arc::new(BrokerControl {
                 registry: Mutex::new(fresh_registry),
             });
-            mutation_client = MtlsRangeMutationClient::new(system.operator_control_client());
+            mutation_client = RecordingRangeMutationClient {
+                inner: MtlsRangeMutationClient::new(system.operator_control_client()),
+                marker_observations: Arc::clone(&marker_observations),
+            };
             let fresh_admin =
                 crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
                     .await
@@ -1247,7 +1336,11 @@ async fn drive_operation(
                     started.elapsed() < max_operation_duration,
                     "operation exceeded duration bound"
                 );
-                return (current, restarted_pids);
+                return (
+                    current,
+                    restarted_pids,
+                    marker_observations.lock().await.clone(),
+                );
             }
             _ => match reconcile_one_rpc_phase(&control, &mutation_client, &current).await {
                 Ok(_) => {}
@@ -1339,6 +1432,7 @@ async fn real_process_split_two_successor_foundation() {
         return;
     }
     assert!(cli_binary().is_file(), "dedicated CI must build crabka CLI");
+    let operation_started = Instant::now();
     let identity = format!("{:x}-p{:x}", timestamp_ms(), std::process::id());
     let operation_id = format!("g8-split-{identity}");
     let mut system =
@@ -1376,29 +1470,108 @@ async fn real_process_split_two_successor_foundation() {
 
     let source = system.sql(0).await;
     source
-        .simple_query("CREATE TABLE live_ledger51 (seq int4) SHARDED")
+        .simple_query(
+            "CREATE TABLE live_ledger51 (seq int4, route_key int4, checksum text NOT NULL) SHARDED",
+        )
         .await
         .expect("create split ledger");
+    let mut acknowledged = Vec::new();
+    let mut ack_file = tempfile::NamedTempFile::new().expect("external split ACK ledger");
     for seq in 0..32_i32 {
+        let route_key = if seq % 2 == 0 { seq / 2 } else { 16 + seq / 2 };
+        let checksum = format!("split-{seq:04x}-{route_key:04x}");
         source
-            .execute("INSERT INTO live_ledger51 VALUES ($1)", &[&seq])
+            .execute(
+                "INSERT INTO live_ledger51 VALUES ($1, $2, $3)",
+                &[&seq, &route_key, &checksum],
+            )
             .await
             .expect("acknowledged split source write");
+        acknowledged.push(SplitLedgerRow {
+            rowid: u64::try_from(seq).unwrap() + 1,
+            seq,
+            route_key,
+            checksum,
+        });
+        let ack = acknowledged.last().unwrap();
+        serde_json::to_writer(
+            &mut ack_file,
+            &serde_json::json!({
+                "rowid": ack.rowid,
+                "seq": ack.seq,
+                "route_key": ack.route_key,
+                "checksum": ack.checksum,
+            }),
+        )
+        .expect("append split ACK");
+        ack_file.write_all(b"\n").expect("terminate split ACK");
+        ack_file.as_file().sync_data().expect("fsync split ACK");
     }
     let pre_r0 = direct_successor_rows(&system, 0, 51, None, None).await;
     let pre_r1 = direct_successor_rows(&system, 1, 51, None, None).await;
     eprintln!("pre-split direct r0={pre_r0:?}, r1={pre_r1:?}");
     assert!(pre_r0.is_empty());
-    assert_eq!(pre_r1, (1..33_u64).collect::<Vec<_>>());
+    assert_eq!(
+        pre_r1.iter().map(|row| row.rowid).collect::<Vec<_>>(),
+        (1..33_u64).collect::<Vec<_>>()
+    );
     initiate_split_with_cli(&system, &operation_id, 51, 16).await;
-    let completed = tokio::time::timeout(
+    let (completed, _, marker_observations) = tokio::time::timeout(
         Duration::from_secs(90),
         drive_operation(&mut system, &operation_id, Duration::from_secs(90), None),
     )
     .await
-    .expect("whole Split operation deadline")
-    .0;
+    .expect("whole Split operation deadline");
     assert_eq!(completed.phase, SplitOperationPhase::Completed);
+    assert_eq!(
+        marker_observations.len(),
+        1,
+        "one authenticated predecessor marker-inheritance response"
+    );
+    let marker_observation = &marker_observations[0];
+    assert_eq!(marker_observation.request.range_id.as_u32(), 1);
+    assert_eq!(marker_observation.request.operation_id, operation_id);
+    assert_eq!(marker_observation.request.generation, 0);
+    assert_eq!(
+        marker_observation.endpoint,
+        completed
+            .plan
+            .as_ref()
+            .expect("sealed Split plan")
+            .current_layout
+            .iter()
+            .find(|range| range.range_id == 1)
+            .expect("predecessor r1")
+            .endpoint
+    );
+    let crabka_gres_ranges::RangeControlOperation::InheritMarkers {
+        journal_revision,
+        journal_digest,
+    } = &marker_observation.request.operation
+    else {
+        panic!("recorded non-marker request");
+    };
+    assert!(*journal_revision > 0);
+    assert!(!journal_digest.is_empty());
+    assert_eq!(
+        marker_observation.digest,
+        completed.evidence.marker_digest.as_deref().unwrap()
+    );
+    let mut partition_union = marker_observation.left_markers.clone();
+    partition_union.extend(marker_observation.right_markers.iter().copied());
+    assert_eq!(partition_union, marker_observation.markers);
+    assert!(marker_observation.left_markers.iter().all(|marker| {
+        marker.key.table_id < 51 || (marker.key.table_id == 51 && marker.key.rowid < 16)
+    }));
+    assert!(marker_observation.right_markers.iter().all(|marker| {
+        marker.key.table_id > 51 || (marker.key.table_id == 51 && marker.key.rowid >= 16)
+    }));
+    assert!(marker_observation.left_markers.iter().all(|left| {
+        marker_observation
+            .right_markers
+            .iter()
+            .all(|right| left != right)
+    }));
     let tenant = load_tenant(system.bootstrap(), system.tenant()).await;
     assert_eq!(
         tenant
@@ -1466,29 +1639,54 @@ async fn real_process_split_two_successor_foundation() {
     )
     .await;
     assert!(!r2_rows.is_empty() && !r3_rows.is_empty());
-    assert!(r2_rows.iter().all(|rowid| {
-        r2_interval.0.is_none_or(|start| *rowid >= start)
-            && r2_interval.1.is_none_or(|end| *rowid < end)
+    assert!(r2_rows.iter().all(|row| {
+        r2_interval.0.is_none_or(|start| row.rowid >= start)
+            && r2_interval.1.is_none_or(|end| row.rowid < end)
     }));
-    assert!(r3_rows.iter().all(|rowid| {
-        r3_interval.0.is_none_or(|start| *rowid >= start)
-            && r3_interval.1.is_none_or(|end| *rowid < end)
+    assert!(r3_rows.iter().all(|row| {
+        r3_interval.0.is_none_or(|start| row.rowid >= start)
+            && r3_interval.1.is_none_or(|end| row.rowid < end)
     }));
-    let mut successor_rowids = r2_rows.iter().chain(&r3_rows).copied().collect::<Vec<_>>();
+    let mut successor_rowids = r2_rows
+        .iter()
+        .chain(&r3_rows)
+        .map(|row| row.rowid)
+        .collect::<Vec<_>>();
     successor_rowids.sort_unstable();
 
     assert_eq!(successor_rowids, (1..33_u64).collect::<Vec<_>>());
+    let expected_r2 = acknowledged
+        .iter()
+        .filter(|row| row.rowid < 16)
+        .cloned()
+        .collect::<Vec<_>>();
+    let expected_r3 = acknowledged
+        .iter()
+        .filter(|row| row.rowid >= 16)
+        .cloned()
+        .collect::<Vec<_>>();
+    assert_eq!(r2_rows, expected_r2);
+    assert_eq!(r3_rows, expected_r3);
     let fresh = system.sql(0).await;
     let full_sequences = fresh
-        .query("SELECT seq FROM live_ledger51 ORDER BY seq", &[])
+        .query(
+            "SELECT seq, route_key, checksum FROM live_ledger51 ORDER BY seq",
+            &[],
+        )
         .await
         .expect("fresh full split ledger scan")
         .into_iter()
-        .map(|row| row.get::<_, i32>(0))
+        .enumerate()
+        .map(|(index, row)| SplitLedgerRow {
+            rowid: u64::try_from(index).unwrap() + 1,
+            seq: row.get(0),
+            route_key: row.get(1),
+            checksum: row.get(2),
+        })
         .collect::<Vec<_>>();
     assert_eq!(
         full_sequences,
-        (0..32_i32).collect::<Vec<_>>(),
+        acknowledged,
         "post-restart SQL scatter log:\n{}",
         system.log(0)
     );
@@ -1510,6 +1708,59 @@ async fn real_process_split_two_successor_foundation() {
     assert!(topics.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
     assert!(topics.contains(&format!("__gres_wal.{}.r3.g0000000001", system.tenant())));
     assert!(topics.contains(&sentinel_topic));
+    if let Some(path) = std::env::var_os("CRABKA_G8_SPLIT_EVIDENCE") {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("create split evidence directory");
+        }
+        let plan = completed.plan.as_ref().expect("sealed plan");
+        let r2 = plan
+            .target_layout
+            .iter()
+            .find(|range| range.range_id == 2)
+            .expect("r2 target");
+        let r3 = plan
+            .target_layout
+            .iter()
+            .find(|range| range.range_id == 3)
+            .expect("r3 target");
+        let evidence = serde_json::json!({
+            "schema_version": 1,
+            "operation": "split",
+            "tenant_id": system.tenant(),
+            "operation_id": operation_id,
+            "phase": "completed",
+            "routing_table_id": plan.routing_table_id,
+            "split_rowid": 16,
+            "target_range_ids": [0, 2, 3],
+            "r2": {"endpoint": r2.endpoint, "generation": r2.wal_generation, "serving": true, "row_count": r2_rows.len(), "cross_side_rows": 0},
+            "r3": {"endpoint": r3.endpoint, "generation": r3.wal_generation, "serving": true, "row_count": r3_rows.len(), "cross_side_rows": 0},
+            "endpoints_distinct": r2.endpoint != r3.endpoint,
+            "acknowledged_rows": acknowledged.len(),
+            "full_scan_rows": full_sequences.len(),
+            "full_ack_equality": full_sequences == acknowledged,
+            "marker_partition": {
+                "authenticated_endpoint": marker_observation.endpoint,
+                "request_range_id": marker_observation.request.range_id.as_u32(),
+                "request_generation": marker_observation.request.generation,
+                "request_journal_revision": journal_revision,
+                "request_journal_digest": journal_digest,
+                "predecessor_count": marker_observation.markers.len(),
+                "r2_count": marker_observation.left_markers.len(),
+                "r3_count": marker_observation.right_markers.len(),
+                "disjoint": true,
+                "exact_union": partition_union == marker_observation.markers,
+                "digest": marker_observation.digest,
+            },
+            "topics": topics,
+            "sentinel_topic": sentinel_topic,
+            "predecessor_topic_absent": true,
+            "predecessor_delete_count": 1,
+            "operation_elapsed_ms": operation_started.elapsed().as_millis(),
+        });
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap())
+            .expect("write split evidence");
+    }
     system.shutdown().await;
 }
 
@@ -1663,7 +1914,7 @@ done
             ),
         )
         .await;
-        let (completed, restart) = drive_result.unwrap_or_else(|_| {
+        let (completed, restart, _) = drive_result.unwrap_or_else(|_| {
             panic!(
                 "whole {} Move operation deadline; source log: {}",
                 kill_point.name(),

@@ -59,6 +59,7 @@ crabka-broker = { path = "../broker" }
 crabka-client-producer = { path = "../client-producer" }
 crabka-gres-control = { path = "../gres-control" }
 crabka-pgmvcc = { path = "../pgmvcc" }
+crabka-pgtypes = { path = "../pgtypes" }
 crabka-security = { path = "../security" }
 tempfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
