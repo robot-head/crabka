@@ -1757,9 +1757,65 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for AllowSplitIntentAutho
         &self,
         _request: &crabka_gres_ranges::transport::RangeControlReq,
         _context: crabka_gres_ranges::control::IntentAuthorizationContext,
-    ) -> Result<bool, String> {
-        Ok(true)
+    ) -> Result<Option<crabka_gres_ranges::control::AuthorizedSplitIntent>, String> {
+        Ok(Some(test_authorized_split_intent()?))
     }
+}
+
+#[cfg(test)]
+fn test_authorized_split_intent()
+-> Result<crabka_gres_ranges::control::AuthorizedSplitIntent, String> {
+    use crabka_gres_control::{
+        RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, SplitOperationPlan,
+        SplitOperationRecord, TenantName,
+    };
+    let source = RangeLayoutEntry {
+        range_id: 0,
+        end_key: None,
+        endpoint: "source:7443".into(),
+        wal_generation: 0,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let left = RangeLayoutEntry {
+        range_id: 0,
+        end_key: Some(RangeBoundary {
+            table_id: 7,
+            rowid: 10,
+        }),
+        endpoint: "left:7443".into(),
+        wal_generation: 1,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let right = RangeLayoutEntry {
+        range_id: 1,
+        end_key: None,
+        endpoint: "right:7443".into(),
+        wal_generation: 1,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let record = SplitOperationRecord::new(
+        TenantName::try_from("tenant-a").map_err(|error| error.to_string())?,
+        "status-after-replace",
+        RangeLayoutSplit {
+            source_range_id: 0,
+            predecessor_generation: 0,
+            left: left.clone(),
+            right: right.clone(),
+        },
+    )
+    .map_err(|error| error.to_string())?
+    .with_plan(SplitOperationPlan {
+        source_record_version: 1,
+        source_map_epoch: 0,
+        routing_table_id: 7,
+        current_layout: vec![source],
+        target_layout: vec![left, right],
+    })
+    .map_err(|error| error.to_string())?;
+    crabka_gres_ranges::control::AuthorizedSplitIntent::from_record(record)
 }
 
 #[async_trait::async_trait]
@@ -1768,9 +1824,9 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         &self,
         request: &crabka_gres_ranges::transport::RangeControlReq,
         context: crabka_gres_ranges::control::IntentAuthorizationContext,
-    ) -> Result<bool, String> {
+    ) -> Result<Option<crabka_gres_ranges::control::AuthorizedSplitIntent>, String> {
         if request.tenant != self.tenant.as_str() {
-            return Ok(false);
+            return Ok(None);
         }
         let mut registry = crabka_gres_control::Registry::connect(&self.bootstrap)
             .await
@@ -1780,17 +1836,17 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
             .await
             .map_err(|error| format!("load split operation: {error}"))?;
         let Some(operation) = operation else {
-            return Ok(false);
+            return Ok(None);
         };
         let Some(plan) = operation.plan.as_ref() else {
-            return Ok(false);
+            return Ok(None);
         };
         let current = registry
             .get(self.tenant.as_str())
             .await
             .map_err(|error| format!("load current tenant layout: {error}"))?;
         let Some(current) = current else {
-            return Ok(false);
+            return Ok(None);
         };
         let target_phase =
             operation.phase >= crabka_gres_control::SplitOperationPhase::LayoutPublished;
@@ -1807,7 +1863,7 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         let layout_matches =
             current.ranges == *expected_layout && Some(current.record_version) == expected_version;
         if !layout_matches {
-            return Ok(false);
+            return Ok(None);
         }
         crabka_gres_ranges::control::RegistrySplitIntentView::new([operation])
             .authorize_request(request, context)
@@ -2775,10 +2831,8 @@ async fn open_live_multirange_tenant(
         .iter()
         .filter_map(|receipt| match &receipt.request.operation {
             crabka_gres_ranges::transport::RangeControlOperation::SuccessorFencePrologue {
-                split,
-            } if receipt.result.is_some() && gateway.control_range_map() == split.target_map => {
-                Some(receipt.request.operation_id.clone())
-            }
+                ..
+            } if receipt.result.is_some() => Some(receipt.request.operation_id.clone()),
             _ => None,
         })
         .collect::<std::collections::BTreeSet<_>>();
@@ -5641,6 +5695,7 @@ mod tests {
             async fn execute(
                 &self,
                 _request: &crabka_gres_ranges::transport::RangeControlReq,
+                _intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
             ) -> crabka_gres_ranges::transport::RangeControlResp {
                 crabka_gres_ranges::transport::RangeControlResp::Status {
                     paused: false,

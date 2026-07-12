@@ -968,6 +968,23 @@ async fn advance_control_operation(
         .unwrap();
 }
 
+async fn control_binding(bootstrap: &str, tenant: &str, operation_id: &str) -> (u64, String) {
+    let mut registry = crabka_gres_control::Registry::connect(bootstrap)
+        .await
+        .unwrap();
+    let record = registry
+        .load_split_operation(tenant, operation_id)
+        .await
+        .unwrap()
+        .unwrap();
+    let revision = record.revision;
+    let digest = crabka_gres_ranges::control::AuthorizedSplitIntent::from_record(record)
+        .unwrap()
+        .digest()
+        .to_string();
+    (revision, digest)
+}
+
 async fn drive_live_control_split(
     runtime: &crabka_gres::GresRuntime,
     bootstrap: &str,
@@ -975,9 +992,7 @@ async fn drive_live_control_split(
     operation_id: &str,
     state_path: &std::path::Path,
 ) {
-    use crabka_gres_ranges::transport::{
-        RangeControlOperation as Operation, RangeControlResp, WireRangeKey,
-    };
+    use crabka_gres_ranges::transport::{RangeControlOperation as Operation, RangeControlResp};
     struct DriverState {
         split: crabka_gres_ranges::SplitState,
         manifest_key: String,
@@ -1118,15 +1133,18 @@ async fn drive_live_control_split(
         split,
         manifest_key,
         covered_offset,
-        barrier_offset,
+        barrier_offset: _,
     } = state;
     if runtime.published_range_map().as_ref() == Some(&split.target_map) {
+        let (journal_revision, journal_digest) =
+            control_binding(bootstrap, tenant, operation_id).await;
         let prologue = control_request(
             runtime,
             tenant,
             operation_id,
             Operation::SuccessorFencePrologue {
-                split: Box::new(split),
+                journal_revision,
+                journal_digest,
             },
         )
         .await;
@@ -1178,28 +1196,14 @@ async fn drive_live_control_split(
     )
     .await;
     assert!(matches!(pause, RangeControlResp::Paused { .. }));
+    let (journal_revision, journal_digest) = control_binding(bootstrap, tenant, operation_id).await;
     let stage = control_request(
         runtime,
         tenant,
         operation_id,
         Operation::StageFilteredRestore {
-            split: Box::new(split.clone()),
-            source_range: RangeId::COORDINATOR,
-            source_generation: 0,
-            manifest_key,
-            covered_offset,
-            barrier_offset,
-            routing_table_id: 1,
-            physical_table_id: 1,
-            interval_start: WireRangeKey {
-                table_id: split.predecessor_before.start.table_id.as_u64(),
-                rowid: split.predecessor_before.start.rowid,
-            },
-            interval_end: split.predecessor_before.end.map(|key| WireRangeKey {
-                table_id: key.table_id.as_u64(),
-                rowid: key.rowid,
-            }),
-            target_map: split.target_map.clone(),
+            journal_revision,
+            journal_digest,
         },
     )
     .await;
@@ -1215,19 +1219,14 @@ async fn drive_live_control_split(
         None,
     )
     .await;
+    let (journal_revision, journal_digest) = control_binding(bootstrap, tenant, operation_id).await;
     let markers = control_request(
         runtime,
         tenant,
         operation_id,
         Operation::InheritMarkers {
-            interval_start: WireRangeKey {
-                table_id: split.predecessor_before.start.table_id.as_u64(),
-                rowid: split.predecessor_before.start.rowid,
-            },
-            interval_end: split.predecessor_before.end.map(|key| WireRangeKey {
-                table_id: key.table_id.as_u64(),
-                rowid: key.rowid,
-            }),
+            journal_revision,
+            journal_digest,
         },
     )
     .await;
@@ -1235,12 +1234,14 @@ async fn drive_live_control_split(
         matches!(markers, RangeControlResp::Markers { .. }),
         "markers: {markers:?}"
     );
+    let (journal_revision, journal_digest) = control_binding(bootstrap, tenant, operation_id).await;
     let prologue = control_request(
         runtime,
         tenant,
         operation_id,
         Operation::SuccessorFencePrologue {
-            split: Box::new(split),
+            journal_revision,
+            journal_digest,
         },
     )
     .await;
