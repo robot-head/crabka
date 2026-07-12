@@ -1,14 +1,10 @@
 //! Production execution of authenticated, generation-fenced range-control steps.
 
-use std::{
-    collections::BTreeMap,
-    sync::{Arc, Weak},
-};
+use std::{collections::BTreeMap, sync::{Arc, Weak}};
 
 use async_trait::async_trait;
 use crabka_gres_ranges::{
     CheckpointManifest, RangeId, RangeTransferBarrier, RangeTransferCapability, SplitCommand,
-    TableId, ValidatedSplitTransferPlan,
     control::RangeControlExecutor,
     transport::{RangeControlOperation, RangeControlReq, RangeControlResp},
 };
@@ -259,12 +255,6 @@ impl LiveRangeControlExecutor {
                 let barrier_offset = evidence.barrier_offset.ok_or_else(|| {
                     rejected("missing_evidence", "pause barrier is absent from journal")
                 })?;
-                let routing_table_id = intent
-                    .record()
-                    .plan
-                    .as_ref()
-                    .expect("authorized plan")
-                    .routing_table_id;
                 if let Some(tail_sha256) = self
                     .operations
                     .lock()
@@ -298,14 +288,10 @@ impl LiveRangeControlExecutor {
                         "staged restore cannot use a stale or foreign pause barrier",
                     ));
                 }
-                let plan = ValidatedSplitTransferPlan::from_control(
-                    split.clone(),
-                    BTreeMap::from([(
-                        TableId::new(routing_table_id),
-                        TableId::new(routing_table_id),
-                    )]),
-                )
-                .map_err(|error| rejected("invalid_split", error.to_string()))?;
+                let plan = self
+                    .gateway
+                    .validated_control_transfer_plan(split.clone())
+                    .map_err(|error| rejected("invalid_split", error.to_string()))?;
                 let tail = transfer
                     .read_committed_tail(checkpoint.range_id, checkpoint.covered_offset, barrier)
                     .await
