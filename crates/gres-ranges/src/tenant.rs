@@ -1107,17 +1107,19 @@ async fn recover_remote_timestamp_primary(
         .await
         .map_err(|error| ExecError::Unsupported(error.to_string()))?
     {
-        crate::transport::RangeResponse::TimestampPrimaryDecision { decision } => match decision {
-            crate::transport::WireTimestampDecision::Aborted => {
-                Ok(crabka_pgexec::PrimaryTxnDecision::Aborted)
+        crate::transport::RangeResponse::TimestampPrimaryDecision { decision, .. } => {
+            match decision {
+                crate::transport::WireTimestampDecision::Aborted => {
+                    Ok(crabka_pgexec::PrimaryTxnDecision::Aborted)
+                }
+                crate::transport::WireTimestampDecision::Committed { commit_ts } => {
+                    Ok(crabka_pgexec::PrimaryTxnDecision::Committed(
+                        crabka_pgexec::CommitTimestamp::new(commit_ts)
+                            .map_err(|error| ExecError::Unsupported(error.to_string()))?,
+                    ))
+                }
             }
-            crate::transport::WireTimestampDecision::Committed { commit_ts } => {
-                Ok(crabka_pgexec::PrimaryTxnDecision::Committed(
-                    crabka_pgexec::CommitTimestamp::new(commit_ts)
-                        .map_err(|error| ExecError::Unsupported(error.to_string()))?,
-                ))
-            }
-        },
+        }
         crate::transport::RangeResponse::SqlError { message, .. }
         | crate::transport::RangeResponse::Error { message, .. } => {
             Err(ExecError::Unsupported(message))

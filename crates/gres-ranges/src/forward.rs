@@ -182,14 +182,20 @@ impl HostedRangeService {
         }
     }
 
-    async fn authenticated_primary_decision(
+    async fn authenticated_primary_outcome(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
-    ) -> Result<crabka_pgexec::PrimaryTxnDecision, crabka_pgexec::ExecError> {
+    ) -> Result<
+        (
+            crabka_pgexec::PrimaryTxnDecision,
+            Vec<crabka_pgexec::TimestampTxnOperation>,
+        ),
+        crabka_pgexec::ExecError,
+    > {
         let primary_range = RangeId::new(identity.primary_range);
         if let Some(primary) = self.engines.get(&primary_range) {
-            primary.validate_timestamp_primary_identity(identity)?;
-            return primary.primary_timestamp_decision(identity.start_ts);
+            let descriptor = primary.validate_timestamp_primary_identity(identity)?;
+            return Ok((descriptor.decision, descriptor.operations));
         }
         let (registry, client) = self.timestamp_primary_remote.as_ref().ok_or_else(|| {
             crabka_pgexec::ExecError::Unsupported(
@@ -210,18 +216,35 @@ impl HostedRangeService {
             .await
             .map_err(|error| crabka_pgexec::ExecError::Unsupported(error.to_string()))?
         {
-            RangeResponse::TimestampPrimaryDecision { decision } => match decision {
-                crate::transport::WireTimestampDecision::Aborted => {
-                    Ok(crabka_pgexec::PrimaryTxnDecision::Aborted)
-                }
-                crate::transport::WireTimestampDecision::Committed { commit_ts } => {
-                    Ok(crabka_pgexec::PrimaryTxnDecision::Committed(
-                        crabka_pgexec::CommitTimestamp::new(commit_ts).map_err(|error| {
-                            crabka_pgexec::ExecError::Unsupported(error.to_string())
-                        })?,
-                    ))
-                }
-            },
+            RangeResponse::TimestampPrimaryDecision {
+                decision,
+                operations,
+            } => {
+                let decision = match decision {
+                    crate::transport::WireTimestampDecision::Aborted => {
+                        crabka_pgexec::PrimaryTxnDecision::Aborted
+                    }
+                    crate::transport::WireTimestampDecision::Committed { commit_ts } => {
+                        crabka_pgexec::PrimaryTxnDecision::Committed(
+                            crabka_pgexec::CommitTimestamp::new(commit_ts).map_err(|error| {
+                                crabka_pgexec::ExecError::Unsupported(error.to_string())
+                            })?,
+                        )
+                    }
+                };
+                Ok((
+                    decision,
+                    operations
+                        .into_iter()
+                        .map(|operation| crabka_pgexec::TimestampTxnOperation {
+                            range_id: operation.range_id,
+                            table_id: operation.table_id,
+                            rowid: operation.rowid,
+                            delete: operation.delete,
+                        })
+                        .collect(),
+                ))
+            }
             RangeResponse::SqlError { message, .. } | RangeResponse::Error { message, .. } => {
                 Err(crabka_pgexec::ExecError::Unsupported(message))
             }
@@ -632,8 +655,8 @@ impl RangeService for HostedRangeService {
                         .resolve_as_primary(identity, decision, &writes)
                         .await
                 } else {
-                    let expected = match self.authenticated_primary_decision(identity).await {
-                        Ok(decision) => decision,
+                    let expected = match self.authenticated_primary_outcome(identity).await {
+                        Ok((decision, _)) => decision,
                         Err(error) => {
                             let error = error.into_pg();
                             return RangeResponse::SqlError {
@@ -688,7 +711,7 @@ impl RangeService for HostedRangeService {
                         };
                     }
                 };
-                let decision = match request.decision {
+                let asserted_decision = match request.decision {
                     crate::transport::WireTimestampDecision::Aborted => {
                         crabka_pgexec::PrimaryTxnDecision::Aborted
                     }
@@ -704,7 +727,7 @@ impl RangeService for HostedRangeService {
                         }
                     }
                 };
-                let operations = request
+                let asserted_operations = request
                     .operations
                     .into_iter()
                     .map(|op| crabka_pgexec::TimestampTxnOperation {
@@ -714,6 +737,32 @@ impl RangeService for HostedRangeService {
                         delete: op.delete,
                     })
                     .collect::<Vec<_>>();
+                let (decision, primary_operations) =
+                    match self.authenticated_primary_outcome(identity).await {
+                        Ok(outcome) => outcome,
+                        Err(_) => {
+                            return RangeResponse::SqlError {
+                                code: "40001".into(),
+                                message: "timestamp recovery primary identity is fenced".into(),
+                            };
+                        }
+                    };
+                if decision == crabka_pgexec::PrimaryTxnDecision::Pending {
+                    return RangeResponse::SqlError {
+                        code: "40001".into(),
+                        message: "timestamp recovery primary has no terminal decision".into(),
+                    };
+                }
+                let operations = primary_operations
+                    .into_iter()
+                    .filter(|operation| operation.range_id == request.range_id.as_u32())
+                    .collect::<Vec<_>>();
+                if asserted_decision != decision || asserted_operations != operations {
+                    return RangeResponse::SqlError {
+                        code: "40001".into(),
+                        message: "timestamp recovery assertion differs from primary outcome".into(),
+                    };
+                }
                 let result = if decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
                     engine
                         .abort_timestamp_transaction_intents(identity.start_ts)
@@ -777,6 +826,18 @@ impl RangeService for HostedRangeService {
                         message: "timestamp primary identity is fenced".into(),
                     };
                 }
+                let operations = descriptor
+                    .as_ref()
+                    .expect("validated descriptor")
+                    .operations
+                    .iter()
+                    .map(|operation| crate::transport::WireTimestampOperation {
+                        range_id: operation.range_id,
+                        table_id: operation.table_id,
+                        rowid: operation.rowid,
+                        delete: operation.delete,
+                    })
+                    .collect();
                 match engine
                     .recover_timestamp_transaction(identity.start_ts)
                     .await
@@ -795,6 +856,7 @@ impl RangeService for HostedRangeService {
                                 unreachable!("recovery returns terminal decision")
                             }
                         },
+                        operations,
                     },
                     Err(error) => {
                         let error = error.into_pg();
@@ -4356,6 +4418,153 @@ mod tests {
             ))
             .await;
         assert!(matches!(response, RangeResponse::SqlError { code, .. } if code == "40001"));
+    }
+
+    #[tokio::test]
+    async fn timestamp_recover_fences_forged_identity_without_mutating_intent() {
+        let primary = crabka_pgexec::SqlEngine::new();
+        let secondary = crabka_pgexec::SqlEngine::new();
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(300).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 301,
+            primary_range: 1,
+        };
+        let write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 2,
+            row: vec![crabka_pgtypes::Datum::Int4(2)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        primary
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                identity.global_xid,
+                vec![1, 2],
+            ))
+            .await
+            .expect("descriptor");
+        secondary
+            .timestamp_txn_participant(2)
+            .prewrite_as_secondary(identity, std::slice::from_ref(&write))
+            .await
+            .expect("secondary prewrite");
+        let service = HostedRangeService::new(BTreeMap::from([
+            (RangeId::new(1), primary),
+            (RangeId::new(2), secondary.clone_handle()),
+        ]));
+        let response = service
+            .handle(RangeRequest::TimestampRecover(
+                crate::transport::TimestampRecoverReq {
+                    range_id: RangeId::new(2),
+                    identity: crate::transport::WireTimestampIdentity {
+                        start_ts: start_ts.get(),
+                        global_xid: 999,
+                        primary_range: 9,
+                    },
+                    decision: crate::transport::WireTimestampDecision::Aborted,
+                    operations: Vec::new(),
+                },
+            ))
+            .await;
+        assert!(matches!(response, RangeResponse::SqlError { code, .. } if code == "40001"));
+        assert_eq!(
+            timestamp_tuple_state(&secondary, &write, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Intent
+        );
+    }
+
+    #[tokio::test]
+    async fn timestamp_recover_rejects_forged_commit_and_ops_without_mutating_intent() {
+        let primary = crabka_pgexec::SqlEngine::new();
+        let secondary = crabka_pgexec::SqlEngine::new();
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(310).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 311,
+            primary_range: 1,
+        };
+        let write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 2,
+            row: vec![crabka_pgtypes::Datum::Int4(2)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let operation = crabka_pgexec::TimestampTxnOperation {
+            range_id: 2,
+            table_id: write.table_id,
+            rowid: write.rowid,
+            delete: false,
+        };
+        primary
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                identity.global_xid,
+                vec![2],
+            ))
+            .await
+            .expect("descriptor");
+        secondary
+            .timestamp_txn_participant(2)
+            .prewrite_as_secondary(identity, std::slice::from_ref(&write))
+            .await
+            .expect("secondary prewrite");
+        primary
+            .acknowledge_timestamp_participant_operations(start_ts, 2, &[operation])
+            .await
+            .expect("ack operations");
+        let actual_commit =
+            crabka_pgexec::CommitTimestamp::after_start(start_ts, 312).expect("commit timestamp");
+        primary
+            .decide_timestamp_transaction(
+                start_ts,
+                crabka_pgexec::PrimaryTxnDecision::Committed(actual_commit),
+            )
+            .await
+            .expect("commit primary");
+        let service = HostedRangeService::new(BTreeMap::from([
+            (RangeId::new(1), primary),
+            (RangeId::new(2), secondary.clone_handle()),
+        ]));
+        let response = service
+            .handle(RangeRequest::TimestampRecover(
+                crate::transport::TimestampRecoverReq {
+                    range_id: RangeId::new(2),
+                    identity: encode_timestamp_identity(identity),
+                    decision: crate::transport::WireTimestampDecision::Committed { commit_ts: 999 },
+                    operations: vec![crate::transport::WireTimestampOperation {
+                        range_id: 2,
+                        table_id: 10,
+                        rowid: 999,
+                        delete: true,
+                    }],
+                },
+            ))
+            .await;
+        assert!(matches!(response, RangeResponse::SqlError { code, .. } if code == "40001"));
+        assert_eq!(
+            timestamp_tuple_state(&secondary, &write, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Intent
+        );
+    }
+
+    fn timestamp_tuple_state(
+        engine: &crabka_pgexec::SqlEngine,
+        write: &crabka_pgexec::TimestampWrite,
+        start_ts: crabka_pgexec::TimestampTransactionId,
+    ) -> crabka_pgmvcc::version::TsVersionState {
+        let key =
+            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
+        let bytes = engine
+            .kv_handle()
+            .get(&key)
+            .expect("read tuple")
+            .expect("tuple");
+        crabka_pgmvcc::version::decode_ts_tuple(&bytes)
+            .expect("decode tuple")
+            .state
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -123,7 +123,10 @@ pub enum RangeResponse {
     /// Timestamp participant operation completed.
     TimestampParticipantDone,
     /// Effective decision returned by the authenticated primary.
-    TimestampPrimaryDecision { decision: WireTimestampDecision },
+    TimestampPrimaryDecision {
+        decision: WireTimestampDecision,
+        operations: Vec<WireTimestampOperation>,
+    },
     /// Range compute rejected the request.
     Error {
         error: WireErrorKind,
@@ -1444,6 +1447,7 @@ mod tests {
                 RangeRequest::TimestampPrimaryRecover(_) => {
                     RangeResponse::TimestampPrimaryDecision {
                         decision: WireTimestampDecision::Aborted,
+                        operations: Vec::new(),
                     }
                 }
             }
