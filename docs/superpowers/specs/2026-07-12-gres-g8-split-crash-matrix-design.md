@@ -77,6 +77,10 @@ After restart and `Completed`, every case performs the same verifier:
 - old source PID differs from the restarted PID, all spawned workload/source process groups are reaped, and no child is left behind;
 - measured maximum ACK gap and whole-operation duration are positive and below their per-case bounds.
 
+Source/restore cases use a strict 25-second ACK-gap bound: the live unoptimized harness measured
+21.113 seconds for process restart plus two-successor restore and prologue. Publication and
+retirement cases retain their tighter 12-second bound.
+
 Each JSON evidence file contains measured predicates and values, never success literals. A validator recomputes counts, sets, interval facts, marker partition arithmetic, bounds, unique identity, and topic expectations. `--validate-only` must fail nonzero for empty, incomplete, wrong-case, duplicate, or missing-family inputs.
 
 ## CI sharding
