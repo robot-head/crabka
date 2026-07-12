@@ -330,6 +330,18 @@ pub struct MultiRangeTenant {
 }
 
 impl MultiRangeTenant {
+    /// Build a transfer plan from the currently served coordinator catalog.
+    ///
+    /// The returned physical-to-logical table mapping is authoritative for
+    /// control-plane restores; callers must not synthesize it from routing IDs.
+    pub fn validated_control_transfer_plan(
+        &self,
+        state: SplitState,
+    ) -> Result<ValidatedSplitTransferPlan, LocalSqlSplitError> {
+        let serving = self.inner.serving.load_full();
+        Self::validated_transfer_plan(&serving, state)
+    }
+
     #[must_use]
     pub fn control_range_map(&self) -> RangeMap {
         self.inner.serving.load().range_map.clone()
