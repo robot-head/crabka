@@ -6,6 +6,58 @@ use async_trait::async_trait;
 
 use crate::transport::{RangeControlOperation, RangeControlReq, RangeControlResp};
 
+/// Read-only tenant-scoped view of the registry's durable split-operation journal.
+#[async_trait]
+pub trait SplitIntentAuthority: Send + Sync {
+    async fn load_operation(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+    ) -> Result<Option<crabka_gres_control::SplitOperationRecord>, String>;
+}
+
+/// Immutable registry/config snapshot suitable for compute-side authorization.
+#[derive(Debug, Default)]
+pub struct RegistrySplitIntentView {
+    operations: BTreeMap<(String, String), crabka_gres_control::SplitOperationRecord>,
+}
+
+impl RegistrySplitIntentView {
+    #[must_use]
+    pub fn new(
+        operations: impl IntoIterator<Item = crabka_gres_control::SplitOperationRecord>,
+    ) -> Self {
+        Self {
+            operations: operations
+                .into_iter()
+                .map(|operation| {
+                    (
+                        (
+                            operation.tenant.as_str().to_string(),
+                            operation.operation_id.clone(),
+                        ),
+                        operation,
+                    )
+                })
+                .collect(),
+        }
+    }
+}
+
+#[async_trait]
+impl SplitIntentAuthority for RegistrySplitIntentView {
+    async fn load_operation(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+    ) -> Result<Option<crabka_gres_control::SplitOperationRecord>, String> {
+        Ok(self
+            .operations
+            .get(&(tenant.to_string(), operation_id.to_string()))
+            .cloned())
+    }
+}
+
 /// Irreversible topology-activation progress persisted on range zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -268,6 +320,7 @@ pub struct GenerationFencedRangeControl {
     generations: BTreeMap<crate::RangeId, std::collections::BTreeSet<u64>>,
     executor: Box<dyn RangeControlExecutor>,
     receipts: Arc<dyn RangeControlReceiptStore>,
+    intent_authority: Option<Arc<dyn SplitIntentAuthority>>,
 }
 
 impl GenerationFencedRangeControl {
@@ -286,12 +339,19 @@ impl GenerationFencedRangeControl {
             )]),
             executor,
             receipts: Arc::new(MemoryRangeControlReceiptStore::default()),
+            intent_authority: None,
         }
     }
 
     #[must_use]
     pub fn with_receipt_store(mut self, store: Arc<dyn RangeControlReceiptStore>) -> Self {
         self.receipts = store;
+        self
+    }
+
+    #[must_use]
+    pub fn with_intent_authority(mut self, authority: Arc<dyn SplitIntentAuthority>) -> Self {
+        self.intent_authority = Some(authority);
         self
     }
 
@@ -313,6 +373,27 @@ impl GenerationFencedRangeControl {
         };
         if request.operation_id.is_empty() {
             return rejected("invalid_operation_id", "operation_id must not be empty");
+        }
+        if let Some(authority) = &self.intent_authority {
+            let operation = match authority
+                .load_operation(&request.tenant, &request.operation_id)
+                .await
+            {
+                Ok(Some(operation)) => operation,
+                Ok(None) => {
+                    return rejected(
+                        "unauthorized_intent",
+                        "operation is absent from the tenant split journal",
+                    );
+                }
+                Err(message) => return rejected("intent_authority", message),
+            };
+            if !request_matches_split_operation(&request, &operation) {
+                return rejected(
+                    "unauthorized_intent",
+                    "control request differs from the durable split intent",
+                );
+            }
         }
         let receipt_key = receipt_key(&request);
         let digest = request_digest(&request);
@@ -531,6 +612,78 @@ fn replayed(response: &RangeControlResp) -> RangeControlResp {
     }
 }
 
+fn request_matches_split_operation(
+    request: &RangeControlReq,
+    operation: &crabka_gres_control::SplitOperationRecord,
+) -> bool {
+    let intent = &operation.split;
+    if operation.tenant.as_str() != request.tenant || operation.operation_id != request.operation_id
+    {
+        return false;
+    }
+    let source = request.range_id.as_u32() == intent.source_range_id
+        && request.generation == intent.predecessor_generation;
+    let target = |range_id: crate::RangeId, generation: u64| {
+        [&intent.left, &intent.right].into_iter().any(|successor| {
+            successor.range_id == range_id.as_u32() && successor.wal_generation == generation
+        })
+    };
+    match &request.operation {
+        RangeControlOperation::ForceCheckpoint
+        | RangeControlOperation::PauseAtCoveredOffset { .. }
+        | RangeControlOperation::Status
+        | RangeControlOperation::RetirePredecessor
+        | RangeControlOperation::Resume => source,
+        RangeControlOperation::StageFilteredRestore {
+            split: requested,
+            source_range,
+            source_generation,
+            target_map: _,
+            ..
+        } => {
+            target(request.range_id, request.generation)
+                && runtime_split_matches_intent(requested, intent, &request.operation_id)
+                && source_range.as_u32() == intent.source_range_id
+                && *source_generation == intent.predecessor_generation
+        }
+        RangeControlOperation::SuccessorFencePrologue { split: requested } => {
+            source && runtime_split_matches_intent(requested, intent, &request.operation_id)
+        }
+        RangeControlOperation::InheritMarkers { .. } => {
+            target(request.range_id, request.generation)
+        }
+    }
+}
+
+fn runtime_split_matches_intent(
+    split: &crate::SplitState,
+    intent: &crabka_gres_control::SplitState,
+    operation_id: &str,
+) -> bool {
+    let matches_successor =
+        |runtime: &crate::SuccessorDescriptor, durable: &crabka_gres_control::RangeLayoutEntry| {
+            runtime.range_id.as_u32() == durable.range_id
+                && runtime.endpoint == durable.endpoint
+                && runtime.wal_generation == durable.wal_generation
+                && runtime
+                    .interval
+                    .end
+                    .map(|end| crabka_gres_control::RangeBoundary {
+                        table_id: end.table_id.as_u64(),
+                        rowid: end.rowid,
+                    })
+                    == durable.end_key
+        };
+    split.operation_id == operation_id
+        && split.predecessor.as_u32() == intent.source_range_id
+        && split.predecessor_generation == intent.predecessor_generation
+        && matches_successor(&split.left, &intent.left)
+        && split
+            .right
+            .as_ref()
+            .is_some_and(|right| matches_successor(right, &intent.right))
+}
+
 fn rejected(code: impl Into<String>, message: impl Into<String>) -> RangeControlResp {
     RangeControlResp::Rejected {
         code: code.into(),
@@ -547,6 +700,19 @@ mod tests {
 
     use super::*;
     use crate::{RangeId, transport::RangeControlOperation};
+
+    struct MissingIntent;
+
+    #[async_trait::async_trait]
+    impl SplitIntentAuthority for MissingIntent {
+        async fn load_operation(
+            &self,
+            _tenant: &str,
+            _operation_id: &str,
+        ) -> Result<Option<crabka_gres_control::SplitOperationRecord>, String> {
+            Ok(None)
+        }
+    }
 
     struct CountingExecutor {
         calls: Arc<AtomicUsize>,
@@ -594,6 +760,26 @@ mod tests {
             operation_id: operation_id.into(),
             operation: RangeControlOperation::RetirePredecessor,
         }
+    }
+
+    #[tokio::test]
+    async fn destructive_control_rejects_missing_registry_intent() {
+        let control = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(CountingExecutor {
+                calls: Arc::new(AtomicUsize::new(0)),
+                response: RangeControlResp::Applied,
+            }),
+        )
+        .with_intent_authority(Arc::new(MissingIntent));
+
+        let response = control.handle(request("tenant-a", 7, "forged")).await;
+
+        assert!(
+            matches!(response, RangeControlResp::Rejected { code, .. } if code == "unauthorized_intent")
+        );
     }
 
     #[tokio::test]

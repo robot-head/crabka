@@ -1405,6 +1405,8 @@ fn render_deployment(
             format!("{name}.range.internal"),
             "--range-allowed-principal".to_owned(),
             format!("CN={name}-range"),
+            "--operator-control-principal".to_owned(),
+            format!("CN={name}-operator"),
         ]);
     }
     args.extend(checkpoint_runtime_args(operator_config)?);
