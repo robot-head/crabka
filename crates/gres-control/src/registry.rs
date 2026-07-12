@@ -18,9 +18,9 @@ use crate::{
     ControlError,
     record::{
         FinalCheckpoint, RangeLayoutMerge, RangeLayoutMutation, RangeLayoutSplit, RegistryKey,
-        TENANT_REGISTRY_TOPIC, TenantName, TenantRecord, decode_registry_record,
-        encode_registry_record, encode_tenant_config_record, tenant_config_topic,
-        tenant_registry_key,
+        SplitOperationRecord, TENANT_REGISTRY_TOPIC, TenantName, TenantRecord,
+        decode_registry_record, encode_registry_record, encode_tenant_config_record,
+        tenant_config_topic, tenant_registry_key,
     },
 };
 
@@ -113,12 +113,50 @@ pub trait TenantRegistryStore {
             RangeLayoutMutation::Merge(merge),
         )
     }
+
+    /// Idempotently create a durable split-operation initiation record.
+    fn begin_split_operation(
+        &mut self,
+        _operation: SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        Err(ControlError::UnsupportedRegistryMutation {
+            mutation: "begin_split_operation",
+            reason: "backend does not implement split-operation journaling",
+        })
+    }
+
+    /// Load one split operation by tenant and operation id.
+    fn load_split_operation(
+        &self,
+        _tenant: &TenantName,
+        _operation_id: &str,
+    ) -> Option<SplitOperationRecord> {
+        None
+    }
+
+    /// List one tenant's split operations in operation-id order.
+    fn list_split_operations(&self, _tenant: &TenantName) -> Vec<SplitOperationRecord> {
+        Vec::new()
+    }
+
+    /// Persist one exact monotone split-operation revision with CAS semantics.
+    fn compare_and_swap_split_operation(
+        &mut self,
+        _expected_revision: Option<u64>,
+        _operation: SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        Err(ControlError::UnsupportedRegistryMutation {
+            mutation: "compare_and_swap_split_operation",
+            reason: "backend does not implement split-operation journaling",
+        })
+    }
 }
 
 /// In-memory implementation of [`TenantRegistryStore`] used by tests and future fakes.
 #[derive(Debug, Default)]
 pub struct InMemoryRegistryStore {
     tenants: Arc<StdMutex<BTreeMap<String, TenantRecord>>>,
+    split_operations: Arc<StdMutex<BTreeMap<(String, String), SplitOperationRecord>>>,
 }
 
 impl Clone for InMemoryRegistryStore {
@@ -130,6 +168,12 @@ impl Clone for InMemoryRegistryStore {
             .clone();
         Self {
             tenants: Arc::new(StdMutex::new(tenants)),
+            split_operations: Arc::new(StdMutex::new(
+                self.split_operations
+                    .lock()
+                    .expect("in-memory split operation lock poisoned")
+                    .clone(),
+            )),
         }
     }
 }
@@ -250,6 +294,109 @@ impl TenantRegistryStore for InMemoryRegistryStore {
         tenants.insert(tenant.as_str().to_string(), next.clone());
         Ok(Some(next))
     }
+
+    fn begin_split_operation(
+        &mut self,
+        operation: SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        operation.ensure_valid()?;
+        if operation.revision != 0
+            || operation.phase != crate::record::SplitOperationPhase::Initiated
+            || operation.attempts != 0
+            || !operation.errors.is_empty()
+        {
+            return Err(split_operation_conflict(
+                &operation,
+                "begin requires a revision-zero initiated record",
+            ));
+        }
+        let key = split_operation_map_key(&operation.tenant, &operation.operation_id);
+        let mut operations = self
+            .split_operations
+            .lock()
+            .expect("in-memory split operation lock poisoned");
+        match operations.get(&key) {
+            Some(current)
+                if current.tenant == operation.tenant
+                    && current.operation_id == operation.operation_id
+                    && current.split == operation.split =>
+            {
+                Ok(current.clone())
+            }
+            Some(_) => Err(split_operation_conflict(
+                &operation,
+                "operation id already names a different split intent",
+            )),
+            None => {
+                operations.insert(key, operation.clone());
+                Ok(operation)
+            }
+        }
+    }
+
+    fn load_split_operation(
+        &self,
+        tenant: &TenantName,
+        operation_id: &str,
+    ) -> Option<SplitOperationRecord> {
+        self.split_operations
+            .lock()
+            .expect("in-memory split operation lock poisoned")
+            .get(&split_operation_map_key(tenant, operation_id))
+            .cloned()
+    }
+
+    fn list_split_operations(&self, tenant: &TenantName) -> Vec<SplitOperationRecord> {
+        self.split_operations
+            .lock()
+            .expect("in-memory split operation lock poisoned")
+            .range((tenant.as_str().to_string(), String::new())..)
+            .take_while(|((name, _), _)| name == tenant.as_str())
+            .map(|(_, operation)| operation.clone())
+            .collect()
+    }
+
+    fn compare_and_swap_split_operation(
+        &mut self,
+        expected_revision: Option<u64>,
+        operation: SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        let key = split_operation_map_key(&operation.tenant, &operation.operation_id);
+        let mut operations = self
+            .split_operations
+            .lock()
+            .expect("in-memory split operation lock poisoned");
+        let current = operations
+            .get(&key)
+            .ok_or_else(|| split_operation_conflict(&operation, "operation does not exist"))?;
+        if current == &operation {
+            return Ok(current.clone());
+        }
+        if expected_revision != Some(current.revision) {
+            return Err(split_operation_conflict(
+                &operation,
+                "expected revision differs from durable revision",
+            ));
+        }
+        operation.ensure_monotone_extension(current)?;
+        operations.insert(key, operation.clone());
+        Ok(operation)
+    }
+}
+
+fn split_operation_map_key(tenant: &TenantName, operation_id: &str) -> (String, String) {
+    (tenant.as_str().to_string(), operation_id.to_string())
+}
+
+fn split_operation_conflict(
+    operation: &SplitOperationRecord,
+    reason: impl Into<String>,
+) -> ControlError {
+    ControlError::SplitOperationConflict {
+        tenant: operation.tenant.clone(),
+        operation_id: operation.operation_id.clone(),
+        reason: reason.into(),
+    }
 }
 
 /// Fold raw compacted-topic records into the latest tenant image.
@@ -269,6 +416,7 @@ pub struct Registry {
     bootstrap: String,
     producer: Producer,
     tenants: Arc<RwLock<BTreeMap<String, TenantRecord>>>,
+    split_operations: Arc<RwLock<BTreeMap<(String, String), SplitOperationRecord>>>,
     applied_rx: watch::Receiver<i64>,
     applied_tx: watch::Sender<i64>,
     write_gate: Mutex<()>,
@@ -291,6 +439,7 @@ impl Registry {
             bootstrap: bootstrap.to_string(),
             producer,
             tenants: Arc::new(RwLock::new(BTreeMap::new())),
+            split_operations: Arc::new(RwLock::new(BTreeMap::new())),
             applied_rx,
             applied_tx,
             write_gate: Mutex::new(()),
@@ -308,6 +457,7 @@ impl Registry {
             self.bootstrap.clone(),
             topic_id,
             Arc::clone(&self.tenants),
+            Arc::clone(&self.split_operations),
             self.applied_tx.clone(),
         );
         self.reader_started = true;
@@ -516,6 +666,101 @@ impl Registry {
         Ok(read_tenants(&self.tenants).values().cloned().collect())
     }
 
+    /// Idempotently persist one immutable split-operation intent.
+    pub async fn begin_split_operation(
+        &mut self,
+        operation: &SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        operation.ensure_valid()?;
+        if operation.revision != 0
+            || operation.phase != crate::record::SplitOperationPhase::Initiated
+            || operation.attempts != 0
+            || !operation.errors.is_empty()
+        {
+            return Err(split_operation_conflict(
+                operation,
+                "begin requires a revision-zero initiated record",
+            ));
+        }
+        let operation = operation.clone();
+        self.mutate_split_operation_after_fencing(
+            &operation.tenant.clone(),
+            &operation.operation_id.clone(),
+            move |current| match current {
+                Some(current)
+                    if current.tenant == operation.tenant
+                        && current.operation_id == operation.operation_id
+                        && current.split == operation.split =>
+                {
+                    Ok(None)
+                }
+                Some(_) => Err(split_operation_conflict(
+                    &operation,
+                    "operation id already names a different split intent",
+                )),
+                None => Ok(Some(operation)),
+            },
+        )
+        .await
+    }
+
+    /// Load one durable split operation after refreshing the committed registry image.
+    pub async fn load_split_operation(
+        &mut self,
+        tenant: &str,
+        operation_id: &str,
+    ) -> Result<Option<SplitOperationRecord>, ControlError> {
+        let tenant = TenantName::try_from(tenant)?;
+        self.refresh().await?;
+        Ok(read_split_operations(&self.split_operations)
+            .get(&split_operation_map_key(&tenant, operation_id))
+            .cloned())
+    }
+
+    /// List one tenant's durable split operations in operation-id order.
+    pub async fn list_split_operations(
+        &mut self,
+        tenant: &str,
+    ) -> Result<Vec<SplitOperationRecord>, ControlError> {
+        let tenant = TenantName::try_from(tenant)?;
+        self.refresh().await?;
+        Ok(read_split_operations(&self.split_operations)
+            .range((tenant.as_str().to_string(), String::new())..)
+            .take_while(|((name, _), _)| name == tenant.as_str())
+            .map(|(_, operation)| operation.clone())
+            .collect())
+    }
+
+    /// Persist one exact monotone split-operation revision with fenced CAS semantics.
+    pub async fn compare_and_swap_split_operation(
+        &mut self,
+        expected_revision: Option<u64>,
+        operation: &SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        let operation = operation.clone();
+        self.mutate_split_operation_after_fencing(
+            &operation.tenant.clone(),
+            &operation.operation_id.clone(),
+            move |current| {
+                let current = current.ok_or_else(|| {
+                    split_operation_conflict(&operation, "operation does not exist")
+                })?;
+                if current == operation {
+                    return Ok(None);
+                }
+                if expected_revision != Some(current.revision) {
+                    return Err(split_operation_conflict(
+                        &operation,
+                        "expected revision differs from durable revision",
+                    ));
+                }
+                operation.ensure_monotone_extension(&current)?;
+                Ok(Some(operation))
+            },
+        )
+        .await
+    }
+
     /// Watch the last offset applied by the registry reader.
     #[must_use]
     pub fn watch(&self) -> watch::Receiver<i64> {
@@ -613,6 +858,48 @@ impl Registry {
         Ok(())
     }
 
+    async fn mutate_split_operation_after_fencing(
+        &mut self,
+        tenant: &TenantName,
+        operation_id: &str,
+        transform: impl FnOnce(
+            Option<SplitOperationRecord>,
+        ) -> Result<Option<SplitOperationRecord>, ControlError>,
+    ) -> Result<SplitOperationRecord, ControlError> {
+        let _gate = self.write_gate.lock().await;
+        self.initialize_transactional_writer().await?;
+        self.refresh().await?;
+        let key = split_operation_map_key(tenant, operation_id);
+        let current = read_split_operations(&self.split_operations)
+            .get(&key)
+            .cloned();
+        let Some(next) = transform(current.clone())? else {
+            return current.ok_or_else(|| ControlError::SplitOperationConflict {
+                tenant: tenant.clone(),
+                operation_id: operation_id.to_string(),
+                reason: "idempotent operation is absent".to_string(),
+            });
+        };
+        next.ensure_valid()?;
+        let transaction = self.begin_registry_transaction().await?;
+        let offset = match self
+            .produce(
+                encode_split_operation_key(&next.tenant, &next.operation_id)?,
+                Some(serde_json::to_vec(&next)?),
+            )
+            .await
+        {
+            Ok(offset) => offset,
+            Err(error) => {
+                abort_registry_transaction(transaction).await?;
+                return Err(error);
+            }
+        };
+        commit_registry_transaction(transaction).await?;
+        self.await_applied(offset).await;
+        Ok(next)
+    }
+
     async fn refresh(&self) -> Result<(), ControlError> {
         let bootstrap_addrs = split_bootstrap(&self.bootstrap);
         let mut admin = AdminClient::connect(&bootstrap_addrs).await?;
@@ -656,6 +943,13 @@ impl Registry {
                 }
                 write_tenants(&self.tenants, |state| {
                     apply_raw_record(
+                        state,
+                        record.key.as_deref().unwrap_or_default(),
+                        record.value.as_deref(),
+                    );
+                });
+                write_split_operations(&self.split_operations, |state| {
+                    apply_raw_split_operation(
                         state,
                         record.key.as_deref().unwrap_or_default(),
                         record.value.as_deref(),
@@ -773,6 +1067,64 @@ fn apply_raw_record(
         _ => {
             let record = merge_monotonic_generation(tenants.get(&name), record);
             tenants.insert(name, record);
+        }
+    }
+}
+
+const SPLIT_OPERATION_KEY_PREFIX: &[u8] = b"\0gres-split-operation\0";
+
+fn encode_split_operation_key(
+    tenant: &TenantName,
+    operation_id: &str,
+) -> Result<Vec<u8>, ControlError> {
+    if operation_id.is_empty() {
+        return Err(ControlError::invalid_field(
+            "split_operation.operation_id",
+            "must not be empty",
+        ));
+    }
+    let mut key = SPLIT_OPERATION_KEY_PREFIX.to_vec();
+    key.extend(serde_json::to_vec(&(tenant.as_str(), operation_id))?);
+    Ok(key)
+}
+
+fn decode_split_operation_key(bytes: &[u8]) -> Option<(TenantName, String)> {
+    let suffix = bytes.strip_prefix(SPLIT_OPERATION_KEY_PREFIX)?;
+    let (tenant, operation_id): (String, String) = serde_json::from_slice(suffix).ok()?;
+    if operation_id.is_empty() {
+        return None;
+    }
+    Some((TenantName::try_from(tenant.as_str()).ok()?, operation_id))
+}
+
+fn apply_raw_split_operation(
+    operations: &mut BTreeMap<(String, String), SplitOperationRecord>,
+    key_bytes: &[u8],
+    value_bytes: Option<&[u8]>,
+) {
+    let Some((tenant, operation_id)) = decode_split_operation_key(key_bytes) else {
+        return;
+    };
+    let key = split_operation_map_key(&tenant, &operation_id);
+    let Some(value_bytes) = value_bytes else {
+        operations.remove(&key);
+        return;
+    };
+    let Ok(operation) = serde_json::from_slice::<SplitOperationRecord>(value_bytes) else {
+        return;
+    };
+    if operation.tenant != tenant
+        || operation.operation_id != operation_id
+        || operation.ensure_valid().is_err()
+    {
+        return;
+    }
+    match operations.get(&key) {
+        Some(current) if current.revision > operation.revision => {}
+        Some(current) if current.revision == operation.revision && current != &operation => {}
+        Some(current) if operation.ensure_monotone_extension(current).is_err() => {}
+        _ => {
+            operations.insert(key, operation);
         }
     }
 }
@@ -913,6 +1265,7 @@ fn spawn_reader(
     bootstrap: String,
     topic_id: WireUuid,
     tenants: Arc<RwLock<BTreeMap<String, TenantRecord>>>,
+    split_operations: Arc<RwLock<BTreeMap<(String, String), SplitOperationRecord>>>,
     applied_tx: watch::Sender<i64>,
 ) {
     tokio::spawn(async move {
@@ -958,6 +1311,13 @@ fn spawn_reader(
                             }
                             write_tenants(&tenants, |state| {
                                 apply_raw_record(
+                                    state,
+                                    record.key.as_deref().unwrap_or_default(),
+                                    record.value.as_deref(),
+                                );
+                            });
+                            write_split_operations(&split_operations, |state| {
+                                apply_raw_split_operation(
                                     state,
                                     record.key.as_deref().unwrap_or_default(),
                                     record.value.as_deref(),
@@ -1017,6 +1377,24 @@ fn write_tenants(
     apply(&mut guard);
 }
 
+fn read_split_operations(
+    operations: &RwLock<BTreeMap<(String, String), SplitOperationRecord>>,
+) -> std::sync::RwLockReadGuard<'_, BTreeMap<(String, String), SplitOperationRecord>> {
+    operations
+        .read()
+        .unwrap_or_else(std::sync::PoisonError::into_inner)
+}
+
+fn write_split_operations(
+    operations: &RwLock<BTreeMap<(String, String), SplitOperationRecord>>,
+    apply: impl FnOnce(&mut BTreeMap<(String, String), SplitOperationRecord>),
+) {
+    let mut guard = operations
+        .write()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    apply(&mut guard);
+}
+
 #[cfg(test)]
 mod tests {
     use assert2::assert;
@@ -1026,7 +1404,8 @@ mod tests {
 
     use super::*;
     use crate::record::{
-        RangeBoundary, SqlUser, TenantId, TenantState, decode_tenant_config_record,
+        RangeBoundary, SplitOperationPhase, SqlUser, TenantId, TenantState,
+        decode_tenant_config_record,
     };
 
     fn tenant_name(name: &str) -> TenantName {
@@ -1321,6 +1700,73 @@ mod tests {
         broker.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn kafka_split_operation_journal_survives_reconnect_and_retries_idempotently() {
+        let directory = TempDir::new().expect("broker tempdir");
+        let broker = Broker::start(BrokerConfig::for_tests(directory.path().to_path_buf()))
+            .await
+            .expect("broker start");
+        let bootstrap = broker.listen_addr().to_string();
+        let operation = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-1",
+            split_layout(RangeBoundary::table_start(100)),
+        )
+        .expect("operation");
+
+        let mut first = Registry::connect(&bootstrap)
+            .await
+            .expect("registry connect");
+        first.ensure_topic(1).await.expect("registry topic");
+        first
+            .begin_split_operation(&operation)
+            .await
+            .expect("begin operation");
+        first
+            .begin_split_operation(&operation)
+            .await
+            .expect("idempotent begin");
+        drop(first);
+
+        let mut reopened = Registry::connect(&bootstrap)
+            .await
+            .expect("reconnect registry");
+        reopened
+            .ensure_topic(1)
+            .await
+            .expect("existing registry topic");
+        let loaded = reopened
+            .load_split_operation("tenant-a", "split-1")
+            .await
+            .expect("load operation")
+            .expect("operation survives reconnect");
+        assert!(loaded == operation);
+        let running = loaded
+            .advance(SplitOperationPhase::Running, 1, None)
+            .expect("running");
+        reopened
+            .compare_and_swap_split_operation(Some(0), &running)
+            .await
+            .expect("update");
+        reopened
+            .compare_and_swap_split_operation(Some(0), &running)
+            .await
+            .expect("idempotent crash retry");
+        assert!(reopened.list_split_operations("tenant-a").await.unwrap() == vec![running]);
+
+        let conflicting = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-1",
+            split_layout(RangeBoundary::table_start(200)),
+        )
+        .expect("conflicting operation");
+        assert!(matches!(
+            reopened.begin_split_operation(&conflicting).await,
+            Err(ControlError::SplitOperationConflict { .. })
+        ));
+        broker.shutdown().await;
+    }
+
     #[test]
     fn in_memory_store_versioned_split_is_idempotent() {
         let mut store = InMemoryRegistryStore::new();
@@ -1434,6 +1880,165 @@ mod tests {
         assert!(first.ranges[0].range_id == 1);
         assert!(first.ranges[0].endpoint == "tenant-a-r1-merged.gres.svc:7432");
         assert!(first.ranges[0].wal_generation == 9);
+    }
+
+    #[test]
+    fn split_operation_begin_is_idempotent_and_rejects_conflicting_intent() {
+        let mut store = InMemoryRegistryStore::new();
+        let operation = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-1",
+            split_layout(RangeBoundary::table_start(100)),
+        )
+        .expect("valid operation");
+
+        let first = store
+            .begin_split_operation(operation.clone())
+            .expect("begin operation");
+        let retry = store
+            .begin_split_operation(operation.clone())
+            .expect("idempotent retry");
+        assert!(first == retry);
+        assert!(store.load_split_operation(&tenant_name("tenant-a"), "split-1") == Some(operation));
+
+        let conflicting = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-1",
+            split_layout(RangeBoundary::table_start(200)),
+        )
+        .expect("valid conflicting operation");
+        assert!(matches!(
+            store.begin_split_operation(conflicting),
+            Err(ControlError::SplitOperationConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn split_operation_cas_enforces_monotone_progress_and_crash_retry() {
+        let mut store = InMemoryRegistryStore::new();
+        let operation = store
+            .begin_split_operation(
+                SplitOperationRecord::new(
+                    tenant_name("tenant-a"),
+                    "split-1",
+                    split_layout(RangeBoundary::table_start(100)),
+                )
+                .expect("valid operation"),
+            )
+            .expect("begin operation");
+        let running = operation
+            .advance(SplitOperationPhase::Running, 1, None)
+            .expect("running update");
+        let running = store
+            .compare_and_swap_split_operation(Some(0), running.clone())
+            .expect("first attempt");
+        let retry = store
+            .compare_and_swap_split_operation(Some(0), running)
+            .expect("crash retry is idempotent");
+        assert!(retry.revision == 1);
+
+        let failed = retry
+            .advance(
+                SplitOperationPhase::Failed,
+                1,
+                Some("compute died after checkpoint".to_string()),
+            )
+            .expect("record failure");
+        let failed = store
+            .compare_and_swap_split_operation(Some(1), failed)
+            .expect("persist failure");
+        let completed = failed
+            .advance(SplitOperationPhase::Completed, 2, None)
+            .expect("complete retry");
+        store
+            .compare_and_swap_split_operation(Some(2), completed.clone())
+            .expect("persist completion");
+
+        let regression = SplitOperationRecord {
+            revision: 4,
+            phase: SplitOperationPhase::Running,
+            ..completed
+        };
+        assert!(matches!(
+            store.compare_and_swap_split_operation(Some(3), regression),
+            Err(ControlError::SplitOperationConflict { .. })
+        ));
+    }
+
+    #[test]
+    fn split_operation_list_is_tenant_scoped_and_ordered() {
+        let mut store = InMemoryRegistryStore::new();
+        for (tenant, operation_id) in [
+            ("tenant-a", "split-2"),
+            ("tenant-b", "split-0"),
+            ("tenant-a", "split-1"),
+        ] {
+            store
+                .begin_split_operation(
+                    SplitOperationRecord::new(
+                        tenant_name(tenant),
+                        operation_id,
+                        split_layout(RangeBoundary::table_start(100)),
+                    )
+                    .expect("valid operation"),
+                )
+                .expect("begin operation");
+        }
+
+        let operations = store.list_split_operations(&tenant_name("tenant-a"));
+        assert!(
+            operations
+                .iter()
+                .map(|operation| operation.operation_id.as_str())
+                .collect::<Vec<_>>()
+                == ["split-1", "split-2"]
+        );
+    }
+
+    #[test]
+    fn split_operation_record_rejects_impossible_attempt_and_error_shapes() {
+        let mut invalid_split = split_layout(RangeBoundary::table_start(100));
+        invalid_split.right.range_id = invalid_split.left.range_id;
+        assert!(
+            SplitOperationRecord::new(tenant_name("tenant-a"), "invalid-split", invalid_split)
+                .is_err()
+        );
+        let operation = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-1",
+            split_layout(RangeBoundary::table_start(100)),
+        )
+        .expect("operation");
+
+        assert!(
+            operation
+                .advance(SplitOperationPhase::Running, 0, None)
+                .is_err()
+        );
+        assert!(
+            operation
+                .advance(SplitOperationPhase::Failed, 1, None)
+                .is_err()
+        );
+        let mut malformed = operation;
+        malformed
+            .errors
+            .push("failure before any attempt".to_string());
+        assert!(malformed.ensure_valid().is_err());
+
+        let completed = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-2",
+            split_layout(RangeBoundary::table_start(100)),
+        )
+        .unwrap()
+        .advance(SplitOperationPhase::Completed, 1, None)
+        .unwrap();
+        assert!(
+            completed
+                .advance(SplitOperationPhase::Completed, 2, None)
+                .is_err()
+        );
     }
 
     #[test]

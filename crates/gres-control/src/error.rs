@@ -84,6 +84,16 @@ pub enum ControlError {
         /// Human-readable conflict reason.
         reason: String,
     },
+    /// A split-operation begin or CAS update conflicts with durable history.
+    #[error("split operation conflict for tenant {tenant} operation {operation_id}: {reason}")]
+    SplitOperationConflict {
+        /// Tenant that owns the operation.
+        tenant: crate::record::TenantName,
+        /// Stable operation identity.
+        operation_id: String,
+        /// Conflict description.
+        reason: String,
+    },
 }
 
 impl ControlError {
