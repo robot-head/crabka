@@ -2769,6 +2769,7 @@ dependencies = [
  "rustls",
  "rustls-pemfile",
  "rustls-rustcrypto",
+ "serde",
  "serde_json",
  "sha2 0.11.0",
  "tempfile",
