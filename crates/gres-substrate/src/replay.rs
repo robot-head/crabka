@@ -163,7 +163,7 @@ fn replay_committed_frames_from_with_filter(
 
         let filtered_ops;
         let ops = match filter {
-            Some(filter) => {
+            Some(ref filter) => {
                 filtered_ops = filter_write_ops(&frame.ops, filter);
                 filtered_ops.as_slice()
             }
@@ -180,7 +180,7 @@ fn replay_committed_frames_from_with_filter(
     ))
 }
 
-fn filter_write_ops(ops: &[WriteOp], filter: CheckpointFilter) -> Vec<WriteOp> {
+fn filter_write_ops(ops: &[WriteOp], filter: &CheckpointFilter) -> Vec<WriteOp> {
     ops.iter()
         .filter(|op| match op {
             WriteOp::Put { key, .. }

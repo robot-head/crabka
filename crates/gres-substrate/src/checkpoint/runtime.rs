@@ -408,7 +408,7 @@ async fn restore_latest_with_filter(
             &manifest,
             current_generation,
             log_start,
-            filter,
+            filter.clone(),
         )
         .await
         {
@@ -556,7 +556,7 @@ pub async fn restore_latest_filtered_and_replay_tail(
         kv,
         tail.current_generation,
         tail.log_start,
-        filter,
+        filter.clone(),
     )
     .await?;
     let (replay_start, expected) = restored_from.map_or((0, 0), |restored| {
@@ -720,7 +720,7 @@ pub async fn restore_filtered_from_manifest_and_replay_tail(
         &manifest,
         tail.current_generation,
         tail.log_start,
-        Some(filter),
+        Some(filter.clone()),
     )
     .await?;
     let replay = replay_committed_frames_from_filtered(
@@ -1203,9 +1203,11 @@ mod tests {
         let base = MemKv::default();
         let left_key = key::row_key(7, 10);
         let right_key = key::row_key(7, 30);
+        let clog_key = key::clog_key(9);
         base.put(left_key.clone(), b"left".to_vec()).expect("left");
         base.put(right_key.clone(), b"right".to_vec())
             .expect("right");
+        base.put(clog_key.clone(), vec![1]).expect("clog");
         let manifest = write_checkpoint(
             objects.as_ref(),
             "t",
@@ -1231,12 +1233,14 @@ mod tests {
             (
                 &left,
                 CheckpointFilter::new(RangeKey::new(TableId::new(7), 0), Some(split))
-                    .expect("left filter"),
+                    .expect("left filter")
+                    .with_structural_ownership(true),
             ),
             (
                 &right,
                 CheckpointFilter::new(split, Some(RangeKey::new(TableId::new(8), 0)))
-                    .expect("right filter"),
+                    .expect("right filter")
+                    .with_structural_ownership(false),
             ),
         ] {
             restore_filtered_from_manifest_and_replay_tail(
@@ -1272,7 +1276,8 @@ mod tests {
                 RangeKey::new(TableId::new(7), 0),
                 Some(RangeKey::new(TableId::new(8), 0)),
             )
-            .expect("control filter"),
+            .expect("control filter")
+            .with_structural_ownership(true),
         )
         .await
         .expect("control selected restore");
@@ -1281,6 +1286,8 @@ mod tests {
         assert!(left.get(&right_key).expect("left excludes right").is_none());
         assert!(right.get(&left_key).expect("right excludes left").is_none());
         assert!(right.get(&right_key).expect("right get") == Some(b"right".to_vec()));
+        assert!(left.get(&clog_key).expect("left owns clog").is_some());
+        assert!(right.get(&clog_key).expect("right excludes clog").is_none());
         let left_pairs = left.scan_range(&[], &[u8::MAX]).expect("left scan");
         let right_pairs = right.scan_range(&[], &[u8::MAX]).expect("right scan");
         let control_pairs = control.scan_range(&[], &[u8::MAX]).expect("control scan");

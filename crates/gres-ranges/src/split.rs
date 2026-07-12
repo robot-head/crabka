@@ -464,6 +464,18 @@ impl SplitState {
     fn is_conversion(&self) -> bool {
         self.operation == SplitOperation::ConvertTable
     }
+
+    /// Derive the only valid pair of transfer requests from durable split state.
+    pub fn transfer_requests(&self) -> Result<[crate::TableTransferRequest; 2], SplitError> {
+        let right = self
+            .right
+            .as_ref()
+            .ok_or(SplitError::InvalidSuccessorPartition)?;
+        Ok([
+            crate::TableTransferRequest::from_successor(&self.left, self.predecessor_generation),
+            crate::TableTransferRequest::from_successor(right, self.predecessor_generation),
+        ])
+    }
 }
 
 /// Durable split-state store seam.

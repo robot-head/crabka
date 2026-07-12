@@ -1,11 +1,39 @@
 //! Dependency-neutral operations required to transfer one hosted range.
 
-use std::{any::Any, sync::Arc};
+use std::{any::Any, collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 use crabka_pgexec::SqlEngine;
 
-use crate::{CheckpointManifest, RangeId, RangeSpec};
+use crate::{CheckpointManifest, RangeId, RangeSpec, SplitState, TableId};
+
+/// Catalog-validated physical-to-logical translation used by successor restore.
+#[derive(Debug, Clone)]
+pub struct ValidatedSplitTransferPlan {
+    state: SplitState,
+    physical_to_logical: BTreeMap<TableId, TableId>,
+}
+
+impl ValidatedSplitTransferPlan {
+    pub(crate) fn new(state: SplitState, physical_to_logical: BTreeMap<TableId, TableId>) -> Self {
+        Self {
+            state,
+            physical_to_logical,
+        }
+    }
+
+    /// Validated split state whose descriptors own the logical intervals.
+    #[must_use]
+    pub const fn state(&self) -> &SplitState {
+        &self.state
+    }
+
+    /// Complete catalog mapping for physical tables hosted by the predecessor.
+    #[must_use]
+    pub const fn physical_to_logical(&self) -> &BTreeMap<TableId, TableId> {
+        &self.physical_to_logical
+    }
+}
 
 /// Exact key interval staged into one successor.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -20,6 +48,53 @@ pub struct TableTransferRequest {
     pub wal_generation: u64,
     /// Source generation fenced by this transfer.
     pub predecessor_generation: u64,
+    _sealed: (),
+}
+
+impl TableTransferRequest {
+    pub(crate) fn from_successor(
+        successor: &crate::SuccessorDescriptor,
+        predecessor_generation: u64,
+    ) -> Self {
+        Self {
+            target_range: successor.range_id,
+            interval: successor.interval.clone(),
+            endpoint: successor.endpoint.clone(),
+            wal_generation: successor.wal_generation,
+            predecessor_generation,
+            _sealed: (),
+        }
+    }
+
+    /// Target range identity.
+    #[must_use]
+    pub const fn target_range(&self) -> RangeId {
+        self.target_range
+    }
+
+    /// Exact validated storage interval.
+    #[must_use]
+    pub const fn interval(&self) -> &RangeSpec {
+        &self.interval
+    }
+
+    /// Authenticated advertised endpoint.
+    #[must_use]
+    pub fn endpoint(&self) -> &str {
+        &self.endpoint
+    }
+
+    /// Fenced successor generation.
+    #[must_use]
+    pub const fn wal_generation(&self) -> u64 {
+        self.wal_generation
+    }
+
+    /// Retiring predecessor generation.
+    #[must_use]
+    pub const fn predecessor_generation(&self) -> u64 {
+        self.predecessor_generation
+    }
 }
 
 /// A restored successor that has not been published into a serving range map.
@@ -42,8 +117,8 @@ pub struct StagedRangeSuccessor {
 /// Both staged halves produced from one checkpoint and one bounded tail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedRangeSuccessors {
-    /// Staged left half, or `None` when range zero is reused in place.
-    pub left: Option<StagedRangeSuccessor>,
+    /// Staged left half. Range zero is replaced, never reused in place.
+    pub left: StagedRangeSuccessor,
     /// Staged right half.
     pub right: StagedRangeSuccessor,
 }
@@ -67,8 +142,8 @@ pub struct ClaimedStagedSuccessor {
 
 /// Runtime resources for both successors, claimed as one publication unit.
 pub struct ClaimedStagedSuccessors {
-    /// Claimed left half, or `None` when range zero is reused in place.
-    pub left: Option<ClaimedStagedSuccessor>,
+    /// Claimed left half. Range zero is replaced, never reused in place.
+    pub left: ClaimedStagedSuccessor,
     /// Claimed right half.
     pub right: ClaimedStagedSuccessor,
 }
@@ -134,6 +209,14 @@ pub enum RangeTransferError {
 /// foundation seam.
 #[async_trait]
 pub trait RangeTransferCapability: Send + Sync {
+    /// Validate placement descriptors before the source writer is paused.
+    fn validate_successors(
+        &self,
+        _plan: &ValidatedSplitTransferPlan,
+    ) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
     /// Force a durable checkpoint for one hosted source range.
     async fn force_checkpoint(
         &self,
@@ -175,7 +258,7 @@ pub trait RangeTransferCapability: Send + Sync {
     /// Stage both successor intervals from the same immutable checkpoint and bounded tail.
     async fn stage_successors(
         &self,
-        requests: [TableTransferRequest; 2],
+        plan: &ValidatedSplitTransferPlan,
         checkpoint: &CheckpointManifest,
         tail: &[CommittedTailRecord],
         barrier: RangeTransferBarrier,
