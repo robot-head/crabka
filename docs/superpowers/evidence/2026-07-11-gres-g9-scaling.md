@@ -69,3 +69,5 @@ The follow-up robust run at `target/gres-scaling-observed-final/range-scaling.js
 This run preserved every threshold: range-local `3.2110x`, sharded `3.3473x`, range-4 envelope efficiency `0.8368`, and all JSON gates true.
 
 Recovery and fencing review tests additionally cover the prewrite-before-primary-ack crash window, rN-only recovery through an authenticated remote primary, forged primary identity/terminal decisions, and conditional descriptor CAS no-op races.
+
+Post-remediation broad verification passed 341 pgexec library tests, 36 pgexec transaction tests, 114 gres-ranges library tests, 21 crossrange tests, 33 multirange tests, the targeted CLI row-boundary parser test, formatting/diff checks, and the static scaling mutation suite. Gateway-local retained its single known invalid-socket fixture failure (10 passed), and strict clippy retained its known pgwire semicolon lint blocker; neither file is part of this remediation.
