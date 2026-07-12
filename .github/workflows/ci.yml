@@ -291,6 +291,7 @@ jobs:
               - 'scripts/gres-range-scaling.sh'
               - 'scripts/tests/gres-range-scaling-ci.sh'
               - 'scripts/gres-sharded-conformance.sh'
+              - 'scripts/tests/gres_sharded_conformance_ci.py'
 
   rust:
     needs: changes
@@ -543,6 +544,20 @@ jobs:
     if: ${{ needs.changes.outputs.gres == 'true' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
+    env:
+      CRABKA_GRES_SHARDED_CONFORMANCE_MODE: live
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_PASSWORD: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 12
     steps:
       - uses: actions/checkout@v7
       - uses: dtolnay/rust-toolchain@stable
@@ -551,6 +566,10 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: gres-sharded-conformance
+      - name: Install PostgreSQL client
+        run: sudo apt-get update && sudo apt-get install -y postgresql-client
+      - name: Validate live G-8 gate structure
+        run: python3 scripts/tests/gres_sharded_conformance_ci.py
       - name: G-8 sharded conformance gate
         run: ./scripts/gres-sharded-conformance.sh
       - name: Upload G-8 sharded conformance artifacts

@@ -8,15 +8,20 @@ usage() {
     cat <<'EOF'
 Usage: scripts/gres-sharded-conformance.sh [--help]
 
-Runs the deterministic G-8 sharded conformance tests that do not require a
-running broker, PostgreSQL oracle, or external services. The gate fails loudly on
-any regression and writes a machine-readable report under the artifact directory.
+Runs the deterministic G-8 sharded conformance tests. In live mode it also runs
+the primary PostgreSQL oracle corpus against SHARDED tables on a two-range Gres
+tenant. The gate fails loudly on any regression and writes machine-readable
+reports under the artifact directory.
 
 Environment:
   CRABKA_GRES_SHARDED_CONFORMANCE_ARTIFACT_DIR=dir
       Artifact directory (default: target/gres-sharded-conformance-artifacts).
   CRABKA_GRES_SHARDED_CONFORMANCE_EXTRA_ARGS=args
       Extra arguments appended after `--` for each cargo test invocation.
+  CRABKA_GRES_SHARDED_CONFORMANCE_MODE=static|live
+      Run deterministic tests only (default), or also run the live corpus gate.
+  CRABKA_GRES_SHARDED_ORACLE_URL=url
+      PostgreSQL admin connection used to recreate the live oracle database.
 EOF
 }
 
@@ -29,6 +34,148 @@ esac
 readonly ARTIFACT_DIR="${CRABKA_GRES_SHARDED_CONFORMANCE_ARTIFACT_DIR:-target/gres-sharded-conformance-artifacts}"
 readonly RESULTS_TSV="${ARTIFACT_DIR}/results.tsv"
 readonly EXTRA_ARGS="${CRABKA_GRES_SHARDED_CONFORMANCE_EXTRA_ARGS:-}"
+readonly MODE="${CRABKA_GRES_SHARDED_CONFORMANCE_MODE:-static}"
+readonly ORACLE_ADMIN_URL="${CRABKA_GRES_SHARDED_ORACLE_URL:-host=127.0.0.1 port=5432 user=postgres dbname=postgres password=postgres}"
+readonly CLUSTER_ID="00000000-0000-0000-0000-000000000001"
+BROKER_PID=""
+GRES_PID=""
+BROKER_PORT=""
+CONTROLLER_PORT=""
+GRES_PORT=""
+
+cleanup() {
+    local status=$?
+    kill "${GRES_PID:-}" 2>/dev/null || true
+    wait "${GRES_PID:-}" 2>/dev/null || true
+    kill "${BROKER_PID:-}" 2>/dev/null || true
+    wait "${BROKER_PID:-}" 2>/dev/null || true
+    return "$status"
+}
+trap cleanup EXIT
+
+choose_ports() {
+    python3 - <<'PY'
+import socket
+sockets = []
+try:
+    for _ in range(3):
+        sock = socket.socket()
+        sock.bind(("127.0.0.1", 0))
+        sockets.append(sock)
+    for sock in sockets:
+        print(sock.getsockname()[1])
+finally:
+    for sock in sockets:
+        sock.close()
+PY
+}
+
+wait_for_tcp() {
+    local port="$1"
+    local label="$2"
+    for _ in $(seq 1 100); do
+        if python3 - "$port" <<'PY' >/dev/null 2>&1
+import socket, sys
+with socket.create_connection(("127.0.0.1", int(sys.argv[1])), timeout=0.2):
+    pass
+PY
+        then return 0; fi
+        sleep 0.2
+    done
+    echo "FAIL: ${label} did not open port ${port}" >&2
+    return 1
+}
+
+run_live_corpus() {
+    command -v psql >/dev/null 2>&1 || { echo "FAIL: psql is required for live mode" >&2; return 1; }
+    if [ "${CRABKA_GRES_SKIP_BUILD:-0}" != "1" ]; then
+        cargo build --locked \
+            -p crabka-cli --bin crabka \
+            -p crabka-broker --bin crabka-broker \
+            -p crabka-gres --bin crabka-gres \
+            -p crabka-gres-conformance --bin crabka-gres-conformance \
+            >"${ARTIFACT_DIR}/build.log" 2>&1
+    fi
+    mapfile -t ports < <(choose_ports)
+    BROKER_PORT="${ports[0]}"
+    CONTROLLER_PORT="${ports[1]}"
+    GRES_PORT="${ports[2]}"
+
+    ./target/debug/crabka format \
+        --log-dir "${ARTIFACT_DIR}/broker-data" --cluster-id "$CLUSTER_ID" \
+        --standalone --node-id 1 --controller-listener "127.0.0.1:${CONTROLLER_PORT}" \
+        >"${ARTIFACT_DIR}/format.log" 2>&1
+    cat >"${ARTIFACT_DIR}/broker.toml" <<EOF
+broker_id = 1
+log_dir = "${ARTIFACT_DIR}/broker-data"
+cluster_id = "${CLUSTER_ID}"
+inter_broker_listener_name = "plain"
+[[listeners]]
+name = "plain"
+bind_addr = "127.0.0.1:${BROKER_PORT}"
+advertised = "127.0.0.1:${BROKER_PORT}"
+protocol = "Plaintext"
+[authorization]
+type = "simple"
+super_users = ["ANONYMOUS"]
+EOF
+    ./target/debug/crabka-broker --log-dir "${ARTIFACT_DIR}/broker-data" \
+        --cluster-id "$CLUSTER_ID" --broker-id 1 --config-file "${ARTIFACT_DIR}/broker.toml" \
+        >"${ARTIFACT_DIR}/broker.log" 2>&1 &
+    BROKER_PID=$!
+    wait_for_tcp "$BROKER_PORT" broker
+
+    printf '%s\n' 'corpus-secret' >"${ARTIFACT_DIR}/tenant.password"
+    ./target/debug/crabka gres create-tenant --bootstrap "127.0.0.1:${BROKER_PORT}" \
+        --name sharded-corpus --user corpus --password-file "${ARTIFACT_DIR}/tenant.password" \
+        --ranges 0,0:2 >"${ARTIFACT_DIR}/create-tenant.log" 2>&1
+    ./target/debug/crabka-gres --listen "127.0.0.1:${GRES_PORT}" \
+        --substrate-bootstrap "127.0.0.1:${BROKER_PORT}" --tenant sharded-corpus \
+        --ranges 0,0:2 --auth trust >"${ARTIFACT_DIR}/gres.log" 2>&1 &
+    GRES_PID=$!
+    for _ in $(seq 1 120); do
+        if psql "host=127.0.0.1 port=${GRES_PORT} user=corpus dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null 2>&1; then break; fi
+        kill -0 "$GRES_PID" 2>/dev/null || { echo "FAIL: Gres exited before readiness" >&2; return 1; }
+        sleep 0.25
+    done
+    psql "host=127.0.0.1 port=${GRES_PORT} user=corpus dbname=crab sslmode=prefer" -tAc 'SELECT 1' >/dev/null
+
+    psql "$ORACLE_ADMIN_URL" -v ON_ERROR_STOP=1 -c 'DROP DATABASE IF EXISTS gres_sharded_oracle WITH (FORCE)' \
+        >"${ARTIFACT_DIR}/oracle-setup.log" 2>&1
+    psql "$ORACLE_ADMIN_URL" -v ON_ERROR_STOP=1 -c 'CREATE DATABASE gres_sharded_oracle' \
+        >>"${ARTIFACT_DIR}/oracle-setup.log" 2>&1
+    local oracle_url="${ORACLE_ADMIN_URL/dbname=postgres/dbname=gres_sharded_oracle}"
+    ./target/debug/crabka-gres-conformance \
+        --oracle-url "$oracle_url" \
+        --subject-url "host=127.0.0.1 port=${GRES_PORT} user=corpus dbname=crab" \
+        --subject-sharded-ddl \
+        --corpus crates/gres-conformance/corpus \
+        --baseline crates/gres-conformance/baseline.json \
+        --out "${ARTIFACT_DIR}/parity-sharded.json" \
+        --summary "${ARTIFACT_DIR}/parity-sharded.md" \
+        >"${ARTIFACT_DIR}/conformance.log" 2>&1
+
+    local range0 range1
+    range0=$(grep -c 'timestamp_primary_committed primary_range=0' "${ARTIFACT_DIR}/gres.log" || true)
+    range1=$(grep -c 'timestamp_primary_committed primary_range=1' "${ARTIFACT_DIR}/gres.log" || true)
+    if [ "$range0" -eq 0 ] || [ "$range1" -eq 0 ]; then
+        echo "FAIL: corpus writes did not prove both primary owners (r0=${range0}, r1=${range1})" >&2
+        return 1
+    fi
+    python3 - "$ARTIFACT_DIR" "$range0" "$range1" <<'PY'
+import json, pathlib, sys
+artifact = pathlib.Path(sys.argv[1])
+payload = {
+    "mode": "live",
+    "range_count": 2,
+    "subject_ddl": "sharded",
+    "baseline": "crates/gres-conformance/baseline.json",
+    "observed_primary_ownership": {"0": int(sys.argv[2]), "1": int(sys.argv[3])},
+    "passed": True,
+}
+(artifact / "corpus-through-sharding.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+PY
+}
 
 log() {
     printf 'gres-sharded-conformance: %s\n' "$*"
@@ -98,6 +245,9 @@ payload = {
     "tests": tests,
     "passed": overall_status == "passed",
 }
+runtime_path = artifact_dir / "corpus-through-sharding.json"
+if runtime_path.exists():
+    payload["corpus_through_sharding"] = json.loads(runtime_path.read_text(encoding="utf-8"))
 (artifact_dir / "sharded-conformance.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
 PY
 }
@@ -126,6 +276,10 @@ run_gate() {
 
 command -v python3 >/dev/null 2>&1 || { echo "FAIL: python3 is required" >&2; exit 1; }
 command -v cargo >/dev/null 2>&1 || { echo "FAIL: cargo is required" >&2; exit 1; }
+case "$MODE" in
+    static|live) ;;
+    *) echo "FAIL: CRABKA_GRES_SHARDED_CONFORMANCE_MODE must be static or live" >&2; exit 2 ;;
+esac
 
 rm -rf "$ARTIFACT_DIR"
 mkdir -p "$ARTIFACT_DIR"
@@ -140,6 +294,11 @@ run_gate pgexec-global-decisions crabka-pgexec transactions \
     cargo test -p crabka-pgexec --test transactions || status=1
 run_gate pgexec-sharded-seams crabka-pgexec lib \
     cargo test -p crabka-pgexec create_table_sharded_persists_catalog_metadata || status=1
+
+if [ "$status" -eq 0 ] && [ "$MODE" = "live" ]; then
+    log "running primary PostgreSQL corpus through a live two-range SHARDED tenant"
+    run_live_corpus || status=1
+fi
 
 if [ "$status" -eq 0 ]; then
     write_report passed
