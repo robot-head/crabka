@@ -77,6 +77,8 @@ pub enum RangeRequest {
     TimestampResolve(TimestampResolveReq),
     /// Idempotently settle participant intents from a durable primary descriptor.
     TimestampRecover(TimestampRecoverReq),
+    /// Authenticate and settle an orphan through its authoritative primary.
+    TimestampPrimaryRecover(TimestampPrimaryRecoverReq),
 }
 
 /// Response sent between range computes.
@@ -120,6 +122,8 @@ pub enum RangeResponse {
     ResolveTxn(ResolveTxnResp),
     /// Timestamp participant operation completed.
     TimestampParticipantDone,
+    /// Effective decision returned by the authenticated primary.
+    TimestampPrimaryDecision { decision: WireTimestampDecision },
     /// Range compute rejected the request.
     Error {
         error: WireErrorKind,
@@ -479,6 +483,12 @@ pub struct TimestampRecoverReq {
     pub identity: WireTimestampIdentity,
     pub decision: WireTimestampDecision,
     pub operations: Vec<WireTimestampOperation>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimestampPrimaryRecoverReq {
+    pub primary_range: RangeId,
+    pub identity: WireTimestampIdentity,
 }
 
 /// Serializable projection pushdown for range-scan RPCs.
@@ -1431,6 +1441,11 @@ mod tests {
                     message: "wrong rpc".into(),
                 },
                 RangeRequest::Txn(_) => RangeResponse::Txn(TxnResp::Prepared),
+                RangeRequest::TimestampPrimaryRecover(_) => {
+                    RangeResponse::TimestampPrimaryDecision {
+                        decision: WireTimestampDecision::Aborted,
+                    }
+                }
             }
         }
     }

@@ -992,15 +992,34 @@ fn recover_durable_timestamp_transactions(
                             participants.sort_unstable();
                             participants.dedup();
                             let primary_range = RangeId::new(identity.primary_range);
-                            let Some(primary) = engines.get(&primary_range) else {
-                                return Err(TenantError::TimestampRecovery(format!(
-                                    "timestamp primary r{primary_range} is unreachable for orphan {}",
-                                    identity.start_ts.get()
-                                )));
+                            let remote_primary_decision;
+                            let (primary, primary_decision) = if let Some(primary) = engines.get(&primary_range) {
+                                let decision = primary.primary_timestamp_decision(identity.start_ts)
+                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                                (Some(primary), decision)
+                            } else {
+                                remote_primary_decision = recover_remote_timestamp_primary(remote.as_ref(), identity).await
+                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                                (None, remote_primary_decision)
                             };
-                            let primary_decision = primary.primary_timestamp_decision(identity.start_ts)
-                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
                             if primary_decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+                                if primary.is_none() {
+                                    for range_id in participants {
+                                        let participant = engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
+                                            format!("terminal participant r{range_id} is not hosted")
+                                        ))?;
+                                        if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
+                                            participant.abort_timestamp_transaction_intents(identity.start_ts).await
+                                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                                        } else {
+                                            return Err(TenantError::TimestampRecovery(
+                                                "committed orphan lacks acknowledged primary operations".into(),
+                                            ));
+                                        }
+                                    }
+                                    continue;
+                                }
+                                let primary = primary.expect("checked hosted primary");
                                 let descriptor = primary.timestamp_transaction_descriptors()
                                     .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?
                                     .into_iter().find(|descriptor| descriptor.start_ts == identity.start_ts)
@@ -1023,6 +1042,7 @@ fn recover_durable_timestamp_transactions(
                                 }
                                 continue;
                             }
+                            let primary = primary.expect("pending decision requires hosted primary");
                             let descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(
                                 identity.start_ts, identity.global_xid,
                                 participants.iter().map(|range| range.as_u32()).collect(),
@@ -1045,6 +1065,57 @@ fn recover_durable_timestamp_transactions(
             .join()
             .map_err(|_| TenantError::TimestampRecovery("recovery worker panicked".into()))?
     })
+}
+
+async fn recover_remote_timestamp_primary(
+    remote: Option<&(RangeRegistry, FramedTcpClient)>,
+    identity: crabka_pgexec::TimestampTxnIdentity,
+) -> Result<crabka_pgexec::PrimaryTxnDecision, ExecError> {
+    let (registry, client) = remote.ok_or_else(|| {
+        ExecError::Unsupported(format!(
+            "timestamp primary r{} is unreachable",
+            identity.primary_range
+        ))
+    })?;
+    let primary_range = RangeId::new(identity.primary_range);
+    let endpoint = registry
+        .resolve(primary_range)
+        .await
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?;
+    let request = crate::transport::RangeRequest::TimestampPrimaryRecover(
+        crate::transport::TimestampPrimaryRecoverReq {
+            primary_range,
+            identity: crate::transport::WireTimestampIdentity {
+                start_ts: identity.start_ts.get(),
+                global_xid: identity.global_xid,
+                primary_range: identity.primary_range,
+            },
+        },
+    );
+    match client
+        .call(&endpoint.endpoint, &request)
+        .await
+        .map_err(|error| ExecError::Unsupported(error.to_string()))?
+    {
+        crate::transport::RangeResponse::TimestampPrimaryDecision { decision } => match decision {
+            crate::transport::WireTimestampDecision::Aborted => {
+                Ok(crabka_pgexec::PrimaryTxnDecision::Aborted)
+            }
+            crate::transport::WireTimestampDecision::Committed { commit_ts } => {
+                Ok(crabka_pgexec::PrimaryTxnDecision::Committed(
+                    crabka_pgexec::CommitTimestamp::new(commit_ts)
+                        .map_err(|error| ExecError::Unsupported(error.to_string()))?,
+                ))
+            }
+        },
+        crate::transport::RangeResponse::SqlError { message, .. }
+        | crate::transport::RangeResponse::Error { message, .. } => {
+            Err(ExecError::Unsupported(message))
+        }
+        _ => Err(ExecError::Unsupported(
+            "unexpected timestamp primary recovery response".into(),
+        )),
+    }
 }
 
 async fn recover_remote_timestamp_participant(
@@ -5864,6 +5935,103 @@ mod tests {
                 .expect("scan reservations")
                 .is_empty()
         );
+        assert!(
+            secondary_kv
+                .scan_prefix(b"\0\0\0\0meta/ts_intent/")
+                .expect("scan identity sidecars")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn rn_only_recovery_settles_orphan_through_remote_primary() {
+        let primary = SqlEngine::new();
+        let secondary_kv: Arc<dyn Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let secondary = SqlEngine::with_kv(Arc::clone(&secondary_kv)).expect("secondary");
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(30).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 31,
+            primary_range: 1,
+        };
+        let primary_write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 1,
+            row: vec![Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let secondary_write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 2,
+            row: vec![Datum::Int4(2)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            primary
+                .timestamp_txn_participant(1)
+                .prewrite_as_primary(identity, &[1], std::slice::from_ref(&primary_write))
+                .await
+                .expect("primary prewrite");
+            secondary
+                .timestamp_txn_participant(2)
+                .prewrite_as_secondary(identity, std::slice::from_ref(&secondary_write))
+                .await
+                .expect("secondary orphan");
+        });
+        drop(runtime);
+
+        let (address_tx, address_rx) = std::sync::mpsc::sync_channel(1);
+        std::thread::spawn(move || {
+            let runtime = tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+                .expect("server runtime");
+            runtime.block_on(async move {
+                let service =
+                    Arc::new(crate::forward::HostedRangeService::new(BTreeMap::from([(
+                        RangeId::new(1),
+                        primary,
+                    )])));
+                let address = crate::transport::spawn_loopback(service)
+                    .await
+                    .expect("spawn primary service");
+                address_tx.send(address).expect("publish address");
+                std::future::pending::<()>().await;
+            });
+        });
+        let address = address_rx.recv().expect("primary address");
+        let record = crabka_gres_control::TenantRecord::new(
+            1,
+            crabka_gres_control::TenantId::try_from("tenant-rn-recovery").expect("tenant id"),
+            crabka_gres_control::TenantName::try_from("tenant-rn-recovery").expect("tenant name"),
+            crabka_gres_control::TenantState::Active,
+            crabka_gres_control::SqlUser::try_from("alice").expect("user"),
+            "SCRAM-SHA-256$4096:salt$stored:server".into(),
+            1,
+        )
+        .expect("record")
+        .with_range_layout(vec![crabka_gres_control::RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: address.to_string(),
+            wal_generation: 1,
+        }])
+        .expect("layout");
+        let registry = RangeRegistry::from_tenant_record(&record).expect("registry");
+        let engines = BTreeMap::from([(RangeId::new(2), secondary)]);
+
+        recover_durable_timestamp_transactions(
+            &engines,
+            Some((registry, FramedTcpClient::default())),
+        )
+        .expect("rN-only recovery settles through authenticated primary RPC");
+
         assert!(
             secondary_kv
                 .scan_prefix(b"\0\0\0\0meta/ts_intent/")

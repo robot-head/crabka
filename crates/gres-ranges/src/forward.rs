@@ -646,6 +646,68 @@ impl RangeService for HostedRangeService {
                     }
                 }
             }
+            RangeRequest::TimestampPrimaryRecover(request) => {
+                let engine = match self.hosted_engine(request.primary_range) {
+                    Ok(engine) => engine,
+                    Err(response) => return response,
+                };
+                let identity = match decode_timestamp_identity(request.identity) {
+                    Ok(identity) => identity,
+                    Err(message) => {
+                        return RangeResponse::SqlError {
+                            code: "22023".into(),
+                            message,
+                        };
+                    }
+                };
+                let descriptor = match engine.timestamp_transaction_descriptors() {
+                    Ok(descriptors) => descriptors.into_iter().find(|descriptor| {
+                        descriptor.start_ts == identity.start_ts
+                            && descriptor.global_xid == identity.global_xid
+                            && identity.primary_range == request.primary_range.as_u32()
+                    }),
+                    Err(error) => {
+                        let error = error.into_pg();
+                        return RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        };
+                    }
+                };
+                if descriptor.is_none() {
+                    return RangeResponse::SqlError {
+                        code: "40001".into(),
+                        message: "timestamp primary identity is fenced".into(),
+                    };
+                }
+                match engine
+                    .recover_timestamp_transaction(identity.start_ts)
+                    .await
+                {
+                    Ok(decision) => RangeResponse::TimestampPrimaryDecision {
+                        decision: match decision {
+                            crabka_pgexec::PrimaryTxnDecision::Aborted => {
+                                crate::transport::WireTimestampDecision::Aborted
+                            }
+                            crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) => {
+                                crate::transport::WireTimestampDecision::Committed {
+                                    commit_ts: commit_ts.get(),
+                                }
+                            }
+                            crabka_pgexec::PrimaryTxnDecision::Pending => {
+                                unreachable!("recovery returns terminal decision")
+                            }
+                        },
+                    },
+                    Err(error) => {
+                        let error = error.into_pg();
+                        RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        }
+                    }
+                }
+            }
             RangeRequest::Tso(crate::transport::TsoReq::Grant { count }) => {
                 let Some(tso) = &self.tso else {
                     return RangeResponse::Error {
@@ -2973,7 +3035,8 @@ mod tests {
                 | RangeRequest::TimestampPrewrite(_)
                 | RangeRequest::TimestampPrimaryAck(_)
                 | RangeRequest::TimestampResolve(_)
-                | RangeRequest::TimestampRecover(_) => RangeResponse::Error {
+                | RangeRequest::TimestampRecover(_)
+                | RangeRequest::TimestampPrimaryRecover(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".to_string(),
                 },
