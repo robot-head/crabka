@@ -59,8 +59,8 @@ pub struct SplitOperationPlan {
     pub target_layout: Vec<RangeLayoutEntry>,
 }
 
-/// Durable registry journal record for initiating an explicit two-successor split.
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Durable registry journal record for initiating a sealed split or move.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitOperationRecord {
     /// Tenant whose range layout is being split.
@@ -69,8 +69,8 @@ pub struct SplitOperationRecord {
     pub operation_id: String,
     /// CAS revision, beginning at zero.
     pub revision: u64,
-    /// Immutable explicit left/right successor intent.
-    pub split: SplitState,
+    /// One authoritative immutable split-or-move intent.
+    pub mutation: RangeMutationPlan,
     /// Full immutable source/target layout and catalog routing identity.
     #[serde(default)]
     pub plan: Option<SplitOperationPlan>,
@@ -85,6 +85,72 @@ pub struct SplitOperationRecord {
     pub evidence: SplitOperationEvidence,
 }
 
+impl<'de> Deserialize<'de> for SplitOperationRecord {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(deny_unknown_fields)]
+        struct WireRecord {
+            tenant: TenantName,
+            operation_id: String,
+            revision: u64,
+            #[serde(default)]
+            mutation: Option<RangeMutationPlan>,
+            #[serde(default)]
+            split: Option<SplitState>,
+            #[serde(default)]
+            plan: Option<SplitOperationPlan>,
+            phase: SplitOperationPhase,
+            attempts: u32,
+            errors: Vec<String>,
+            #[serde(default)]
+            evidence: SplitOperationEvidence,
+        }
+
+        let wire = WireRecord::deserialize(deserializer)?;
+        let mutation = match (wire.mutation, wire.split) {
+            (Some(mutation), None) => mutation,
+            (None, Some(split)) => RangeMutationPlan::Split { split },
+            (Some(_), Some(_)) => {
+                return Err(serde::de::Error::custom(
+                    "split operation must contain exactly one mutation representation",
+                ));
+            }
+            (None, None) => {
+                return Err(serde::de::Error::missing_field("mutation"));
+            }
+        };
+        Ok(Self {
+            tenant: wire.tenant,
+            operation_id: wire.operation_id,
+            revision: wire.revision,
+            mutation,
+            plan: wire.plan,
+            phase: wire.phase,
+            attempts: wire.attempts,
+            errors: wire.errors,
+            evidence: wire.evidence,
+        })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub enum RangeMutationPlan {
+    Split { split: SplitState },
+    Move { move_range: MoveRangeState },
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct MoveRangeState {
+    pub source_range_id: u32,
+    pub predecessor_generation: u64,
+    pub replacement: RangeLayoutEntry,
+}
+
 impl SplitOperationRecord {
     /// Construct a revision-zero initiation record.
     pub fn new(
@@ -96,7 +162,35 @@ impl SplitOperationRecord {
             tenant,
             operation_id: operation_id.into(),
             revision: 0,
-            split,
+            mutation: RangeMutationPlan::Split { split },
+            plan: None,
+            phase: SplitOperationPhase::Initiated,
+            attempts: 0,
+            errors: Vec::new(),
+            evidence: SplitOperationEvidence::default(),
+        };
+        record.ensure_valid()?;
+        Ok(record)
+    }
+
+    pub fn new_move(
+        tenant: TenantName,
+        operation_id: impl Into<String>,
+        source_range_id: u32,
+        predecessor_generation: u64,
+        replacement: RangeLayoutEntry,
+    ) -> Result<Self, crate::ControlError> {
+        let record = Self {
+            tenant,
+            operation_id: operation_id.into(),
+            revision: 0,
+            mutation: RangeMutationPlan::Move {
+                move_range: MoveRangeState {
+                    source_range_id,
+                    predecessor_generation,
+                    replacement,
+                },
+            },
             plan: None,
             phase: SplitOperationPhase::Initiated,
             attempts: 0,
@@ -114,7 +208,7 @@ impl SplitOperationRecord {
                 "may only be sealed at initiation",
             ));
         }
-        plan.ensure_valid(&self.split)?;
+        plan.ensure_valid(&self)?;
         self.plan = Some(plan);
         self.ensure_valid()?;
         Ok(self)
@@ -164,9 +258,12 @@ impl SplitOperationRecord {
                 "entries must not be empty",
             ));
         }
-        self.split.ensure_intent_valid()?;
+        match &self.mutation {
+            RangeMutationPlan::Split { split } => split.ensure_intent_valid()?,
+            RangeMutationPlan::Move { move_range } => move_range.ensure_intent_valid()?,
+        }
         if let Some(plan) = &self.plan {
-            plan.ensure_valid(&self.split)?;
+            plan.ensure_valid(self)?;
         }
         self.evidence.ensure_valid()?;
         let phase_shape = match self.phase {
@@ -203,7 +300,7 @@ impl SplitOperationRecord {
         let revision = prior.revision.checked_add(1);
         let immutable = self.tenant == prior.tenant
             && self.operation_id == prior.operation_id
-            && self.split == prior.split;
+            && self.mutation == prior.mutation;
         let immutable = immutable && self.plan == prior.plan;
         let errors_extend = self.errors.starts_with(&prior.errors);
         let evidence_extends = self.evidence.extends(&prior.evidence);
@@ -235,6 +332,58 @@ impl SplitOperationRecord {
     }
 }
 
+impl MoveRangeState {
+    fn ensure_intent_valid(&self) -> Result<(), crate::ControlError> {
+        let replacement = &self.replacement;
+        if replacement.range_id == self.source_range_id
+            || replacement.endpoint.is_empty()
+            || replacement.wal_generation <= self.predecessor_generation
+            || replacement.lifecycle != RangeLifecycle::Serving
+            || replacement.retirement.is_some()
+        {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.mutation.move_range",
+                "move replacement must be fresh, serving, generation-fenced, and distinct",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SplitOperationRecord {
+    #[must_use]
+    pub fn source_range_id(&self) -> u32 {
+        match &self.mutation {
+            RangeMutationPlan::Split { split } => split.source_range_id,
+            RangeMutationPlan::Move { move_range } => move_range.source_range_id,
+        }
+    }
+
+    #[must_use]
+    pub fn predecessor_generation(&self) -> u64 {
+        match &self.mutation {
+            RangeMutationPlan::Split { split } => split.predecessor_generation,
+            RangeMutationPlan::Move { move_range } => move_range.predecessor_generation,
+        }
+    }
+
+    #[must_use]
+    pub fn split_intent(&self) -> Option<&SplitState> {
+        match &self.mutation {
+            RangeMutationPlan::Split { split } => Some(split),
+            RangeMutationPlan::Move { .. } => None,
+        }
+    }
+
+    #[must_use]
+    pub fn move_intent(&self) -> Option<&MoveRangeState> {
+        match &self.mutation {
+            RangeMutationPlan::Move { move_range } => Some(move_range),
+            RangeMutationPlan::Split { .. } => None,
+        }
+    }
+}
+
 impl SplitOperationPhase {
     /// Whether registry authority must already expose the sealed target layout.
     #[must_use]
@@ -260,7 +409,9 @@ impl SplitOperationPhase {
 }
 
 impl SplitOperationPlan {
-    fn ensure_valid(&self, split: &SplitState) -> Result<(), crate::ControlError> {
+    fn ensure_valid(&self, operation: &SplitOperationRecord) -> Result<(), crate::ControlError> {
+        let source_range_id = operation.source_range_id();
+        let predecessor_generation = operation.predecessor_generation();
         if self.source_record_version == 0 || self.routing_table_id == 0 {
             return Err(crate::ControlError::invalid_field(
                 "split_operation.plan",
@@ -272,10 +423,24 @@ impl SplitOperationPlan {
         let source = self
             .current_layout
             .iter()
-            .find(|range| range.range_id == split.source_range_id);
-        if source.is_none_or(|range| range.wal_generation != split.predecessor_generation)
-            || !self.target_layout.iter().any(|range| range == &split.left)
-            || !self.target_layout.iter().any(|range| range == &split.right)
+            .find(|range| range.range_id == source_range_id);
+        let target_matches = match &operation.mutation {
+            RangeMutationPlan::Split { split } => {
+                self.target_layout.iter().any(|range| range == &split.left)
+                    && self.target_layout.iter().any(|range| range == &split.right)
+            }
+            RangeMutationPlan::Move { move_range } => {
+                let replacement = &move_range.replacement;
+                self.target_layout.len() == self.current_layout.len()
+                    && self.target_layout.iter().any(|range| range == replacement)
+                    && !self
+                        .target_layout
+                        .iter()
+                        .any(|range| range.range_id == source_range_id)
+            }
+        };
+        if source.is_none_or(|range| range.wal_generation != predecessor_generation)
+            || !target_matches
         {
             return Err(crate::ControlError::invalid_field(
                 "split_operation.plan",
@@ -1727,6 +1892,67 @@ mod tests {
                 .enumerate()
                 .all(|(rank, phase)| { progress_rank(*phase) == u8::try_from(rank).ok() })
         );
+    }
+
+    #[test]
+    fn move_operation_seals_one_exact_replacement_and_rejects_unknown_kind() {
+        let replacement = RangeLayoutEntry {
+            range_id: 9,
+            end_key: None,
+            endpoint: "replacement:7443".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let operation = SplitOperationRecord::new_move(
+            TenantName::try_from("tenant-a").unwrap(),
+            "move-1",
+            0,
+            4,
+            replacement.clone(),
+        )
+        .unwrap()
+        .with_plan(SplitOperationPlan {
+            source_record_version: 9,
+            source_map_epoch: 9,
+            routing_table_id: 7,
+            current_layout: vec![RangeLayoutEntry {
+                range_id: 0,
+                end_key: None,
+                endpoint: "source:7443".into(),
+                wal_generation: 4,
+                lifecycle: RangeLifecycle::Serving,
+                retirement: None,
+            }],
+            target_layout: vec![replacement],
+        })
+        .unwrap();
+        assert!(matches!(operation.mutation, RangeMutationPlan::Move { .. }));
+        let mut json = serde_json::to_value(&operation).unwrap();
+        assert!(json.get("split").is_none());
+        assert_eq!(json["mutation"]["move_range"]["replacement"]["range_id"], 9);
+        json["mutation"]["kind"] = serde_json::json!("future_kind");
+        assert!(serde_json::from_value::<SplitOperationRecord>(json).is_err());
+    }
+
+    #[test]
+    fn legacy_split_json_decodes_to_authoritative_typed_payload() {
+        let operation = SplitOperationRecord::new(
+            TenantName::try_from("tenant-a").unwrap(),
+            "legacy-split",
+            split_intent(),
+        )
+        .unwrap();
+        let mut legacy = serde_json::to_value(&operation).unwrap();
+        let split = legacy["mutation"]["split"].take();
+        legacy.as_object_mut().unwrap().remove("mutation");
+        legacy["split"] = split;
+
+        let decoded: SplitOperationRecord = serde_json::from_value(legacy).unwrap();
+        assert_eq!(decoded, operation);
+        let encoded = serde_json::to_value(decoded).unwrap();
+        assert!(encoded.get("split").is_none());
+        assert_eq!(encoded["mutation"]["kind"], "split");
     }
 
     #[test]

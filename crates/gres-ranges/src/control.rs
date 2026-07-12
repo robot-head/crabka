@@ -37,16 +37,34 @@ impl AuthorizedSplitIntent {
             crate::MapEpoch::new(plan.source_map_epoch),
             &plan.current_layout,
         )?;
-        let split = crate::SplitState::for_split(
-            record.operation_id.clone(),
-            crate::SplitCommand {
-                current_map,
-                predecessor: crate::RangeId::new(record.split.source_range_id),
-                predecessor_generation: record.split.predecessor_generation,
-                left: successor_from_layout(&record.split.left, &plan.target_layout)?,
-                right: successor_from_layout(&record.split.right, &plan.target_layout)?,
-            },
-        )
+        let split = match &record.mutation {
+            crabka_gres_control::RangeMutationPlan::Split { split } => {
+                crate::SplitState::for_split(
+                    record.operation_id.clone(),
+                    crate::SplitCommand {
+                        current_map,
+                        predecessor: crate::RangeId::new(split.source_range_id),
+                        predecessor_generation: split.predecessor_generation,
+                        left: successor_from_layout(&split.left, &plan.target_layout)?,
+                        right: successor_from_layout(&split.right, &plan.target_layout)?,
+                    },
+                )
+            }
+            crabka_gres_control::RangeMutationPlan::Move { move_range } => {
+                crate::SplitState::for_move(
+                    record.operation_id.clone(),
+                    crate::MoveRangeCommand {
+                        current_map,
+                        range_id: crate::RangeId::new(move_range.source_range_id),
+                        predecessor_generation: move_range.predecessor_generation,
+                        replacement: successor_from_layout(
+                            &move_range.replacement,
+                            &plan.target_layout,
+                        )?,
+                    },
+                )
+            }
+        }
         .map_err(|error| error.to_string())?;
         if !map_matches_layout(&split.target_map, &plan.target_layout) {
             return Err("derived target map differs from sealed target layout".into());
@@ -796,7 +814,8 @@ fn request_matches_split_operation(
     operation: &crabka_gres_control::SplitOperationRecord,
     context: IntentAuthorizationContext,
 ) -> bool {
-    let intent = &operation.split;
+    let source_range_id = operation.source_range_id();
+    let predecessor_generation = operation.predecessor_generation();
     if operation.plan.is_none() {
         return false;
     };
@@ -806,17 +825,17 @@ fn request_matches_split_operation(
     {
         return false;
     }
-    let source = request.range_id.as_u32() == intent.source_range_id
-        && request.generation == intent.predecessor_generation;
+    let source = request.range_id.as_u32() == source_range_id
+        && request.generation == predecessor_generation;
     match &request.operation {
         RangeControlOperation::Status => {
             (source && !operation.phase.expects_target_registry_layout())
-                || [intent.left.clone(), intent.right.clone()]
-                    .iter()
-                    .any(|successor| {
+                || operation.plan.as_ref().is_some_and(|plan| {
+                    plan.target_layout.iter().any(|successor| {
                         request.range_id.as_u32() == successor.range_id
                             && request.generation == successor.wal_generation
                     })
+                })
         }
         RangeControlOperation::ForceCheckpoint
         | RangeControlOperation::RetirePredecessor
@@ -997,8 +1016,8 @@ mod tests {
         let authorized = AuthorizedSplitIntent::from_record(record.clone()).unwrap();
         let request = RangeControlReq {
             tenant: record.tenant.as_str().into(),
-            range_id: RangeId::new(record.split.source_range_id),
-            generation: record.split.predecessor_generation,
+            range_id: RangeId::new(record.source_range_id()),
+            generation: record.predecessor_generation(),
             operation_id: record.operation_id.clone(),
             operation: RangeControlOperation::StageFilteredRestore {
                 journal_revision: record.revision,
@@ -1051,13 +1070,28 @@ mod tests {
         changed.phase = Phase::Failed;
         record_mutations.push(changed);
         let mut changed = record.clone();
-        changed.split.predecessor_generation += 1;
+        match &mut changed.mutation {
+            crabka_gres_control::RangeMutationPlan::Split { split } => {
+                split.predecessor_generation += 1
+            }
+            _ => unreachable!(),
+        }
         record_mutations.push(changed);
         let mut changed = record.clone();
-        changed.split.left.endpoint.push_str("-other");
+        match &mut changed.mutation {
+            crabka_gres_control::RangeMutationPlan::Split { split } => {
+                split.left.endpoint.push_str("-other")
+            }
+            _ => unreachable!(),
+        }
         record_mutations.push(changed);
         let mut changed = record.clone();
-        changed.split.right.wal_generation += 1;
+        match &mut changed.mutation {
+            crabka_gres_control::RangeMutationPlan::Split { split } => {
+                split.right.wal_generation += 1
+            }
+            _ => unreachable!(),
+        }
         record_mutations.push(changed);
         let mut changed = record.clone();
         changed.plan.as_mut().unwrap().source_map_epoch += 1;
@@ -1080,6 +1114,60 @@ mod tests {
         for changed in record_mutations {
             assert!(!allowed(changed, &request).await);
         }
+    }
+
+    #[test]
+    fn authorized_move_derives_one_exact_replacement_without_split_aliasing() {
+        use crabka_gres_control::{
+            RangeLayoutEntry, RangeLifecycle, SplitOperationPlan, SplitOperationRecord, TenantName,
+        };
+        let coordinator = RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(crabka_gres_control::RangeBoundary {
+                table_id: 7,
+                rowid: 50,
+            }),
+            endpoint: "r0:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let source = RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: "source:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let replacement = RangeLayoutEntry {
+            range_id: 2,
+            end_key: None,
+            endpoint: "replacement:7443".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let record = SplitOperationRecord::new_move(
+            TenantName::try_from("tenant-a").unwrap(),
+            "move-1",
+            1,
+            4,
+            replacement.clone(),
+        )
+        .unwrap()
+        .with_plan(SplitOperationPlan {
+            source_record_version: 9,
+            source_map_epoch: 9,
+            routing_table_id: 7,
+            current_layout: vec![coordinator.clone(), source],
+            target_layout: vec![coordinator, replacement],
+        })
+        .unwrap();
+        let authorized = AuthorizedSplitIntent::from_record(record).unwrap();
+        assert_eq!(authorized.split().operation, crate::SplitOperation::Move);
+        assert!(authorized.split().right.is_none());
+        assert_eq!(authorized.split().successor, crate::RangeId::new(2));
     }
 
     struct CountingExecutor {

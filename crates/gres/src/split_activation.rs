@@ -34,14 +34,14 @@ pub(super) struct PendingLiveTopology {
     pub(super) left_id: RangeId,
     pub(super) left_replay_journal_seq: u64,
     pub(super) left: LiveRangeResources,
-    pub(super) right_id: RangeId,
-    pub(super) right_replay_journal_seq: u64,
-    pub(super) right: LiveRangeResources,
+    pub(super) right: Option<(RangeId, u64, LiveRangeResources)>,
 }
 
 impl PendingLiveTopology {
     pub(super) fn abort_staged_checkpoint_workers(&self) {
-        for resources in [&self.left, &self.right] {
+        for resources in std::iter::once(&self.left)
+            .chain(self.right.as_ref().map(|(_, _, resources)| resources))
+        {
             if let Some(checkpoint) = &resources.checkpoint {
                 checkpoint.handle.abort();
             }
@@ -144,7 +144,9 @@ impl LiveMultiRangeTransfer {
             .clone();
         ranges.remove(&pending.predecessor);
         ranges.insert(pending.left_id, pending.left);
-        ranges.insert(pending.right_id, pending.right);
+        if let Some((right_id, _, right)) = pending.right {
+            ranges.insert(right_id, right);
+        }
         let engines = serving_engines
             .iter()
             .map(|(id, engine)| (*id, engine.clone_handle()))
@@ -315,11 +317,13 @@ pub(super) async fn persist_must_activate(
         .get_mut(&pending.left_id)
         .expect("validated left target")
         .replay_journal_seq = Some(pending.left_replay_journal_seq);
-    receipt
-        .targets
-        .get_mut(&pending.right_id)
-        .expect("validated right target")
-        .replay_journal_seq = Some(pending.right_replay_journal_seq);
+    if let Some((right_id, replay_journal_seq, _)) = &pending.right {
+        receipt
+            .targets
+            .get_mut(right_id)
+            .expect("validated right target")
+            .replay_journal_seq = Some(*replay_journal_seq);
+    }
     validate_receipt_shape(&receipt).map_err(|error| {
         crabka_gres_ranges::RangeTransferError::Boundary {
             range_id: pending.predecessor,
@@ -452,11 +456,13 @@ pub(super) async fn copy_must_activate_before_bind(
         .get_mut(&pending.left_id)
         .expect("left target")
         .replay_journal_seq = Some(pending.left_replay_journal_seq);
-    receipt
-        .targets
-        .get_mut(&pending.right_id)
-        .expect("right target")
-        .replay_journal_seq = Some(pending.right_replay_journal_seq);
+    if let Some((right_id, replay_journal_seq, _)) = &pending.right {
+        receipt
+            .targets
+            .get_mut(right_id)
+            .expect("right target")
+            .replay_journal_seq = Some(*replay_journal_seq);
+    }
     let expected = serde_json::to_vec(&expected_receipt).map_err(|error| {
         crabka_gres_ranges::RangeTransferError::Runtime {
             range_id: RangeId::COORDINATOR,
@@ -507,13 +513,11 @@ pub(super) async fn activate_serving_topology(
             range_id: RangeId::COORDINATOR,
             reason: "activate without pending topology".into(),
         })?;
-    for (index, (range_id, resources)) in [
-        (pending.left_id, pending.left.clone()),
-        (pending.right_id, pending.right.clone()),
-    ]
-    .into_iter()
-    .enumerate()
-    {
+    let mut targets = vec![(pending.left_id, pending.left.clone())];
+    if let Some((right_id, _, right)) = &pending.right {
+        targets.push((*right_id, right.clone()));
+    }
+    for (index, (range_id, resources)) in targets.into_iter().enumerate() {
         if !resources.writer.is_activated() {
             transfer.activation_fault(TopologyActivationFault::BeforeProducerInit, range_id)?;
             let recovered = crabka_gres_substrate::recover_live_for_range_with_restore(

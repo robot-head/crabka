@@ -47,8 +47,10 @@ enum GresCommand {
     Suspend(TenantNameArgs),
     /// Mark one Gres tenant active.
     Resume(TenantNameArgs),
-    /// Unsafely edit one tenant range layout for offline development only.
+    /// Initiate a sealed, journaled two-successor range split.
     Split(SplitRangeArgs),
+    /// Initiate a sealed, journaled one-for-one range move.
+    Move(MoveRangeArgs),
     /// Delete one Gres tenant registry record.
     Delete(TenantNameArgs),
     /// Render `PgDog` configuration files from the tenant registry.
@@ -187,6 +189,33 @@ struct SplitRangeArgs {
 }
 
 #[derive(Args, Debug)]
+struct MoveRangeArgs {
+    #[arg(long)]
+    bootstrap: String,
+    /// Tenant name.
+    #[arg(long)]
+    tenant: String,
+    /// Existing range to replace.
+    #[arg(long)]
+    source_range_id: u32,
+    /// Catalog table identity used to seal the routing epoch.
+    #[arg(long)]
+    table: u64,
+    /// Durable idempotency key.
+    #[arg(long)]
+    operation_id: String,
+    /// Fresh replacement range id.
+    #[arg(long)]
+    replacement_range_id: u32,
+    /// Fresh replacement compute endpoint.
+    #[arg(long)]
+    replacement_endpoint: Option<String>,
+    /// Fresh replacement WAL generation. Defaults to predecessor + 1.
+    #[arg(long)]
+    replacement_wal_generation: Option<u64>,
+}
+
+#[derive(Args, Debug)]
 struct BalanceDryRunArgs {
     /// JSON metrics snapshot path. Use `-` to read from stdin.
     #[arg(long)]
@@ -274,6 +303,7 @@ async fn run_inner(args: GresArgs) -> Result<(), String> {
         GresCommand::Suspend(args) => change_tenant_state(args, TenantState::Suspended).await,
         GresCommand::Resume(args) => change_tenant_state(args, TenantState::Active).await,
         GresCommand::Split(args) => split_range(args).await,
+        GresCommand::Move(args) => move_range(args).await,
         GresCommand::Delete(args) => delete_tenant(args).await,
         GresCommand::RenderPgdog(args) => render_pgdog(args).await,
         GresCommand::BalanceDryRun(args) => balance_dry_run(&args),
@@ -508,6 +538,88 @@ async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
         successor_range_id
     );
     Ok(())
+}
+
+async fn move_range(args: MoveRangeArgs) -> Result<(), String> {
+    let tenant_name = TenantName::try_from(args.tenant.as_str()).map_err(|e| e.to_string())?;
+    let mut registry = connect_registry(&args.bootstrap).await?;
+    let record = registry
+        .get(tenant_name.as_str())
+        .await
+        .map_err(|e| e.to_string())?
+        .ok_or_else(|| format!("tenant {tenant_name} not found"))?;
+    let operation = build_move_operation(&tenant_name, &record, &args)?;
+    let replacement = &operation.move_intent().expect("sealed move").replacement;
+    registry
+        .begin_split_operation(&operation)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!(
+        "initiated move {} for tenant {tenant_name} range {} generation {} to range {} generation {}",
+        args.operation_id,
+        operation.source_range_id(),
+        operation.predecessor_generation(),
+        replacement.range_id,
+        replacement.wal_generation,
+    );
+    Ok(())
+}
+
+fn build_move_operation(
+    tenant_name: &TenantName,
+    record: &TenantRecord,
+    args: &MoveRangeArgs,
+) -> Result<SplitOperationRecord, String> {
+    let source_index = record
+        .ranges
+        .iter()
+        .position(|range| range.range_id == args.source_range_id)
+        .ok_or_else(|| {
+            format!(
+                "range {} is not in tenant {tenant_name}",
+                args.source_range_id
+            )
+        })?;
+    let source = &record.ranges[source_index];
+    if args.replacement_range_id == source.range_id
+        || record
+            .ranges
+            .iter()
+            .any(|range| range.range_id == args.replacement_range_id)
+    {
+        return Err("replacement range id must be fresh and differ from the predecessor".into());
+    }
+    let replacement = RangeLayoutEntry {
+        range_id: args.replacement_range_id,
+        end_key: source.end_key,
+        endpoint: args
+            .replacement_endpoint
+            .clone()
+            .unwrap_or_else(|| range_endpoint(&tenant_name, args.replacement_range_id)),
+        wal_generation: args
+            .replacement_wal_generation
+            .unwrap_or_else(|| source.wal_generation.saturating_add(1)),
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let mut target_layout = record.ranges.clone();
+    target_layout[source_index] = replacement.clone();
+    SplitOperationRecord::new_move(
+        tenant_name.clone(),
+        args.operation_id.clone(),
+        source.range_id,
+        source.wal_generation,
+        replacement,
+    )
+    .map_err(|e| e.to_string())?
+    .with_plan(SplitOperationPlan {
+        source_record_version: record.record_version,
+        source_map_epoch: record.record_version,
+        routing_table_id: args.table,
+        current_layout: record.ranges.clone(),
+        target_layout,
+    })
+    .map_err(|e| e.to_string())
 }
 
 async fn create_tenant(args: CreateTenantArgs) -> Result<(), String> {
@@ -1112,6 +1224,38 @@ mod tests {
 
         assert!(left.range_id == 0);
         assert!(right.range_id == 1);
+    }
+
+    #[test]
+    fn move_builder_seals_one_replacement_without_mutating_tenant_layout() {
+        let mut record = test_record("tenant-a", TenantState::Active);
+        record.ranges = vec![RangeLayoutEntry {
+            range_id: 0,
+            end_key: None,
+            endpoint: "source:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        }];
+        let original = record.clone();
+        let args = MoveRangeArgs {
+            bootstrap: "unused:9092".into(),
+            tenant: "tenant-a".into(),
+            source_range_id: record.ranges[0].range_id,
+            table: 7,
+            operation_id: "move-1".into(),
+            replacement_range_id: 99,
+            replacement_endpoint: Some("replacement:7443".into()),
+            replacement_wal_generation: Some(record.ranges[0].wal_generation + 1),
+        };
+
+        let operation = build_move_operation(&record.name, &record, &args).unwrap();
+
+        assert!(record == original);
+        assert!(operation.plan.as_ref().unwrap().current_layout == original.ranges);
+        assert!(operation.plan.as_ref().unwrap().target_layout.len() == original.ranges.len());
+        assert!(operation.move_intent().unwrap().replacement.range_id == 99);
+        assert!(operation.split_intent().is_none());
     }
 
     #[test]

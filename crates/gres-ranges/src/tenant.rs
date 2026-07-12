@@ -787,15 +787,13 @@ impl MultiRangeTenant {
         {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
-        let right_descriptor = state
-            .right
-            .as_ref()
-            .ok_or(SplitError::InvalidSuccessorPartition)?;
-        if right.range_id != right_descriptor.range_id
-            || right.endpoint != right_descriptor.endpoint
-            || right.wal_generation != right_descriptor.wal_generation
-        {
-            return Err(LocalSqlSplitError::RetryMismatch);
+        match (right.as_ref(), state.right.as_ref()) {
+            (Some(right), Some(descriptor))
+                if right.range_id == descriptor.range_id
+                    && right.endpoint == descriptor.endpoint
+                    && right.wal_generation == descriptor.wal_generation => {}
+            (None, None) => {}
+            _ => return Err(LocalSqlSplitError::RetryMismatch),
         }
         if state.left.range_id.is_coordinator() {
             left.engine.set_catalog_kv(left.engine.kv_handle());
@@ -808,10 +806,14 @@ impl MultiRangeTenant {
             if let Some(scanner) = coordinator.foreign_scanner_handle() {
                 left.engine.set_foreign_scanner(scanner);
             }
-            configure_successor_engine(&left.engine, &mut right.engine);
+            if let Some(right) = &mut right {
+                configure_successor_engine(&left.engine, &mut right.engine);
+            }
         } else {
             configure_successor_engine(coordinator, &mut left.engine);
-            configure_successor_engine(coordinator, &mut right.engine);
+            if let Some(right) = &mut right {
+                configure_successor_engine(coordinator, &mut right.engine);
+            }
         }
 
         let mut engines = serving
@@ -821,7 +823,9 @@ impl MultiRangeTenant {
             .collect::<BTreeMap<_, _>>();
         engines.remove(&state.predecessor);
         engines.insert(state.left.range_id, left.engine.clone_handle());
-        engines.insert(right_descriptor.range_id, right.engine);
+        if let Some(right) = right.as_ref() {
+            engines.insert(right.range_id, right.engine.clone_handle());
+        }
         if state.left.range_id.is_coordinator() {
             let replacement = engines
                 .get(&RangeId::COORDINATOR)
@@ -846,7 +850,9 @@ impl MultiRangeTenant {
         let mut keepalives = serving.keepalives.clone();
         keepalives.remove(&state.predecessor);
         keepalives.insert(state.left.range_id, left.keepalive);
-        keepalives.insert(right_descriptor.range_id, right.keepalive);
+        if let Some(right) = right {
+            keepalives.insert(right.range_id, right.keepalive);
+        }
         if let Some(transfer) = transfer {
             transfer.publish_serving_topology(&engines)?;
             transfer.begin_serving_topology_publication();
@@ -916,6 +922,22 @@ impl MultiRangeTenant {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
         let state = SplitState::for_split(operation_id, command)?;
+        self.publish_claimed_successors(&serving, &state, claimed, Some(transfer))
+            .await
+    }
+
+    /// Publish an already authorized one-or-two-successor mutation through the irreversible
+    /// activation protocol. The sealed state is the sole topology authority.
+    pub async fn publish_control_mutation_with_transfer(
+        &self,
+        state: SplitState,
+        claimed: crate::ClaimedStagedSuccessors,
+        transfer: &dyn RangeTransferCapability,
+    ) -> Result<(), LocalSqlSplitError> {
+        let serving = self.inner.serving.load_full();
+        if state.current_map != serving.range_map {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
         self.publish_claimed_successors(&serving, &state, claimed, Some(transfer))
             .await
     }

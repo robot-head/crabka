@@ -4003,18 +4003,34 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 wal_generation: request.wal_generation,
             })
         };
-        let [left_request, right_request] = requests;
-        let left = stage_range(left_request).await?;
-        let right = match stage_range(right_request).await {
-            Ok(right) => right,
-            Err(error) => {
-                self.staged
-                    .lock()
-                    .map_err(|_| range_pause_lock_error(left.range_id))?
-                    .remove(&left.range_id);
-                return Err(error);
+        let mut requests = requests.into_iter();
+        let left = stage_range(requests.next().ok_or_else(|| {
+            crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id: state.predecessor,
+                reason: "mutation has no successor".into(),
             }
+        })?)
+        .await?;
+        let right = if let Some(right_request) = requests.next() {
+            match stage_range(right_request).await {
+                Ok(right) => Some(right),
+                Err(error) => {
+                    self.staged
+                        .lock()
+                        .map_err(|_| range_pause_lock_error(left.range_id))?
+                        .remove(&left.range_id);
+                    return Err(error);
+                }
+            }
+        } else {
+            None
         };
+        if requests.next().is_some() {
+            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id: state.predecessor,
+                reason: "mutation has more than two successors".into(),
+            });
+        }
         Ok(crabka_gres_ranges::StagedRangeSuccessors { left, right })
     }
 
@@ -4038,22 +4054,29 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "source writer does not hold the requested transfer barrier".to_owned(),
             });
         }
-        if staged.left.range_id == staged.right.range_id {
+        if staged
+            .right
+            .as_ref()
+            .is_some_and(|right| staged.left.range_id == right.range_id)
+        {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: staged.right.range_id,
+                range_id: staged.left.range_id,
                 reason: "successor identities must be distinct".to_owned(),
             });
         }
         let mut successors = self
             .staged
             .lock()
-            .map_err(|_| range_pause_lock_error(staged.right.range_id))?;
+            .map_err(|_| range_pause_lock_error(staged.left.range_id))?;
         if !successors.contains_key(&staged.left.range_id)
-            || !successors.contains_key(&staged.right.range_id)
+            || staged
+                .right
+                .as_ref()
+                .is_some_and(|right| !successors.contains_key(&right.range_id))
         {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
                 range_id: barrier.range_id,
-                reason: "both successors must be staged before either is claimed".to_owned(),
+                reason: "every successor must be staged before any is claimed".to_owned(),
             });
         }
         let left = successors.remove(&staged.left.range_id).ok_or_else(|| {
@@ -4062,12 +4085,18 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "left successor disappeared during atomic claim".to_owned(),
             }
         })?;
-        let right = successors.remove(&staged.right.range_id).ok_or_else(|| {
-            crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: staged.right.range_id,
-                reason: "right successor disappeared during atomic claim".to_owned(),
-            }
-        })?;
+        let right = staged
+            .right
+            .as_ref()
+            .map(|descriptor| {
+                successors.remove(&descriptor.range_id).ok_or_else(|| {
+                    crabka_gres_ranges::RangeTransferError::Boundary {
+                        range_id: descriptor.range_id,
+                        reason: "right successor disappeared during atomic claim".to_owned(),
+                    }
+                })
+            })
+            .transpose()?;
         *self
             .pending
             .lock()
@@ -4080,9 +4109,17 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             left_id: staged.left.range_id,
             left_replay_journal_seq: left.replay_journal_seq,
             left: left.resources.clone(),
-            right_id: staged.right.range_id,
-            right_replay_journal_seq: right.replay_journal_seq,
-            right: right.resources.clone(),
+            right: staged
+                .right
+                .as_ref()
+                .zip(right.as_ref())
+                .map(|(descriptor, successor)| {
+                    (
+                        descriptor.range_id,
+                        successor.replay_journal_seq,
+                        successor.resources.clone(),
+                    )
+                }),
         });
         Ok(crabka_gres_ranges::ClaimedStagedSuccessors {
             left: crabka_gres_ranges::ClaimedStagedSuccessor {
@@ -4092,13 +4129,19 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 engine: left.engine,
                 keepalive: Arc::new(left.resources),
             },
-            right: crabka_gres_ranges::ClaimedStagedSuccessor {
-                range_id: staged.right.range_id,
-                endpoint: staged.right.endpoint.clone(),
-                wal_generation: staged.right.wal_generation,
-                engine: right.engine,
-                keepalive: Arc::new(right.resources),
-            },
+            right: staged
+                .right
+                .as_ref()
+                .zip(right)
+                .map(
+                    |(descriptor, successor)| crabka_gres_ranges::ClaimedStagedSuccessor {
+                        range_id: descriptor.range_id,
+                        endpoint: descriptor.endpoint.clone(),
+                        wal_generation: descriptor.wal_generation,
+                        engine: successor.engine,
+                        keepalive: Arc::new(successor.resources),
+                    },
+                ),
         })
     }
 }
