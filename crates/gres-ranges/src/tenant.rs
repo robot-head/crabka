@@ -2570,6 +2570,13 @@ impl GatewaySession {
         self.release_explicit_transaction();
     }
 
+    fn complete_timestamp_rollback(&mut self) {
+        self.transaction = GatewayTransaction::Idle;
+        self.release_timestamp_topology_guard();
+        self.status = TxStatus::Idle;
+        self.release_explicit_transaction();
+    }
+
     async fn ensure_remote_session(&mut self, range_id: RangeId) -> Result<(), PgError> {
         if self.remote_sessions.contains_key(&range_id) {
             return Ok(());
@@ -3216,13 +3223,14 @@ impl GatewaySession {
     }
 
     async fn rollback_transaction(&mut self) -> Result<Vec<QueryResult>, PgError> {
-        let previous = std::mem::replace(&mut self.transaction, GatewayTransaction::Idle);
         if let GatewayTransaction::Timestamp {
             identity,
             participants,
             ..
-        } = previous
+        } = &self.transaction
         {
+            let identity = *identity;
+            let participants = participants.clone();
             let serving = self.current_serving()?;
             let coordinator = serving
                 .engine(RangeId::COORDINATOR)
@@ -3234,10 +3242,10 @@ impl GatewaySession {
             )
             .await
             .map_err(ExecError::into_pg)?;
-            self.status = TxStatus::Idle;
-            self.release_explicit_transaction();
+            self.complete_timestamp_rollback();
             return Ok(rollback_command_response());
         }
+        let previous = std::mem::replace(&mut self.transaction, GatewayTransaction::Idle);
         let Some((touched, escalated, recovery)) = transaction_participants(previous) else {
             self.status = TxStatus::Idle;
             return Ok(rollback_command_response());
@@ -6114,6 +6122,107 @@ mod tests {
         ));
         assert_eq!(session.status, TxStatus::Failed);
         publication.await.expect("abort releases publication fence");
+    }
+
+    #[tokio::test]
+    async fn timestamp_rollback_releases_topology_and_explicit_transaction_fences() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp-rollback-fences").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let mut session = gateway.connect();
+        session
+            .simple_query("CREATE TABLE s (id int4) SHARDED")
+            .await
+            .expect("create sharded table");
+        session.simple_query("BEGIN").await.expect("begin");
+        session
+            .simple_query("INSERT INTO s VALUES (1)")
+            .await
+            .expect("timestamp write");
+        assert!(matches!(
+            session.transaction,
+            GatewayTransaction::Timestamp { .. }
+        ));
+        assert!(session.timestamp_topology_guard.is_some());
+        assert!(session.explicit_transaction);
+        let publication = tokio::spawn(handles.inner.topology_mutation_gate.clone().write_owned());
+        tokio::task::yield_now().await;
+        assert!(!publication.is_finished());
+
+        session.simple_query("ROLLBACK").await.expect("rollback");
+
+        assert_eq!(session.transaction, GatewayTransaction::Idle);
+        assert_eq!(session.status, TxStatus::Idle);
+        assert!(session.timestamp_topology_guard.is_none());
+        assert!(!session.explicit_transaction);
+        publication
+            .await
+            .expect("rollback releases publication fence");
+    }
+
+    async fn session_with_unabortable_timestamp(gateway: &MultiRangeTenant) -> GatewaySession {
+        let mut session = gateway.connect();
+        session.acquire_timestamp_topology_guard().await;
+        session.transaction = GatewayTransaction::Timestamp {
+            identity: crabka_pgexec::TimestampTxnIdentity {
+                start_ts: crabka_pgexec::TimestampTransactionId::new(12).expect("timestamp"),
+                global_xid: 12,
+                primary_range: RangeId::COORDINATOR.as_u32(),
+            },
+            participants: BTreeMap::new(),
+            commit_ops: Vec::new(),
+        };
+        session
+    }
+
+    #[tokio::test]
+    async fn timestamp_rollback_error_preserves_cleanup_capable_state() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp-rollback-error").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("start");
+        let mut session = session_with_unabortable_timestamp(&gateway).await;
+
+        session
+            .rollback_transaction()
+            .await
+            .expect_err("missing primary participant abort fails");
+
+        assert!(matches!(
+            session.transaction,
+            GatewayTransaction::Timestamp { .. }
+        ));
+        assert!(session.timestamp_topology_guard.is_some());
+    }
+
+    #[tokio::test]
+    async fn failed_timestamp_rollback_drop_releases_fence_after_cleanup_attempt() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp-rollback-drop").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let mut session = session_with_unabortable_timestamp(&gateway).await;
+        let publication = tokio::spawn(handles.inner.topology_mutation_gate.clone().write_owned());
+        tokio::task::yield_now().await;
+        assert!(!publication.is_finished());
+        session
+            .rollback_transaction()
+            .await
+            .expect_err("missing primary participant abort fails");
+
+        drop(session);
+
+        tokio::time::timeout(std::time::Duration::from_secs(5), publication)
+            .await
+            .expect("drop cleanup releases topology fence")
+            .expect("publication task");
     }
 
     #[tokio::test]

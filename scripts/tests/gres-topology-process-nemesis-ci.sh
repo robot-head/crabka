@@ -48,12 +48,14 @@ for kill_point in ("running", "checkpointed", "paused_before_stage", "paused_aft
     elif kill_point == "checkpointed":
         assert kill_evidence["durable_phase"] == "Checkpointed"
         assert durable["manifest_key"] and durable["covered_offset"] is not None
-        assert durable["barrier_offset"] is None
+        assert durable["barrier_offset"] is None and durable["tail_sha256"] is None and durable["marker_digest"] is None
     elif kill_point == "paused_before_stage":
         assert kill_evidence["durable_phase"] == "Paused"
-        assert durable["barrier_offset"] is not None and durable["tail_sha256"] is None
+        assert durable["manifest_key"] and durable["covered_offset"] is not None
+        assert durable["barrier_offset"] is not None and durable["tail_sha256"] is None and durable["marker_digest"] is None
     else:
         assert kill_evidence["durable_phase"] == "Paused"
+        assert durable["manifest_key"] and durable["covered_offset"] is not None
         assert durable["barrier_offset"] is not None and durable["tail_sha256"]
         assert durable["marker_digest"] is None
 PY
