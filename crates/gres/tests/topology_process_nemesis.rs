@@ -702,6 +702,25 @@ fn retirement_restart_uses_authoritative_target_ranges() {
     assert_eq!(restart_hosted_ranges(SourceKillPoint::Restored), "r0,r1");
 }
 
+#[tokio::test]
+async fn split_successor_proxies_are_distinct_and_retargeted() {
+    if std::env::var_os("CRABKA_G8_PROCESS_NEMESIS").is_none() {
+        return;
+    }
+    let mut system = ProcessHarness::start_all_on_zero(&format!(
+        "tenant-g8-split-proxies-{:x}-p{:x}",
+        timestamp_ms(),
+        std::process::id()
+    ))
+    .await;
+    let [r2, r3] = system.split_successor_endpoints();
+    assert_ne!(r2, r3);
+    system.restart_with_hosted_ranges(0, "r0,r1").await;
+    assert_eq!(system.range_endpoint(2), r2);
+    assert_eq!(system.range_endpoint(3), r3);
+    system.shutdown().await;
+}
+
 struct BrokerControl {
     registry: Mutex<Registry>,
 }

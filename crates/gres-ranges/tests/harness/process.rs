@@ -33,6 +33,8 @@ pub struct ProcessHarness {
     sql_proxy: RangeProxy,
     r0_proxy: RangeProxy,
     r1_proxy: RangeProxy,
+    r2_proxy: RangeProxy,
+    r3_proxy: RangeProxy,
     r0: ProcessNode,
     r1: Option<ProcessNode>,
 }
@@ -73,6 +75,8 @@ impl ProcessHarness {
         let sql_proxy = RangeProxy::start().await;
         let r0_proxy = RangeProxy::start().await;
         let r1_proxy = RangeProxy::start().await;
+        let r2_proxy = RangeProxy::start().await;
+        let r3_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
 
@@ -96,6 +100,8 @@ impl ProcessHarness {
             sql_proxy,
             r0_proxy,
             r1_proxy,
+            r2_proxy,
+            r3_proxy,
             r0,
             r1: Some(r1),
         };
@@ -114,6 +120,8 @@ impl ProcessHarness {
         let sql_proxy = RangeProxy::start().await;
         let r0_proxy = RangeProxy::start().await;
         let r1_proxy = RangeProxy::start().await;
+        let r2_proxy = RangeProxy::start().await;
+        let r3_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
         let r0 = spawn_node(root.path(), &bootstrap, &tenant, 0, "r0,r1", &tls, None);
@@ -127,11 +135,15 @@ impl ProcessHarness {
             sql_proxy,
             r0_proxy,
             r1_proxy,
+            r2_proxy,
+            r3_proxy,
             r0,
             r1: None,
         };
         harness.wait_ready(0).await;
         harness.r1_proxy.set_backend(harness.r0.range_port);
+        harness.r2_proxy.set_backend(harness.r0.range_port);
+        harness.r3_proxy.set_backend(harness.r0.range_port);
         harness
     }
 
@@ -173,6 +185,10 @@ impl ProcessHarness {
 
     pub fn range_endpoint(&self, range: u32) -> String {
         format!("127.0.0.1:{}", self.proxy(range).port)
+    }
+
+    pub fn split_successor_endpoints(&self) -> [String; 2] {
+        [self.range_endpoint(2), self.range_endpoint(3)]
     }
 
     pub fn operator_control_client(&self) -> crabka_gres_ranges::FramedTcpClient {
@@ -288,6 +304,8 @@ impl ProcessHarness {
             let replacement_port = self.r0.range_port;
             self.r0_proxy.set_backend(replacement_port);
             self.r1_proxy.set_backend(replacement_port);
+            self.r2_proxy.set_backend(replacement_port);
+            self.r3_proxy.set_backend(replacement_port);
         }
         self.wait_ready(range).await;
     }
@@ -309,6 +327,8 @@ impl ProcessHarness {
         self.proxy(range).set_backend(range_addr.port());
         if range == 0 {
             self.sql_proxy.set_backend(ready.sql.port());
+            self.r2_proxy.set_backend(range_addr.port());
+            self.r3_proxy.set_backend(range_addr.port());
         }
         if range == 0 && self.r1.is_none() {
             self.r1_proxy.set_backend(range_addr.port());
@@ -331,10 +351,12 @@ impl ProcessHarness {
     }
 
     fn proxy(&self, range: u32) -> &RangeProxy {
-        if range == 0 {
-            &self.r0_proxy
-        } else {
-            &self.r1_proxy
+        match range {
+            0 => &self.r0_proxy,
+            1 => &self.r1_proxy,
+            2 => &self.r2_proxy,
+            3 => &self.r3_proxy,
+            _ => panic!("range proxy r{range} is not configured"),
         }
     }
 }
