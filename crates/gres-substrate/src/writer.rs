@@ -227,12 +227,28 @@ impl<W> DeferredWalWriter<W> {
         Ok(())
     }
 
+    /// Return whether the irreversible binding has completed.
+    #[must_use]
+    pub fn is_activated(&self) -> bool {
+        self.live.read().is_ok_and(|live| live.is_some())
+    }
+
     fn current(&self) -> Result<Arc<W>, SubstrateError> {
         self.live
             .read()
             .map_err(|_| SubstrateError::Unavailable("deferred writer lock poisoned".into()))?
             .clone()
             .ok_or_else(|| SubstrateError::Unavailable("deferred writer is not activated".into()))
+    }
+}
+
+impl DeferredWalWriter<ProducerWalWriter> {
+    /// Pause the activated producer, rejecting staged handles fail-closed.
+    pub async fn pause_and_barrier(
+        &self,
+        generation: WriterGeneration,
+    ) -> Result<PausedWalWriter, SubstrateError> {
+        self.current()?.pause_and_barrier(generation).await
     }
 }
 

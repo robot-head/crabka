@@ -567,6 +567,11 @@ pub struct CheckpointHandle {
 }
 
 impl CheckpointHandle {
+    /// Abort a staged checkpoint worker that will never become serving.
+    pub fn abort(&self) {
+        self.task.abort();
+    }
+
     /// Atomically capture the matching WAL metadata and KV snapshot between commit groups.
     pub async fn checkpoint_from_source(
         &self,

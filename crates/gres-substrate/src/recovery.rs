@@ -285,6 +285,16 @@ pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, Subs
     Ok(last_visible.unwrap_or(-1))
 }
 
+/// Ensure the selected range-generation WAL topic exists without constructing
+/// or initializing a transactional producer.
+pub async fn ensure_live_wal_topic(config: &LiveRecoveryConfig) -> Result<String, SubstrateError> {
+    let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
+    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    ensure_wal_topic_name(&mut admin, &config.wal_topic()).await
+}
+
 /// Restore and catch up a read-only range-zero follower without fencing a writer.
 pub async fn bootstrap_live_range0_follower(
     config: &LiveRecoveryConfig,
