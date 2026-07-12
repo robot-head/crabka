@@ -13,9 +13,9 @@ pub use pgdog::{
 pub use record::{
     FinalCheckpoint, HashPlacement, RangeBoundary, RangeLayoutEntry, RangeLayoutMerge,
     RangeLayoutMutation, RangeLayoutSplit, RangeLifecycle, RangeRetirement, RegistryKey,
-    SplitOperationPhase, SplitOperationRecord, SplitState, SqlUser, TENANT_CONFIG_TOPIC_PREFIX,
-    TENANT_REGISTRY_TOPIC, TenantId, TenantName, TenantRecord, TenantState, decode_registry_record,
-    decode_tenant_config_record, encode_registry_record, encode_tenant_config_record,
-    tenant_config_topic, tenant_registry_key,
+    SplitOperationEvidence, SplitOperationPhase, SplitOperationPlan, SplitOperationRecord,
+    SplitState, SqlUser, TENANT_CONFIG_TOPIC_PREFIX, TENANT_REGISTRY_TOPIC, TenantId, TenantName,
+    TenantRecord, TenantState, decode_registry_record, decode_tenant_config_record,
+    encode_registry_record, encode_tenant_config_record, tenant_config_topic, tenant_registry_key,
 };
 pub use registry::{InMemoryRegistryStore, Registry, TenantRegistryStore, fold};

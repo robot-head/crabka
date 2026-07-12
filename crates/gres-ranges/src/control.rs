@@ -622,6 +622,9 @@ fn request_matches_split_operation(
     context: IntentAuthorizationContext,
 ) -> bool {
     let intent = &operation.split;
+    let Some(plan) = operation.plan.as_ref() else {
+        return false;
+    };
     if operation.tenant.as_str() != request.tenant
         || operation.operation_id != request.operation_id
         || !phase_authorizes_operation(operation.phase, &request.operation, context)
@@ -632,26 +635,92 @@ fn request_matches_split_operation(
         && request.generation == intent.predecessor_generation;
     match &request.operation {
         RangeControlOperation::ForceCheckpoint
-        | RangeControlOperation::PauseAtCoveredOffset { .. }
         | RangeControlOperation::Status
         | RangeControlOperation::RetirePredecessor
         | RangeControlOperation::Resume => source,
+        RangeControlOperation::PauseAtCoveredOffset {
+            manifest_key,
+            covered_offset,
+        } => {
+            source
+                && operation.evidence.manifest_key.as_ref() == Some(manifest_key)
+                && operation.evidence.covered_offset == Some(*covered_offset)
+        }
         RangeControlOperation::StageFilteredRestore {
             split: requested,
             source_range,
             source_generation,
+            manifest_key,
+            covered_offset,
+            barrier_offset,
             target_map: _,
             ..
         } => {
             source
-                && runtime_split_matches_intent(requested, intent, &request.operation_id)
+                && runtime_split_matches_intent(requested, intent, plan, &request.operation_id)
                 && source_range.as_u32() == intent.source_range_id
                 && *source_generation == intent.predecessor_generation
+                && operation.evidence.manifest_key.as_ref() == Some(manifest_key)
+                && operation.evidence.covered_offset == Some(*covered_offset)
+                && operation.evidence.barrier_offset == Some(*barrier_offset)
         }
         RangeControlOperation::SuccessorFencePrologue { split: requested } => {
-            source && runtime_split_matches_intent(requested, intent, &request.operation_id)
+            source && runtime_split_matches_intent(requested, intent, plan, &request.operation_id)
         }
-        RangeControlOperation::InheritMarkers { .. } => source,
+        RangeControlOperation::InheritMarkers {
+            interval_start,
+            interval_end,
+        } => {
+            source
+                && wire_key_matches(*interval_start, requested_interval_start(plan, intent))
+                && wire_optional_key_matches(*interval_end, requested_interval_end(plan, intent))
+        }
+    }
+}
+
+fn requested_interval_start(
+    plan: &crabka_gres_control::SplitOperationPlan,
+    intent: &crabka_gres_control::SplitState,
+) -> crabka_gres_control::RangeBoundary {
+    let index = plan
+        .current_layout
+        .iter()
+        .position(|range| range.range_id == intent.source_range_id)
+        .unwrap_or(0);
+    index
+        .checked_sub(1)
+        .and_then(|prior| plan.current_layout[prior].end_key)
+        .unwrap_or(crabka_gres_control::RangeBoundary {
+            table_id: 0,
+            rowid: 0,
+        })
+}
+
+fn requested_interval_end(
+    plan: &crabka_gres_control::SplitOperationPlan,
+    intent: &crabka_gres_control::SplitState,
+) -> Option<crabka_gres_control::RangeBoundary> {
+    plan.current_layout
+        .iter()
+        .find(|range| range.range_id == intent.source_range_id)
+        .and_then(|range| range.end_key)
+}
+
+fn wire_key_matches(
+    actual: crate::transport::WireRangeKey,
+    expected: crabka_gres_control::RangeBoundary,
+) -> bool {
+    actual.table_id == expected.table_id && actual.rowid == expected.rowid
+}
+
+fn wire_optional_key_matches(
+    actual: Option<crate::transport::WireRangeKey>,
+    expected: Option<crabka_gres_control::RangeBoundary>,
+) -> bool {
+    match (actual, expected) {
+        (None, None) => true,
+        (Some(actual), Some(expected)) => wire_key_matches(actual, expected),
+        _ => false,
     }
 }
 
@@ -693,6 +762,7 @@ fn phase_authorizes_operation(
 fn runtime_split_matches_intent(
     split: &crate::SplitState,
     intent: &crabka_gres_control::SplitState,
+    plan: &crabka_gres_control::SplitOperationPlan,
     operation_id: &str,
 ) -> bool {
     let matches_successor =
@@ -712,11 +782,29 @@ fn runtime_split_matches_intent(
     split.operation_id == operation_id
         && split.predecessor.as_u32() == intent.source_range_id
         && split.predecessor_generation == intent.predecessor_generation
+        && split.current_map.epoch().as_u64() == plan.source_map_epoch
+        && split.target_map.epoch().as_u64() == plan.source_map_epoch.saturating_add(1)
+        && map_matches_layout(&split.current_map, &plan.current_layout)
+        && map_matches_layout(&split.target_map, &plan.target_layout)
         && matches_successor(&split.left, &intent.left)
         && split
             .right
             .as_ref()
             .is_some_and(|right| matches_successor(right, &intent.right))
+}
+
+fn map_matches_layout(
+    map: &crate::RangeMap,
+    layout: &[crabka_gres_control::RangeLayoutEntry],
+) -> bool {
+    map.ranges().len() == layout.len()
+        && map.ranges().iter().zip(layout).all(|(range, expected)| {
+            range.range_id.as_u32() == expected.range_id
+                && range.end.map(|end| crabka_gres_control::RangeBoundary {
+                    table_id: end.table_id.as_u64(),
+                    rowid: end.rowid,
+                }) == expected.end_key
+        })
 }
 
 fn rejected(code: impl Into<String>, message: impl Into<String>) -> RangeControlResp {

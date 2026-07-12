@@ -39,6 +39,28 @@ pub enum SplitOperationPhase {
     Completed,
 }
 
+/// Append-only receipts recorded by the operator after each acknowledged control step.
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitOperationEvidence {
+    pub manifest_key: Option<String>,
+    pub covered_offset: Option<i64>,
+    pub barrier_offset: Option<i64>,
+    pub tail_sha256: Option<String>,
+    pub marker_digest: Option<String>,
+}
+
+/// Immutable full-layout authority captured when the operation is initiated.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitOperationPlan {
+    pub source_record_version: u64,
+    pub source_map_epoch: u64,
+    pub routing_table_id: u64,
+    pub current_layout: Vec<RangeLayoutEntry>,
+    pub target_layout: Vec<RangeLayoutEntry>,
+}
+
 /// Durable registry journal record for initiating an explicit two-successor split.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -51,12 +73,18 @@ pub struct SplitOperationRecord {
     pub revision: u64,
     /// Immutable explicit left/right successor intent.
     pub split: SplitState,
+    /// Full immutable source/target layout and catalog routing identity.
+    #[serde(default)]
+    pub plan: Option<SplitOperationPlan>,
     /// Monotone operation phase.
     pub phase: SplitOperationPhase,
     /// Monotone number of execution attempts begun.
     pub attempts: u32,
     /// Append-only failure history.
     pub errors: Vec<String>,
+    /// Append-only, response-derived control evidence.
+    #[serde(default)]
+    pub evidence: SplitOperationEvidence,
 }
 
 impl SplitOperationRecord {
@@ -71,12 +99,27 @@ impl SplitOperationRecord {
             operation_id: operation_id.into(),
             revision: 0,
             split,
+            plan: None,
             phase: SplitOperationPhase::Initiated,
             attempts: 0,
             errors: Vec::new(),
+            evidence: SplitOperationEvidence::default(),
         };
         record.ensure_valid()?;
         Ok(record)
+    }
+
+    pub fn with_plan(mut self, plan: SplitOperationPlan) -> Result<Self, crate::ControlError> {
+        if self.revision != 0 || self.phase != SplitOperationPhase::Initiated {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.plan",
+                "may only be sealed at initiation",
+            ));
+        }
+        plan.ensure_valid(&self.split)?;
+        self.plan = Some(plan);
+        self.ensure_valid()?;
+        Ok(self)
     }
 
     /// Build the next revision while preserving monotone progress.
@@ -86,12 +129,23 @@ impl SplitOperationRecord {
         attempts: u32,
         error: Option<String>,
     ) -> Result<Self, crate::ControlError> {
+        self.advance_with_evidence(phase, attempts, error, self.evidence.clone())
+    }
+
+    pub fn advance_with_evidence(
+        &self,
+        phase: SplitOperationPhase,
+        attempts: u32,
+        error: Option<String>,
+        evidence: SplitOperationEvidence,
+    ) -> Result<Self, crate::ControlError> {
         let mut next = self.clone();
         next.revision = next.revision.checked_add(1).ok_or_else(|| {
             crate::ControlError::invalid_field("split_operation.revision", "must not overflow")
         })?;
         next.phase = phase;
         next.attempts = attempts;
+        next.evidence = evidence;
         if let Some(error) = error {
             next.errors.push(error);
         }
@@ -113,6 +167,10 @@ impl SplitOperationRecord {
             ));
         }
         self.split.ensure_intent_valid()?;
+        if let Some(plan) = &self.plan {
+            plan.ensure_valid(&self.split)?;
+        }
+        self.evidence.ensure_valid()?;
         let phase_shape = match self.phase {
             SplitOperationPhase::Initiated => {
                 self.revision == 0 && self.attempts == 0 && self.errors.is_empty()
@@ -148,7 +206,9 @@ impl SplitOperationRecord {
         let immutable = self.tenant == prior.tenant
             && self.operation_id == prior.operation_id
             && self.split == prior.split;
+        let immutable = immutable && self.plan == prior.plan;
         let errors_extend = self.errors.starts_with(&prior.errors);
+        let evidence_extends = self.evidence.extends(&prior.evidence);
         let phase_extends = self.phase == prior.phase
             || (self.phase == SplitOperationPhase::Failed
                 && prior.phase != SplitOperationPhase::Completed)
@@ -164,6 +224,7 @@ impl SplitOperationRecord {
             && prior.phase != SplitOperationPhase::Completed
             && self.attempts >= prior.attempts
             && errors_extend
+            && evidence_extends
         {
             Ok(())
         } else {
@@ -173,6 +234,64 @@ impl SplitOperationRecord {
                 reason: "update is not a monotone extension".to_string(),
             })
         }
+    }
+}
+
+impl SplitOperationPlan {
+    fn ensure_valid(&self, split: &SplitState) -> Result<(), crate::ControlError> {
+        if self.source_record_version == 0 || self.routing_table_id == 0 {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.plan",
+                "record version and routing table id must be positive",
+            ));
+        }
+        ensure_range_layout_valid(&self.current_layout)?;
+        ensure_range_layout_valid(&self.target_layout)?;
+        let source = self
+            .current_layout
+            .iter()
+            .find(|range| range.range_id == split.source_range_id);
+        if source.is_none_or(|range| range.wal_generation != split.predecessor_generation)
+            || !self.target_layout.iter().any(|range| range == &split.left)
+            || !self.target_layout.iter().any(|range| range == &split.right)
+        {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.plan",
+                "source or successor layout differs from split intent",
+            ));
+        }
+        Ok(())
+    }
+}
+
+impl SplitOperationEvidence {
+    fn ensure_valid(&self) -> Result<(), crate::ControlError> {
+        if self.manifest_key.as_ref().is_some_and(String::is_empty)
+            || self.tail_sha256.as_ref().is_some_and(String::is_empty)
+            || self.marker_digest.as_ref().is_some_and(String::is_empty)
+            || self.covered_offset.is_some_and(|offset| offset < 0)
+            || self.barrier_offset.is_some_and(|offset| offset < 0)
+            || self.barrier_offset.is_some() && self.covered_offset.is_none()
+        {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.evidence",
+                "receipt evidence is empty, negative, or incomplete",
+            ));
+        }
+        Ok(())
+    }
+
+    fn extends(&self, prior: &Self) -> bool {
+        fn field_extends<T: PartialEq>(next: &Option<T>, prior: &Option<T>) -> bool {
+            prior
+                .as_ref()
+                .is_none_or(|prior| next.as_ref() == Some(prior))
+        }
+        field_extends(&self.manifest_key, &prior.manifest_key)
+            && field_extends(&self.covered_offset, &prior.covered_offset)
+            && field_extends(&self.barrier_offset, &prior.barrier_offset)
+            && field_extends(&self.tail_sha256, &prior.tail_sha256)
+            && field_extends(&self.marker_digest, &prior.marker_digest)
     }
 }
 
@@ -1419,6 +1538,35 @@ mod tests {
         assert!(
             paused
                 .advance(SplitOperationPhase::Running, 1, None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn split_operation_evidence_is_append_only_and_exact() {
+        let initiated = SplitOperationRecord::new(
+            TenantName::try_from("tenant-a").unwrap(),
+            "split-evidence",
+            split_intent(),
+        )
+        .unwrap();
+        let running = initiated
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        let evidence = SplitOperationEvidence {
+            manifest_key: Some("tenant/r1/manifest".into()),
+            covered_offset: Some(41),
+            ..Default::default()
+        };
+        let checkpointed = running
+            .advance_with_evidence(SplitOperationPhase::Checkpointed, 1, None, evidence.clone())
+            .unwrap();
+        let mut forged = evidence;
+        forged.manifest_key = Some("attacker/manifest".into());
+
+        assert!(
+            checkpointed
+                .advance_with_evidence(SplitOperationPhase::Checkpointed, 1, None, forged)
                 .is_err()
         );
     }

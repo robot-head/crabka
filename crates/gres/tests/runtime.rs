@@ -890,16 +890,34 @@ async fn seed_control_operation(
         .right
         .as_ref()
         .expect("proper split has right successor");
+    let split_intent = crabka_gres_control::RangeLayoutSplit {
+        source_range_id: split.predecessor.as_u32(),
+        predecessor_generation: split.predecessor_generation,
+        left: control_layout_entry(&split.left),
+        right: control_layout_entry(right),
+    };
+    let mut target_layout = record.ranges.clone();
+    let source_index = target_layout
+        .iter()
+        .position(|range| range.range_id == split_intent.source_range_id)
+        .unwrap();
+    target_layout.splice(
+        source_index..=source_index,
+        [split_intent.left.clone(), split_intent.right.clone()],
+    );
     let operation = crabka_gres_control::SplitOperationRecord::new(
         crabka_gres_control::TenantName::try_from(tenant).unwrap(),
         &split.operation_id,
-        crabka_gres_control::RangeLayoutSplit {
-            source_range_id: split.predecessor.as_u32(),
-            predecessor_generation: split.predecessor_generation,
-            left: control_layout_entry(&split.left),
-            right: control_layout_entry(right),
-        },
+        split_intent,
     )
+    .unwrap()
+    .with_plan(crabka_gres_control::SplitOperationPlan {
+        source_record_version: record.record_version,
+        source_map_epoch: split.current_map.epoch().as_u64(),
+        routing_table_id: 1,
+        current_layout: record.ranges.clone(),
+        target_layout,
+    })
     .unwrap();
     let mut registry = crabka_gres_control::Registry::connect(bootstrap)
         .await
@@ -923,6 +941,7 @@ async fn advance_control_operation(
     tenant: &str,
     operation_id: &str,
     phase: crabka_gres_control::SplitOperationPhase,
+    evidence: Option<crabka_gres_control::SplitOperationEvidence>,
 ) {
     let mut registry = crabka_gres_control::Registry::connect(bootstrap)
         .await
@@ -935,7 +954,14 @@ async fn advance_control_operation(
     if current.phase == phase || current.phase > phase {
         return;
     }
-    let next = current.advance(phase, current.attempts, None).unwrap();
+    let next = current
+        .advance_with_evidence(
+            phase,
+            current.attempts,
+            None,
+            evidence.unwrap_or_else(|| current.evidence.clone()),
+        )
+        .unwrap();
     registry
         .compare_and_swap_split_operation(Some(current.revision), &next)
         .await
@@ -1025,6 +1051,11 @@ async fn drive_live_control_split(
             tenant,
             operation_id,
             crabka_gres_control::SplitOperationPhase::Checkpointed,
+            Some(crabka_gres_control::SplitOperationEvidence {
+                manifest_key: Some(manifest_key.clone()),
+                covered_offset: Some(covered_offset),
+                ..Default::default()
+            }),
         )
         .await;
         transfer
@@ -1056,6 +1087,12 @@ async fn drive_live_control_split(
             tenant,
             operation_id,
             crabka_gres_control::SplitOperationPhase::Paused,
+            Some(crabka_gres_control::SplitOperationEvidence {
+                manifest_key: Some(manifest_key.clone()),
+                covered_offset: Some(covered_offset),
+                barrier_offset: Some(barrier_offset),
+                ..Default::default()
+            }),
         )
         .await;
         let state = DriverState {
@@ -1105,6 +1142,7 @@ async fn drive_live_control_split(
             tenant,
             operation_id,
             crabka_gres_control::SplitOperationPhase::Activated,
+            None,
         )
         .await;
         let retire =
@@ -1121,6 +1159,7 @@ async fn drive_live_control_split(
             tenant,
             operation_id,
             crabka_gres_control::SplitOperationPhase::Completed,
+            None,
         )
         .await;
         return;
@@ -1173,6 +1212,7 @@ async fn drive_live_control_split(
         tenant,
         operation_id,
         crabka_gres_control::SplitOperationPhase::Restored,
+        None,
     )
     .await;
     let markers = control_request(
@@ -1216,6 +1256,7 @@ async fn drive_live_control_split(
         tenant,
         operation_id,
         crabka_gres_control::SplitOperationPhase::Activated,
+        None,
     )
     .await;
     let retire = control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
@@ -1231,6 +1272,7 @@ async fn drive_live_control_split(
         tenant,
         operation_id,
         crabka_gres_control::SplitOperationPhase::Completed,
+        None,
     )
     .await;
 }
