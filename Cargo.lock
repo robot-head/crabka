@@ -2755,6 +2755,7 @@ dependencies = [
  "crabka-gres-ranges",
  "crabka-gres-substrate",
  "crabka-object-store",
+ "crabka-operator",
  "crabka-pgcatalog",
  "crabka-pgexec",
  "crabka-pgkv",

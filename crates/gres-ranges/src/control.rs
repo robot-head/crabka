@@ -561,9 +561,12 @@ impl GenerationFencedRangeControl {
         if request.tenant != self.tenant {
             return rejected("wrong_tenant", "control request belongs to another tenant");
         }
-        let Some(expected_generations) = self.generations.get(&request.range_id) else {
+        let expected_generations = self.generations.get(&request.range_id);
+        if expected_generations.is_none()
+            && !matches!(request.operation, RangeControlOperation::Status)
+        {
             return rejected("wrong_range", "range is not hosted by this compute");
-        };
+        }
         if request.operation_id.is_empty() {
             return rejected("invalid_operation_id", "operation_id must not be empty");
         }
@@ -595,7 +598,7 @@ impl GenerationFencedRangeControl {
             }
             Err(message) => return rejected("intent_authority", message),
         };
-        if !expected_generations.contains(&request.generation)
+        if expected_generations.is_some_and(|expected| !expected.contains(&request.generation))
             && !existing.as_ref().is_some_and(|receipt| {
                 receipt.request == request && receipt.request_digest == digest
             })
@@ -831,10 +834,17 @@ fn request_matches_split_operation(
         RangeControlOperation::Status => {
             (source && !operation.phase.expects_target_registry_layout())
                 || operation.plan.as_ref().is_some_and(|plan| {
-                    plan.target_layout.iter().any(|successor| {
-                        request.range_id.as_u32() == successor.range_id
-                            && request.generation == successor.wal_generation
-                    })
+                    let target_phase = operation.phase.is_between(
+                        crabka_gres_control::SplitOperationPhase::Activated,
+                        crabka_gres_control::SplitOperationPhase::Resuming,
+                    ) || (operation.phase
+                        == crabka_gres_control::SplitOperationPhase::Completed
+                        && context == IntentAuthorizationContext::CompletedReplay);
+                    target_phase
+                        && plan.target_layout.iter().any(|successor| {
+                            request.range_id.as_u32() == successor.range_id
+                                && request.generation == successor.wal_generation
+                        })
                 })
         }
         RangeControlOperation::ForceCheckpoint
@@ -1148,7 +1158,7 @@ mod tests {
             lifecycle: RangeLifecycle::Serving,
             retirement: None,
         };
-        let record = SplitOperationRecord::new_move(
+        let mut record = SplitOperationRecord::new_move(
             TenantName::try_from("tenant-a").unwrap(),
             "move-1",
             1,
@@ -1164,6 +1174,43 @@ mod tests {
             target_layout: vec![coordinator, replacement],
         })
         .unwrap();
+        let status = |range_id, generation| RangeControlReq {
+            tenant: "tenant-a".into(),
+            range_id: RangeId::new(range_id),
+            generation,
+            operation_id: "move-1".into(),
+            operation: RangeControlOperation::Status,
+        };
+        record.phase = crabka_gres_control::SplitOperationPhase::Restored;
+        record.revision = 4;
+        record.attempts = 1;
+        assert!(!request_matches_split_operation(
+            &status(2, 5),
+            &record,
+            IntentAuthorizationContext::New,
+        ));
+        record.phase = crabka_gres_control::SplitOperationPhase::Activated;
+        assert!(request_matches_split_operation(
+            &status(2, 5),
+            &record,
+            IntentAuthorizationContext::New,
+        ));
+        assert!(!request_matches_split_operation(
+            &status(3, 5),
+            &record,
+            IntentAuthorizationContext::New,
+        ));
+        assert!(!request_matches_split_operation(
+            &status(2, 6),
+            &record,
+            IntentAuthorizationContext::New,
+        ));
+        record.phase = crabka_gres_control::SplitOperationPhase::LayoutPublished;
+        assert!(!request_matches_split_operation(
+            &status(1, 4),
+            &record,
+            IntentAuthorizationContext::New,
+        ));
         let authorized = AuthorizedSplitIntent::from_record(record).unwrap();
         assert_eq!(authorized.split().operation, crate::SplitOperation::Move);
         assert!(authorized.split().right.is_none());

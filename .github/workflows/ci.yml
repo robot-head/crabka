@@ -539,6 +539,30 @@ jobs:
           if-no-files-found: error
           retention-days: 30
 
+  gres-topology-process-nemesis:
+    needs: changes
+    if: ${{ needs.changes.outputs.gres == 'true' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.96.0"
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: gres-topology-process-nemesis
+      - name: Exercise a live Move through CLI, operator, and Gres
+        run: bash scripts/tests/gres-topology-process-nemesis-ci.sh
+      - name: Upload topology process evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@v7
+        with:
+          name: gres-topology-process-nemesis
+          path: target/g8-topology-process-nemesis
+          if-no-files-found: error
+          retention-days: 30
+
   gres-sharded-conformance:
     needs: changes
     if: ${{ needs.changes.outputs.gres == 'true' }}

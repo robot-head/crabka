@@ -192,8 +192,16 @@ impl LiveRangeControlExecutor {
         let transfer = self.transfer()?;
         match &request.operation {
             RangeControlOperation::ForceCheckpoint => {
+                transfer
+                    .record_topology_activation_intent(intent.split())
+                    .await
+                    .map_err(transfer_error)?;
                 let checkpoint = transfer
                     .force_checkpoint(request.range_id)
+                    .await
+                    .map_err(transfer_error)?;
+                transfer
+                    .record_topology_activation_checkpoint(&request.operation_id, &checkpoint)
                     .await
                     .map_err(transfer_error)?;
                 self.operations

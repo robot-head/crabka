@@ -613,7 +613,7 @@ async fn park_suspended_tenant_wal(
     let mut ranges_to_park = Vec::with_capacity(ranges.len());
     for range in ranges {
         let topic = wal_topic_for_generation(tenant, range.range_id, generation_to_park);
-        if topic_exists(admin, &topic).await? {
+        if topic_exists(&mut **admin, &topic).await? {
             ranges_to_park.push(range.range_id);
         }
     }
@@ -659,7 +659,7 @@ async fn park_suspended_tenant_wal(
     *record = latest;
 
     if !ranges_to_park.is_empty() {
-        delete_wal_topics(admin, tenant, &ranges_to_park, generation_to_park).await?;
+        delete_wal_topics(&mut **admin, tenant, &ranges_to_park, generation_to_park).await?;
     }
     if wal_topics_remain(admin, tenant, ranges, generation_to_park).await? {
         return Ok(ParkingProgress::DeletionPending);
@@ -710,10 +710,10 @@ async fn park_retiring_ranges(
             ));
         }
         let topic = wal_topic_for_generation(tenant, range_id, generation);
-        if topic_exists(admin, &topic).await? {
-            delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+        if topic_exists(&mut **admin, &topic).await? {
+            delete_wal_topics(&mut **admin, tenant, &[range_id], generation).await?;
         }
-        if topic_exists(admin, &topic).await? {
+        if topic_exists(&mut **admin, &topic).await? {
             return Ok(ParkingProgress::DeletionPending);
         }
         let expected = record.record_version;
@@ -759,10 +759,10 @@ async fn park_retiring_ranges(
     }
     for (range_id, operation_id, generation) in retiring {
         let topic = wal_topic_for_generation(tenant, range_id, generation);
-        if topic_exists(admin, &topic).await? {
-            delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+        if topic_exists(&mut **admin, &topic).await? {
+            delete_wal_topics(&mut **admin, tenant, &[range_id], generation).await?;
         }
-        if topic_exists(admin, &topic).await? {
+        if topic_exists(&mut **admin, &topic).await? {
             return Ok(ParkingProgress::DeletionPending);
         }
         let expected = record.record_version;
@@ -776,6 +776,45 @@ async fn park_retiring_ranges(
     Ok(ParkingProgress::Complete)
 }
 
+/// Reconcile at most one durable split/move predecessor WAL retirement without Kubernetes.
+///
+/// The registry sidecar is the authority: deletion is replay-safe, and the sidecar advances to
+/// `Parked` only after metadata confirms the exact generation topic is absent.
+pub async fn reconcile_one_retiring_range_wal(
+    control: &crate::context::GresControlHandle,
+    admin: &mut (dyn crabka_client_admin::AdminClientLike + Send),
+    tenant: &TenantName,
+) -> Result<bool, ReconcileError> {
+    let Some(record) = control.get_tenant(tenant).await? else {
+        return Err(ReconcileError::Malformed(format!(
+            "retiring tenant {tenant} disappeared"
+        )));
+    };
+    let Some(retirement) = record
+        .range_retirements
+        .iter()
+        .find(|retirement| retirement.phase == crabka_gres_control::RangeRetirementPhase::Parking)
+    else {
+        return Ok(true);
+    };
+    let operation_id = retirement.operation_id.clone();
+    let range_id = retirement.source_range_id;
+    let generation = retirement.source_generation;
+    let topic = wal_topic_for_generation(tenant, range_id, generation);
+    if topic_exists(admin, &topic).await? {
+        delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+    }
+    if topic_exists(admin, &topic).await? {
+        return Ok(false);
+    }
+    let expected_version = record.record_version;
+    let parked = record.confirm_split_predecessor_parked(&operation_id, range_id, generation)?;
+    control
+        .replace_tenant_if_version(&parked, Some(expected_version))
+        .await?;
+    Ok(true)
+}
+
 async fn wal_topics_remain(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     tenant: &TenantName,
@@ -784,7 +823,7 @@ async fn wal_topics_remain(
 ) -> Result<bool, ReconcileError> {
     for range in ranges {
         if topic_exists(
-            admin,
+            &mut **admin,
             &wal_topic_for_generation(tenant, range.range_id, generation),
         )
         .await?
@@ -796,7 +835,7 @@ async fn wal_topics_remain(
 }
 
 async fn delete_wal_topics(
-    admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
+    admin: &mut (dyn crabka_client_admin::AdminClientLike + Send),
     tenant: &TenantName,
     ranges: &[u32],
     generation: u64,
@@ -817,7 +856,7 @@ async fn delete_wal_topics(
 }
 
 async fn topic_exists(
-    admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
+    admin: &mut (dyn crabka_client_admin::AdminClientLike + Send),
     topic: &str,
 ) -> Result<bool, ReconcileError> {
     let metadata = admin.metadata(&[topic]).await?;

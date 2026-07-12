@@ -33,7 +33,7 @@ pub struct ProcessHarness {
     r0_proxy: RangeProxy,
     r1_proxy: RangeProxy,
     r0: ProcessNode,
-    r1: ProcessNode,
+    r1: Option<ProcessNode>,
 }
 
 struct ProcessNode {
@@ -94,10 +94,39 @@ impl ProcessHarness {
             r0_proxy,
             r1_proxy,
             r0,
-            r1,
+            r1: Some(r1),
         };
         harness.wait_ready(0).await;
         harness.wait_ready(1).await;
+        harness
+    }
+
+    pub async fn start_all_on_zero(name: &str) -> Self {
+        let root = tempfile::tempdir().expect("process harness root");
+        let broker = Broker::start(BrokerConfig::for_tests(root.path().join("broker")))
+            .await
+            .expect("start real broker");
+        let bootstrap = broker.listen_addr().to_string();
+        let tenant = name.to_owned();
+        let r0_proxy = RangeProxy::start().await;
+        let r1_proxy = RangeProxy::start().await;
+        let tls = write_tls_fixture(root.path());
+        provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
+        let r0 = spawn_node(root.path(), &bootstrap, &tenant, 0, "r0,r1", &tls, None);
+        let mut harness = Self {
+            _root: root,
+            _broker: broker,
+            bootstrap,
+            tenant,
+            tls,
+            commit_fault: None,
+            r0_proxy,
+            r1_proxy,
+            r0,
+            r1: None,
+        };
+        harness.wait_ready(0).await;
+        harness.r1_proxy.set_backend(harness.r0.range_port);
         harness
     }
 
@@ -116,8 +145,35 @@ impl ProcessHarness {
     pub fn endpoints(&self) -> [(u16, u16); 2] {
         [
             (self.r0.sql_port, self.r0_proxy.port),
-            (self.r1.sql_port, self.r1_proxy.port),
+            (
+                self.r1
+                    .as_ref()
+                    .map_or(self.r0.sql_port, |node| node.sql_port),
+                self.r1_proxy.port,
+            ),
         ]
+    }
+
+    pub fn bootstrap(&self) -> &str {
+        &self.bootstrap
+    }
+
+    pub fn tenant(&self) -> &str {
+        &self.tenant
+    }
+
+    pub fn range_endpoint(&self, range: u32) -> String {
+        format!("127.0.0.1:{}", self.proxy(range).port)
+    }
+
+    pub fn operator_control_client(&self) -> crabka_gres_ranges::FramedTcpClient {
+        crabka_gres_ranges::FramedTcpClient::with_tls_pem(
+            &std::fs::read(&self.tls.server_cert).expect("operator certificate"),
+            &std::fs::read(&self.tls.server_key).expect("operator key"),
+            &std::fs::read(&self.tls.ca).expect("range CA"),
+            "crabka-dev".to_owned(),
+        )
+        .expect("operator mTLS client")
     }
 
     pub fn log(&self, range: u32) -> String {
@@ -156,6 +212,17 @@ impl ProcessHarness {
         self.restart_node(range, &hosted_ranges).await;
     }
 
+    pub async fn restart_with_hosted_ranges(&mut self, range: u32, hosted_ranges: &str) {
+        self.restart_node(range, hosted_ranges).await;
+    }
+
+    pub async fn host_all_ranges_on_source_zero(&mut self) {
+        self.stop_node(0).await;
+        self.stop_node(1).await;
+        self.restart_node(0, "r0,r1").await;
+        self.r1_proxy.set_backend(self.r0.range_port);
+    }
+
     pub fn clear_commit_fault(&mut self) {
         self.commit_fault = None;
     }
@@ -174,6 +241,9 @@ impl ProcessHarness {
     }
 
     async fn stop_node(&mut self, range: u32) {
+        if range == 1 && self.r1.is_none() {
+            return;
+        }
         let node = self.node_mut(range);
         if node.child.try_wait().expect("child status").is_none() {
             node.child.kill().await.expect("kill compute child");
@@ -217,7 +287,7 @@ impl ProcessHarness {
         let ready = tokio::time::timeout(Duration::from_secs(30), ready)
             .await
             .expect("compute readiness timeout")
-            .expect("compute readiness channel closed");
+            .unwrap_or_else(|_| panic!("compute readiness channel closed: {}", self.log(range)));
         let range_addr = ready.range.expect("range listener address");
         let node = self.node_mut(range);
         node.sql_port = ready.sql.port();
@@ -226,13 +296,17 @@ impl ProcessHarness {
     }
 
     fn node(&self, range: u32) -> &ProcessNode {
-        if range == 0 { &self.r0 } else { &self.r1 }
+        if range == 0 {
+            &self.r0
+        } else {
+            self.r1.as_ref().expect("r1 child is not configured")
+        }
     }
     fn node_mut(&mut self, range: u32) -> &mut ProcessNode {
         if range == 0 {
             &mut self.r0
         } else {
-            &mut self.r1
+            self.r1.as_mut().expect("r1 child is not configured")
         }
     }
 
@@ -248,7 +322,9 @@ impl ProcessHarness {
 impl Drop for ProcessHarness {
     fn drop(&mut self) {
         let _ = self.r0.child.start_kill();
-        let _ = self.r1.child.start_kill();
+        if let Some(r1) = &mut self.r1 {
+            let _ = r1.child.start_kill();
+        }
     }
 }
 
@@ -393,7 +469,9 @@ fn spawn_node(
     commit_fault: Option<&str>,
 ) -> ProcessNode {
     let cache_dir = root.join(format!("r{range}-cache"));
+    let checkpoint_dir = root.join("checkpoints");
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
+    std::fs::create_dir_all(&checkpoint_dir).expect("checkpoint dir");
     let log_path = root.join(format!("r{range}.log"));
     let stderr = File::create(&log_path).expect("node log");
     let binary = gres_binary();
@@ -426,6 +504,16 @@ fn spawn_node(
         "--operator-control-principal",
         "CN=process-range",
     ]);
+    if range == 0 {
+        command.args([
+            "--checkpoint-store",
+            "local",
+            "--checkpoint-local-root",
+            checkpoint_dir.to_str().expect("checkpoint path"),
+            "--checkpoint-frames",
+            "1",
+        ]);
+    }
     if let Some(fault) = commit_fault {
         command.env("CRABKA_GRES_TEST_COMMIT_FAULT", fault);
     }
