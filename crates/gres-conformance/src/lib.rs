@@ -161,12 +161,36 @@ fn is_create_table_candidate(sql: &str) -> bool {
     use crabka_pgparser::token::{Keyword, Token};
 
     let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
-        return false;
+        return has_unmistakable_create_table_prefix(sql);
     };
     matches!(tokens.first(), Some((Token::Keyword(Keyword::Create), _)))
         && tokens.iter().take(8).any(|(token, _)| {
             matches!(token, Token::Keyword(Keyword::Table))
         })
+}
+
+fn has_unmistakable_create_table_prefix(mut sql: &str) -> bool {
+    loop {
+        sql = sql.trim_start();
+        if let Some(comment) = sql.strip_prefix("--") {
+            let Some((_, rest)) = comment.split_once('\n') else {
+                return false;
+            };
+            sql = rest;
+        } else if let Some(comment) = sql.strip_prefix("/*") {
+            let Some((_, rest)) = comment.split_once("*/") else {
+                return false;
+            };
+            sql = rest;
+        } else {
+            break;
+        }
+    }
+    let mut words = sql.split_whitespace();
+    words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
+        && words.take(7).any(|word| word.eq_ignore_ascii_case("TABLE"))
 }
 
 #[derive(Debug, Error)]
@@ -1249,6 +1273,8 @@ mod tests {
 
         subject_sharded_statement("CREATE TABLE copied AS SELECT 1")
             .expect_err("unsupported table DDL must not pass through unchanged");
+        subject_sharded_statement("CREATE TABLE lexical (label text DEFAULT 'unterminated)")
+            .expect_err("lexer-level malformed table DDL must not pass through unchanged");
     }
 
     #[test]
