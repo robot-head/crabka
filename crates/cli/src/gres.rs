@@ -16,8 +16,9 @@ use crabka_gres_balancer::{
 };
 use crabka_gres_control::{
     PgdogGeneral, PgdogRenderInput, PgdogUser, RangeBoundary, RangeLayoutEntry, RangeLayoutSplit,
-    Registry, SqlUser, TenantEndpoint, TenantId, TenantName, TenantRecord, TenantState,
-    render_pgdog_toml, render_users_toml, tenant_config_topic,
+    RangeLifecycle, Registry, SplitOperationPlan, SplitOperationRecord, SqlUser, TenantEndpoint,
+    TenantId, TenantName, TenantRecord, TenantState, render_pgdog_toml, render_users_toml,
+    tenant_config_topic,
 };
 use crabka_security::{ListenerProtocol, SaslMechanism, scram::PgScramVerifier};
 use serde::Serialize;
@@ -165,6 +166,15 @@ struct SplitRangeArgs {
     table: u64,
     /// Row identifier at the split point.
     rowid: u64,
+    /// Durable idempotency key for this split.
+    #[arg(long)]
+    operation_id: String,
+    /// Left successor range id. Range zero may remain the left successor.
+    #[arg(long)]
+    left_range_id: Option<u32>,
+    /// Left successor compute endpoint.
+    #[arg(long)]
+    left_endpoint: Option<String>,
     /// New successor range id. Defaults to max(existing range id) + 1.
     #[arg(long)]
     successor_range_id: Option<u32>,
@@ -174,9 +184,6 @@ struct SplitRangeArgs {
     /// Successor WAL generation. Defaults to the source range generation.
     #[arg(long)]
     successor_wal_generation: Option<u64>,
-    /// Acknowledge this metadata-only command does not move data or make a live split safe.
-    #[arg(long)]
-    unsafe_metadata_only: bool,
 }
 
 #[derive(Args, Debug)]
@@ -426,7 +433,6 @@ const fn execution_policy_name(policy: ExecutionPolicy) -> &'static str {
 }
 
 async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
-    require_unsafe_metadata_only(args.unsafe_metadata_only)?;
     let tenant_name = TenantName::try_from(args.tenant.as_str()).map_err(|e| e.to_string())?;
     let mut registry = connect_registry(&args.bootstrap).await?;
     let record = registry
@@ -435,47 +441,73 @@ async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
         .map_err(|e| e.to_string())?
         .ok_or_else(|| format!("tenant {tenant_name} not found"))?;
     let source = source_range_for_key(&record, RangeBoundary::new(args.table, args.rowid))?;
+    let first_free = next_range_id(&record);
+    let left_range_id = args
+        .left_range_id
+        .unwrap_or_else(|| if source.range_id == 0 { 0 } else { first_free });
     let successor_range_id = args
         .successor_range_id
-        .unwrap_or_else(|| next_range_id(&record));
+        .unwrap_or_else(|| first_free.max(left_range_id.saturating_add(1)));
+    let left_endpoint = args.left_endpoint.unwrap_or_else(|| {
+        if left_range_id == source.range_id {
+            source.endpoint.clone()
+        } else {
+            range_endpoint(&tenant_name, left_range_id)
+        }
+    });
     let successor_endpoint = args
         .successor_endpoint
         .unwrap_or_else(|| range_endpoint(&tenant_name, successor_range_id));
     let successor_wal_generation = args
         .successor_wal_generation
-        .unwrap_or(source.wal_generation);
+        .unwrap_or_else(|| source.wal_generation.saturating_add(1));
+    let successor = |range_id, end_key, endpoint: String| RangeLayoutEntry {
+        range_id,
+        end_key,
+        endpoint,
+        wal_generation: successor_wal_generation,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let split = RangeLayoutSplit {
+        source_range_id: source.range_id,
+        predecessor_generation: source.wal_generation,
+        left: successor(
+            left_range_id,
+            Some(RangeBoundary::new(args.table, args.rowid)),
+            left_endpoint,
+        ),
+        right: successor(successor_range_id, source.end_key, successor_endpoint),
+    };
+    let target = record
+        .clone()
+        .split_range_layout(split.clone())
+        .map_err(|e| e.to_string())?;
+    let operation =
+        SplitOperationRecord::new(tenant_name.clone(), args.operation_id.clone(), split)
+            .map_err(|e| e.to_string())?
+            .with_plan(SplitOperationPlan {
+                source_record_version: record.record_version,
+                source_map_epoch: record.record_version,
+                routing_table_id: args.table,
+                current_layout: record.ranges.clone(),
+                target_layout: target.ranges,
+            })
+            .map_err(|e| e.to_string())?;
     registry
-        .split_range_layout_if_version(
-            tenant_name.as_str(),
-            record.record_version,
-            RangeLayoutSplit {
-                source_range_id: source.range_id,
-                split_key: RangeBoundary::new(args.table, args.rowid),
-                successor_range_id,
-                successor_endpoint,
-                successor_wal_generation,
-            },
-        )
+        .begin_split_operation(&operation)
         .await
         .map_err(|e| e.to_string())?;
-    eprintln!(
-        "WARNING: metadata-only registry split was recorded; no checkpoint, copy, catch-up, or cutover occurred. This is unsafe for live data."
-    );
     println!(
-        "UNSAFE metadata-only split tenant {tenant_name} range {} at table {} rowid {} into range {}",
-        source.range_id, args.table, args.rowid, successor_range_id
+        "initiated split {} for tenant {tenant_name} range {} at table {} rowid {} into ranges {} and {}",
+        args.operation_id,
+        source.range_id,
+        args.table,
+        args.rowid,
+        left_range_id,
+        successor_range_id
     );
     Ok(())
-}
-
-fn require_unsafe_metadata_only(acknowledged: bool) -> Result<(), String> {
-    if acknowledged {
-        return Ok(());
-    }
-    Err(
-        "refusing metadata-only range mutation without --unsafe-metadata-only; it does not move data and is unsafe for live use"
-            .to_string(),
-    )
 }
 
 async fn create_tenant(args: CreateTenantArgs) -> Result<(), String> {
@@ -1203,12 +1235,6 @@ mod tests {
                 .as_str()
                 .is_some_and(|message| message.contains("split"))
         );
-    }
-
-    #[test]
-    fn unsafe_metadata_only_requires_explicit_acknowledgement() {
-        assert!(require_unsafe_metadata_only(false).is_err());
-        assert!(require_unsafe_metadata_only(true).is_ok());
     }
 
     fn test_record(name: &str, state: TenantState) -> TenantRecord {
