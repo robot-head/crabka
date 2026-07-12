@@ -49,7 +49,7 @@ pub struct InDoubtMarker {
     pub key: RangeKey,
 }
 
-/// User request to split a range into predecessor and successor halves.
+/// User request to replace one range with two fresh successor halves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct SplitCommand {
@@ -196,11 +196,21 @@ impl SplitState {
             command.split_at,
             command.successor,
         )?;
+        let left_successor = if command.predecessor.is_coordinator() {
+            RangeId::COORDINATOR
+        } else {
+            next_unused_range_id(&command.current_map, &[command.successor])?
+        };
+        let left = RangeSpec::for_interval(
+            left_successor,
+            plan.left.start,
+            plan.left.end,
+        );
         let target_map = map_with_replaced_ranges(
             &command.current_map,
             command.current_map.epoch().next()?,
             command.predecessor,
-            &[plan.left.clone(), plan.right.clone()],
+            &[left.clone(), plan.right.clone()],
         )?;
 
         let operation_id = operation_id.into();
@@ -215,7 +225,7 @@ impl SplitState {
             successor: command.successor,
             successor_generation: None,
             predecessor_before: predecessor_before(&command.current_map, command.predecessor)?,
-            predecessor_after: plan.left,
+            predecessor_after: left,
             successor_after: plan.right,
             merge_right_before: None,
             conversion_table: None,
@@ -234,12 +244,13 @@ impl SplitState {
         command: MoveRangeCommand,
     ) -> Result<Self, SplitError> {
         let predecessor_before = predecessor_before(&command.current_map, command.range_id)?;
+        let successor = next_unused_range_id(&command.current_map, &[])?;
         let target_map = map_with_replaced_ranges(
             &command.current_map,
             command.current_map.epoch().next()?,
             command.range_id,
             &[RangeSpec::for_interval(
-                command.range_id,
+                successor,
                 predecessor_before.start,
                 predecessor_before.end,
             )],
@@ -254,11 +265,19 @@ impl SplitState {
             operation_id,
             operation: SplitOperation::Move,
             predecessor: command.range_id,
-            successor: command.range_id,
+            successor,
             successor_generation: Some(command.successor_generation),
             predecessor_before: predecessor_before.clone(),
-            predecessor_after: predecessor_before.clone(),
-            successor_after: predecessor_before,
+            predecessor_after: RangeSpec::for_interval(
+                successor,
+                predecessor_before.start,
+                predecessor_before.end,
+            ),
+            successor_after: RangeSpec::for_interval(
+                successor,
+                predecessor_before.start,
+                predecessor_before.end,
+            ),
             merge_right_before: None,
             conversion_table: None,
             current_map: command.current_map,
@@ -591,7 +610,11 @@ impl<'a> SplitOrchestrator<'a> {
             state.advance_to(SplitStep::UnpauseServing);
             return Ok(());
         }
-        state.advance_to(SplitStep::ParkPredecessor);
+        state.advance_to(if state.predecessor.is_coordinator() {
+            SplitStep::UnpauseServing
+        } else {
+            SplitStep::ParkPredecessor
+        });
         Ok(())
     }
 }
@@ -652,6 +675,9 @@ pub enum SplitError {
     /// Map epoch overflowed.
     #[error("range map epoch must not overflow")]
     MapEpochOverflow,
+    /// No fresh range identity can be allocated.
+    #[error("range id must not overflow")]
+    RangeIdOverflow,
     /// A retry reused an operation id for different state.
     #[error("split operation id was reused with different state")]
     OperationMismatch,
@@ -741,6 +767,23 @@ fn predecessor_before(range_map: &RangeMap, predecessor: RangeId) -> Result<Rang
             split_at: RangeKey::MIN,
         })
         .map_err(Into::into)
+}
+
+fn next_unused_range_id(
+    range_map: &RangeMap,
+    reserved: &[RangeId],
+) -> Result<RangeId, SplitError> {
+    range_map
+        .ranges()
+        .iter()
+        .map(|range| range.range_id)
+        .chain(reserved.iter().copied())
+        .max()
+        .unwrap_or(RangeId::COORDINATOR)
+        .as_u32()
+        .checked_add(1)
+        .map(RangeId::new)
+        .ok_or(SplitError::RangeIdOverflow)
 }
 
 fn map_with_replaced_ranges(
@@ -1039,7 +1082,7 @@ mod tests {
         assert!(state.operation == SplitOperation::Move);
         assert!(state.predecessor_after == state.successor_after);
         assert!(state.successor_generation == Some(9));
-        assert!(hooks.events() == expected_split_events(RangeId::new(1)));
+        assert!(hooks.events() == expected_split_events(RangeId::new(4)));
     }
 
     #[tokio::test]
@@ -1204,7 +1247,7 @@ mod tests {
 
         assert!(owners(&initial, left_key) == vec![RangeId::new(1)]);
         assert!(owners(&initial, right_key) == vec![RangeId::new(1)]);
-        assert!(owners(&state.target_map, left_key) == vec![RangeId::new(1)]);
+        assert!(owners(&state.target_map, left_key) == vec![RangeId::new(4)]);
         assert!(owners(&state.target_map, right_key) == vec![RangeId::new(2)]);
     }
 
@@ -1243,6 +1286,26 @@ mod tests {
             predecessor: RangeId::new(1),
             successor: RangeId::new(2),
             split_at: RangeKey::table_start(TableId::new(20)),
+        }
+    }
+
+    #[test]
+    fn split_keeps_exactly_one_owner_after_predecessor_is_parked() {
+        let state = SplitState::for_split("split-owners", split_command()).expect("split state");
+
+        for key in [
+            RangeKey::table_start(TableId::new(10)),
+            RangeKey::table_start(TableId::new(19)),
+            RangeKey::table_start(TableId::new(20)),
+            RangeKey::table_start(TableId::new(29)),
+        ] {
+            let owners = state
+                .target_map
+                .ranges()
+                .iter()
+                .filter(|range| range.range_id != state.predecessor && range.contains_key(key))
+                .count();
+            assert_eq!(owners, 1, "key {key:?} must have one serving owner after park");
         }
     }
 
