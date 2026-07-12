@@ -2375,7 +2375,7 @@ pub(crate) fn scan_ts_live_interval(
     Ok(out)
 }
 
-fn scan_table_interval(
+pub(crate) fn scan_table_interval(
     kv: &dyn Kv,
     table_id: u32,
     interval: RowInterval,

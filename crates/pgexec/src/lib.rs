@@ -543,7 +543,18 @@ impl SqlEngine {
 
     /// Snapshot the exclusive terminal rowid for a local table cursor.
     pub fn scan_local_terminal(&self, table: &crabka_pgcatalog::Table) -> Result<u64, ExecError> {
-        crate::exec::read_seq_kv(self.kv.as_ref(), table.id)
+        let sequence = crate::exec::read_seq_kv(self.kv.as_ref(), table.id)?;
+        let physical_max =
+            crate::exec::scan_table_interval(self.kv.as_ref(), table.id, RowInterval::ALL)?
+                .into_iter()
+                .try_fold(None, |maximum, (key, _)| {
+                    let prefix = crabka_pgmvcc::version::row_prefix_of(&key)?;
+                    let rowid = crabka_pgkv::key::rowid_of(table.id, prefix)?;
+                    Ok::<_, ExecError>(Some(
+                        maximum.map_or(rowid, |current: u64| current.max(rowid)),
+                    ))
+                })?;
+        exclusive_cursor_terminal(sequence, physical_max)
     }
 
     /// Return whether a catalog table uses global visibility semantics.
@@ -1449,6 +1460,33 @@ impl SqlEngine {
             .as_ref()
             .expect("finish_global on a non-GTM engine")
             .finish_global(g);
+    }
+}
+
+fn exclusive_cursor_terminal(sequence: u64, physical_max: Option<u64>) -> Result<u64, ExecError> {
+    let physical = physical_max
+        .map(|rowid| {
+            rowid.checked_add(1).ok_or_else(|| {
+                ExecError::Unsupported("local cursor rowid terminal overflow".into())
+            })
+        })
+        .transpose()?
+        .unwrap_or(0);
+    Ok(sequence.max(physical))
+}
+
+#[cfg(test)]
+mod cursor_terminal_tests {
+    use super::exclusive_cursor_terminal;
+
+    #[test]
+    fn combines_structural_and_physical_cursor_horizons() {
+        assert_eq!(exclusive_cursor_terminal(9, None).unwrap(), 9);
+        assert_eq!(exclusive_cursor_terminal(0, Some(7)).unwrap(), 8);
+        assert_eq!(exclusive_cursor_terminal(20, Some(7)).unwrap(), 20);
+        assert_eq!(exclusive_cursor_terminal(3, Some(7)).unwrap(), 8);
+        assert_eq!(exclusive_cursor_terminal(0, None).unwrap(), 0);
+        assert!(exclusive_cursor_terminal(0, Some(u64::MAX)).is_err());
     }
 }
 
