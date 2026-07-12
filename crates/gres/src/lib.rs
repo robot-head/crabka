@@ -2368,9 +2368,16 @@ async fn open_multirange_runtime(
         tenant_config = tenant_config.with_commit_fault_for_testing(fault);
     }
     if let Some(hosted_ranges) = &config.host_ranges {
-        tenant_config = tenant_config
-            .with_hosted_ranges(hosted_ranges.clone())
-            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        if config.is_in_memory_bootstrap() {
+            tenant_config = tenant_config
+                .with_hosted_ranges(hosted_ranges.clone())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+        } else {
+            // Live activation recovery may replace the static CLI map before serving. Preserve
+            // the syntactically parsed IDs for recovery selection and validate membership only
+            // after the durable recovery map has been selected.
+            tenant_config.hosted_ranges = Some(hosted_ranges.clone());
+        }
     }
     if let Some(record) = tenant_record {
         let mut registry = crabka_gres_ranges::RangeRegistry::from_tenant_record(record)
@@ -2476,7 +2483,7 @@ async fn open_multirange_runtime(
             }
         });
     }
-    let activation_receipt =
+    let mut activation_receipt =
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
@@ -2485,7 +2492,7 @@ async fn open_multirange_runtime(
         .map(split_activation::ActivationDiscovery::timestamp_primary_aliases)
         .unwrap_or_default();
     let provisional_registry = if let Some((discovery, current)) =
-        activation_receipt.as_ref().zip(tenant_record)
+        activation_receipt.as_mut().zip(tenant_record)
     {
         let operation = load_live_split_operation(
             &config.bootstrap,
@@ -2499,6 +2506,15 @@ async fn open_multirange_runtime(
             .plan
             .as_ref()
             .ok_or_else(|| std::io::Error::other("activation operation plan is absent"))?;
+        if matches!(
+            operation.phase,
+            crabka_gres_control::SplitOperationPhase::LayoutPublished
+                | crabka_gres_control::SplitOperationPhase::Retiring
+                | crabka_gres_control::SplitOperationPhase::Resuming
+                | crabka_gres_control::SplitOperationPhase::Completed
+        ) {
+            discovery.promote_authoritative_target_recovery()?;
+        }
         let target = discovery.provisional_tenant_record(current, plan.source_record_version)?;
         Some((
             plan.current_layout.clone(),
@@ -2534,6 +2550,9 @@ async fn open_multirange_runtime(
                     .map(|spec| spec.range_id),
             );
         }
+    }
+    if let Some(hosted_ranges) = &config.host_ranges {
+        tenant_config = bind_recovered_hosted_ranges(tenant_config, hosted_ranges)?;
     }
     if tenant_config.range_registry.is_some()
         && let Some((current_layout, source_record_version, provisional_target)) =
@@ -2573,6 +2592,15 @@ async fn open_multirange_runtime(
         "activation recovery startup handoff"
     );
     open_live_multirange_tenant(tenant_config, engines, config, timestamp_primary_aliases).await
+}
+
+fn bind_recovered_hosted_ranges(
+    tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
+    hosted_ranges: &[crabka_gres_ranges::RangeId],
+) -> std::io::Result<crabka_gres_ranges::MultiRangeTenantConfig> {
+    tenant_config
+        .with_hosted_ranges(hosted_ranges.to_vec())
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))
 }
 
 fn remote_ranges_are_configured(config: &SubstrateRuntimeConfig, record: &TenantRecord) -> bool {
@@ -5999,6 +6027,34 @@ mod tests {
             ["__gres.tenant-a.r0", "__gres.tenant-a.r2"]
         );
         assert!(topics.iter().all(|topic| topic != "__gres_wal.tenant-a"));
+    }
+
+    #[test]
+    fn deferred_hosted_ranges_validate_only_against_selected_recovery_map() {
+        let tenant = crabka_gres_ranges::TenantName::parse("deferred-hosts").expect("tenant");
+        let current =
+            crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, "0:0,50:10")
+                .expect("current map");
+        let requested = [
+            crabka_gres_ranges::RangeId::COORDINATOR,
+            crabka_gres_ranges::RangeId::new(2),
+        ];
+        assert!(bind_recovered_hosted_ranges(current.clone(), &requested).is_err());
+
+        let mut target = current;
+        let mut specs = target.range_map.ranges().to_vec();
+        specs[1].range_id = crabka_gres_ranges::RangeId::new(2);
+        target.range_map = crabka_gres_ranges::RangeMap::new(
+            target.tenant.clone(),
+            crabka_gres_ranges::MapEpoch::new(1),
+            specs,
+        )
+        .expect("target map");
+        let bound = bind_recovered_hosted_ranges(target, &requested).expect("target hosts");
+        assert_eq!(bound.hosted_ranges.as_deref(), Some(requested.as_slice()));
+        assert!(
+            bind_recovered_hosted_ranges(bound, &[crabka_gres_ranges::RangeId::new(9)]).is_err()
+        );
     }
 
     #[test]
