@@ -72,7 +72,7 @@ struct RetirementPredicateState {
     retire_receipt_durable: bool,
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct RetirementDeleteLedger {
     exact_delete_calls: usize,
     requested_topics: Vec<String>,
@@ -115,14 +115,21 @@ impl RangeMutationClient for RecordingRangeMutationClient {
                 digest,
             } = &response
         {
-            self.marker_observations.lock().await.push(MarkerObservation {
-                endpoint: endpoint.to_owned(),
-                request,
-                markers: markers.clone(),
-                left_markers: left_markers.clone(),
-                right_markers: right_markers.clone(),
-                digest: digest.clone(),
-            });
+            self.marker_observations
+                .lock()
+                .await
+                .push(MarkerObservation {
+                    endpoint: endpoint.to_owned(),
+                    request,
+                    markers: markers.clone(),
+                    left_markers: left_markers
+                        .clone()
+                        .expect("new marker response has left partition"),
+                    right_markers: right_markers
+                        .clone()
+                        .expect("new marker response has right partition"),
+                    digest: digest.clone(),
+                });
         }
         Ok(response)
     }
@@ -1015,6 +1022,7 @@ async fn drive_operation(
     SplitOperationRecord,
     Option<KillObservation>,
     Vec<MarkerObservation>,
+    RetirementDeleteLedger,
 ) {
     let tenant = TenantName::try_from(system.tenant()).expect("tenant");
     let mut registry = Registry::connect(system.bootstrap())
@@ -1340,6 +1348,7 @@ async fn drive_operation(
                     current,
                     restarted_pids,
                     marker_observations.lock().await.clone(),
+                    delete_ledger.lock().expect("final delete ledger").clone(),
                 );
             }
             _ => match reconcile_one_rpc_phase(&control, &mutation_client, &current).await {
@@ -1507,6 +1516,28 @@ async fn real_process_split_two_successor_foundation() {
         ack_file.write_all(b"\n").expect("terminate split ACK");
         ack_file.as_file().sync_data().expect("fsync split ACK");
     }
+    ack_file.flush().expect("flush split ACK ledger");
+    ack_file
+        .as_file()
+        .sync_all()
+        .expect("sync split ACK ledger");
+    let ack_path = ack_file.into_temp_path();
+    let acknowledged = std::fs::read_to_string(&ack_path)
+        .expect("read back fsynced split ACK ledger")
+        .lines()
+        .map(|line| {
+            let value: serde_json::Value =
+                serde_json::from_str(line).expect("decode split ACK ledger row");
+            SplitLedgerRow {
+                rowid: value["rowid"].as_u64().expect("ACK rowid"),
+                seq: i32::try_from(value["seq"].as_i64().expect("ACK seq")).expect("int4 seq"),
+                route_key: i32::try_from(value["route_key"].as_i64().expect("ACK route key"))
+                    .expect("int4 route key"),
+                checksum: value["checksum"].as_str().expect("ACK checksum").to_owned(),
+            }
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(acknowledged.len(), 32);
     let pre_r0 = direct_successor_rows(&system, 0, 51, None, None).await;
     let pre_r1 = direct_successor_rows(&system, 1, 51, None, None).await;
     eprintln!("pre-split direct r0={pre_r0:?}, r1={pre_r1:?}");
@@ -1516,13 +1547,15 @@ async fn real_process_split_two_successor_foundation() {
         (1..33_u64).collect::<Vec<_>>()
     );
     initiate_split_with_cli(&system, &operation_id, 51, 16).await;
-    let (completed, _, marker_observations) = tokio::time::timeout(
+    let (completed, _, marker_observations, delete_observation) = tokio::time::timeout(
         Duration::from_secs(90),
         drive_operation(&mut system, &operation_id, Duration::from_secs(90), None),
     )
     .await
     .expect("whole Split operation deadline");
     assert_eq!(completed.phase, SplitOperationPhase::Completed);
+    assert_eq!(delete_observation.exact_delete_calls, 1);
+    assert!(!delete_observation.unrelated_delete_attempted);
     assert_eq!(
         marker_observations.len(),
         1,
@@ -1733,8 +1766,8 @@ async fn real_process_split_two_successor_foundation() {
             "routing_table_id": plan.routing_table_id,
             "split_rowid": 16,
             "target_range_ids": [0, 2, 3],
-            "r2": {"endpoint": r2.endpoint, "generation": r2.wal_generation, "serving": true, "row_count": r2_rows.len(), "cross_side_rows": 0},
-            "r3": {"endpoint": r3.endpoint, "generation": r3.wal_generation, "serving": true, "row_count": r3_rows.len(), "cross_side_rows": 0},
+            "r2": {"endpoint": r2.endpoint, "generation": r2.wal_generation, "serving": tenant.ranges.contains(r2), "row_count": r2_rows.len(), "cross_side_rows": r2_rows.iter().filter(|row| row.rowid >= 16).count()},
+            "r3": {"endpoint": r3.endpoint, "generation": r3.wal_generation, "serving": tenant.ranges.contains(r3), "row_count": r3_rows.len(), "cross_side_rows": r3_rows.iter().filter(|row| row.rowid < 16).count()},
             "endpoints_distinct": r2.endpoint != r3.endpoint,
             "acknowledged_rows": acknowledged.len(),
             "full_scan_rows": full_sequences.len(),
@@ -1748,14 +1781,14 @@ async fn real_process_split_two_successor_foundation() {
                 "predecessor_count": marker_observation.markers.len(),
                 "r2_count": marker_observation.left_markers.len(),
                 "r3_count": marker_observation.right_markers.len(),
-                "disjoint": true,
+                "disjoint": marker_observation.left_markers.iter().all(|left| marker_observation.right_markers.iter().all(|right| left != right)),
                 "exact_union": partition_union == marker_observation.markers,
                 "digest": marker_observation.digest,
             },
             "topics": topics,
             "sentinel_topic": sentinel_topic,
-            "predecessor_topic_absent": true,
-            "predecessor_delete_count": 1,
+            "predecessor_topic_absent": !topics.contains(&format!("__gres_wal.{}.r1", system.tenant())),
+            "predecessor_delete_count": delete_observation.exact_delete_calls,
             "operation_elapsed_ms": operation_started.elapsed().as_millis(),
         });
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap())
@@ -1914,7 +1947,7 @@ done
             ),
         )
         .await;
-        let (completed, restart, _) = drive_result.unwrap_or_else(|_| {
+        let (completed, restart, _, _) = drive_result.unwrap_or_else(|_| {
             panic!(
                 "whole {} Move operation deadline; source log: {}",
                 kill_point.name(),
