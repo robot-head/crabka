@@ -45,9 +45,9 @@ pub use self::{
     frame::WalFrame,
     recovery::{
         CommittedWalReader, InMemoryWalLog, LiveRecovered, LiveRecoveryConfig, RecoveryBarrier,
-        RecoveryFencer, bootstrap_live_range0_follower, bounded_committed_tail, live_committed_end,
-        read_live_committed_tail, recover_after_barrier, recover_live, recover_live_for_range,
-        recover_live_for_range_with_restore,
+        RecoveryFencer, bootstrap_live_range0_follower, bounded_committed_tail,
+        ensure_live_wal_topic, live_committed_end, read_live_committed_tail, recover_after_barrier,
+        recover_live, recover_live_for_range, recover_live_for_range_with_restore,
     },
     replay::{
         ReplayItem, ReplayOutcome, replay_committed_frames, replay_committed_frames_from_filtered,
