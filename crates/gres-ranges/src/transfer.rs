@@ -217,6 +217,17 @@ pub trait RangeTransferCapability: Send + Sync {
         Ok(())
     }
 
+    /// Atomically refresh runtime control paths from the newly configured serving engines.
+    fn publish_serving_topology(
+        &self,
+        _engines: &BTreeMap<RangeId, SqlEngine>,
+    ) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
+    /// Make control paths visible after the gateway's serving snapshot is installed.
+    fn finish_serving_topology_publication(&self) {}
+
     /// Force a durable checkpoint for one hosted source range.
     async fn force_checkpoint(
         &self,

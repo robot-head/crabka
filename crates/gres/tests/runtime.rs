@@ -8,8 +8,7 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_gres_ranges::{
-    MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
-    SuccessorDescriptor, TableId, TenantName,
+    RangeId, RangeKey, RangeSpec, SplitCommand, SuccessorDescriptor, TableId,
 };
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
@@ -454,13 +453,26 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         ranges: Some("0,5".to_string()),
         host_ranges: None,
         range_rpc: None,
-        advertised_endpoint: None,
+        advertised_endpoint: Some("127.0.0.1:7443".into()),
     })
     .await
     .expect("open live multi-range runtime");
     let transfer = runtime
         .range_transfer_capability()
         .expect("live multi-range transfer capability");
+    let before_tso = match runtime
+        .handle_range_request(crabka_gres_ranges::RangeRequest::Tso(
+            crabka_gres_ranges::TsoReq::Grant { count: 2 },
+        ))
+        .await
+        .expect("range service")
+    {
+        crabka_gres_ranges::RangeResponse::Tso(crabka_gres_ranges::TsoResp::Granted {
+            first_ts,
+            count: 2,
+        }) => first_ts,
+        response => panic!("unexpected pre-split TSO response: {response:?}"),
+    };
     let range = RangeId::COORDINATOR;
     let target_range = RangeId::new(2);
     let mut session = runtime.engine.connect();
@@ -546,45 +558,162 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .expect_err("write while paused must be rejected");
 
     let split_at = RangeKey::table_start(TableId::new(u64::from(table_id)));
-    let _state = SplitState::for_split(
-        "r0-live-transfer",
-        SplitCommand {
-            current_map: RangeMap::new(
-                TenantName::parse(tenant).expect("tenant"),
-                MapEpoch::new(1),
-                vec![RangeSpec::for_interval(
-                    RangeId::COORDINATOR,
-                    RangeKey::MIN,
-                    None,
-                )],
-            )
-            .expect("source map"),
-            predecessor: RangeId::COORDINATOR,
-            predecessor_generation: 0,
-            left: SuccessorDescriptor {
-                range_id: RangeId::COORDINATOR,
-                endpoint: "left.internal:7443".into(),
-                wal_generation: 1,
-                interval: RangeSpec::for_interval(
-                    RangeId::COORDINATOR,
-                    RangeKey::MIN,
-                    Some(split_at),
-                ),
-            },
-            right: SuccessorDescriptor {
-                range_id: target_range,
-                endpoint: "right.internal:7443".into(),
-                wal_generation: 1,
-                interval: RangeSpec::for_interval(target_range, split_at, None),
-            },
+    let current_map = runtime.published_range_map().expect("source map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|spec| spec.range_id == RangeId::COORDINATOR)
+        .expect("r0 interval")
+        .clone();
+    let command = SplitCommand {
+        current_map,
+        predecessor: RangeId::COORDINATOR,
+        predecessor_generation: 0,
+        left: SuccessorDescriptor {
+            range_id: RangeId::COORDINATOR,
+            endpoint: "127.0.0.1:7443".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::COORDINATOR, RangeKey::MIN, Some(split_at)),
         },
-    )
-    .expect("split state");
+        right: SuccessorDescriptor {
+            range_id: target_range,
+            endpoint: "127.0.0.1:7443".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(target_range, split_at, predecessor.end),
+        },
+    };
     transfer.resume(barrier).await.expect("resume writer");
     session
         .simple_query("INSERT INTO t1 VALUES (10)")
         .await
         .expect("write after resume");
+    runtime
+        .split_successors("r0-live-transfer", command)
+        .await
+        .expect("publish replacement r0 and right successor");
+    let after_tso = match runtime
+        .handle_range_request(crabka_gres_ranges::RangeRequest::Tso(
+            crabka_gres_ranges::TsoReq::Grant { count: 2 },
+        ))
+        .await
+        .expect("replacement range service")
+    {
+        crabka_gres_ranges::RangeResponse::Tso(crabka_gres_ranges::TsoResp::Granted {
+            first_ts,
+            count: 2,
+        }) => first_ts,
+        response => panic!("unexpected post-split TSO response: {response:?}"),
+    };
+    assert!(
+        after_tso > before_tso,
+        "replacement r0 TSO must advance monotonically"
+    );
+    runtime
+        .verify_current_range0_receipt_store()
+        .await
+        .expect("replacement r0 durable receipt write/read/reopen");
+    let mut post_split = runtime.engine.connect();
+    let replacement_checkpoint = transfer
+        .force_checkpoint(RangeId::COORDINATOR)
+        .await
+        .expect("checkpoint replacement r0");
+    post_split
+        .simple_query("CREATE TABLE after_r0_split (id int4)")
+        .await
+        .expect("catalog DDL through replacement r0");
+    let replacement_barrier = transfer
+        .pause_at_checkpoint(&replacement_checkpoint)
+        .await
+        .expect("pause replacement r0");
+    let replacement_tail = transfer
+        .read_committed_tail(
+            RangeId::COORDINATOR,
+            replacement_checkpoint.covered_offset,
+            replacement_barrier,
+        )
+        .await
+        .expect("read replacement r0 bounded tail");
+    assert_eq!(
+        replacement_tail.last().map(|record| record.offset),
+        Some(replacement_barrier.offset),
+        "replacement r0 tail reaches its barrier"
+    );
+    transfer
+        .resume(replacement_barrier)
+        .await
+        .expect("resume replacement r0");
+    post_split
+        .simple_query("SELECT * FROM t1")
+        .await
+        .expect("catalog read and routed table read after r0 replacement");
+    post_split
+        .simple_query("CREATE TABLE t2 (id int4)")
+        .await
+        .expect("create second-split table");
+    post_split
+        .simple_query("INSERT INTO t2 VALUES (20)")
+        .await
+        .expect("populate second-split table");
+    let current_map = runtime.published_range_map().expect("post-r0 map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|spec| spec.range_id == target_range)
+        .expect("first successor interval")
+        .clone();
+    let second_split_at = RangeKey::table_start(TableId::new(2));
+    runtime
+        .split_successors(
+            "split-first-successor",
+            SplitCommand {
+                current_map,
+                predecessor: target_range,
+                predecessor_generation: 1,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::new(3),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 2,
+                    interval: RangeSpec::for_interval(
+                        RangeId::new(3),
+                        predecessor.start,
+                        Some(second_split_at),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(4),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 2,
+                    interval: RangeSpec::for_interval(
+                        RangeId::new(4),
+                        second_split_at,
+                        predecessor.end,
+                    ),
+                },
+            },
+        )
+        .await
+        .expect("second split targets the first split successor");
+    let mut after_second = runtime.engine.connect();
+    after_second
+        .simple_query("BEGIN")
+        .await
+        .expect("begin ordinary cross-range transaction");
+    after_second
+        .simple_query("INSERT INTO t1 VALUES (30)")
+        .await
+        .expect("write first GTM participant");
+    after_second
+        .simple_query("INSERT INTO t2 VALUES (40)")
+        .await
+        .expect("write second GTM participant");
+    after_second
+        .simple_query("COMMIT")
+        .await
+        .expect("replacement r0 records ordinary cross-range decision");
+    after_second
+        .simple_query("SELECT * FROM t2")
+        .await
+        .expect("second successor serves its restored table");
 }
 
 fn kv_from_pairs(pairs: crabka_pgkv::KvScan) -> crabka_pgkv::MemKv {
@@ -717,7 +846,7 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
         ranges: Some("0,5".to_string()),
         host_ranges: None,
         range_rpc: None,
-        advertised_endpoint: None,
+        advertised_endpoint: Some("127.0.0.1:7443".into()),
     })
     .await
     .expect("open live multi-range runtime");
@@ -751,7 +880,7 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
         predecessor_generation: 0,
         left: SuccessorDescriptor {
             range_id: RangeId::new(3),
-            endpoint: "left.internal:7443".into(),
+            endpoint: "127.0.0.1:7443".into(),
             wal_generation: 1,
             interval: RangeSpec::for_interval(
                 RangeId::new(3),
@@ -761,7 +890,7 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
         },
         right: SuccessorDescriptor {
             range_id: RangeId::new(2),
-            endpoint: "right.internal:7443".into(),
+            endpoint: "127.0.0.1:7443".into(),
             wal_generation: 1,
             interval: RangeSpec::for_interval(RangeId::new(2), split_at, None),
         },
