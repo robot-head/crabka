@@ -365,17 +365,44 @@ pub(crate) fn active_operations(
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    };
+
     use super::*;
     use crabka_gres_control::{
         RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, SplitOperationPlan,
         TenantName,
     };
     use crabka_gres_ranges::{RangeControlResp, RangeId};
+    use tokio::sync::Mutex;
 
     #[test]
     fn active_operation_filter_is_ordered_and_excludes_terminal_records() {
-        let records = vec![];
-        assert!(active_operations(records).is_empty());
+        let mut second = operation();
+        second.operation_id = "split-b".into();
+        let second = second
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        let mut first = operation();
+        first.operation_id = "split-a".into();
+        let first = first
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        let terminal = operation()
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap()
+            .advance(SplitOperationPhase::Completed, 1, None)
+            .unwrap();
+        let active = active_operations(vec![second, terminal, first]);
+        assert_eq!(
+            active
+                .iter()
+                .map(|record| record.operation_id.as_str())
+                .collect::<Vec<_>>(),
+            vec!["split-a", "split-b"]
+        );
     }
 
     fn operation() -> SplitOperationRecord {
@@ -521,5 +548,321 @@ mod tests {
         ));
         assert_eq!(running.revision, 1);
         assert_eq!(running.phase, SplitOperationPhase::Running);
+    }
+
+    struct CrashOnceControl {
+        operation: Mutex<SplitOperationRecord>,
+        tenant: Mutex<crabka_gres_control::TenantRecord>,
+        fail_next_cas: AtomicBool,
+        apply_replace_then_fail: AtomicBool,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::context::GresControlLike for CrashOnceControl {
+        async fn get_tenant(
+            &self,
+            _tenant: &crabka_gres_control::TenantName,
+        ) -> Result<Option<crabka_gres_control::TenantRecord>, crate::context::GresControlWriteError>
+        {
+            Ok(Some(self.tenant.lock().await.clone()))
+        }
+
+        async fn replace_tenant_if_version(
+            &self,
+            record: &crabka_gres_control::TenantRecord,
+            expected: Option<u64>,
+        ) -> Result<crabka_gres_control::TenantRecord, crate::context::GresControlWriteError>
+        {
+            let mut current = self.tenant.lock().await;
+            if expected != Some(current.record_version) {
+                return Err(test_registry_error());
+            }
+            *current = record.clone();
+            if self.apply_replace_then_fail.swap(false, Ordering::SeqCst) {
+                return Err(test_registry_error());
+            }
+            Ok(record.clone())
+        }
+
+        async fn delete_tenant(
+            &self,
+            _tenant: &crabka_gres_control::TenantName,
+        ) -> Result<(), crate::context::GresControlWriteError> {
+            unreachable!()
+        }
+
+        async fn validate_final_checkpoint_manifest(
+            &self,
+            _record: &crabka_gres_control::TenantRecord,
+        ) -> Result<(), crate::context::GresControlWriteError> {
+            unreachable!()
+        }
+
+        async fn compare_and_swap_split_operation(
+            &self,
+            expected: u64,
+            operation: &SplitOperationRecord,
+        ) -> Result<SplitOperationRecord, crate::context::GresControlWriteError> {
+            if self.fail_next_cas.swap(false, Ordering::SeqCst) {
+                return Err(test_registry_error());
+            }
+            let mut current = self.operation.lock().await;
+            if current.revision != expected {
+                return Err(test_registry_error());
+            }
+            *current = operation.clone();
+            Ok(operation.clone())
+        }
+    }
+
+    fn test_registry_error() -> crate::context::GresControlWriteError {
+        crabka_gres_control::ControlError::UnsupportedRegistryMutation {
+            mutation: "test_crash",
+            reason: "injected acknowledgement loss",
+        }
+        .into()
+    }
+
+    struct ReceiptClient {
+        response: RangeControlResp,
+        requests: Mutex<Vec<RangeControlReq>>,
+    }
+
+    #[async_trait::async_trait]
+    impl RangeMutationClient for ReceiptClient {
+        async fn mutate(
+            &self,
+            _endpoint: &str,
+            request: RangeControlReq,
+        ) -> Result<RangeControlResp, SplitReconcileError> {
+            self.requests.lock().await.push(request);
+            Ok(self.response.clone())
+        }
+    }
+
+    fn tenant_for(operation: &SplitOperationRecord) -> crabka_gres_control::TenantRecord {
+        let plan = operation.plan.as_ref().unwrap();
+        let mut tenant = crabka_gres_control::TenantRecord::new(
+            plan.source_record_version,
+            crabka_gres_control::TenantId::try_from("tenant-a").unwrap(),
+            crabka_gres_control::TenantName::try_from("tenant-a").unwrap(),
+            crabka_gres_control::TenantState::Active,
+            crabka_gres_control::SqlUser::try_from("alice").unwrap(),
+            "SCRAM-SHA-256$4096:salt$stored:server".into(),
+            1,
+        )
+        .unwrap()
+        .with_range_layout(plan.current_layout.clone())
+        .unwrap();
+        tenant.record_version = plan.source_record_version;
+        tenant
+    }
+
+    #[tokio::test]
+    async fn crash_after_each_rpc_side_effect_replays_the_exact_receipt_request() {
+        let mut running = operation()
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        let cases = vec![
+            (
+                running.clone(),
+                RangeControlResp::Checkpoint {
+                    generation: 4,
+                    covered_offset: 8,
+                    manifest_key: "manifest".into(),
+                },
+            ),
+            {
+                running = apply_response(
+                    &running,
+                    RangeControlResp::Checkpoint {
+                        generation: 4,
+                        covered_offset: 8,
+                        manifest_key: "manifest".into(),
+                    },
+                )
+                .unwrap();
+                (
+                    running.clone(),
+                    RangeControlResp::Paused { barrier_offset: 10 },
+                )
+            },
+            {
+                running = apply_response(&running, RangeControlResp::Paused { barrier_offset: 10 })
+                    .unwrap();
+                (
+                    running.clone(),
+                    RangeControlResp::Staged {
+                        tail_sha256: "tail".into(),
+                    },
+                )
+            },
+            {
+                running = apply_response(
+                    &running,
+                    RangeControlResp::Staged {
+                        tail_sha256: "tail".into(),
+                    },
+                )
+                .unwrap();
+                (
+                    running.clone(),
+                    RangeControlResp::Markers {
+                        markers: vec![],
+                        digest: "markers".into(),
+                    },
+                )
+            },
+            {
+                running = apply_response(
+                    &running,
+                    RangeControlResp::Markers {
+                        markers: vec![],
+                        digest: "markers".into(),
+                    },
+                )
+                .unwrap();
+                (running.clone(), RangeControlResp::Applied)
+            },
+        ];
+        for (record, response) in cases {
+            let control = Arc::new(CrashOnceControl {
+                operation: Mutex::new(record.clone()),
+                tenant: Mutex::new(tenant_for(&record)),
+                fail_next_cas: AtomicBool::new(true),
+                apply_replace_then_fail: AtomicBool::new(false),
+            });
+            let handle: crate::context::GresControlHandle = control.clone();
+            let client = ReceiptClient {
+                response,
+                requests: Mutex::new(Vec::new()),
+            };
+            assert!(
+                reconcile_one_rpc_phase(&handle, &client, &record)
+                    .await
+                    .is_err()
+            );
+            assert_eq!(control.operation.lock().await.revision, record.revision);
+            reconcile_one_rpc_phase(&handle, &client, &record)
+                .await
+                .unwrap();
+            let requests = client.requests.lock().await;
+            assert_eq!(requests.len(), 2);
+            assert_eq!(requests[0], requests[1]);
+            assert_eq!(control.operation.lock().await.revision, record.revision + 1);
+        }
+    }
+
+    #[tokio::test]
+    async fn ambiguous_layout_cutover_reloads_exact_target_without_duplicate_retirement() {
+        let mut activated = operation()
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        for response in [
+            RangeControlResp::Checkpoint {
+                generation: 4,
+                covered_offset: 8,
+                manifest_key: "manifest".into(),
+            },
+            RangeControlResp::Paused { barrier_offset: 10 },
+            RangeControlResp::Staged {
+                tail_sha256: "tail".into(),
+            },
+            RangeControlResp::Markers {
+                markers: vec![],
+                digest: "markers".into(),
+            },
+            RangeControlResp::Applied,
+        ] {
+            activated = apply_response(&activated, response).unwrap();
+        }
+        let source = tenant_for(&activated);
+        let control = Arc::new(CrashOnceControl {
+            operation: Mutex::new(activated.clone()),
+            tenant: Mutex::new(source),
+            fail_next_cas: AtomicBool::new(false),
+            apply_replace_then_fail: AtomicBool::new(true),
+        });
+        let handle: crate::context::GresControlHandle = control.clone();
+
+        assert!(
+            reconcile_activated_cutover(&handle, &activated)
+                .await
+                .is_err()
+        );
+        let durable = control.tenant.lock().await.clone();
+        assert_eq!(
+            durable.ranges,
+            activated.plan.as_ref().unwrap().target_layout
+        );
+        assert_eq!(durable.range_retirements.len(), 1);
+        let retiring = reconcile_activated_cutover(&handle, &activated)
+            .await
+            .unwrap();
+        assert_eq!(retiring.phase, SplitOperationPhase::Retiring);
+        assert_eq!(control.tenant.lock().await.range_retirements.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn crash_after_retire_rpc_replays_receipt_only_after_sidecar_is_parked() {
+        let mut record = operation()
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        for response in [
+            RangeControlResp::Checkpoint {
+                generation: 4,
+                covered_offset: 8,
+                manifest_key: "manifest".into(),
+            },
+            RangeControlResp::Paused { barrier_offset: 10 },
+            RangeControlResp::Staged {
+                tail_sha256: "tail".into(),
+            },
+            RangeControlResp::Markers {
+                markers: vec![],
+                digest: "markers".into(),
+            },
+            RangeControlResp::Applied,
+        ] {
+            record = apply_response(&record, response).unwrap();
+        }
+        record = record
+            .advance(SplitOperationPhase::Retiring, 1, None)
+            .unwrap();
+        let plan = record.plan.as_ref().unwrap();
+        let tenant = tenant_for(&record)
+            .publish_split_target_with_retirement(
+                record.operation_id.clone(),
+                0,
+                4,
+                complete_retirement_evidence(&record).unwrap(),
+                plan.target_layout.clone(),
+            )
+            .unwrap()
+            .confirm_split_predecessor_parked(&record.operation_id, 0, 4)
+            .unwrap();
+        let control = Arc::new(CrashOnceControl {
+            operation: Mutex::new(record.clone()),
+            tenant: Mutex::new(tenant),
+            fail_next_cas: AtomicBool::new(true),
+            apply_replace_then_fail: AtomicBool::new(false),
+        });
+        let handle: crate::context::GresControlHandle = control.clone();
+        let client = ReceiptClient {
+            response: RangeControlResp::Applied,
+            requests: Mutex::new(Vec::new()),
+        };
+        assert!(
+            reconcile_one_rpc_phase(&handle, &client, &record)
+                .await
+                .is_err()
+        );
+        let resumed = reconcile_one_rpc_phase(&handle, &client, &record)
+            .await
+            .unwrap();
+        assert_eq!(resumed.phase, SplitOperationPhase::Resuming);
+        let requests = client.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[0], requests[1]);
     }
 }
