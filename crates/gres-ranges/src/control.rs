@@ -11,6 +11,8 @@ use crate::transport::{RangeControlReq, RangeControlResp};
 #[serde(rename_all = "snake_case")]
 pub enum TopologyActivationPhase {
     Prepared,
+    SourceCheckpoint,
+    MustActivate,
     Aborted,
     WriterActivated,
     CheckpointDurable,

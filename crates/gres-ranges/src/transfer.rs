@@ -243,6 +243,14 @@ pub trait RangeTransferCapability: Send + Sync {
     /// Enter the fail-closed publication guard after preparation succeeds.
     fn begin_serving_topology_publication(&self) {}
 
+    /// Durably commit the roll-forward decision through the predecessor range zero.
+    ///
+    /// After this returns successfully, every failure path must leave the predecessor
+    /// paused and startup must finish activation before advertising readiness.
+    async fn mark_topology_must_activate(&self) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
     /// Cross the irreversible writer-activation point after preparation is complete.
     async fn activate_serving_topology(&self) -> Result<(), RangeTransferError> {
         Ok(())
