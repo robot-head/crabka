@@ -88,6 +88,15 @@ pub async fn reconcile_one_rpc_phase(
             .await
             .map_err(|error| SplitReconcileError::Registry(error.to_string()));
     }
+    if record.phase == SplitOperationPhase::LayoutPublished {
+        let retiring = record
+            .advance(SplitOperationPhase::Retiring, record.attempts, None)
+            .map_err(|error| SplitReconcileError::InvalidJournal(error.to_string()))?;
+        return control
+            .compare_and_swap_split_operation(record.revision, &retiring)
+            .await
+            .map_err(|error| SplitReconcileError::Registry(error.to_string()));
+    }
     if record.phase == SplitOperationPhase::Retiring {
         let tenant = control
             .get_tenant(&record.tenant)
@@ -152,11 +161,11 @@ pub async fn reconcile_activated_cutover(
                 "durable cutover differs from sealed target topology".into(),
             ));
         }
-        let retiring = record
-            .advance(SplitOperationPhase::Retiring, record.attempts, None)
+        let published = record
+            .advance(SplitOperationPhase::LayoutPublished, record.attempts, None)
             .map_err(|error| SplitReconcileError::InvalidJournal(error.to_string()))?;
         return control
-            .compare_and_swap_split_operation(record.revision, &retiring)
+            .compare_and_swap_split_operation(record.revision, &published)
             .await
             .map_err(|error| SplitReconcileError::Registry(error.to_string()));
     }
@@ -882,10 +891,10 @@ mod tests {
             activated.plan.as_ref().unwrap().target_layout
         );
         assert_eq!(durable.range_retirements.len(), 1);
-        let retiring = reconcile_activated_cutover(&handle, &activated)
+        let published = reconcile_activated_cutover(&handle, &activated)
             .await
             .unwrap();
-        assert_eq!(retiring.phase, SplitOperationPhase::Retiring);
+        assert_eq!(published.phase, SplitOperationPhase::LayoutPublished);
         assert_eq!(control.tenant.lock().await.range_retirements.len(), 1);
     }
 

@@ -1747,6 +1747,15 @@ struct LiveSplitIntentAuthority {
     tenant: crabka_gres_control::TenantName,
 }
 
+/// Build the production registry-backed split authority for integration verification.
+#[doc(hidden)]
+pub fn live_split_intent_authority(
+    bootstrap: String,
+    tenant: crabka_gres_control::TenantName,
+) -> Arc<dyn crabka_gres_ranges::control::SplitIntentAuthority> {
+    Arc::new(LiveSplitIntentAuthority { bootstrap, tenant })
+}
+
 #[cfg(test)]
 struct AllowSplitIntentAuthority;
 
@@ -1848,8 +1857,13 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         let Some(current) = current else {
             return Ok(None);
         };
-        let target_phase =
-            operation.phase >= crabka_gres_control::SplitOperationPhase::LayoutPublished;
+        let activated_pre_cutover_status = operation.phase
+            == crabka_gres_control::SplitOperationPhase::Activated
+            && matches!(
+                request.operation,
+                crabka_gres_ranges::transport::RangeControlOperation::Status
+            );
+        let target_phase = operation.phase.expects_target_registry_layout();
         let expected_layout = if target_phase {
             &plan.target_layout
         } else {
@@ -1860,8 +1874,12 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         } else {
             Some(plan.source_record_version)
         };
-        let layout_matches =
+        let mut layout_matches =
             current.ranges == *expected_layout && Some(current.record_version) == expected_version;
+        if activated_pre_cutover_status {
+            layout_matches |= current.ranges == plan.current_layout
+                && current.record_version == plan.source_record_version;
+        }
         if !layout_matches {
             return Ok(None);
         }

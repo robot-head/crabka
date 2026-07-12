@@ -2025,9 +2025,9 @@ mod tests {
         for phase in [
             SplitOperationPhase::Checkpointed,
             SplitOperationPhase::Paused,
-            SplitOperationPhase::LayoutPublished,
             SplitOperationPhase::Restored,
             SplitOperationPhase::Activated,
+            SplitOperationPhase::LayoutPublished,
             SplitOperationPhase::Retiring,
             SplitOperationPhase::Resuming,
             SplitOperationPhase::Completed,
@@ -2059,7 +2059,7 @@ mod tests {
             ("tenant-b", "split-0"),
             ("tenant-a", "split-1"),
         ] {
-            store
+            let begun = store
                 .begin_split_operation(
                     SplitOperationRecord::new(
                         tenant_name(tenant),
@@ -2069,6 +2069,20 @@ mod tests {
                     .expect("valid operation"),
                 )
                 .expect("begin operation");
+            if tenant == "tenant-a" && operation_id == "split-2" {
+                let running = begun
+                    .advance(SplitOperationPhase::Running, 1, None)
+                    .unwrap();
+                store
+                    .compare_and_swap_split_operation(Some(0), running.clone())
+                    .unwrap();
+                let completed = running
+                    .advance(SplitOperationPhase::Completed, 1, None)
+                    .unwrap();
+                store
+                    .compare_and_swap_split_operation(Some(1), completed)
+                    .unwrap();
+            }
         }
 
         let operations = store.list_split_operations(&tenant_name("tenant-a"));
@@ -2122,9 +2136,9 @@ mod tests {
             SplitOperationPhase::Running,
             SplitOperationPhase::Checkpointed,
             SplitOperationPhase::Paused,
-            SplitOperationPhase::LayoutPublished,
             SplitOperationPhase::Restored,
             SplitOperationPhase::Activated,
+            SplitOperationPhase::LayoutPublished,
             SplitOperationPhase::Retiring,
             SplitOperationPhase::Resuming,
             SplitOperationPhase::Completed,
