@@ -35,6 +35,7 @@ use crate::{
     forward::{
         ForwardError, RegistryRangeScanner, RegistryRemoteForward, RegistryTsoRpc,
         RemoteExplicitGateLease, RemoteForward, RemoteRangeSession,
+        canonicalize_timestamp_operations,
     },
     registry::RangeRegistry,
     run_split,
@@ -3922,10 +3923,12 @@ impl GatewaySession {
                         delete: write.delete,
                     })
                     .collect::<Vec<_>>();
+                let asserted_operations = canonicalize_timestamp_operations(asserted_operations)?;
                 let actual_operations = primary_operations
                     .into_iter()
                     .filter(|operation| operation.range_id == range_id.as_u32())
                     .collect::<Vec<_>>();
+                let actual_operations = canonicalize_timestamp_operations(actual_operations)?;
                 if actual_decision == crabka_pgexec::PrimaryTxnDecision::Pending
                     || actual_decision != asserted_decision
                     || actual_operations != asserted_operations
@@ -6287,6 +6290,86 @@ mod tests {
             local_timestamp_tuple_state(secondary, &write, start_ts),
             crabka_pgmvcc::version::TsVersionState::Intent
         );
+    }
+
+    #[tokio::test]
+    async fn local_secondary_resolves_valid_operations_in_descending_row_order() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,0:50").expect("cfg");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let engines = gateway.hosted_range_engines();
+        let primary = &engines[&RangeId::COORDINATOR];
+        let secondary = &engines[&RangeId::new(1)];
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(610).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 611,
+            primary_range: 0,
+        };
+        let low = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 60,
+            row: vec![Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let high = crabka_pgexec::TimestampWrite {
+            rowid: 61,
+            row: vec![Datum::Int4(2)],
+            ..low.clone()
+        };
+        let operations = [&low, &high]
+            .into_iter()
+            .map(|write| crabka_pgexec::TimestampTxnOperation {
+                range_id: 1,
+                table_id: write.table_id,
+                rowid: write.rowid,
+                delete: write.delete,
+            })
+            .collect::<Vec<_>>();
+        primary
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                identity.global_xid,
+                vec![1],
+            ))
+            .await
+            .expect("descriptor");
+        secondary
+            .timestamp_txn_participant(1)
+            .prewrite_as_secondary(identity, &[low.clone(), high.clone()])
+            .await
+            .expect("prewrite");
+        primary
+            .acknowledge_timestamp_participant_operations(start_ts, 1, &operations)
+            .await
+            .expect("ack operations");
+        let commit_ts =
+            crabka_pgexec::CommitTimestamp::after_start(start_ts, 612).expect("commit timestamp");
+        primary
+            .decide_timestamp_transaction(
+                start_ts,
+                crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
+            )
+            .await
+            .expect("commit primary");
+        let session = gateway.connect();
+        session
+            .timestamp_resolve(
+                RangeId::new(1),
+                identity,
+                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                &[high.clone(), low.clone()],
+            )
+            .await
+            .expect("descending operations are canonicalized");
+        assert!(matches!(
+            local_timestamp_tuple_state(secondary, &low, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Committed { .. }
+        ));
+        assert!(matches!(
+            local_timestamp_tuple_state(secondary, &high, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Committed { .. }
+        ));
     }
 
     fn local_timestamp_tuple_state(

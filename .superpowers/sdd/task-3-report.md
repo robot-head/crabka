@@ -89,3 +89,7 @@ Final second-review verification passed formatting/diff checks, pgexec library `
 - Local hosted secondaries now independently validate full primary identity, terminal decision, and exact participant operations before `resolve_as_secondary`. Opposite Commit/Abort and Pending-primary RED cases leave the intent unchanged.
 - Verification: gres-ranges library `119/119`, crossrange `21/21`, multirange `33/33`, focused remote restart `1/1`, static gate, formatting/diff checks, and gateway-local `10/11` with only the known invalid-socket fixture.
 - Fresh robust artifact `target/gres-scaling-readonly-inspect-final/range-scaling.json` passes all gates: range-local `3.2407x`, sharded `3.4701x`, envelope efficiency `0.8675`, and exact 110-per-range observations.
+
+## Canonical operation assertions
+
+Local and remote secondary validation now share one canonicalizer that sorts by `(range_id, table_id, rowid, delete)` and rejects exact duplicates before comparison. Valid multi-row operations resolve regardless of input order, while a duplicated forged operation list returns `40001` without changing either intent. Verification passed gres-ranges library `122/122`, crossrange `21/21`, multirange `33/33`, focused remote restart `1/1`, formatting/diff checks, and the static scaling suite.
