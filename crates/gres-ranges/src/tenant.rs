@@ -578,6 +578,7 @@ impl MultiRangeTenant {
             split_lock: Mutex::new(()),
             schema_gate: Arc::new(Mutex::new(())),
             table_write_gates: StdMutex::new(BTreeMap::new()),
+            topology_mutation_gate: Arc::new(RwLock::new(())),
             explicit_transaction_gate: Arc::new(Mutex::new(())),
             active_explicit_transactions: AtomicUsize::new(0),
             empty_table_split_test_hook: config.empty_table_split_test_hook,
@@ -658,6 +659,7 @@ impl MultiRangeTenant {
         command: SplitCommand,
     ) -> Result<SplitState, LocalSqlSplitError> {
         let _split_guard = self.inner.split_lock.lock().await;
+        let _topology_fence = self.acquire_control_topology_fence().await;
         let operation_id = operation_id.into();
         let table_id = command.right.interval.start.table_id;
         if let Some(state) = self
@@ -680,8 +682,7 @@ impl MultiRangeTenant {
             let _table_write_gate = if serving.range_map == state.target_map {
                 None
             } else {
-                let table_write_gate = self.inner.table_write_gate(table_id);
-                let table_write_gate = table_write_gate.write_owned().await;
+                let table_write_gate = self.acquire_table_publication_fence(table_id).await;
                 let serving = self.inner.serving.load_full();
                 self.validate_empty_table_split(&serving, command.right.range_id, table_id)?;
                 Some(table_write_gate)
@@ -696,8 +697,7 @@ impl MultiRangeTenant {
         if let Some(hook) = &self.inner.empty_table_split_test_hook {
             hook.wait_after_initial_validation().await;
         }
-        let table_write_gate = self.inner.table_write_gate(table_id);
-        let _table_write_gate = table_write_gate.write_owned().await;
+        let _table_write_gate = self.acquire_table_publication_fence(table_id).await;
         let serving = self.inner.serving.load_full();
         self.validate_empty_table_split(&serving, command.right.range_id, table_id)?;
         let bridge = LocalSqlSplitBridge { tenant: self };
@@ -719,10 +719,10 @@ impl MultiRangeTenant {
     ) -> Result<SplitState, LocalSqlSplitError> {
         let _split_guard = self.inner.split_lock.lock().await;
         let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
+        let _topology_fence = self.acquire_control_topology_fence().await;
         let operation_id = operation_id.into();
         let table_id = command.right.interval.start.table_id;
-        let table_write_gate = self.inner.table_write_gate(table_id);
-        let _table_write_gate = table_write_gate.write_owned().await;
+        let _table_write_gate = self.acquire_table_publication_fence(table_id).await;
         let serving = self.inner.serving.load_full();
         let transfer_table =
             self.validate_populated_table_split(&serving, command.right.range_id, table_id)?;
@@ -941,12 +941,44 @@ impl MultiRangeTenant {
         claimed: crate::ClaimedStagedSuccessors,
         transfer: &dyn RangeTransferCapability,
     ) -> Result<(), LocalSqlSplitError> {
+        let _table_write_gate = self
+            .acquire_table_publication_fence(state.predecessor_before.start.table_id)
+            .await;
         let serving = self.inner.serving.load_full();
+        recover_durable_timestamp_transactions(
+            &serving.engines,
+            self.inner.timestamp_primary_remote.clone(),
+        )
+        .map_err(|error| {
+            LocalSqlSplitError::Orchestration(SplitError::Hook(format!(
+                "settle timestamp transactions before topology publication: {error}"
+            )))
+        })?;
         if state.current_map != serving.range_map {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
         self.publish_claimed_successors(&serving, &state, claimed, Some(transfer))
             .await
+    }
+
+    /// Fence new timestamp transactions while a control-plane topology mutation is paused.
+    pub async fn acquire_control_topology_fence(&self) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        self.inner
+            .topology_mutation_gate
+            .clone()
+            .write_owned()
+            .await
+    }
+
+    async fn acquire_table_publication_fence(
+        &self,
+        table_id: TableId,
+    ) -> tokio::sync::OwnedRwLockWriteGuard<()> {
+        debug_assert!(
+            self.inner.topology_mutation_gate.try_read().is_err(),
+            "table publication fence requires topology publication fence first"
+        );
+        self.inner.table_write_gate(table_id).write_owned().await
     }
 
     fn validate_populated_table_split(
@@ -1863,6 +1895,7 @@ impl Engine for MultiRangeTenant {
             inner: Arc::clone(&self.inner),
             sessions,
             remote_sessions: BTreeMap::new(),
+            timestamp_topology_guard: None,
             serving_epoch: serving.range_map.epoch(),
             explicit_transaction: false,
             explicit_transaction_guard: None,
@@ -1887,6 +1920,7 @@ struct TenantInner {
     split_lock: Mutex<()>,
     schema_gate: Arc<Mutex<()>>,
     table_write_gates: StdMutex<BTreeMap<TableId, Arc<RwLock<()>>>>,
+    topology_mutation_gate: Arc<RwLock<()>>,
     explicit_transaction_gate: Arc<Mutex<()>>,
     active_explicit_transactions: AtomicUsize,
     empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
@@ -2194,6 +2228,7 @@ pub struct GatewaySession {
     inner: Arc<TenantInner>,
     sessions: BTreeMap<RangeId, crabka_pgexec::SqlSession>,
     remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
+    timestamp_topology_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
     serving_epoch: MapEpoch,
     explicit_transaction: bool,
     explicit_transaction_guard: Option<ExplicitTransactionGuard>,
@@ -2257,6 +2292,11 @@ struct StatementRoute {
 struct PreparedParticipantRelease {
     range_id: RangeId,
     global_xid: u64,
+}
+
+struct RoutedDmlFences {
+    _autocommit_topology_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
+    _table_write_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -2502,6 +2542,34 @@ async fn send_gateway_result<S: crabka_pgwire::engine::ResultSink>(
 }
 
 impl GatewaySession {
+    async fn acquire_timestamp_topology_guard(&mut self) {
+        if self.timestamp_topology_guard.is_none() {
+            self.timestamp_topology_guard =
+                Some(self.inner.topology_mutation_gate.clone().read_owned().await);
+        }
+    }
+
+    fn release_timestamp_topology_guard(&mut self) {
+        self.timestamp_topology_guard = None;
+    }
+
+    fn complete_timestamp_abort(&mut self) {
+        self.transaction = GatewayTransaction::Failed {
+            touched: Vec::new(),
+            escalated: false,
+            recovery: None,
+        };
+        self.release_timestamp_topology_guard();
+        self.status = TxStatus::Failed;
+    }
+
+    fn complete_timestamp_commit(&mut self) {
+        self.transaction = GatewayTransaction::Idle;
+        self.release_timestamp_topology_guard();
+        self.status = TxStatus::Idle;
+        self.release_explicit_transaction();
+    }
+
     async fn ensure_remote_session(&mut self, range_id: RangeId) -> Result<(), PgError> {
         if self.remote_sessions.contains_key(&range_id) {
             return Ok(());
@@ -2914,7 +2982,9 @@ impl GatewaySession {
             range_id: portal_state.route.range_id,
             table_id: portal_state.route.table_id,
         });
-        let _table_write_gate = self.acquire_routed_dml_gate(&portal_state.route).await?;
+        let _dml_fences = self
+            .acquire_routed_dml_fences(&portal_state.route, false)
+            .await?;
         let own_start_ts = match &self.transaction {
             GatewayTransaction::Timestamp { identity, .. }
                 if portal_state.route.kind == StatementKind::Query =>
@@ -2982,12 +3052,7 @@ impl GatewaySession {
         )
         .await
         .map_err(ExecError::into_pg)?;
-        self.transaction = GatewayTransaction::Failed {
-            touched: Vec::new(),
-            escalated: false,
-            recovery: None,
-        };
-        self.status = TxStatus::Failed;
+        self.complete_timestamp_abort();
         Ok(())
     }
 
@@ -3000,7 +3065,16 @@ impl GatewaySession {
             range_id: route.range_id,
             table_id: route.table_id,
         });
-        let _table_write_gate = self.acquire_routed_dml_gate(&route).await?;
+        let timestamp_write = route.scatter_ranges.is_some()
+            || (route.kind == StatementKind::Dml
+                && (matches!(
+                    self.transaction,
+                    GatewayTransaction::Idle | GatewayTransaction::Timestamp { .. }
+                ) || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
+                && self.statement_targets_sharded_table(statement)?);
+        let _dml_fences = self
+            .acquire_routed_dml_fences(&route, timestamp_write)
+            .await?;
 
         if self.explicit_transaction
             && !matches!(route.kind, StatementKind::Begin | StatementKind::Rollback)
@@ -3014,13 +3088,7 @@ impl GatewaySession {
                 .await
                 .map(|result| vec![result]);
         }
-        if route.kind == StatementKind::Dml
-            && (matches!(
-                self.transaction,
-                GatewayTransaction::Idle | GatewayTransaction::Timestamp { .. }
-            ) || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
-            && self.statement_targets_sharded_table(statement)?
-        {
+        if timestamp_write {
             return self
                 .execute_timestamp_scatter(statement, vec![route.range_id])
                 .await
@@ -3565,21 +3633,44 @@ impl GatewaySession {
             .await
     }
 
-    async fn acquire_routed_dml_gate(
-        &self,
+    async fn acquire_routed_dml_fences(
+        &mut self,
         route: &StatementRoute,
-    ) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, PgError> {
+        timestamp_write: bool,
+    ) -> Result<RoutedDmlFences, PgError> {
+        let autocommit_topology_guard = if timestamp_write
+            && matches!(self.transaction, GatewayTransaction::Idle)
+        {
+            Some(self.inner.topology_mutation_gate.clone().read_owned().await)
+        } else {
+            if timestamp_write
+                && (matches!(self.transaction, GatewayTransaction::Timestamp { .. })
+                    || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
+            {
+                self.acquire_timestamp_topology_guard().await;
+            }
+            None
+        };
         if route.kind != StatementKind::Dml {
-            return Ok(None);
+            return Ok(RoutedDmlFences {
+                _autocommit_topology_guard: autocommit_topology_guard,
+                _table_write_guard: None,
+            });
         }
         let Some(table_id) = route.table_id else {
-            return Ok(None);
+            return Ok(RoutedDmlFences {
+                _autocommit_topology_guard: autocommit_topology_guard,
+                _table_write_guard: None,
+            });
         };
 
         let table_write_gate = self.inner.table_write_gate(table_id);
         let table_write_gate = table_write_gate.read_owned().await;
         self.current_serving()?;
-        Ok(Some(table_write_gate))
+        Ok(RoutedDmlFences {
+            _autocommit_topology_guard: autocommit_topology_guard,
+            _table_write_guard: Some(table_write_gate),
+        })
     }
 
     fn statement_targets_sharded_table(&self, statement: &str) -> Result<bool, PgError> {
@@ -3831,6 +3922,8 @@ impl GatewaySession {
         let identity = if let GatewayTransaction::Timestamp { identity, .. } = &self.transaction {
             *identity
         } else {
+            self.acquire_timestamp_topology_guard().await;
+            self.current_serving()?;
             let primary_range = timestamp_primary_range(&writes_by_range).expect("primary range");
             let identity = crabka_pgexec::TimestampTxnIdentity {
                 start_ts: write_lease.start_ts,
@@ -3978,9 +4071,7 @@ impl GatewaySession {
             .commit_timestamp_statement_ops(commit_ops)
             .await
             .map_err(ExecError::into_pg)?;
-        self.transaction = GatewayTransaction::Idle;
-        self.status = TxStatus::Idle;
-        self.release_explicit_transaction();
+        self.complete_timestamp_commit();
         Ok(vec![QueryResult::Command {
             tag: "COMMIT".into(),
         }])
@@ -4404,7 +4495,14 @@ impl Drop for GatewaySession {
             let participants = participants.clone();
             let serving = self.inner.serving.load_full();
             let remote_sessions = self.remote_sessions.clone();
-            dispatch_dropped_timestamp_cleanup(serving, remote_sessions, identity, participants);
+            let topology_guard = self.timestamp_topology_guard.take();
+            dispatch_dropped_timestamp_cleanup(
+                serving,
+                remote_sessions,
+                identity,
+                participants,
+                topology_guard,
+            );
         }
         self.release_explicit_transaction();
     }
@@ -4415,9 +4513,11 @@ fn dispatch_dropped_timestamp_cleanup(
     remote_sessions: BTreeMap<RangeId, RemoteRangeSession>,
     identity: crabka_pgexec::TimestampTxnIdentity,
     participants: BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
+    topology_guard: Option<tokio::sync::OwnedRwLockReadGuard<()>>,
 ) {
     if let Ok(handle) = tokio::runtime::Handle::try_current() {
         handle.spawn(async move {
+            let _topology_guard = topology_guard;
             if let Err(error) = cleanup_dropped_timestamp_session(
                 serving,
                 remote_sessions,
@@ -4434,6 +4534,7 @@ fn dispatch_dropped_timestamp_cleanup(
     let spawn = std::thread::Builder::new()
         .name("crabka-timestamp-drop-cleanup".into())
         .spawn(move || {
+            let _topology_guard = topology_guard;
             let runtime = tokio::runtime::Builder::new_current_thread()
                 .enable_all()
                 .build();
@@ -5878,6 +5979,170 @@ mod tests {
         assert!(!exclusive.is_finished());
         drop(second_dml);
         exclusive.await.expect("exclusive fence");
+    }
+
+    async fn timestamp_session_with_blocked_publication() -> (
+        GatewaySession,
+        tokio::task::JoinHandle<tokio::sync::OwnedRwLockWriteGuard<()>>,
+    ) {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp_topology_fence").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let mut session = gateway.connect();
+        session.acquire_timestamp_topology_guard().await;
+        let publication = tokio::spawn(handles.inner.topology_mutation_gate.clone().write_owned());
+        tokio::task::yield_now().await;
+        assert!(!publication.is_finished());
+        (session, publication)
+    }
+
+    fn timestamp_dml_route(table_id: TableId) -> StatementRoute {
+        StatementRoute {
+            kind: StatementKind::Dml,
+            range_id: RangeId::COORDINATOR,
+            table_id: Some(table_id),
+            scatter_ranges: Some(vec![RangeId::COORDINATOR]),
+        }
+    }
+
+    #[tokio::test]
+    async fn timestamp_dml_waiting_on_topology_never_holds_table_fence() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp-lock-order-interleave").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let table_id = TableId::new(50);
+        let table_gate = handles.inner.table_write_gate(table_id);
+        let topology_publication = handles
+            .inner
+            .topology_mutation_gate
+            .clone()
+            .write_owned()
+            .await;
+        let mut session = gateway.connect();
+        let incoming_dml = tokio::spawn(async move {
+            session
+                .acquire_routed_dml_fences(&timestamp_dml_route(table_id), true)
+                .await
+                .expect("timestamp DML fences")
+        });
+        tokio::task::yield_now().await;
+        assert!(!incoming_dml.is_finished());
+
+        let table_publication =
+            tokio::time::timeout(std::time::Duration::from_secs(1), table_gate.write_owned())
+                .await
+                .expect("topology-first DML cannot block publication's table fence");
+        drop(table_publication);
+        drop(topology_publication);
+        incoming_dml.await.expect("incoming DML task");
+    }
+
+    #[tokio::test]
+    async fn timestamp_dml_fence_helper_holds_topology_then_table() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp-lock-order-truth").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let table_id = TableId::new(50);
+        let table_gate = handles.inner.table_write_gate(table_id);
+        let mut session = gateway.connect();
+        let fences = session
+            .acquire_routed_dml_fences(&timestamp_dml_route(table_id), true)
+            .await
+            .expect("timestamp DML fences");
+
+        let topology_publication =
+            tokio::spawn(handles.inner.topology_mutation_gate.clone().write_owned());
+        let table_publication = tokio::spawn(table_gate.write_owned());
+        tokio::task::yield_now().await;
+        assert!(!topology_publication.is_finished());
+        assert!(!table_publication.is_finished());
+
+        drop(fences);
+        topology_publication.await.expect("topology publication");
+        table_publication.await.expect("table publication");
+    }
+
+    #[tokio::test]
+    async fn timestamp_commit_releases_topology_publication_fence() {
+        let (mut session, publication) = timestamp_session_with_blocked_publication().await;
+        session.transaction = GatewayTransaction::Timestamp {
+            identity: crabka_pgexec::TimestampTxnIdentity {
+                start_ts: crabka_pgexec::TimestampTransactionId::new(10).expect("timestamp"),
+                global_xid: 10,
+                primary_range: RangeId::COORDINATOR.as_u32(),
+            },
+            participants: BTreeMap::new(),
+            commit_ops: Vec::new(),
+        };
+
+        session.complete_timestamp_commit();
+
+        assert_eq!(session.transaction, GatewayTransaction::Idle);
+        assert_eq!(session.status, TxStatus::Idle);
+        publication
+            .await
+            .expect("commit releases publication fence");
+    }
+
+    #[tokio::test]
+    async fn timestamp_abort_releases_topology_publication_fence() {
+        let (mut session, publication) = timestamp_session_with_blocked_publication().await;
+        session.transaction = GatewayTransaction::Timestamp {
+            identity: crabka_pgexec::TimestampTxnIdentity {
+                start_ts: crabka_pgexec::TimestampTransactionId::new(11).expect("timestamp"),
+                global_xid: 11,
+                primary_range: RangeId::COORDINATOR.as_u32(),
+            },
+            participants: BTreeMap::new(),
+            commit_ops: Vec::new(),
+        };
+
+        session.complete_timestamp_abort();
+
+        assert!(matches!(
+            session.transaction,
+            GatewayTransaction::Failed { .. }
+        ));
+        assert_eq!(session.status, TxStatus::Failed);
+        publication.await.expect("abort releases publication fence");
+    }
+
+    #[tokio::test]
+    async fn dropped_timestamp_session_holds_fence_through_async_cleanup() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("timestamp_drop_topology_fence").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let mut session = gateway.connect();
+        session.acquire_timestamp_topology_guard().await;
+        session.transaction = GatewayTransaction::Timestamp {
+            identity: crabka_pgexec::TimestampTxnIdentity {
+                start_ts: crabka_pgexec::TimestampTransactionId::new(10).expect("timestamp"),
+                global_xid: 10,
+                primary_range: RangeId::COORDINATOR.as_u32(),
+            },
+            participants: BTreeMap::new(),
+            commit_ops: Vec::new(),
+        };
+        let publication = tokio::spawn(handles.inner.topology_mutation_gate.clone().write_owned());
+        tokio::task::yield_now().await;
+        assert!(!publication.is_finished());
+        drop(session);
+        tokio::time::timeout(std::time::Duration::from_secs(5), publication)
+            .await
+            .expect("cleanup releases publication fence")
+            .expect("publication task");
     }
 
     fn tenant() -> TenantName {
