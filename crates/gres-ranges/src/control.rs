@@ -4,7 +4,7 @@ use std::{collections::BTreeMap, sync::Arc};
 
 use async_trait::async_trait;
 
-use crate::transport::{RangeControlReq, RangeControlResp};
+use crate::transport::{RangeControlOperation, RangeControlReq, RangeControlResp};
 
 /// Irreversible topology-activation progress persisted on range zero.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -135,6 +135,18 @@ pub trait RangeControlExecutor: Send + Sync {
             message: "operation intent is durable but runtime status is unknown".into(),
         }
     }
+
+    /// Reconcile a step whose durable completion evidence may be widened after restart.
+    ///
+    /// Implementations may advance only evidence intrinsic to the same immutable request. The
+    /// dispatcher validates the permitted response shape and persists it with a revision CAS.
+    async fn reconcile_completed(
+        &self,
+        request: &RangeControlReq,
+        _previous: &RangeControlResp,
+    ) -> RangeControlResp {
+        self.reconcile(request).await
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -253,7 +265,7 @@ impl RangeControlReceiptStore for RangeZeroReceiptStore {
 /// Service-side dispatcher that fences tenant/generation and replays completed operation IDs.
 pub struct GenerationFencedRangeControl {
     tenant: String,
-    generations: BTreeMap<crate::RangeId, u64>,
+    generations: BTreeMap<crate::RangeId, std::collections::BTreeSet<u64>>,
     executor: Box<dyn RangeControlExecutor>,
     receipts: Arc<dyn RangeControlReceiptStore>,
 }
@@ -268,7 +280,10 @@ impl GenerationFencedRangeControl {
     ) -> Self {
         Self {
             tenant: tenant.into(),
-            generations: BTreeMap::from([(range_id, generation)]),
+            generations: BTreeMap::from([(
+                range_id,
+                std::collections::BTreeSet::from([generation]),
+            )]),
             executor,
             receipts: Arc::new(MemoryRangeControlReceiptStore::default()),
         }
@@ -282,7 +297,10 @@ impl GenerationFencedRangeControl {
 
     #[must_use]
     pub fn with_range(mut self, range_id: crate::RangeId, generation: u64) -> Self {
-        self.generations.insert(range_id, generation);
+        self.generations
+            .entry(range_id)
+            .or_default()
+            .insert(generation);
         self
     }
 
@@ -290,15 +308,9 @@ impl GenerationFencedRangeControl {
         if request.tenant != self.tenant {
             return rejected("wrong_tenant", "control request belongs to another tenant");
         }
-        let Some(expected_generation) = self.generations.get(&request.range_id) else {
+        let Some(expected_generations) = self.generations.get(&request.range_id) else {
             return rejected("wrong_range", "range is not hosted by this compute");
         };
-        if request.generation != *expected_generation {
-            return rejected(
-                "stale_generation",
-                format!("expected generation {expected_generation}"),
-            );
-        }
         if request.operation_id.is_empty() {
             return rejected("invalid_operation_id", "operation_id must not be empty");
         }
@@ -308,14 +320,82 @@ impl GenerationFencedRangeControl {
             Ok(existing) => existing,
             Err(message) => return rejected("receipt_store", message),
         };
+        if !expected_generations.contains(&request.generation)
+            && !existing.as_ref().is_some_and(|receipt| {
+                receipt.request == request && receipt.request_digest == digest
+            })
+        {
+            return rejected(
+                "stale_generation",
+                format!("expected one of generations {expected_generations:?}"),
+            );
+        }
         if let Some(receipt) = existing {
             if receipt.request_digest != digest || receipt.request != request {
                 return rejected("operation_mismatch", "operation step payload changed");
             }
-            if let Some(response) = receipt.result {
-                return replayed(&response);
+            if let Some(response) = receipt.result.as_ref() {
+                if matches!(
+                    request.operation,
+                    RangeControlOperation::PauseAtCoveredOffset { .. }
+                        | RangeControlOperation::StageFilteredRestore { .. }
+                        | RangeControlOperation::InheritMarkers { .. }
+                        | RangeControlOperation::SuccessorFencePrologue { .. }
+                ) {
+                    let reconciled = self.executor.reconcile_completed(&request, response).await;
+                    let accepted = match (response, &reconciled) {
+                        (
+                            RangeControlResp::Staged { tail_sha256: _ },
+                            RangeControlResp::Staged { tail_sha256: _ },
+                        ) => true,
+                        (
+                            RangeControlResp::Paused {
+                                barrier_offset: previous,
+                            },
+                            RangeControlResp::Paused {
+                                barrier_offset: current,
+                            },
+                        ) if current >= previous => true,
+                        (
+                            RangeControlResp::Markers {
+                                markers: expected_markers,
+                                digest: expected_digest,
+                            },
+                            RangeControlResp::Markers {
+                                markers: actual_markers,
+                                digest: actual_digest,
+                            },
+                        ) if expected_markers == actual_markers
+                            && expected_digest == actual_digest =>
+                        {
+                            true
+                        }
+                        (
+                            RangeControlResp::Applied | RangeControlResp::AlreadyApplied,
+                            RangeControlResp::Applied | RangeControlResp::AlreadyApplied,
+                        ) => true,
+                        _ => false,
+                    };
+                    if matches!(reconciled, RangeControlResp::Rejected { .. }) {
+                        return reconciled;
+                    }
+                    if !accepted {
+                        return rejected(
+                            "stage_reconcile_mismatch",
+                            "reconstructed evidence is stale or has an invalid response shape",
+                        );
+                    }
+                    if &reconciled == response {
+                        return replayed(response);
+                    }
+                    return self
+                        .replace_completed_receipt(&receipt_key, receipt, reconciled)
+                        .await;
+                }
+                return replayed(response);
             }
             let response = self.executor.reconcile(&request).await;
+            crash_after_effect_if_requested(&request, &response);
             return self.complete_receipt(&receipt_key, receipt, response).await;
         }
         let intent = RangeControlReceipt {
@@ -335,6 +415,7 @@ impl GenerationFencedRangeControl {
             Err(message) => return rejected("receipt_store", message),
         }
         let response = self.executor.execute(&request).await;
+        crash_after_effect_if_requested(&request, &response);
         self.complete_receipt(&receipt_key, intent, response).await
     }
 
@@ -360,6 +441,55 @@ impl GenerationFencedRangeControl {
             Err(message) => rejected("receipt_store", message),
         }
     }
+
+    async fn replace_completed_receipt(
+        &self,
+        key: &str,
+        mut receipt: RangeControlReceipt,
+        response: RangeControlResp,
+    ) -> RangeControlResp {
+        let expected = receipt.revision;
+        receipt.revision = match receipt.revision.checked_add(1) {
+            Some(revision) => revision,
+            None => return rejected("receipt_revision", "control receipt revision overflow"),
+        };
+        receipt.result = Some(response.clone());
+        match self
+            .receipts
+            .compare_and_swap(key, Some(expected), receipt)
+            .await
+        {
+            Ok(true) => response,
+            Ok(false) => rejected(
+                "receipt_race",
+                "control reconciliation raced another writer",
+            ),
+            Err(message) => rejected("receipt_store", message),
+        }
+    }
+}
+
+fn crash_after_effect_if_requested(request: &RangeControlReq, response: &RangeControlResp) {
+    if matches!(
+        response,
+        RangeControlResp::Rejected { .. } | RangeControlResp::Ambiguous { .. }
+    ) {
+        return;
+    }
+    let requested = match std::env::var("CRABKA_GRES_CONTROL_CRASH_AFTER_EFFECT") {
+        Ok(requested) => requested,
+        Err(_) => return,
+    };
+    let step = match request.operation {
+        RangeControlOperation::StageFilteredRestore { .. } => "stage",
+        RangeControlOperation::InheritMarkers { .. } => "markers",
+        RangeControlOperation::SuccessorFencePrologue { .. } => "prologue",
+        RangeControlOperation::RetirePredecessor => "retire",
+        _ => return,
+    };
+    if requested == step {
+        std::process::exit(86);
+    }
 }
 
 fn request_digest(request: &RangeControlReq) -> String {
@@ -381,9 +511,9 @@ fn receipt_key(request: &RangeControlReq) -> String {
         Operation::PauseAtCoveredOffset { .. } => "pause",
         Operation::Status => "status",
         Operation::StageFilteredRestore { .. } => "stage",
-        Operation::SuccessorFencePrologue => "prologue",
+        Operation::SuccessorFencePrologue { .. } => "prologue",
         Operation::InheritMarkers { .. } => "markers",
-        Operation::Park => "park",
+        Operation::RetirePredecessor => "retire-predecessor",
         Operation::Resume => "resume",
     };
     format!(
@@ -423,6 +553,26 @@ mod tests {
         response: RangeControlResp,
     }
 
+    struct WideningExecutor {
+        execute: RangeControlResp,
+        reconcile: RangeControlResp,
+    }
+
+    #[async_trait]
+    impl RangeControlExecutor for WideningExecutor {
+        async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
+            self.execute.clone()
+        }
+
+        async fn reconcile_completed(
+            &self,
+            _request: &RangeControlReq,
+            _previous: &RangeControlResp,
+        ) -> RangeControlResp {
+            self.reconcile.clone()
+        }
+    }
+
     #[async_trait]
     impl RangeControlExecutor for CountingExecutor {
         async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
@@ -442,7 +592,7 @@ mod tests {
             range_id: RangeId::new(1),
             generation,
             operation_id: operation_id.into(),
-            operation: RangeControlOperation::Park,
+            operation: RangeControlOperation::RetirePredecessor,
         }
     }
 
@@ -501,7 +651,7 @@ mod tests {
         assert!(
             matches!(control.handle(mismatch).await, RangeControlResp::Rejected { code, .. } if code == "operation_mismatch")
         );
-        assert_eq!(calls.load(Ordering::SeqCst), 1);
+        assert_eq!(calls.load(Ordering::SeqCst), 2);
     }
 
     #[tokio::test]
@@ -643,5 +793,101 @@ mod tests {
         assert_eq!(control.handle(first).await, RangeControlResp::Applied);
         assert_eq!(control.handle(second).await, RangeControlResp::Applied);
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn completed_pause_receipt_can_advance_monotonically_under_same_request() {
+        let store = Arc::new(MemoryRangeControlReceiptStore::default());
+        let mut pause = request("tenant-a", 7, "widen");
+        pause.operation = RangeControlOperation::PauseAtCoveredOffset {
+            manifest_key: "manifest".into(),
+            covered_offset: 5,
+        };
+        let first = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(WideningExecutor {
+                execute: RangeControlResp::Paused { barrier_offset: 10 },
+                reconcile: RangeControlResp::Paused { barrier_offset: 10 },
+            }),
+        )
+        .with_receipt_store(store.clone());
+        assert_eq!(
+            first.handle(pause.clone()).await,
+            RangeControlResp::Paused { barrier_offset: 10 }
+        );
+
+        let reopened = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(WideningExecutor {
+                execute: RangeControlResp::Paused { barrier_offset: 14 },
+                reconcile: RangeControlResp::Paused { barrier_offset: 14 },
+            }),
+        )
+        .with_receipt_store(store.clone());
+        assert_eq!(
+            reopened.handle(pause.clone()).await,
+            RangeControlResp::Paused { barrier_offset: 14 }
+        );
+        let receipt = store
+            .load(&receipt_key(&pause))
+            .await
+            .unwrap()
+            .expect("updated receipt");
+        assert_eq!(receipt.revision, 3);
+        assert_eq!(
+            receipt.result,
+            Some(RangeControlResp::Paused { barrier_offset: 14 })
+        );
+    }
+
+    #[tokio::test]
+    async fn completed_pause_receipt_rejects_a_barrier_downgrade() {
+        let store = Arc::new(MemoryRangeControlReceiptStore::default());
+        let mut pause = request("tenant-a", 7, "downgrade");
+        pause.operation = RangeControlOperation::PauseAtCoveredOffset {
+            manifest_key: "manifest".into(),
+            covered_offset: 5,
+        };
+        let first = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(WideningExecutor {
+                execute: RangeControlResp::Paused { barrier_offset: 10 },
+                reconcile: RangeControlResp::Paused { barrier_offset: 10 },
+            }),
+        )
+        .with_receipt_store(store.clone());
+        assert!(matches!(
+            first.handle(pause.clone()).await,
+            RangeControlResp::Paused { .. }
+        ));
+        let reopened = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(WideningExecutor {
+                execute: RangeControlResp::Paused { barrier_offset: 9 },
+                reconcile: RangeControlResp::Paused { barrier_offset: 9 },
+            }),
+        )
+        .with_receipt_store(store.clone());
+        assert!(matches!(
+            reopened.handle(pause.clone()).await,
+            RangeControlResp::Rejected { ref code, .. } if code == "stage_reconcile_mismatch"
+        ));
+        assert_eq!(
+            store
+                .load(&receipt_key(&pause))
+                .await
+                .unwrap()
+                .unwrap()
+                .revision,
+            2
+        );
     }
 }

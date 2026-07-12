@@ -457,6 +457,22 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
     })
     .await
     .expect("open live multi-range runtime");
+    let control_status =
+        crabka_gres_ranges::RangeRequest::Control(crabka_gres_ranges::transport::RangeControlReq {
+            tenant: tenant.into(),
+            range_id: RangeId::COORDINATOR,
+            generation: 0,
+            operation_id: "control-status-attachment".into(),
+            operation: crabka_gres_ranges::transport::RangeControlOperation::Status,
+        });
+    for _ in 0..2 {
+        assert!(matches!(
+            runtime.handle_range_request(control_status.clone()).await,
+            Some(crabka_gres_ranges::RangeResponse::Control(
+                crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
+            ))
+        ));
+    }
     let transfer = runtime
         .range_transfer_capability()
         .expect("live multi-range transfer capability");
@@ -781,6 +797,393 @@ fn activation_crash_config(
         host_ranges: None,
         range_rpc: None,
         advertised_endpoint: Some("127.0.0.1:7443".into()),
+    }
+}
+
+async fn control_request(
+    runtime: &crabka_gres::GresRuntime,
+    tenant: &str,
+    operation_id: &str,
+    operation: crabka_gres_ranges::transport::RangeControlOperation,
+) -> crabka_gres_ranges::transport::RangeControlResp {
+    match runtime
+        .handle_range_request(crabka_gres_ranges::RangeRequest::Control(
+            crabka_gres_ranges::transport::RangeControlReq {
+                tenant: tenant.into(),
+                range_id: RangeId::COORDINATOR,
+                generation: 0,
+                operation_id: operation_id.into(),
+                operation,
+            },
+        ))
+        .await
+    {
+        Some(crabka_gres_ranges::RangeResponse::Control(response)) => response,
+        response => panic!("unexpected range-control response: {response:?}"),
+    }
+}
+
+async fn drive_live_control_split(
+    runtime: &crabka_gres::GresRuntime,
+    tenant: &str,
+    operation_id: &str,
+    state_path: &std::path::Path,
+) {
+    use crabka_gres_ranges::transport::{
+        RangeControlOperation as Operation, RangeControlResp, WireRangeKey,
+    };
+    struct DriverState {
+        split: crabka_gres_ranges::SplitState,
+        manifest_key: String,
+        covered_offset: i64,
+        barrier_offset: i64,
+    }
+    let state = if state_path.exists() {
+        let value: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(state_path).expect("read driver state"))
+                .expect("decode driver state");
+        DriverState {
+            split: serde_json::from_value(value["split"].clone()).expect("decode stored split"),
+            manifest_key: value["manifest_key"].as_str().expect("manifest key").into(),
+            covered_offset: value["covered_offset"].as_i64().expect("covered offset"),
+            barrier_offset: value["barrier_offset"].as_i64().expect("barrier offset"),
+        }
+    } else {
+        let current_map = runtime.published_range_map().expect("source range map");
+        let predecessor = current_map
+            .ranges()
+            .iter()
+            .find(|range| range.range_id == RangeId::COORDINATOR)
+            .cloned()
+            .expect("source predecessor");
+        let split_at = RangeKey::table_start(TableId::new(1));
+        let split = crabka_gres_ranges::SplitState::for_split(
+            operation_id,
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 0,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::COORDINATOR,
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        predecessor.start,
+                        Some(split_at),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(2),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(RangeId::new(2), split_at, predecessor.end),
+                },
+            },
+        )
+        .expect("valid control split");
+        let transfer = runtime
+            .range_transfer_capability()
+            .expect("live control transfer capability");
+        transfer
+            .record_topology_activation_intent(&split)
+            .await
+            .expect("journal topology intent before checkpoint");
+        let checkpoint =
+            control_request(runtime, tenant, operation_id, Operation::ForceCheckpoint).await;
+        let RangeControlResp::Checkpoint {
+            covered_offset,
+            manifest_key,
+            ..
+        } = checkpoint
+        else {
+            panic!("checkpoint failed: {checkpoint:?}");
+        };
+        transfer
+            .record_topology_activation_checkpoint(
+                operation_id,
+                &crabka_gres_ranges::CheckpointManifest {
+                    range_id: RangeId::COORDINATOR,
+                    covered_offset,
+                    manifest_key: manifest_key.clone(),
+                },
+            )
+            .await
+            .expect("journal topology checkpoint before pause");
+        let pause = control_request(
+            runtime,
+            tenant,
+            operation_id,
+            Operation::PauseAtCoveredOffset {
+                manifest_key: manifest_key.clone(),
+                covered_offset,
+            },
+        )
+        .await;
+        let RangeControlResp::Paused { barrier_offset } = pause else {
+            panic!("pause failed: {pause:?}");
+        };
+        let state = DriverState {
+            split,
+            manifest_key,
+            covered_offset,
+            barrier_offset,
+        };
+        std::fs::write(
+            state_path,
+            serde_json::to_vec(&serde_json::json!({
+                "split": state.split,
+                "manifest_key": state.manifest_key,
+                "covered_offset": state.covered_offset,
+                "barrier_offset": state.barrier_offset,
+            }))
+            .expect("encode driver state"),
+        )
+        .expect("persist operator driver state before staging");
+        state
+    };
+    let DriverState {
+        split,
+        manifest_key,
+        covered_offset,
+        barrier_offset,
+    } = state;
+    if runtime.published_range_map().as_ref() == Some(&split.target_map) {
+        let prologue = control_request(
+            runtime,
+            tenant,
+            operation_id,
+            Operation::SuccessorFencePrologue {
+                split: Box::new(split),
+            },
+        )
+        .await;
+        assert!(
+            matches!(
+                prologue,
+                RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+            ),
+            "active prologue replay: {prologue:?}"
+        );
+        let retire =
+            control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
+        assert!(
+            matches!(
+                retire,
+                RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+            ),
+            "active retire: {retire:?}"
+        );
+        return;
+    }
+    let checkpoint =
+        control_request(runtime, tenant, operation_id, Operation::ForceCheckpoint).await;
+    assert!(matches!(checkpoint, RangeControlResp::Checkpoint { .. }));
+    let pause = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        Operation::PauseAtCoveredOffset {
+            manifest_key: manifest_key.clone(),
+            covered_offset,
+        },
+    )
+    .await;
+    assert!(matches!(pause, RangeControlResp::Paused { .. }));
+    let stage = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        Operation::StageFilteredRestore {
+            split: Box::new(split.clone()),
+            source_range: RangeId::COORDINATOR,
+            source_generation: 0,
+            manifest_key,
+            covered_offset,
+            barrier_offset,
+            routing_table_id: 1,
+            physical_table_id: 1,
+            interval_start: WireRangeKey {
+                table_id: split.predecessor_before.start.table_id.as_u64(),
+                rowid: split.predecessor_before.start.rowid,
+            },
+            interval_end: split.predecessor_before.end.map(|key| WireRangeKey {
+                table_id: key.table_id.as_u64(),
+                rowid: key.rowid,
+            }),
+            target_map: split.target_map.clone(),
+        },
+    )
+    .await;
+    assert!(
+        matches!(stage, RangeControlResp::Staged { .. }),
+        "stage: {stage:?}"
+    );
+    let markers = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        Operation::InheritMarkers {
+            interval_start: WireRangeKey {
+                table_id: split.predecessor_before.start.table_id.as_u64(),
+                rowid: split.predecessor_before.start.rowid,
+            },
+            interval_end: split.predecessor_before.end.map(|key| WireRangeKey {
+                table_id: key.table_id.as_u64(),
+                rowid: key.rowid,
+            }),
+        },
+    )
+    .await;
+    assert!(
+        matches!(markers, RangeControlResp::Markers { .. }),
+        "markers: {markers:?}"
+    );
+    let prologue = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        Operation::SuccessorFencePrologue {
+            split: Box::new(split),
+        },
+    )
+    .await;
+    assert!(
+        matches!(
+            prologue,
+            RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+        ),
+        "prologue: {prologue:?}"
+    );
+    let retire = control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
+    assert!(
+        matches!(
+            retire,
+            RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+        ),
+        "retire: {retire:?}"
+    );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn control_executor_crash_child() {
+    if std::env::var_os("CRABKA_GRES_CONTROL_CRASH_CHILD").is_none() {
+        return;
+    }
+    let bootstrap = std::env::var("CRABKA_GRES_ACTIVATION_BOOTSTRAP").expect("bootstrap env");
+    let tenant = std::env::var("CRABKA_GRES_ACTIVATION_TENANT").expect("tenant env");
+    let checkpoint_root = PathBuf::from(
+        std::env::var("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT").expect("checkpoint env"),
+    );
+    let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
+        bootstrap,
+        tenant.clone(),
+        checkpoint_root.clone(),
+    ))
+    .await
+    .expect("open control crash child");
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("CREATE TABLE t1 (id int4); INSERT INTO t1 VALUES (7), (8), (9)")
+        .await
+        .expect("seed control crash ledger");
+    drive_live_control_split(
+        &runtime,
+        &tenant,
+        "control-crash",
+        &checkpoint_root.join("control-driver.json"),
+    )
+    .await;
+    panic!("control crash failpoint returned");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
+    const MAX_CONTROL_RECOVERY_PAUSE: std::time::Duration = std::time::Duration::from_secs(30);
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    for step in ["stage", "markers", "prologue", "retire"] {
+        let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
+        let tenant = format!("control-crash-{step}");
+        let executable = std::env::current_exe().expect("test executable");
+        let bootstrap = broker.listen_addr().to_string();
+        let checkpoint_root = checkpoint_dir.path().to_path_buf();
+        let status = tokio::task::spawn_blocking({
+            let tenant = tenant.clone();
+            let bootstrap = bootstrap.clone();
+            let checkpoint_root = checkpoint_root.clone();
+            move || {
+                std::process::Command::new(executable)
+                    .args(["--exact", "control_executor_crash_child", "--nocapture"])
+                    .env("CRABKA_GRES_CONTROL_CRASH_CHILD", "1")
+                    .env("CRABKA_GRES_CONTROL_CRASH_AFTER_EFFECT", step)
+                    .env("CRABKA_GRES_ACTIVATION_BOOTSTRAP", bootstrap)
+                    .env("CRABKA_GRES_ACTIVATION_TENANT", tenant)
+                    .env("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT", checkpoint_root)
+                    .status()
+                    .expect("run control crash child")
+            }
+        })
+        .await
+        .expect("join crash child");
+        assert_eq!(
+            status.code(),
+            Some(86),
+            "{step} must hard-exit after its effect"
+        );
+
+        let started = std::time::Instant::now();
+        let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
+            bootstrap,
+            tenant.clone(),
+            checkpoint_root.clone(),
+        ))
+        .await
+        .unwrap_or_else(|error| panic!("pre-readiness reconcile after {step}: {error}"));
+        drive_live_control_split(
+            &runtime,
+            &tenant,
+            "control-crash",
+            &checkpoint_root.join("control-driver.json"),
+        )
+        .await;
+        let recovery_elapsed = started.elapsed();
+        eprintln!(
+            "control crash step={step} reopen_and_replay_ms={}",
+            recovery_elapsed.as_millis()
+        );
+        assert!(
+            recovery_elapsed < MAX_CONTROL_RECOVERY_PAUSE,
+            "{step} exceeded bounded pause/recovery window"
+        );
+        let map = runtime.published_range_map().expect("successor map");
+        assert_eq!(
+            map.ranges()
+                .iter()
+                .filter(|range| range.contains_key(RangeKey::table_start(TableId::new(1))))
+                .count(),
+            1,
+            "exactly one successor owns the table"
+        );
+        let ledger_rowids = runtime
+            .hosted_range_kv_scan(RangeId::new(2))
+            .expect("scan successor durable fold")
+            .into_iter()
+            .filter_map(|(key, _)| match crabka_pgkv::key::classify_key(&key) {
+                crabka_pgkv::key::KeyClass::PrimaryRow { table_id: 1, rowid }
+                | crabka_pgkv::key::KeyClass::PrimaryVersion {
+                    table_id: 1, rowid, ..
+                } => Some(rowid),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>();
+        assert_eq!(
+            ledger_rowids.len(),
+            3,
+            "exact acknowledged ledger row identities"
+        );
     }
 }
 

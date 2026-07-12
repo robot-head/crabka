@@ -1406,6 +1406,19 @@ pub(super) async fn reconcile_before_readiness(
     let tenant = range0.resources.recovery_config.tenant.to_string();
     let source_store =
         RangeZeroTopologyActivationStore::new(tenant.clone(), range0.engine.clone_handle());
+    let control_recovery_operations = range0
+        .engine
+        .range_control_receipts(&tenant)
+        .map_err(|error| std::io::Error::other(format!("list range-control receipts: {error:?}")))?
+        .into_iter()
+        .map(|bytes| {
+            serde_json::from_slice::<crabka_gres_ranges::control::RangeControlReceipt>(&bytes)
+                .map(|receipt| receipt.request.operation_id)
+                .map_err(|error| {
+                    std::io::Error::other(format!("decode range-control receipt: {error}"))
+                })
+        })
+        .collect::<Result<std::collections::BTreeSet<_>, _>>()?;
     let mut receipts = source_store
         .list()
         .await
@@ -1429,6 +1442,8 @@ pub(super) async fn reconcile_before_readiness(
     for receipt in receipts {
         match receipt.phase {
             TopologyActivationPhase::Aborted => {}
+            TopologyActivationPhase::SourceCheckpoint
+                if control_recovery_operations.contains(&receipt.operation_id) => {}
             TopologyActivationPhase::Prepared | TopologyActivationPhase::SourceCheckpoint => {
                 abort_pre_activation(&source_store, receipt).await?
             }

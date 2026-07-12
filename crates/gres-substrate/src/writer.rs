@@ -327,6 +327,15 @@ impl PausedWalWriter {
         self.pause.release();
         let _ = self.permit.take();
     }
+
+    /// Permanently retire this writer without reopening its commit gate.
+    ///
+    /// The pause nonce remains fenced, so stale handles cannot resume commits after ownership
+    /// moved to a successor generation.
+    pub fn retire(mut self) {
+        self.pause.active = false;
+        let _ = self.permit.take();
+    }
 }
 
 impl Drop for PausedWalWriter {
@@ -395,6 +404,44 @@ impl PauseReservation {
 impl Drop for PauseReservation {
     fn drop(&mut self) {
         self.release();
+    }
+}
+
+#[cfg(test)]
+mod pause_retirement_tests {
+    use std::sync::{Arc, Mutex};
+
+    use tokio::sync::Semaphore;
+
+    use super::{PauseReservation, PausedWalWriter, WriterPauseState};
+
+    #[tokio::test]
+    async fn retiring_paused_writer_never_reopens_commit_gate() {
+        let state = Arc::new(Mutex::new(WriterPauseState::Paused {
+            nonce: 7,
+            barrier_offset: 11,
+        }));
+        let permit = Arc::new(Semaphore::new(1))
+            .acquire_owned()
+            .await
+            .expect("permit");
+        PausedWalWriter {
+            pause: PauseReservation {
+                state: Arc::clone(&state),
+                nonce: 7,
+                active: true,
+            },
+            permit: Some(permit),
+            barrier_offset: 11,
+        }
+        .retire();
+        assert_eq!(
+            *state.lock().expect("pause state"),
+            WriterPauseState::Paused {
+                nonce: 7,
+                barrier_offset: 11,
+            }
+        );
     }
 }
 
@@ -1171,6 +1218,223 @@ impl SubstrateCommitter<DeferredWalWriter<ProducerWalWriter>> {
                     })
                     .expect("activation frame contains its value"),
             ))
+    }
+
+    /// Commit one range-control receipt while the matching predecessor pause is held.
+    pub async fn commit_range_control_receipt_cas(
+        &self,
+        authorization: &PausedWalAuthorization,
+        barrier_offset: i64,
+        tenant: &str,
+        receipt: &str,
+        expected: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<bool, SubstrateError> {
+        validate_paused_control_receipt_transition(tenant, receipt, expected.as_deref(), &value)?;
+        let key = crabka_pgkv::key::range_control_receipt_key(tenant, receipt);
+        let _permit = Arc::clone(&self.commit_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
+        if self.kv.get(&key).map_err(SubstrateError::from)? != expected {
+            return Ok(false);
+        }
+        let next_journal_seq = self.next_journal_seq.load(Ordering::SeqCst);
+        let frame = WalFrame {
+            journal_seq: next_journal_seq,
+            ops: vec![WriteOp::ConditionalPut {
+                key: key.clone(),
+                expected,
+                value: value.clone(),
+            }],
+        };
+        let writer = self.writer.current()?;
+        let ack = writer
+            .commit_group_with_pause_authorization(
+                authorization,
+                barrier_offset,
+                GroupCommitRequest {
+                    generation: self.generation,
+                    frames: vec![frame.clone()],
+                },
+            )
+            .await?;
+        apply_frame(self.kv.as_ref(), &frame.ops)?;
+        if let Some(source) = &self.checkpoint_snapshot_source
+            && let Some(last_ack) = ack.frames.last().copied()
+        {
+            source.record_commit(last_ack);
+        }
+        self.next_journal_seq.store(
+            next_journal_seq
+                .checked_add(1)
+                .ok_or_else(|| SubstrateError::Frame("journal sequence overflow".into()))?,
+            Ordering::SeqCst,
+        );
+        Ok(self.kv.get(&key).map_err(SubstrateError::from)? == Some(value))
+    }
+}
+
+fn validate_paused_control_receipt_transition(
+    tenant: &str,
+    receipt_key: &str,
+    expected: Option<&[u8]>,
+    value: &[u8],
+) -> Result<(), SubstrateError> {
+    use crabka_gres_ranges::{
+        control::RangeControlReceipt,
+        transport::{RangeControlOperation as Operation, RangeControlResp},
+    };
+    let next: RangeControlReceipt = serde_json::from_slice(value)
+        .map_err(|error| SubstrateError::Frame(format!("decode control receipt: {error}")))?;
+    let step = match next.request.operation {
+        Operation::ForceCheckpoint => "checkpoint",
+        Operation::PauseAtCoveredOffset { .. } => "pause",
+        Operation::Status => "status",
+        Operation::StageFilteredRestore { .. } => "stage",
+        Operation::SuccessorFencePrologue { .. } => "prologue",
+        Operation::InheritMarkers { .. } => "markers",
+        Operation::RetirePredecessor => "retire-predecessor",
+        Operation::Resume => "resume",
+    };
+    let exact_key = format!(
+        "r{}.g{}:{}:{step}",
+        next.request.range_id.as_u32(),
+        next.request.generation,
+        next.request.operation_id
+    );
+    if next.request.tenant != tenant || exact_key != receipt_key {
+        return Err(SubstrateError::Frame(
+            "paused control receipt tenant or exact step key mismatch".into(),
+        ));
+    }
+    let Some(expected) = expected else {
+        if next.revision == 1 && next.result.is_none() {
+            return Ok(());
+        }
+        return Err(SubstrateError::Frame(
+            "paused control receipt creation must be an in-progress revision one".into(),
+        ));
+    };
+    let prior: RangeControlReceipt = serde_json::from_slice(expected)
+        .map_err(|error| SubstrateError::Frame(format!("decode prior control receipt: {error}")))?;
+    let immutable = prior.request == next.request
+        && prior.request_digest == next.request_digest
+        && prior.generation == next.generation
+        && next.revision == prior.revision.checked_add(1).unwrap_or(u64::MAX);
+    if !immutable {
+        return Err(SubstrateError::Frame(
+            "paused control receipt changed immutable request evidence or revision".into(),
+        ));
+    }
+    match (&prior.result, &next.result) {
+        (None, Some(_)) => Ok(()),
+        (
+            Some(RangeControlResp::Paused {
+                barrier_offset: old,
+            }),
+            Some(RangeControlResp::Paused {
+                barrier_offset: new,
+            }),
+        ) if new >= old => Ok(()),
+        (Some(RangeControlResp::Staged { .. }), Some(RangeControlResp::Staged { .. })) => Ok(()),
+        _ => Err(SubstrateError::Frame(
+            "paused control receipt transition is not an allowed completion or reconciliation"
+                .into(),
+        )),
+    }
+}
+
+#[cfg(test)]
+mod paused_control_receipt_validation_tests {
+    use crabka_gres_ranges::{
+        RangeId,
+        control::RangeControlReceipt,
+        transport::{RangeControlOperation, RangeControlReq, RangeControlResp},
+    };
+
+    use super::validate_paused_control_receipt_transition;
+
+    fn receipt(revision: u64, result: Option<RangeControlResp>) -> RangeControlReceipt {
+        RangeControlReceipt {
+            request: RangeControlReq {
+                tenant: "tenant-a".into(),
+                range_id: RangeId::COORDINATOR,
+                generation: 7,
+                operation_id: "split-9".into(),
+                operation: RangeControlOperation::RetirePredecessor,
+            },
+            request_digest: "fixed-digest".into(),
+            generation: 7,
+            revision,
+            result,
+        }
+    }
+
+    #[test]
+    fn paused_receipt_accepts_exact_intent_and_completion_only() {
+        let intent = receipt(1, None);
+        let intent_bytes = serde_json::to_vec(&intent).unwrap();
+        assert!(
+            validate_paused_control_receipt_transition(
+                "tenant-a",
+                "r0.g7:split-9:retire-predecessor",
+                None,
+                &intent_bytes,
+            )
+            .is_ok()
+        );
+        let completion = receipt(2, Some(RangeControlResp::Applied));
+        assert!(
+            validate_paused_control_receipt_transition(
+                "tenant-a",
+                "r0.g7:split-9:retire-predecessor",
+                Some(&intent_bytes),
+                &serde_json::to_vec(&completion).unwrap(),
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn paused_receipt_rejects_wrong_key_digest_revision_and_result_rewrite() {
+        let prior = receipt(2, Some(RangeControlResp::Applied));
+        let prior_bytes = serde_json::to_vec(&prior).unwrap();
+        let mut candidate = prior.clone();
+        candidate.revision = 3;
+        candidate.result = Some(RangeControlResp::Rejected {
+            code: "forged".into(),
+            message: "forged".into(),
+        });
+        assert!(
+            validate_paused_control_receipt_transition(
+                "tenant-a",
+                "r0.g7:split-9:retire-predecessor",
+                Some(&prior_bytes),
+                &serde_json::to_vec(&candidate).unwrap(),
+            )
+            .is_err()
+        );
+        candidate.result = Some(RangeControlResp::Applied);
+        candidate.request_digest = "changed".into();
+        assert!(
+            validate_paused_control_receipt_transition(
+                "tenant-a",
+                "r0.g7:split-9:retire-predecessor",
+                Some(&prior_bytes),
+                &serde_json::to_vec(&candidate).unwrap(),
+            )
+            .is_err()
+        );
+        assert!(
+            validate_paused_control_receipt_transition(
+                "tenant-a",
+                "r0.g8:split-9:retire-predecessor",
+                None,
+                &serde_json::to_vec(&receipt(1, None)).unwrap(),
+            )
+            .is_err()
+        );
     }
 }
 

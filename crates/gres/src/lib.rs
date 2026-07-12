@@ -27,6 +27,7 @@ use rand::RngExt as _;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+mod live_range_control;
 mod split_activation;
 use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
 
@@ -818,6 +819,24 @@ impl GresRuntime {
             RuntimeEngine::Multi(tenant) => Some(tenant.control_range_map()),
             RuntimeEngine::Single(_) => None,
         }
+    }
+
+    /// Inspect one currently hosted range's raw durable fold in system tests.
+    #[doc(hidden)]
+    pub fn hosted_range_kv_scan(
+        &self,
+        range_id: crabka_gres_ranges::RangeId,
+    ) -> Result<crabka_pgkv::KvScan, String> {
+        let transfer = self
+            .staged_transfer
+            .as_ref()
+            .ok_or_else(|| "live range transfer unavailable".to_owned())?;
+        transfer
+            .range(range_id)
+            .map_err(|error| error.to_string())?
+            .store
+            .scan_range(&[], &[u8::MAX])
+            .map_err(|error| error.to_string())
     }
 
     /// Physically move one populated ordinary table in a local live multi-range runtime.
@@ -2608,6 +2627,117 @@ async fn open_live_multirange_tenant(
         gateway.hosted_range_engines(),
         tso_rpc,
     ));
+    let mut generations = transfer
+        .ranges
+        .read()
+        .map_err(|_| std::io::Error::other("live range lock poisoned"))?
+        .iter()
+        .map(|(range_id, resources)| (*range_id, resources.generation.0))
+        .collect::<Vec<_>>();
+    generations.extend(
+        transfer
+            .retired
+            .lock()
+            .map_err(|_| std::io::Error::other("retired range lock poisoned"))?
+            .iter()
+            .map(|(range_id, resources)| (*range_id, resources.generation.0)),
+    );
+    generations.sort_unstable_by_key(|(range_id, _)| *range_id);
+    generations.dedup();
+    let receipt_store = Arc::new(live_range_control::LiveRangeControlReceiptStore::new(
+        config.tenant.clone(),
+        &transfer,
+    ));
+    let mut recovery_receipts =
+        crabka_gres_ranges::control::RangeControlReceiptStore::list(receipt_store.as_ref())
+            .await
+            .map_err(|error| std::io::Error::other(format!("list control receipts: {error}")))?;
+    generations.extend(
+        recovery_receipts
+            .iter()
+            .map(|receipt| (receipt.request.range_id, receipt.request.generation)),
+    );
+    generations.sort_unstable_by_key(|(range_id, _)| *range_id);
+    generations.dedup();
+    let Some((first_range, first_generation)) = generations.first().copied() else {
+        return Err(std::io::Error::other(
+            "range control requires a hosted range",
+        ));
+    };
+    let executor = Box::new(live_range_control::LiveRangeControlExecutor::new(
+        &transfer,
+        gateway.clone(),
+    ));
+    let mut control = crabka_gres_ranges::control::GenerationFencedRangeControl::new(
+        config.tenant.clone(),
+        first_range,
+        first_generation,
+        executor,
+    )
+    .with_receipt_store(receipt_store.clone());
+    for (range_id, generation) in generations.into_iter().skip(1) {
+        control = control.with_range(range_id, generation);
+    }
+    let control = Arc::new(control);
+    let activated_operations = recovery_receipts
+        .iter()
+        .filter_map(|receipt| match &receipt.request.operation {
+            crabka_gres_ranges::transport::RangeControlOperation::SuccessorFencePrologue {
+                split,
+            } if receipt.result.is_some() && gateway.control_range_map() == split.target_map => {
+                Some(receipt.request.operation_id.clone())
+            }
+            _ => None,
+        })
+        .collect::<std::collections::BTreeSet<_>>();
+    if !activated_operations.is_empty() {
+        transfer
+            .activation_irreversible
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+    recovery_receipts.retain(|receipt| {
+        !activated_operations.contains(&receipt.request.operation_id)
+            || matches!(
+                receipt.request.operation,
+                crabka_gres_ranges::transport::RangeControlOperation::RetirePredecessor
+            )
+    });
+    recovery_receipts.sort_by_key(|receipt| {
+        (
+            receipt.request.operation_id.clone(),
+            live_range_control::recovery_step_rank(&receipt.request.operation),
+        )
+    });
+    for receipt in recovery_receipts {
+        if !live_range_control::requires_startup_reconcile(&receipt.request.operation) {
+            continue;
+        }
+        let response = control.handle(receipt.request).await;
+        if matches!(
+            response,
+            crabka_gres_ranges::transport::RangeControlResp::Rejected { .. }
+                | crabka_gres_ranges::transport::RangeControlResp::Ambiguous { .. }
+        ) {
+            return Err(std::io::Error::other(format!(
+                "range-control startup reconciliation did not prove readiness: {response:?}"
+            )));
+        }
+    }
+    let mut controlled_service =
+        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
+            .with_range_control(control);
+    if let Some((registry, client)) = gateway.timestamp_primary_remote() {
+        controlled_service = controlled_service.with_timestamp_primary_remote(registry, client);
+    }
+    if let Some(tso_rpc) = transfer
+        .tso_rpc
+        .read()
+        .map_err(|_| std::io::Error::other("live TSO lock poisoned"))?
+        .clone()
+    {
+        controlled_service = controlled_service.with_tso(tso_rpc);
+    }
+    dynamic_service.replace(controlled_service);
     Ok(GresRuntime {
         engine: RuntimeEngine::Multi(Box::new(gateway)),
         checkpoint_runtime: None,
@@ -2728,6 +2858,65 @@ impl LiveMultiRangeTransfer {
             })
     }
 
+    async fn compare_and_swap_paused_control_receipt(
+        &self,
+        tenant: &str,
+        receipt: &str,
+        expected: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<bool, crabka_gres_ranges::RangeTransferError> {
+        let range_id = crabka_gres_ranges::RangeId::COORDINATOR;
+        let resources = self
+            .retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(range_id))?
+            .get(&range_id)
+            .cloned()
+            .map_or_else(|| self.range(range_id), Ok)?;
+        let (authorization, barrier_offset) = {
+            let state = resources
+                .pause
+                .lock()
+                .map_err(|_| range_pause_lock_error(range_id))?;
+            let RangePauseState::Paused(paused) = &*state else {
+                return Err(crabka_gres_ranges::RangeTransferError::Unavailable {
+                    range_id,
+                    reason: "range zero is not paused for structural receipt append".into(),
+                });
+            };
+            (paused.activation_authorization(), paused.barrier_offset)
+        };
+        resources
+            .activation_committer
+            .commit_range_control_receipt_cas(
+                &authorization,
+                barrier_offset,
+                tenant,
+                receipt,
+                expected,
+                value,
+            )
+            .await
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id,
+                reason: format!("commit paused range-control receipt: {error}"),
+            })
+    }
+
+    fn current_range_zero_engine(
+        &self,
+    ) -> Result<SqlEngine, crabka_gres_ranges::RangeTransferError> {
+        self.engines
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(SqlEngine::clone_handle)
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "current range-zero receipt engine is unavailable".into(),
+            })
+    }
+
     fn staged_successor_kv(
         &self,
         range_id: crabka_gres_ranges::RangeId,
@@ -2748,6 +2937,129 @@ impl LiveMultiRangeTransfer {
                 range_id,
                 reason: format!("scan staged successor KV: {error}"),
             })
+    }
+
+    fn staged_successor_markers(
+        &self,
+        range_id: crabka_gres_ranges::RangeId,
+        start: crabka_gres_ranges::RangeKey,
+        end: Option<crabka_gres_ranges::RangeKey>,
+    ) -> Result<Vec<crabka_gres_ranges::InDoubtMarker>, crabka_gres_ranges::RangeTransferError>
+    {
+        let staged = self
+            .staged
+            .lock()
+            .map_err(|_| range_pause_lock_error(range_id))?;
+        let successor = staged.get(&range_id).ok_or_else(|| {
+            crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id,
+                reason: "staged successor is unavailable for marker verification".into(),
+            }
+        })?;
+        crabka_gres_ranges::tenant::in_doubt_markers_for_engine(&successor.engine, start, end)
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id,
+                reason: format!("inspect staged successor markers: {error}"),
+            })
+    }
+
+    fn activation_is_irreversible(&self) -> bool {
+        self.activation_irreversible
+            .load(std::sync::atomic::Ordering::Acquire)
+    }
+
+    fn note_activation_irreversible(&self) {
+        self.activation_irreversible
+            .store(true, std::sync::atomic::Ordering::Release);
+    }
+
+    async fn retire_predecessor(
+        &self,
+        operation_id: &str,
+        range_id: crabka_gres_ranges::RangeId,
+        generation: u64,
+        current_map: &crabka_gres_ranges::RangeMap,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        if !self.activation_is_irreversible() {
+            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id,
+                reason: "predecessor retirement requires irreversible successor activation".into(),
+            });
+        }
+        let resources = self
+            .retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(range_id))?
+            .remove(&range_id);
+        let Some(resources) = resources else {
+            use crabka_gres_ranges::control::{
+                RangeZeroTopologyActivationStore, TopologyActivationPhase,
+                TopologyActivationReceiptStore,
+            };
+            let engine = self.current_range_zero_engine()?;
+            let tenant = current_map.tenant().to_string();
+            let receipt = RangeZeroTopologyActivationStore::new(tenant, engine)
+                .load(operation_id)
+                .await
+                .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: format!("load retirement activation proof: {reason}"),
+                })?
+                .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id,
+                    reason: "retirement has no authoritative activation receipt".into(),
+                })?;
+            let ranges = self
+                .ranges
+                .read()
+                .map_err(|_| range_pause_lock_error(range_id))?;
+            let targets_ready = receipt.targets.iter().all(|(target_id, target)| {
+                ranges
+                    .get(target_id)
+                    .is_some_and(|resources| resources.generation.0 == target.wal_generation)
+                    && self
+                        .engines
+                        .read()
+                        .is_ok_and(|engines| engines.contains_key(target_id))
+            });
+            let predecessor_replaced = ranges
+                .get(&range_id)
+                .is_none_or(|resources| resources.generation.0 > generation);
+            if receipt.operation_id == operation_id
+                && receipt.phase == TopologyActivationPhase::TopologyCommitted
+                && receipt.split.predecessor == range_id
+                && receipt.split.predecessor_generation == generation
+                && receipt.split.target_map == *current_map
+                && predecessor_replaced
+                && targets_ready
+            {
+                return Ok(());
+            }
+            return Err(crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id,
+                reason: "retirement proof does not match the committed serving topology".into(),
+            });
+        };
+        let paused = {
+            let mut state = resources
+                .pause
+                .lock()
+                .map_err(|_| range_pause_lock_error(range_id))?;
+            let RangePauseState::Paused(_) = &*state else {
+                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id,
+                    reason: "retired predecessor does not hold its pause fence".into(),
+                });
+            };
+            let RangePauseState::Paused(paused) =
+                std::mem::replace(&mut *state, RangePauseState::Pausing)
+            else {
+                unreachable!()
+            };
+            paused
+        };
+        paused.retire();
+        Ok(())
     }
 
     fn release_pause(
