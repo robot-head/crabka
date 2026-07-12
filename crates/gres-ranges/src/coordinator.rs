@@ -348,9 +348,8 @@ impl TxnRpc {
             | RangeResponse::Tso(_)
             | RangeResponse::ResolveTxn(_)
             | RangeResponse::TimestampParticipantDone
-            | RangeResponse::TimestampPrimaryDecision { .. } => {
-                Err(TxnRpcError::UnexpectedResponse)
-            }
+            | RangeResponse::TimestampPrimaryDecision { .. }
+            | RangeResponse::TimestampPrimaryOutcome { .. } => Err(TxnRpcError::UnexpectedResponse),
         }
     }
 }

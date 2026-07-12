@@ -79,6 +79,8 @@ pub enum RangeRequest {
     TimestampRecover(TimestampRecoverReq),
     /// Authenticate and settle an orphan through its authoritative primary.
     TimestampPrimaryRecover(TimestampPrimaryRecoverReq),
+    /// Read a validated primary descriptor without choosing a decision.
+    TimestampPrimaryInspect(TimestampPrimaryRecoverReq),
 }
 
 /// Response sent between range computes.
@@ -125,6 +127,11 @@ pub enum RangeResponse {
     /// Effective decision returned by the authenticated primary.
     TimestampPrimaryDecision {
         decision: WireTimestampDecision,
+        operations: Vec<WireTimestampOperation>,
+    },
+    /// Read-only validated primary descriptor outcome.
+    TimestampPrimaryOutcome {
+        decision: WirePrimaryTxnDecision,
         operations: Vec<WireTimestampOperation>,
     },
     /// Range compute rejected the request.
@@ -460,6 +467,14 @@ pub struct TimestampPrimaryAckReq {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case", tag = "kind")]
 pub enum WireTimestampDecision {
+    Aborted,
+    Committed { commit_ts: u64 },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "kind")]
+pub enum WirePrimaryTxnDecision {
+    Pending,
     Aborted,
     Committed { commit_ts: u64 },
 }
@@ -1447,6 +1462,12 @@ mod tests {
                 RangeRequest::TimestampPrimaryRecover(_) => {
                     RangeResponse::TimestampPrimaryDecision {
                         decision: WireTimestampDecision::Aborted,
+                        operations: Vec::new(),
+                    }
+                }
+                RangeRequest::TimestampPrimaryInspect(_) => {
+                    RangeResponse::TimestampPrimaryOutcome {
+                        decision: WirePrimaryTxnDecision::Pending,
                         operations: Vec::new(),
                     }
                 }

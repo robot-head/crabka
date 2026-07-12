@@ -3881,6 +3881,60 @@ impl GatewaySession {
                     .resolve_as_primary(identity, decision, writes)
                     .await
             } else {
+                let primary_range = RangeId::new(identity.primary_range);
+                let (actual_decision, primary_operations) = if let Some(primary) =
+                    self.current_serving()?.engine(primary_range)
+                {
+                    let descriptor = primary
+                        .validate_timestamp_primary_identity(identity)
+                        .map_err(ExecError::into_pg)?;
+                    (descriptor.decision, descriptor.operations)
+                } else {
+                    self.remote_sessions
+                        .get(&primary_range)
+                        .ok_or_else(|| {
+                            PgError::error("08003", "remote timestamp primary session is missing")
+                        })?
+                        .timestamp_primary_inspect(identity)
+                        .await?
+                };
+                let asserted_decision = match decision {
+                    crabka_pgexec::TimestampTxnDecision::Aborted => {
+                        crabka_pgexec::PrimaryTxnDecision::Aborted
+                    }
+                    crabka_pgexec::TimestampTxnDecision::Committed(commit_ts)
+                    | crabka_pgexec::TimestampTxnDecision::Deleted(commit_ts) => {
+                        crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts)
+                    }
+                    crabka_pgexec::TimestampTxnDecision::Pending => {
+                        return Err(PgError::error(
+                            "40001",
+                            "timestamp primary has no terminal decision",
+                        ));
+                    }
+                };
+                let asserted_operations = writes
+                    .iter()
+                    .map(|write| crabka_pgexec::TimestampTxnOperation {
+                        range_id: range_id.as_u32(),
+                        table_id: write.table_id,
+                        rowid: write.rowid,
+                        delete: write.delete,
+                    })
+                    .collect::<Vec<_>>();
+                let actual_operations = primary_operations
+                    .into_iter()
+                    .filter(|operation| operation.range_id == range_id.as_u32())
+                    .collect::<Vec<_>>();
+                if actual_decision == crabka_pgexec::PrimaryTxnDecision::Pending
+                    || actual_decision != asserted_decision
+                    || actual_operations != asserted_operations
+                {
+                    return Err(PgError::error(
+                        "40001",
+                        "timestamp secondary assertion differs from primary descriptor",
+                    ));
+                }
                 participant
                     .resolve_as_secondary(identity, decision, writes)
                     .await
@@ -6119,6 +6173,137 @@ mod tests {
                     TimestampVersion::new(5, 6)
                 ]
         );
+    }
+
+    #[tokio::test]
+    async fn local_secondary_rejects_commit_opposite_to_primary_abort() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,0:50").expect("cfg");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let engines = gateway.hosted_range_engines();
+        let primary = &engines[&RangeId::COORDINATOR];
+        let secondary = &engines[&RangeId::new(1)];
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(500).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 501,
+            primary_range: 0,
+        };
+        let write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 60,
+            row: vec![Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        primary
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                identity.global_xid,
+                vec![1],
+            ))
+            .await
+            .expect("descriptor");
+        secondary
+            .timestamp_txn_participant(1)
+            .prewrite_as_secondary(identity, std::slice::from_ref(&write))
+            .await
+            .expect("prewrite");
+        primary
+            .decide_timestamp_transaction(start_ts, crabka_pgexec::PrimaryTxnDecision::Aborted)
+            .await
+            .expect("abort primary");
+        let session = gateway.connect();
+        let commit_ts =
+            crabka_pgexec::CommitTimestamp::after_start(start_ts, 502).expect("commit timestamp");
+        assert!(
+            session
+                .timestamp_resolve(
+                    RangeId::new(1),
+                    identity,
+                    crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                    std::slice::from_ref(&write),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            local_timestamp_tuple_state(secondary, &write, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Intent
+        );
+    }
+
+    #[tokio::test]
+    async fn local_secondary_rejects_abort_while_primary_is_pending() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0,0:50").expect("cfg");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let engines = gateway.hosted_range_engines();
+        let primary = &engines[&RangeId::COORDINATOR];
+        let secondary = &engines[&RangeId::new(1)];
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(510).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 511,
+            primary_range: 0,
+        };
+        let write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 61,
+            row: vec![Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        primary
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                identity.global_xid,
+                vec![1],
+            ))
+            .await
+            .expect("pending descriptor");
+        secondary
+            .timestamp_txn_participant(1)
+            .prewrite_as_secondary(identity, std::slice::from_ref(&write))
+            .await
+            .expect("prewrite");
+        let session = gateway.connect();
+        assert!(
+            session
+                .timestamp_resolve(
+                    RangeId::new(1),
+                    identity,
+                    crabka_pgexec::TimestampTxnDecision::Aborted,
+                    std::slice::from_ref(&write),
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(
+            primary
+                .primary_timestamp_decision(start_ts)
+                .expect("decision"),
+            crabka_pgexec::PrimaryTxnDecision::Pending
+        );
+        assert_eq!(
+            local_timestamp_tuple_state(secondary, &write, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Intent
+        );
+    }
+
+    fn local_timestamp_tuple_state(
+        engine: &SqlEngine,
+        write: &crabka_pgexec::TimestampWrite,
+        start_ts: crabka_pgexec::TimestampTransactionId,
+    ) -> crabka_pgmvcc::version::TsVersionState {
+        let key =
+            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
+        let bytes = engine
+            .kv_handle()
+            .get(&key)
+            .expect("read tuple")
+            .expect("tuple");
+        crabka_pgmvcc::version::decode_ts_tuple(&bytes)
+            .expect("decode tuple")
+            .state
     }
 
     #[tokio::test]
