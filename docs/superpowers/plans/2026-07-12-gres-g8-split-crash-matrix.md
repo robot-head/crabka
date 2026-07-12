@@ -338,6 +338,9 @@ scripts/tests/gres-topology-process-split-publication-ci.sh
 scripts/tests/gres-topology-process-split-retirement-ci.sh
 ```
 
+The aggregate gate `scripts/tests/gres-topology-process-split-matrix-ci.sh` runs those three
+shards and then invokes `--validate-matrix` for cross-family identity uniqueness.
+
 Expected: 11, 2, and 6 unique cases pass; every family validator accepts its exact evidence set.
 
 - [ ] **Step 2: Run existing Split Stateright exhaustive gate**

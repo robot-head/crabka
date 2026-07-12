@@ -6,6 +6,8 @@ use std::{
     process::Stdio,
     time::Duration,
 };
+#[cfg(unix)]
+use std::os::unix::process::CommandExt as _;
 
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
@@ -187,6 +189,10 @@ impl ProcessHarness {
         self.node(range).child.id().expect("child pid")
     }
 
+    pub fn process_group(&self, range: u32) -> u32 {
+        self.pid(range)
+    }
+
     pub fn endpoints(&self) -> [(u16, u16); 2] {
         [
             (self.r0.sql_port, self.r0_proxy.port),
@@ -318,10 +324,25 @@ impl ProcessHarness {
         }
         let node = self.node_mut(range);
         if node.child.try_wait().expect("child status").is_none() {
+            let pid = node.child.id().expect("compute child PID");
+            #[cfg(unix)]
+            {
+                let status = std::process::Command::new("kill")
+                    .args(["-KILL", "--", &format!("-{pid}")])
+                    .status()
+                    .expect("kill compute process group");
+                assert!(status.success(), "kill compute process group r{range}");
+            }
+            #[cfg(not(unix))]
             node.child.kill().await.expect("kill compute child");
             let _ = tokio::time::timeout(Duration::from_secs(5), node.child.wait())
                 .await
                 .expect("compute child shutdown timeout");
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(5);
+            while process_group_exists(pid) && tokio::time::Instant::now() < deadline {
+                tokio::time::sleep(Duration::from_millis(25)).await;
+            }
+            assert!(!process_group_exists(pid), "compute process group r{range} reaped");
         }
         let _ = tokio::time::timeout(Duration::from_secs(5), &mut node.log_task)
             .await
@@ -408,10 +429,55 @@ impl ProcessHarness {
     }
 }
 
+fn process_group_exists(process_group: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", "--", &format!("-{process_group}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn kill_process_group(process_group: u32) {
+    let _ = std::process::Command::new("kill")
+        .args(["-KILL", "--", &format!("-{process_group}")])
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .status();
+}
+
+#[cfg(test)]
+mod process_group_tests {
+    use super::*;
+
+    #[tokio::test]
+    async fn kill_process_group_reaps_child_and_descendant() {
+        let mut command = Command::new("bash");
+        command.args(["-c", "sleep 300 & wait"]).kill_on_drop(true);
+        #[cfg(unix)]
+        command.as_std_mut().process_group(0);
+        let mut child = command.spawn().expect("spawn process group fixture");
+        let process_group = child.id().expect("fixture PID");
+        assert!(process_group_exists(process_group));
+        kill_process_group(process_group);
+        tokio::time::timeout(Duration::from_secs(5), child.wait())
+            .await
+            .expect("fixture group exit timeout")
+            .expect("wait fixture group");
+        assert!(!process_group_exists(process_group));
+    }
+}
+
 impl Drop for ProcessHarness {
     fn drop(&mut self) {
+        if let Some(pid) = self.r0.child.id() {
+            kill_process_group(pid);
+        }
         let _ = self.r0.child.start_kill();
         if let Some(r1) = &mut self.r1 {
+            if let Some(pid) = r1.child.id() {
+                kill_process_group(pid);
+            }
             let _ = r1.child.start_kill();
         }
     }
@@ -612,10 +678,13 @@ fn spawn_node(
     if let Some(fault) = commit_fault {
         command.env("CRABKA_GRES_TEST_COMMIT_FAULT", fault);
     }
-    let child = command
+    command
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    #[cfg(unix)]
+    command.as_std_mut().process_group(0);
+    let child = command
         .spawn()
         .expect("spawn gres child");
     let mut child = child;
