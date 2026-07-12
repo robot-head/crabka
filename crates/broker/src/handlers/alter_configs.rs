@@ -243,10 +243,10 @@ mod tests {
 
     #[tokio::test]
     async fn handle_preserves_resource_identity_for_unsupported_type() {
-        let resp = drive_one(
+        let resp = Box::pin(drive_one(
             Arc::new(crate::authorizer::AllowAllAuthorizer),
             resource(77, "mystery"),
-        )
+        ))
         .await;
 
         let expected = AlterConfigsResponse {
@@ -265,7 +265,11 @@ mod tests {
 
     #[tokio::test]
     async fn topic_resource_denial_uses_topic_authorization_error() {
-        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_TOPIC, "orders")).await;
+        let resp = Box::pin(drive_one(
+            Arc::new(DenyAll),
+            resource(RESOURCE_TYPE_TOPIC, "orders"),
+        ))
+        .await;
 
         let expected = AlterConfigsResponse {
             throttle_time_ms: 0,
@@ -283,7 +287,11 @@ mod tests {
 
     #[tokio::test]
     async fn broker_resource_denial_uses_cluster_authorization_error() {
-        let resp = drive_one(Arc::new(DenyAll), resource(RESOURCE_TYPE_BROKER, "1")).await;
+        let resp = Box::pin(drive_one(
+            Arc::new(DenyAll),
+            resource(RESOURCE_TYPE_BROKER, "1"),
+        ))
+        .await;
 
         let expected = AlterConfigsResponse {
             throttle_time_ms: 0,
@@ -301,10 +309,10 @@ mod tests {
 
     #[tokio::test]
     async fn authorized_broker_resource_is_reported_unsupported() {
-        let resp = drive_one(
+        let resp = Box::pin(drive_one(
             Arc::new(crate::authorizer::AllowAllAuthorizer),
             resource(RESOURCE_TYPE_BROKER, "1"),
-        )
+        ))
         .await;
 
         let expected = AlterConfigsResponse {

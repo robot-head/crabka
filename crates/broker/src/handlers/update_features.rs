@@ -591,7 +591,7 @@ mod tests {
             1,
         )]);
 
-        let (resp, broker_handle, _dir) = call_with(Arc::new(DenyAll), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(Arc::new(DenyAll), req)).await;
 
         let expected = UpdateFeaturesResponse {
             throttle_time_ms: 0,
@@ -606,10 +606,10 @@ mod tests {
 
     #[tokio::test]
     async fn handle_rejects_empty_feature_updates() {
-        let (resp, broker_handle, _dir) = call_with(
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
             Arc::new(crate::authorizer::AllowAllAuthorizer),
             validate_only(Vec::new()),
-        )
+        ))
         .await;
 
         let expected = UpdateFeaturesResponse {
@@ -632,8 +632,11 @@ mod tests {
             1,
         )]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         let expected = UpdateFeaturesResponse {
             throttle_time_ms: 0,
@@ -685,8 +688,11 @@ mod tests {
             metadata_update(crate::features::METADATA_VERSION_MAX, 1),
         ]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         let expected = UpdateFeaturesResponse {
             throttle_time_ms: 0,
@@ -719,8 +725,11 @@ mod tests {
     async fn handle_rejects_negative_level_with_supported_range_message() {
         let req = validate_only(vec![metadata_update(-1, 1)]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert_row_error(&resp, crate::features::METADATA_VERSION, "supported range");
         broker_handle.shutdown().await;
@@ -733,8 +742,11 @@ mod tests {
             1,
         )]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert_row_error(&resp, crate::features::METADATA_VERSION, "supported range");
         broker_handle.shutdown().await;
@@ -747,8 +759,11 @@ mod tests {
             2,
         )]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert!(resp.error_code == codes::NONE, "{resp:?}");
         assert_ok_row(&resp, crate::features::METADATA_VERSION);
@@ -762,8 +777,11 @@ mod tests {
             2,
         )]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert_row_error(
             &resp,
@@ -777,8 +795,11 @@ mod tests {
     async fn handle_allows_delete_zero_when_downgrade_allowed() {
         let req = validate_only(vec![metadata_update(0, 2)]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert!(resp.error_code == codes::NONE, "{resp:?}");
         assert_ok_row(&resp, crate::features::METADATA_VERSION);
@@ -792,8 +813,11 @@ mod tests {
             1,
         )]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert_row_error(&resp, crate::features::METADATA_VERSION, "downgrade");
         broker_handle.shutdown().await;
@@ -803,8 +827,11 @@ mod tests {
     async fn handle_rejects_delete_zero_without_downgrade_flag() {
         let req = validate_only(vec![metadata_update(0, 1)]);
 
-        let (resp, broker_handle, _dir) =
-            call_with(Arc::new(crate::authorizer::AllowAllAuthorizer), req).await;
+        let (resp, broker_handle, _dir) = Box::pin(call_with(
+            Arc::new(crate::authorizer::AllowAllAuthorizer),
+            req,
+        ))
+        .await;
 
         assert_row_error(&resp, crate::features::METADATA_VERSION, "downgrade flag");
         broker_handle.shutdown().await;
