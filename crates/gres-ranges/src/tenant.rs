@@ -470,6 +470,10 @@ impl MultiRangeTenant {
         for engine in engines.values_mut() {
             engine.set_range_scanner(range_scanner.clone());
         }
+        let timestamp_primary_remote = config
+            .range_registry
+            .clone()
+            .zip(config.range_client.clone());
         let range_client = range_client_for_registry(&config)?;
         let remote_forward = match (config.range_registry, range_client) {
             (Some(registry), Some(client)) => {
@@ -483,6 +487,7 @@ impl MultiRangeTenant {
             tenant: config.tenant,
             serving: ArcSwap::from_pointee(ServingSnapshot::ready(config.range_map, engines)),
             remote_forward,
+            timestamp_primary_remote,
             coordinator: LocalCoordinator::default(),
             route_log: Mutex::new(Vec::new()),
             data_dir: config.data_dir,
@@ -530,6 +535,11 @@ impl MultiRangeTenant {
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
             .collect()
+    }
+
+    #[must_use]
+    pub fn timestamp_primary_remote(&self) -> Option<(RangeRegistry, FramedTcpClient)> {
+        self.inner.timestamp_primary_remote.clone()
     }
 
     /// Install one foreign scanner on every currently served range engine.
@@ -1633,6 +1643,7 @@ struct TenantInner {
     tenant: TenantName,
     serving: ArcSwap<ServingSnapshot>,
     remote_forward: Option<Arc<dyn RemoteForward>>,
+    timestamp_primary_remote: Option<(RangeRegistry, FramedTcpClient)>,
     coordinator: LocalCoordinator,
     route_log: Mutex<Vec<RouteRecord>>,
     data_dir: Option<PathBuf>,
@@ -3793,6 +3804,9 @@ impl GatewaySession {
     ) -> Result<(), PgError> {
         let serving = self.current_serving()?;
         if let Some(engine) = serving.engine(primary_range) {
+            engine
+                .validate_timestamp_primary_identity(identity)
+                .map_err(ExecError::into_pg)?;
             return engine
                 .add_timestamp_transaction_participant(
                     identity.start_ts,
@@ -3827,6 +3841,9 @@ impl GatewaySession {
             .collect::<Vec<_>>();
         let serving = self.current_serving()?;
         if let Some(engine) = serving.engine(primary_range) {
+            engine
+                .validate_timestamp_primary_identity(identity)
+                .map_err(ExecError::into_pg)?;
             return engine
                 .acknowledge_timestamp_participant_operations(
                     identity.start_ts,

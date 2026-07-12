@@ -626,9 +626,12 @@ impl GresRuntime {
     }
 
     fn multi(engine: crabka_gres_ranges::MultiRangeTenant) -> Self {
-        let range_service = Arc::new(crabka_gres_ranges::HostedRangeService::new(
-            engine.hosted_range_engines(),
-        ));
+        let mut range_service =
+            crabka_gres_ranges::HostedRangeService::new(engine.hosted_range_engines());
+        if let Some((registry, client)) = engine.timestamp_primary_remote() {
+            range_service = range_service.with_timestamp_primary_remote(registry, client);
+        }
+        let range_service = Arc::new(range_service);
         Self {
             engine: RuntimeEngine::Multi(Box::new(engine)),
             checkpoint_runtime: None,
@@ -2285,6 +2288,9 @@ async fn open_live_multirange_tenant(
         .map_err(|error| std::io::Error::other(format!("ordinary 2PC recovery: {error:?}")))?;
     let mut range_service =
         crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines());
+    if let Some((registry, client)) = gateway.timestamp_primary_remote() {
+        range_service = range_service.with_timestamp_primary_remote(registry, client);
+    }
     if let Some(tso_rpc) = tso_rpc {
         range_service = range_service.with_tso(tso_rpc);
     }
