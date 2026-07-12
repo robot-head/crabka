@@ -1570,9 +1570,9 @@ pub(super) async fn reconcile_before_readiness(
     engines: &mut LiveMultirangeEngines,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
     discovered: Option<ActivationDiscovery>,
-) -> std::io::Result<Option<RangeMap>> {
+) -> std::io::Result<(Option<RangeMap>, bool)> {
     if discovered.is_none() && !engines.engines.contains_key(&RangeId::COORDINATOR) {
-        return Ok(None);
+        return Ok((None, false));
     }
     let range0 = engines.engines.get(&RangeId::COORDINATOR).ok_or_else(|| {
         std::io::Error::other("range zero missing during activation reconciliation")
@@ -1590,7 +1590,7 @@ pub(super) async fn reconcile_before_readiness(
                 "authoritative target journal names an unrecovered activation target",
             ));
         }
-        return Ok(Some(discovered.recovery_map.clone()));
+        return Ok((Some(discovered.recovery_map.clone()), true));
     }
     let tenant = range0.resources.recovery_config.tenant.to_string();
     let source_store =
@@ -1626,6 +1626,10 @@ pub(super) async fn reconcile_before_readiness(
         }
     }
     receipts.sort_by_key(|receipt| receipt.split.target_map.epoch());
+    let defer_timestamp_recovery = receipts.iter().any(|receipt| {
+        matches!(receipt.phase, TopologyActivationPhase::SourceCheckpoint)
+            && control_recovery_operations.contains(&receipt.operation_id)
+    });
 
     let mut activation = None;
     for receipt in receipts {
@@ -1645,14 +1649,14 @@ pub(super) async fn reconcile_before_readiness(
         }
     }
     let Some(receipt) = activation else {
-        return Ok(None);
+        return Ok((None, defer_timestamp_recovery));
     };
     if topology_is_recovered(engines, &receipt) {
-        return Ok(Some(receipt.split.target_map));
+        return Ok((Some(receipt.split.target_map), true));
     }
     complete_post_activation(config, engines, checkpoint_store, receipt)
         .await
-        .map(Some)
+        .map(|map| (Some(map), true))
 }
 
 fn topology_is_recovered(
@@ -1769,7 +1773,8 @@ async fn complete_post_activation(
             )
             .map_err(|error| std::io::Error::other(format!("successor interval: {error}")))?
             .with_physical_to_logical(physical_to_logical.clone())
-            .with_structural_ownership(target.range_id == receipt.split.left.range_id);
+            .with_structural_ownership(target.range_id == receipt.split.left.range_id)
+            .with_target_range(target.range_id);
             let restored = crabka_gres_substrate::restore_filtered_from_manifest_and_replay_tail(
                 source_checkpoint_runtime.store.as_ref(),
                 &checkpoint.manifest_key,

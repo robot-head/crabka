@@ -794,7 +794,15 @@ pub fn read_timestamp_txn_descriptor(
     let Some(value) = kv.get(&timestamp_txn_descriptor_key(start_ts))? else {
         return Ok(None);
     };
-    let Some((global_xid, rest)) = take_u64(&value) else {
+    decode_timestamp_txn_descriptor_value(start_ts, &value).map(Some)
+}
+
+/// Decode one durable timestamp transaction descriptor value for its key timestamp.
+pub fn decode_timestamp_txn_descriptor_value(
+    start_ts: TimestampTransactionId,
+    value: &[u8],
+) -> Result<TimestampTxnDescriptor, crabka_pgkv::KvError> {
+    let Some((global_xid, rest)) = take_u64(value) else {
         return Err(crabka_pgkv::KvError::CorruptRow(
             "short timestamp transaction descriptor".into(),
         ));
@@ -887,7 +895,7 @@ pub fn read_timestamp_txn_descriptor(
             "timestamp transaction commit timestamp does not follow start timestamp".into(),
         ));
     }
-    Ok(Some(TimestampTxnDescriptor {
+    Ok(TimestampTxnDescriptor {
         start_ts,
         global_xid,
         generation,
@@ -895,7 +903,7 @@ pub fn read_timestamp_txn_descriptor(
         prepared,
         operations,
         decision,
-    }))
+    })
 }
 
 /// Enumerate all durable range-0 timestamp descriptors. Malformed keys and values

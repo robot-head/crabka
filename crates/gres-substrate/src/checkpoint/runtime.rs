@@ -914,9 +914,9 @@ impl PartKvSnapshot {
         let pairs = parts.into_iter().flat_map(|part| part.pairs);
         let pairs = match filter {
             Some(filter) => pairs
-                .filter_map(|pair| match filter.contains_key(&pair.0) {
-                    Ok(true) => Some(Ok(pair)),
-                    Ok(false) => None,
+                .filter_map(|pair| match filter.filter_pair(&pair.0, &pair.1) {
+                    Ok(Some(value)) => Some(Ok((pair.0, value))),
+                    Ok(None) => None,
                     Err(error) => Some(Err(error)),
                 })
                 .collect::<Result<Vec<_>, _>>()?,

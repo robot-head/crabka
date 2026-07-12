@@ -186,9 +186,41 @@ fn filter_write_ops(
 ) -> Result<Vec<WriteOp>, SubstrateError> {
     ops.iter()
         .filter_map(|op| match op {
-            WriteOp::Put { key, .. }
-            | WriteOp::ConditionalPut { key, .. }
-            | WriteOp::Delete { key } => match filter.contains_key(key) {
+            WriteOp::Put { key, value } => match filter.filter_pair(key, value) {
+                Ok(Some(value)) => Some(Ok(WriteOp::Put {
+                    key: key.clone(),
+                    value,
+                })),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
+            WriteOp::ConditionalPut {
+                key,
+                expected,
+                value,
+            } => match filter.filter_pair(key, value).and_then(|value| {
+                let expected = expected
+                    .as_deref()
+                    .map(|expected| filter.filter_pair(key, expected))
+                    .transpose()?
+                    .flatten();
+                match (value, expected) {
+                    (None, None) => Ok(None),
+                    (Some(value), expected) => Ok(Some(WriteOp::ConditionalPut {
+                        key: key.clone(),
+                        expected,
+                        value,
+                    })),
+                    (None, Some(_)) => Err(SubstrateError::Checkpoint(
+                        "timestamp descriptor transition drops successor ownership".into(),
+                    )),
+                }
+            }) {
+                Ok(Some(op)) => Some(Ok(op)),
+                Ok(None) => None,
+                Err(error) => Some(Err(error)),
+            },
+            WriteOp::Delete { key } => match filter.contains_pair(key, None) {
                 Ok(true) => Some(Ok(op.clone())),
                 Ok(false) => None,
                 Err(error) => Some(Err(error)),
@@ -199,11 +231,65 @@ fn filter_write_ops(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use assert2::assert;
     use crabka_gres_ranges::{RangeKey, TableId};
     use crabka_pgkv::{Kv, MemKv, WriteOp};
 
     use super::*;
+
+    #[test]
+    fn filtered_tail_rehomes_timestamp_descriptor_and_intent() {
+        let filter = CheckpointFilter::new(RangeKey::new(TableId::new(51), 16), None)
+            .unwrap()
+            .with_physical_to_logical(BTreeMap::from([(TableId::new(1), TableId::new(52))]))
+            .with_target_range(crabka_gres_ranges::RangeId::new(3));
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(9).unwrap();
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 10, vec![1]);
+        descriptor
+            .acknowledge_operations(
+                1,
+                &[crabka_pgexec::TimestampTxnOperation {
+                    range_id: 1,
+                    table_id: 1,
+                    rowid: 1,
+                    delete: false,
+                }],
+            )
+            .unwrap();
+        let mut intent_key = b"\0\0\0\0meta/ts_intent/".to_vec();
+        intent_key.extend_from_slice(&1_u32.to_be_bytes());
+        intent_key.extend_from_slice(&1_u64.to_be_bytes());
+        intent_key.extend_from_slice(&9_u64.to_be_bytes());
+        let mut identity = vec![0; 24];
+        identity[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        identity[20..24].copy_from_slice(&1_u32.to_be_bytes());
+        let ops = filter_write_ops(
+            &[
+                crabka_pgexec::timestamp_txn_descriptor_op(&descriptor),
+                WriteOp::Put {
+                    key: intent_key,
+                    value: identity,
+                },
+            ],
+            &filter,
+        )
+        .unwrap();
+        let WriteOp::Put { value, .. } = &ops[0] else {
+            panic!("descriptor put")
+        };
+        let rewritten =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value).unwrap();
+        assert_eq!(rewritten.participants, vec![3]);
+        assert_eq!(rewritten.prepared, vec![3]);
+        assert_eq!(rewritten.operations[0].range_id, 3);
+        let WriteOp::Put { value, .. } = &ops[1] else {
+            panic!("intent put")
+        };
+        assert_eq!(&value[16..20], &3_u32.to_be_bytes());
+        assert_eq!(&value[20..24], &3_u32.to_be_bytes());
+    }
 
     #[test]
     fn replay_applies_committed_frames_until_own_barrier() {

@@ -17,6 +17,7 @@ pub struct CheckpointFilter {
     end: Option<RangeKey>,
     physical_to_logical: BTreeMap<TableId, TableId>,
     owns_structural: Option<bool>,
+    target_range: Option<u32>,
 }
 
 impl CheckpointFilter {
@@ -37,6 +38,7 @@ impl CheckpointFilter {
             end,
             physical_to_logical: BTreeMap::new(),
             owns_structural: None,
+            target_range: None,
         })
     }
 
@@ -52,6 +54,69 @@ impl CheckpointFilter {
     pub fn with_structural_ownership(mut self, owns_structural: bool) -> Self {
         self.owns_structural = Some(owns_structural);
         self
+    }
+
+    /// Name the successor range used when rehoming copied timestamp descriptors.
+    #[must_use]
+    pub fn with_target_range(mut self, range_id: crabka_gres_ranges::RangeId) -> Self {
+        self.target_range = Some(range_id.as_u32());
+        self
+    }
+
+    /// Select and, when necessary, rewrite one checkpoint pair for this successor.
+    pub fn filter_pair(&self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, SubstrateError> {
+        if key.starts_with(b"\0\0\0\0meta/ts_intent/") {
+            if !self.contains_pair(key, Some(value))? {
+                return Ok(None);
+            }
+            let target = self.target_range.ok_or_else(|| {
+                SubstrateError::Checkpoint("timestamp intent filter lacks target range".into())
+            })?;
+            let mut value: [u8; 24] = value.try_into().map_err(|_| {
+                SubstrateError::Checkpoint("malformed timestamp intent identity".into())
+            })?;
+            value[16..20].copy_from_slice(&target.to_be_bytes());
+            value[20..24].copy_from_slice(&target.to_be_bytes());
+            return Ok(Some(value.to_vec()));
+        }
+        if !key.starts_with(b"\0\0\0\0meta/ts_txn/") {
+            return self
+                .contains_pair(key, Some(value))
+                .map(|selected| selected.then(|| value.to_vec()));
+        }
+        let start_ts = timestamp_descriptor_start(key)?;
+        let mut descriptor = crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value)
+            .map_err(|error| {
+                SubstrateError::Checkpoint(format!("malformed timestamp descriptor: {error}"))
+            })?;
+        let target_range = self.target_range.ok_or_else(|| {
+            SubstrateError::Checkpoint("timestamp descriptor filter lacks target range".into())
+        })?;
+        let mut selected_source_ranges = std::collections::BTreeSet::new();
+        let mut selected_operations = Vec::new();
+        for mut operation in descriptor.operations {
+            let logical = self.logical_table(operation.table_id)?;
+            if self.contains_range_key(RangeKey::new(logical, operation.rowid)) {
+                selected_source_ranges.insert(operation.range_id);
+                operation.range_id = target_range;
+                selected_operations.push(operation);
+            }
+        }
+        descriptor.operations = selected_operations;
+        if descriptor.operations.is_empty() {
+            return Ok(None);
+        }
+        let prepared = selected_source_ranges
+            .iter()
+            .all(|range| descriptor.prepared.contains(range));
+        descriptor.participants = vec![target_range];
+        descriptor.prepared = prepared.then_some(target_range).into_iter().collect();
+        let crabka_pgkv::WriteOp::Put { value, .. } =
+            crabka_pgexec::timestamp_txn_descriptor_op(&descriptor)
+        else {
+            unreachable!()
+        };
+        Ok(Some(value))
     }
 
     /// Build a table-local row interval filter.
@@ -71,6 +136,26 @@ impl CheckpointFilter {
     /// Return true when a KV key belongs to this row interval.
     #[must_use]
     pub fn contains_key(&self, bytes: &[u8]) -> Result<bool, SubstrateError> {
+        self.contains_pair(bytes, None)
+    }
+
+    /// Return true when a KV pair belongs to this interval, including timestamp metadata whose
+    /// ownership is encoded in its key or descriptor value.
+    pub fn contains_pair(
+        &self,
+        bytes: &[u8],
+        value: Option<&[u8]>,
+    ) -> Result<bool, SubstrateError> {
+        if let Some(key) = self.timestamp_metadata_key(bytes, value)? {
+            return Ok(self.contains_range_key(key));
+        }
+        if bytes.starts_with(b"\0\0\0\0meta/ts_txn/") {
+            let start_ts = timestamp_descriptor_start(bytes)?;
+            return match value {
+                Some(value) => self.timestamp_descriptor_belongs(start_ts, value),
+                None => Ok(true),
+            };
+        }
         // Non-row substrate metadata has no range key. Assign it exactly once
         // to the interval beginning at the global minimum (the r0 successor),
         // so two adjacent successor restores form a disjoint full partition.
@@ -99,11 +184,58 @@ impl CheckpointFilter {
             | key::KeyClass::System
             | key::KeyClass::Unknown => return Ok(owns_structural),
         };
-        if row_key < self.start {
-            return Ok(false);
-        };
+        Ok(self.contains_range_key(row_key))
+    }
 
-        Ok(self.end.is_none_or(|end| row_key < end))
+    fn contains_range_key(&self, key: RangeKey) -> bool {
+        key >= self.start && self.end.is_none_or(|end| key < end)
+    }
+
+    fn timestamp_metadata_key(
+        &self,
+        bytes: &[u8],
+        _value: Option<&[u8]>,
+    ) -> Result<Option<RangeKey>, SubstrateError> {
+        const INTENT: &[u8] = b"\0\0\0\0meta/ts_intent/";
+        const PREWRITE: &[u8] = b"\0\0\0\0meta/ts_prewrite/";
+        let tail = if let Some(tail) = bytes.strip_prefix(INTENT) {
+            if tail.len() != 20 {
+                return Err(SubstrateError::Checkpoint(
+                    "malformed timestamp intent metadata key".into(),
+                ));
+            }
+            &tail[..12]
+        } else if let Some(tail) = bytes.strip_prefix(PREWRITE) {
+            if tail.len() != 12 {
+                return Err(SubstrateError::Checkpoint(
+                    "malformed timestamp prewrite metadata key".into(),
+                ));
+            }
+            tail
+        } else {
+            return Ok(None);
+        };
+        let physical = u32::from_be_bytes(tail[..4].try_into().expect("4-byte table id"));
+        let rowid = u64::from_be_bytes(tail[4..12].try_into().expect("8-byte row id"));
+        Ok(Some(RangeKey::new(self.logical_table(physical)?, rowid)))
+    }
+
+    fn timestamp_descriptor_belongs(
+        &self,
+        start_ts: crabka_pgexec::TimestampTransactionId,
+        value: &[u8],
+    ) -> Result<bool, SubstrateError> {
+        let descriptor = crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value)
+            .map_err(|error| {
+                SubstrateError::Checkpoint(format!("malformed timestamp descriptor: {error}"))
+            })?;
+        descriptor
+            .operations
+            .into_iter()
+            .try_fold(false, |owned, operation| {
+                let key = RangeKey::new(self.logical_table(operation.table_id)?, operation.rowid);
+                Ok(owned || self.contains_range_key(key))
+            })
     }
 
     fn logical_table(&self, physical_id: u32) -> Result<TableId, SubstrateError> {
@@ -113,6 +245,18 @@ impl CheckpointFilter {
             .copied()
             .ok_or(SubstrateError::UnmappedPhysicalTable(physical_id))
     }
+}
+
+fn timestamp_descriptor_start(
+    bytes: &[u8],
+) -> Result<crabka_pgexec::TimestampTransactionId, SubstrateError> {
+    const PREFIX: &[u8] = b"\0\0\0\0meta/ts_txn/";
+    let raw = bytes.strip_prefix(PREFIX).expect("prefix checked");
+    let raw: [u8; 8] = raw
+        .try_into()
+        .map_err(|_| SubstrateError::Checkpoint("malformed timestamp descriptor key".into()))?;
+    crabka_pgexec::TimestampTransactionId::new(u64::from_be_bytes(raw))
+        .map_err(|_| SubstrateError::Checkpoint("zero timestamp descriptor key".into()))
 }
 
 /// A checkpoint part containing key-ordered KV snapshot chunks.
@@ -232,6 +376,156 @@ mod tests {
     use proptest::prelude::*;
 
     use super::*;
+
+    fn descriptor_pair(operations: &[(u32, u64)]) -> (Vec<u8>, Vec<u8>) {
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(9).unwrap();
+        let mut descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 10, vec![1]);
+        let operations = operations
+            .iter()
+            .map(|(table_id, rowid)| crabka_pgexec::TimestampTxnOperation {
+                range_id: 1,
+                table_id: *table_id,
+                rowid: *rowid,
+                delete: false,
+            })
+            .collect::<Vec<_>>();
+        descriptor
+            .acknowledge_operations(1, &operations)
+            .expect("descriptor operations");
+        let crabka_pgkv::WriteOp::Put { key, value } =
+            crabka_pgexec::timestamp_txn_descriptor_op(&descriptor)
+        else {
+            unreachable!()
+        };
+        (key, value)
+    }
+
+    fn split_filters() -> (CheckpointFilter, CheckpointFilter) {
+        let mapping = BTreeMap::from([
+            (TableId::new(1), TableId::new(52)),
+            (TableId::new(2), TableId::new(50)),
+        ]);
+        let left = CheckpointFilter::new(
+            RangeKey::new(TableId::new(50), 10),
+            Some(RangeKey::new(TableId::new(51), 16)),
+        )
+        .unwrap()
+        .with_physical_to_logical(mapping.clone())
+        .with_structural_ownership(true)
+        .with_target_range(crabka_gres_ranges::RangeId::new(2));
+        let right = CheckpointFilter::new(RangeKey::new(TableId::new(51), 16), None)
+            .unwrap()
+            .with_physical_to_logical(mapping)
+            .with_structural_ownership(false)
+            .with_target_range(crabka_gres_ranges::RangeId::new(3));
+        (left, right)
+    }
+
+    #[test]
+    fn timestamp_metadata_routes_by_embedded_physical_row_key() {
+        let (left, right) = split_filters();
+        let mut intent = b"\0\0\0\0meta/ts_intent/".to_vec();
+        intent.extend_from_slice(&1_u32.to_be_bytes());
+        intent.extend_from_slice(&1_u64.to_be_bytes());
+        intent.extend_from_slice(&9_u64.to_be_bytes());
+        let mut identity = vec![0; 24];
+        identity[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        identity[20..24].copy_from_slice(&1_u32.to_be_bytes());
+        assert!(left.filter_pair(&intent, &identity).unwrap().is_none());
+        let rewritten = right
+            .filter_pair(&intent, &identity)
+            .unwrap()
+            .expect("right intent");
+        assert_eq!(&rewritten[16..20], &3_u32.to_be_bytes());
+        assert_eq!(&rewritten[20..24], &3_u32.to_be_bytes());
+    }
+
+    #[test]
+    fn timestamp_descriptor_is_duplicated_for_cross_partition_operations() {
+        let (left, right) = split_filters();
+        let right_only = descriptor_pair(&[(1, 1)]);
+        assert!(
+            !left
+                .contains_pair(&right_only.0, Some(&right_only.1))
+                .unwrap()
+        );
+        assert!(
+            right
+                .contains_pair(&right_only.0, Some(&right_only.1))
+                .unwrap()
+        );
+
+        let (cross_key, cross_value) = descriptor_pair(&[(2, 12), (1, 1)]);
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(9).unwrap();
+        let mut committed =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, &cross_value).unwrap();
+        committed
+            .decide(crabka_pgexec::PrimaryTxnDecision::Committed(
+                crabka_pgexec::CommitTimestamp::after_start(start_ts, 10).unwrap(),
+            ))
+            .unwrap();
+        let crabka_pgkv::WriteOp::Put {
+            value: cross_value, ..
+        } = crabka_pgexec::timestamp_txn_descriptor_op(&committed)
+        else {
+            unreachable!()
+        };
+        let cross = (cross_key, cross_value);
+        assert!(left.contains_pair(&cross.0, Some(&cross.1)).unwrap());
+        assert!(right.contains_pair(&cross.0, Some(&cross.1)).unwrap());
+
+        let left_value = left
+            .filter_pair(&cross.0, &cross.1)
+            .unwrap()
+            .expect("left descriptor");
+        let right_value = right
+            .filter_pair(&cross.0, &cross.1)
+            .unwrap()
+            .expect("right descriptor");
+        let left_descriptor =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, &left_value).unwrap();
+        let right_descriptor =
+            crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, &right_value).unwrap();
+        assert_eq!(left_descriptor.participants, vec![2]);
+        assert_eq!(right_descriptor.participants, vec![3]);
+        assert!(left_descriptor.operations.iter().all(|op| op.range_id == 2));
+        assert!(
+            right_descriptor
+                .operations
+                .iter()
+                .all(|op| op.range_id == 3)
+        );
+        assert_eq!(left_descriptor.decision, right_descriptor.decision);
+    }
+
+    #[test]
+    fn timestamp_descriptor_delete_broadcasts_to_both_successors() {
+        let (left, right) = split_filters();
+        let (key, _) = descriptor_pair(&[(1, 1)]);
+        assert!(left.contains_pair(&key, None).unwrap());
+        assert!(right.contains_pair(&key, None).unwrap());
+        assert!(
+            left.contains_pair(b"\0\0\0\0meta/ts_txn/bad", None)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn timestamp_metadata_filtering_fails_closed() {
+        let (_, right) = split_filters();
+        let malformed = b"\0\0\0\0meta/ts_prewrite/short";
+        assert!(right.contains_pair(malformed, Some(&[])).is_err());
+        let unknown = descriptor_pair(&[(99, 1)]);
+        assert!(matches!(
+            right.contains_pair(&unknown.0, Some(&unknown.1)),
+            Err(SubstrateError::UnmappedPhysicalTable(99))
+        ));
+        assert!(
+            right
+                .contains_pair(b"\0\0\0\0meta/ts_txn/bad", Some(&[]))
+                .is_err()
+        );
+    }
 
     #[test]
     fn rejects_truncated_value() {
