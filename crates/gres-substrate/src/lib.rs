@@ -66,8 +66,9 @@ pub use self::{
     },
     writer::{
         CheckpointSnapshotSource, DEFAULT_MAX_FRAME_BYTES, DeferredWalWriter, FenceLease,
-        GroupCommitAck, GroupCommitRequest, PausedWalAuthorization, PausedWalWriter, ProducerWalWriter, SubstrateCommitter,
-        SubstrateLinearizer, SubstrateTsoHorizon, TransactionalWalWriter, WalAppendAck,
-        WalWriterFaultInjector, WalWriterFaultStage, WriterGeneration, chunk_wal_batch,
+        GroupCommitAck, GroupCommitRequest, PausedWalAuthorization, PausedWalWriter,
+        ProducerWalWriter, SubstrateCommitter, SubstrateLinearizer, SubstrateTsoHorizon,
+        TransactionalWalWriter, WalAppendAck, WalWriterFaultInjector, WalWriterFaultStage,
+        WriterGeneration, chunk_wal_batch,
     },
 };

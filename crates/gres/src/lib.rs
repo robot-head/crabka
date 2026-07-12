@@ -2879,8 +2879,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         }
         let expected = receipt.revision;
         receipt.revision = receipt.revision.saturating_add(1);
-        receipt.phase =
-            crabka_gres_ranges::control::TopologyActivationPhase::SourceCheckpoint;
+        receipt.phase = crabka_gres_ranges::control::TopologyActivationPhase::SourceCheckpoint;
         receipt.source_checkpoint = Some(checkpoint.clone());
         if !store
             .compare_and_swap(operation_id, Some(expected), receipt)
@@ -3066,13 +3065,12 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     .await?;
                 }
                 self.activation_fault(TopologyActivationFault::BeforeDeferredBind, range_id)?;
-                resources
-                    .writer
-                    .activate(canonical)
-                    .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                resources.writer.activate(canonical).map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
                         range_id,
                         reason: format!("bind canonical successor writer: {error}"),
-                    })?;
+                    }
+                })?;
                 self.activation_fault(TopologyActivationFault::AfterDeferredBind, range_id)?;
             }
 

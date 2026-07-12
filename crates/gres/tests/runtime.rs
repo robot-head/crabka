@@ -916,7 +916,10 @@ async fn activation_crash_matrix_reopens_before_readiness() {
         })
         .await
         .expect("join crash child");
-        assert!(!child_status.success(), "fault {fault} must kill its process");
+        assert!(
+            !child_status.success(),
+            "fault {fault} must kill its process"
+        );
 
         let config = activation_crash_config(bootstrap, tenant, checkpoint_root);
         let runtime = crabka_gres::open_substrate_runtime(&config)

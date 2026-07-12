@@ -1125,13 +1125,23 @@ impl SubstrateCommitter<DeferredWalWriter<ProducerWalWriter>> {
                 .ok_or_else(|| SubstrateError::Frame("journal sequence overflow".into()))?,
             Ordering::SeqCst,
         );
-        Ok(self.kv.get(&crabka_pgkv::key::topology_activation_receipt_key(
-            tenant,
-            operation_id,
-        )).map_err(SubstrateError::from)? == Some(frame.ops.into_iter().find_map(|op| match op {
-            WriteOp::ConditionalPut { value, .. } => Some(value),
-            _ => None,
-        }).expect("activation frame contains its value")))
+        Ok(self
+            .kv
+            .get(&crabka_pgkv::key::topology_activation_receipt_key(
+                tenant,
+                operation_id,
+            ))
+            .map_err(SubstrateError::from)?
+            == Some(
+                frame
+                    .ops
+                    .into_iter()
+                    .find_map(|op| match op {
+                        WriteOp::ConditionalPut { value, .. } => Some(value),
+                        _ => None,
+                    })
+                    .expect("activation frame contains its value"),
+            ))
     }
 }
 
@@ -1143,10 +1153,12 @@ fn validate_must_activate_transition(
     value: &[u8],
 ) -> Result<(), SubstrateError> {
     use crabka_gres_ranges::control::{TopologyActivationPhase, TopologyActivationReceipt};
-    let prior: TopologyActivationReceipt = serde_json::from_slice(expected)
-        .map_err(|error| SubstrateError::Frame(format!("decode prior activation receipt: {error}")))?;
-    let next: TopologyActivationReceipt = serde_json::from_slice(value)
-        .map_err(|error| SubstrateError::Frame(format!("decode next activation receipt: {error}")))?;
+    let prior: TopologyActivationReceipt = serde_json::from_slice(expected).map_err(|error| {
+        SubstrateError::Frame(format!("decode prior activation receipt: {error}"))
+    })?;
+    let next: TopologyActivationReceipt = serde_json::from_slice(value).map_err(|error| {
+        SubstrateError::Frame(format!("decode next activation receipt: {error}"))
+    })?;
     let valid = prior.tenant == tenant
         && next.tenant == tenant
         && prior.operation_id == operation_id
@@ -1154,9 +1166,10 @@ fn validate_must_activate_transition(
         && prior.split == next.split
         && prior.phase == TopologyActivationPhase::SourceCheckpoint
         && next.phase == TopologyActivationPhase::MustActivate
-        && next.revision == prior.revision.checked_add(1).ok_or_else(|| {
-            SubstrateError::Frame("activation receipt revision overflow".into())
-        })?
+        && next.revision
+            == prior.revision.checked_add(1).ok_or_else(|| {
+                SubstrateError::Frame("activation receipt revision overflow".into())
+            })?
         && next.source_checkpoint == prior.source_checkpoint
         && barrier_offset.is_none_or(|offset| next.barrier_offset == Some(offset))
         && next.barrier_offset.is_some()

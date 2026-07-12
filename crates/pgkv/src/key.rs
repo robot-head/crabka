@@ -782,9 +782,6 @@ mod tests {
 
         assert!(key.starts_with(&prefix));
         assert_ne!(prefix, range_control_receipt_prefix("tenant-a"));
-        assert_ne!(
-            key,
-            topology_activation_receipt_key("tenant-b", "split-7")
-        );
+        assert_ne!(key, topology_activation_receipt_key("tenant-b", "split-7"));
     }
 }
