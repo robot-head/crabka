@@ -81,3 +81,11 @@ Post-remediation verification: formatting and diff checks passed; pgexec library
 - Fresh robust artifact `target/gres-scaling-auth-recovery-final2/range-scaling.json` passes all gates: range-local `3.2778x`, sharded `3.4144x`, envelope efficiency `0.8536`, and observed distributions exactly 110 per range.
 
 Final second-review verification passed formatting/diff checks, pgexec library `341/341`, pgexec transactions `36/36`, gres-ranges library `116/116`, crossrange `21/21`, multirange `33/33`, the targeted CLI parser, and the static mutation/skew suite. Gateway-local remains `10/11` solely because of the existing invalid-socket fixture now at `gateway_local.rs:1136`.
+
+## Third-review read-only inspection closure
+
+- Added `TimestampPrimaryInspect`, a distinct read-only full-descriptor RPC. Normal secondary resolution and `TimestampRecover` use inspection; only the explicit startup recovery coordinator invokes `TimestampPrimaryRecover` and may abort-win a pending primary.
+- A remote pending-primary RED changed the primary to Aborted merely by checking a forged Commit assertion. It now returns `40001` while the primary remains Pending and the secondary remains Intent.
+- Local hosted secondaries now independently validate full primary identity, terminal decision, and exact participant operations before `resolve_as_secondary`. Opposite Commit/Abort and Pending-primary RED cases leave the intent unchanged.
+- Verification: gres-ranges library `119/119`, crossrange `21/21`, multirange `33/33`, focused remote restart `1/1`, static gate, formatting/diff checks, and gateway-local `10/11` with only the known invalid-socket fixture.
+- Fresh robust artifact `target/gres-scaling-readonly-inspect-final/range-scaling.json` passes all gates: range-local `3.2407x`, sharded `3.4701x`, envelope efficiency `0.8675`, and exact 110-per-range observations.
