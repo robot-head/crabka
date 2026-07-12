@@ -332,25 +332,6 @@ pub(super) async fn persist_must_activate(
         TopologyActivationFault::BeforeMustActivate,
         pending.predecessor,
     )?;
-    let authorization = {
-        let pause = source_resources
-            .pause
-            .lock()
-            .map_err(|_| range_pause_lock_error(pending.predecessor))?;
-        let super::RangePauseState::Paused(paused) = &*pause else {
-            return Err(crabka_gres_ranges::RangeTransferError::Runtime {
-                range_id: pending.predecessor,
-                reason: "must-activate append requires the held predecessor pause".into(),
-            });
-        };
-        if paused.barrier_offset != pending.barrier_offset {
-            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: pending.predecessor,
-                reason: "must-activate pause barrier differs from staged evidence".into(),
-            });
-        }
-        paused.activation_authorization()
-    };
     let expected = serde_json::to_vec(&expected_receipt).map_err(|reason| {
         crabka_gres_ranges::RangeTransferError::Runtime {
             range_id: pending.predecessor,
@@ -363,22 +344,55 @@ pub(super) async fn persist_must_activate(
             reason: format!("encode must-activate receipt: {reason}"),
         }
     })?;
-    if !source_resources
-        .activation_committer
-        .commit_activation_receipt_cas(
-            &authorization,
-            pending.barrier_offset,
-            &tenant,
-            &pending.operation_id,
-            expected,
-            value,
-        )
-        .await
-        .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
-            range_id: pending.predecessor,
-            reason: format!("persist must-activate receipt: {reason}"),
-        })?
-    {
+    let committed = if pending.predecessor == RangeId::COORDINATOR {
+        let authorization = {
+            let pause = source_resources
+                .pause
+                .lock()
+                .map_err(|_| range_pause_lock_error(pending.predecessor))?;
+            let super::RangePauseState::Paused(paused) = &*pause else {
+                return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id: pending.predecessor,
+                    reason: "must-activate append requires the held predecessor pause".into(),
+                });
+            };
+            if paused.barrier_offset != pending.barrier_offset {
+                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id: pending.predecessor,
+                    reason: "must-activate pause barrier differs from staged evidence".into(),
+                });
+            }
+            paused.activation_authorization()
+        };
+        source_resources
+            .activation_committer
+            .commit_activation_receipt_cas(
+                &authorization,
+                pending.barrier_offset,
+                &tenant,
+                &pending.operation_id,
+                expected,
+                value,
+            )
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: format!("persist must-activate receipt: {reason}"),
+            })?
+    } else {
+        store
+            .compare_and_swap(
+                &pending.operation_id,
+                Some(expected_receipt.revision),
+                receipt,
+            )
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: format!("persist must-activate receipt through range zero: {reason}"),
+            })?
+    };
+    if !committed {
         return Err(crabka_gres_ranges::RangeTransferError::Runtime {
             range_id: pending.predecessor,
             reason: "must-activate receipt CAS raced".into(),
