@@ -84,14 +84,21 @@ impl SourceKillPoint {
                     && record.evidence.manifest_key.is_some()
                     && record.evidence.covered_offset.is_some()
                     && record.evidence.barrier_offset.is_none()
+                    && record.evidence.tail_sha256.is_none()
+                    && record.evidence.marker_digest.is_none()
             }
             Self::PausedBeforeStage => {
                 record.phase == SplitOperationPhase::Paused
+                    && record.evidence.manifest_key.is_some()
+                    && record.evidence.covered_offset.is_some()
                     && record.evidence.barrier_offset.is_some()
                     && record.evidence.tail_sha256.is_none()
+                    && record.evidence.marker_digest.is_none()
             }
             Self::PausedAfterStage => {
                 record.phase == SplitOperationPhase::Paused
+                    && record.evidence.manifest_key.is_some()
+                    && record.evidence.covered_offset.is_some()
                     && record.evidence.barrier_offset.is_some()
                     && record.evidence.tail_sha256.is_some()
                     && record.evidence.marker_digest.is_none()
