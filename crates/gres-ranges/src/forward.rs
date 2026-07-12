@@ -63,6 +63,7 @@ pub struct HostedRangeService {
     engines: BTreeMap<RangeId, crabka_pgexec::SqlEngine>,
     tso: Option<Arc<dyn TsoRpc>>,
     timestamp_primary_remote: Option<(RangeRegistry, FramedTcpClient)>,
+    timestamp_primary_aliases: BTreeMap<RangeId, RangeId>,
     next_session_id: AtomicU64,
     sessions: tokio::sync::Mutex<BTreeMap<u64, HostedSession>>,
     explicit_gate: Arc<ExplicitGate>,
@@ -101,6 +102,7 @@ impl HostedRangeService {
             engines,
             tso: None,
             timestamp_primary_remote: None,
+            timestamp_primary_aliases: BTreeMap::new(),
             next_session_id: AtomicU64::new(1),
             sessions: tokio::sync::Mutex::new(BTreeMap::new()),
             explicit_gate: Arc::new(ExplicitGate {
@@ -141,6 +143,13 @@ impl HostedRangeService {
         self
     }
 
+    /// Resolve historical timestamp primary identities through an exact topology replacement.
+    #[must_use]
+    pub fn with_timestamp_primary_aliases(mut self, aliases: BTreeMap<RangeId, RangeId>) -> Self {
+        self.timestamp_primary_aliases = aliases;
+        self
+    }
+
     /// Attach range 0's durable timestamp oracle RPC.
     #[must_use]
     pub fn with_tso(mut self, tso: Arc<dyn TsoRpc>) -> Self {
@@ -155,6 +164,18 @@ impl HostedRangeService {
                 error: WireErrorKind::StaleEndpoint,
                 message: format!("range r{range_id} is not hosted here"),
             })
+    }
+
+    fn hosted_timestamp_primary_engine(
+        &self,
+        range_id: RangeId,
+    ) -> Result<&crabka_pgexec::SqlEngine, RangeResponse> {
+        let physical_range = self
+            .timestamp_primary_aliases
+            .get(&range_id)
+            .copied()
+            .unwrap_or(range_id);
+        self.hosted_engine(physical_range)
     }
 
     async fn handle_explicit_gate(&self, request: ExplicitGateReq) -> ExplicitGateResp {
@@ -234,7 +255,7 @@ impl HostedRangeService {
         crabka_pgexec::ExecError,
     > {
         let primary_range = RangeId::new(identity.primary_range);
-        if let Some(primary) = self.engines.get(&primary_range) {
+        if let Ok(primary) = self.hosted_timestamp_primary_engine(primary_range) {
             let descriptor = primary.validate_timestamp_primary_identity(identity)?;
             return Ok((descriptor.decision, descriptor.operations));
         }
@@ -529,7 +550,7 @@ impl RangeService for HostedRangeService {
                 }
             }
             RangeRequest::ResolveTxn(request) => {
-                let engine = match self.hosted_engine(request.primary_range) {
+                let engine = match self.hosted_timestamp_primary_engine(request.primary_range) {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
@@ -593,7 +614,7 @@ impl RangeService for HostedRangeService {
                 }
             }
             RangeRequest::TimestampPrimaryAck(request) => {
-                let engine = match self.hosted_engine(request.primary_range) {
+                let engine = match self.hosted_timestamp_primary_engine(request.primary_range) {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
@@ -905,7 +926,7 @@ impl RangeService for HostedRangeService {
                 }
             }
             RangeRequest::TimestampPrimaryRecover(request) => {
-                let engine = match self.hosted_engine(request.primary_range) {
+                let engine = match self.hosted_timestamp_primary_engine(request.primary_range) {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
@@ -980,7 +1001,7 @@ impl RangeService for HostedRangeService {
                 }
             }
             RangeRequest::TimestampPrimaryInspect(request) => {
-                let engine = match self.hosted_engine(request.primary_range) {
+                let engine = match self.hosted_timestamp_primary_engine(request.primary_range) {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
@@ -4584,6 +4605,56 @@ mod tests {
             response,
             RangeResponse::ResolveTxn(ResolveTxnResp::Committed { commit_ts: 8 })
         );
+    }
+
+    #[tokio::test]
+    async fn hosted_service_resolves_historical_move_primaries_on_exact_successor() {
+        let kv = Arc::new(MemKv::new());
+        let engine = crabka_pgexec::SqlEngine::with_kv(kv.clone()).expect("engine");
+        let decisions = [
+            (5, crabka_pgexec::PrimaryTxnDecision::Pending),
+            (6, crabka_pgexec::PrimaryTxnDecision::Aborted),
+            (
+                7,
+                crabka_pgexec::PrimaryTxnDecision::Committed(
+                    crabka_pgexec::CommitTimestamp::after_start(
+                        crabka_pgexec::TimestampTransactionId::new(7).expect("start"),
+                        8,
+                    )
+                    .expect("commit"),
+                ),
+            ),
+        ];
+        for (start, decision) in decisions {
+            let start = crabka_pgexec::TimestampTransactionId::new(start).expect("start");
+            let mut descriptor =
+                crabka_pgexec::TimestampTxnDescriptor::begun(start, start.get(), vec![]);
+            if decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+                descriptor.decide(decision).expect("descriptor decision");
+            }
+            kv.write_batch(&[crabka_pgexec::timestamp_txn::timestamp_txn_descriptor_op(
+                &descriptor,
+            )])
+            .expect("descriptor");
+        }
+        let predecessor = RangeId::new(1);
+        let successor = RangeId::new(2);
+        let service = HostedRangeService::new(BTreeMap::from([(successor, engine)]))
+            .with_timestamp_primary_aliases(BTreeMap::from([(predecessor, successor)]));
+
+        for (start, expected) in [
+            (5, ResolveTxnResp::Pending),
+            (6, ResolveTxnResp::Aborted),
+            (7, ResolveTxnResp::Committed { commit_ts: 8 }),
+        ] {
+            let response = service
+                .handle(RangeRequest::ResolveTxn(crate::transport::ResolveTxnReq {
+                    primary_range: predecessor,
+                    start_ts: start,
+                }))
+                .await;
+            assert_eq!(response, RangeResponse::ResolveTxn(expected));
+        }
     }
 
     #[tokio::test]

@@ -12,7 +12,10 @@ use std::{
 };
 
 use async_trait::async_trait;
-use crabka_gres_control::{Registry, SplitOperationPhase, SplitOperationRecord, TenantName};
+use crabka_gres_control::{
+    RangeRetirementPhase, Registry, SplitOperationPhase, SplitOperationRecord, TenantName,
+    TenantRecord,
+};
 use crabka_operator::{
     context::{GresControlHandle, GresControlLike, GresControlWriteError},
     controller::{
@@ -48,11 +51,16 @@ enum SourceKillPoint {
     Checkpointed,
     PausedBeforeStage,
     PausedAfterStage,
+    Restored,
+    ActivatedBeforeCutover,
+    ActivatedAfterTenantCas,
+    LayoutPublished,
 }
 
 impl SourceKillPoint {
     fn from_env() -> Self {
-        match std::env::var("CRABKA_G8_SOURCE_KILL_POINT")
+        match std::env::var("CRABKA_G8_CUTOVER_KILL_POINT")
+            .or_else(|_| std::env::var("CRABKA_G8_SOURCE_KILL_POINT"))
             .as_deref()
             .unwrap_or("paused_after_stage")
         {
@@ -60,6 +68,10 @@ impl SourceKillPoint {
             "checkpointed" => Self::Checkpointed,
             "paused_before_stage" => Self::PausedBeforeStage,
             "paused_after_stage" => Self::PausedAfterStage,
+            "restored" => Self::Restored,
+            "activated_before_cutover" => Self::ActivatedBeforeCutover,
+            "activated_after_tenant_cas" => Self::ActivatedAfterTenantCas,
+            "layout_published" => Self::LayoutPublished,
             other => panic!("unknown source kill point {other}"),
         }
     }
@@ -70,10 +82,20 @@ impl SourceKillPoint {
             Self::Checkpointed => "checkpointed",
             Self::PausedBeforeStage => "paused_before_stage",
             Self::PausedAfterStage => "paused_after_stage",
+            Self::Restored => "restored",
+            Self::ActivatedBeforeCutover => "activated_before_cutover",
+            Self::ActivatedAfterTenantCas => "activated_after_tenant_cas",
+            Self::LayoutPublished => "layout_published",
         }
     }
 
-    fn is_ready(self, record: &SplitOperationRecord) -> bool {
+    fn is_ready(self, record: &SplitOperationRecord, tenant: &TenantRecord) -> bool {
+        let plan = record.plan.as_ref();
+        let matching_retirement = tenant.range_retirements.iter().find(|retirement| {
+            retirement.operation_id == record.operation_id
+                && retirement.source_range_id == record.source_range_id()
+                && retirement.source_generation == record.predecessor_generation()
+        });
         match self {
             Self::Running => {
                 record.phase == SplitOperationPhase::Running
@@ -103,8 +125,42 @@ impl SourceKillPoint {
                     && record.evidence.tail_sha256.is_some()
                     && record.evidence.marker_digest.is_none()
             }
+            Self::Restored => {
+                record.phase == SplitOperationPhase::Restored
+                    && complete_transfer_evidence(record)
+                    && plan.is_some_and(|plan| tenant.ranges == plan.current_layout)
+                    && matching_retirement.is_none()
+            }
+            Self::ActivatedBeforeCutover => {
+                record.phase == SplitOperationPhase::Activated
+                    && complete_transfer_evidence(record)
+                    && plan.is_some_and(|plan| tenant.ranges == plan.current_layout)
+                    && matching_retirement.is_none()
+            }
+            Self::ActivatedAfterTenantCas => {
+                record.phase == SplitOperationPhase::Activated
+                    && complete_transfer_evidence(record)
+                    && plan.is_some_and(|plan| tenant.ranges == plan.target_layout)
+                    && matching_retirement
+                        .is_some_and(|retirement| retirement.phase == RangeRetirementPhase::Parking)
+            }
+            Self::LayoutPublished => {
+                record.phase == SplitOperationPhase::LayoutPublished
+                    && complete_transfer_evidence(record)
+                    && plan.is_some_and(|plan| tenant.ranges == plan.target_layout)
+                    && matching_retirement
+                        .is_some_and(|retirement| retirement.phase == RangeRetirementPhase::Parking)
+            }
         }
     }
+}
+
+fn complete_transfer_evidence(record: &SplitOperationRecord) -> bool {
+    record.evidence.manifest_key.is_some()
+        && record.evidence.covered_offset.is_some()
+        && record.evidence.barrier_offset.is_some()
+        && record.evidence.tail_sha256.is_some()
+        && record.evidence.marker_digest.is_some()
 }
 
 struct KillInjection<'a> {
@@ -123,6 +179,10 @@ struct KillObservation {
     phase: SplitOperationPhase,
     evidence: crabka_gres_control::SplitOperationEvidence,
     post_publication_ack_before_retirement: bool,
+    ambiguous_cutover_advanced_without_republish: bool,
+    tenant_layout: &'static str,
+    retirement_phase: Option<RangeRetirementPhase>,
+    tenant_record_version: u64,
 }
 
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
@@ -430,6 +490,15 @@ async fn load_operation(bootstrap: &str, tenant: &str, operation_id: &str) -> Sp
         .expect("journaled operation")
 }
 
+async fn load_tenant(bootstrap: &str, tenant: &str) -> TenantRecord {
+    let mut registry = Registry::connect(bootstrap).await.expect("registry");
+    registry
+        .get(tenant)
+        .await
+        .expect("load tenant")
+        .expect("tenant present")
+}
+
 async fn drive_operation(
     system: &mut ProcessHarness,
     operation_id: &str,
@@ -449,10 +518,10 @@ async fn drive_operation(
     let mut restarted_pids = None;
     loop {
         let current = load_operation(system.bootstrap(), system.tenant(), operation_id).await;
-        if kill_injection
-            .as_ref()
-            .is_some_and(|injection| injection.point.is_ready(&current) && restarted_pids.is_none())
-        {
+        let current_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
+        if kill_injection.as_ref().is_some_and(|injection| {
+            injection.point.is_ready(&current, &current_tenant) && restarted_pids.is_none()
+        }) {
             let injection = kill_injection.as_ref().expect("checked");
             wait_for_ack_count(injection.ledger_path, 8).await;
             let old_pid = system.pid(0);
@@ -487,7 +556,38 @@ async fn drive_operation(
                 phase: current.phase,
                 evidence: current.evidence.clone(),
                 post_publication_ack_before_retirement: false,
+                ambiguous_cutover_advanced_without_republish: false,
+                tenant_layout: current
+                    .plan
+                    .as_ref()
+                    .map(|plan| {
+                        if current_tenant.ranges == plan.target_layout {
+                            "target"
+                        } else {
+                            "current"
+                        }
+                    })
+                    .expect("sealed plan"),
+                retirement_phase: current_tenant
+                    .range_retirements
+                    .iter()
+                    .find(|retirement| retirement.operation_id == current.operation_id)
+                    .map(|retirement| retirement.phase),
+                tenant_record_version: current_tenant.record_version,
             });
+            let restarted_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
+            assert_eq!(
+                restarted_tenant.record_version, current_tenant.record_version,
+                "restart cannot alter durable tenant version"
+            );
+            assert_eq!(
+                restarted_tenant.ranges, current_tenant.ranges,
+                "restart cannot alter durable tenant layout"
+            );
+            assert_eq!(
+                restarted_tenant.range_retirements, current_tenant.range_retirements,
+                "restart cannot alter durable retirement sidecar"
+            );
         }
         if current.evidence.tail_sha256.is_some()
             && let Some(observation) = restarted_pids.as_mut()
@@ -495,32 +595,35 @@ async fn drive_operation(
         {
             observation.stage_complete_ms = Some(timestamp_ms());
         }
+        if matches!(
+            current.phase,
+            SplitOperationPhase::Activated | SplitOperationPhase::LayoutPublished
+        ) && let (Some(injection), Some(observation)) =
+            (kill_injection.as_ref(), restarted_pids.as_mut())
+            && !observation.post_publication_ack_before_retirement
+        {
+            observation.publication_ms = Some(timestamp_ms());
+            let acknowledged = parse_ack_ledger(
+                &std::fs::read_to_string(injection.ledger_path)
+                    .expect("post-publication acknowledgement ledger"),
+            )
+            .expect("valid post-publication acknowledgement ledger")
+            .acknowledgements
+            .len();
+            wait_for_ack_count(injection.ledger_path, acknowledged + 1).await;
+            observation.post_publication_ack_before_retirement = true;
+            observation.post_publication_ack_ms = parse_ack_ledger(
+                &std::fs::read_to_string(injection.ledger_path)
+                    .expect("post-publication acknowledgement ledger"),
+            )
+            .expect("valid post-publication acknowledgement ledger")
+            .acknowledgements
+            .values()
+            .next_back()
+            .copied();
+        }
         match current.phase {
             SplitOperationPhase::Activated => {
-                if let (Some(injection), Some(observation)) =
-                    (kill_injection.as_ref(), restarted_pids.as_mut())
-                    && !observation.post_publication_ack_before_retirement
-                {
-                    observation.publication_ms = Some(timestamp_ms());
-                    let acknowledged = parse_ack_ledger(
-                        &std::fs::read_to_string(injection.ledger_path)
-                            .expect("post-publication acknowledgement ledger"),
-                    )
-                    .expect("valid post-publication acknowledgement ledger")
-                    .acknowledgements
-                    .len();
-                    wait_for_ack_count(injection.ledger_path, acknowledged + 1).await;
-                    observation.post_publication_ack_before_retirement = true;
-                    observation.post_publication_ack_ms = parse_ack_ledger(
-                        &std::fs::read_to_string(injection.ledger_path)
-                            .expect("post-publication acknowledgement ledger"),
-                    )
-                    .expect("valid post-publication acknowledgement ledger")
-                    .acknowledgements
-                    .values()
-                    .next_back()
-                    .copied();
-                }
                 let readiness_deadline = Instant::now() + std::time::Duration::from_secs(5);
                 loop {
                     match verify_target_topology_ready(&mutation_client, &current).await {
@@ -558,9 +661,31 @@ async fn drive_operation(
                         Err(error) => panic!("target readiness: {error}"),
                     }
                 }
-                reconcile_activated_cutover(&control, &current)
+                let tenant_before_cutover = load_tenant(system.bootstrap(), system.tenant()).await;
+                let reconciled = reconcile_activated_cutover(&control, &current)
                     .await
                     .expect("atomic cutover");
+                if current
+                    .plan
+                    .as_ref()
+                    .is_some_and(|plan| tenant_before_cutover.ranges == plan.target_layout)
+                {
+                    let tenant_after_cutover =
+                        load_tenant(system.bootstrap(), system.tenant()).await;
+                    assert_eq!(
+                        tenant_after_cutover.record_version, tenant_before_cutover.record_version,
+                        "ambiguous cutover replay cannot republish tenant"
+                    );
+                    assert_eq!(tenant_after_cutover.ranges, tenant_before_cutover.ranges);
+                    assert_eq!(
+                        tenant_after_cutover.range_retirements,
+                        tenant_before_cutover.range_retirements
+                    );
+                    assert_eq!(reconciled.phase, SplitOperationPhase::LayoutPublished);
+                    if let Some(observation) = restarted_pids.as_mut() {
+                        observation.ambiguous_cutover_advanced_without_republish = true;
+                    }
+                }
             }
             SplitOperationPhase::Retiring => {
                 let mut admin =
@@ -799,6 +924,12 @@ done
         restart.post_publication_ack_before_retirement,
         "a successor-bound write must commit after publication while retirement is pending"
     );
+    if kill_point == SourceKillPoint::ActivatedAfterTenantCas {
+        assert!(
+            restart.ambiguous_cutover_advanced_without_republish,
+            "tenant-CAS ambiguity must advance only the journal"
+        );
+    }
 
     let ledger = parse_ack_ledger(
         &std::fs::read_to_string(&ledger_path).expect("read final acknowledgement ledger"),
@@ -809,6 +940,10 @@ done
         SourceKillPoint::Running => 10_000,
         SourceKillPoint::Checkpointed => 10_000,
         SourceKillPoint::PausedAfterStage => 15_000,
+        SourceKillPoint::Restored => 20_000,
+        SourceKillPoint::ActivatedBeforeCutover
+        | SourceKillPoint::ActivatedAfterTenantCas
+        | SourceKillPoint::LayoutPublished => 12_000,
     };
     assert!(
         ledger.recovered >= 1,
@@ -844,7 +979,12 @@ done
         .await
         .query("SELECT id, checksum FROM live_ledger ORDER BY id", &[])
         .await
-        .expect("read final workload ledger")
+        .unwrap_or_else(|error| {
+            panic!(
+                "read final workload ledger: {error}; source log: {}",
+                system.log(0)
+            )
+        })
         .into_iter()
         .map(|row| (i64::from(row.get::<_, i32>(0)), row.get::<_, String>(1)))
         .collect::<Vec<_>>();
@@ -942,6 +1082,10 @@ done
                 "operation_elapsed_ms": operation_elapsed_ms,
             "predecessor_wal_retired": true,
             "post_publication_ack_before_retirement": restart.post_publication_ack_before_retirement,
+            "ambiguous_cutover_advanced_without_republish": restart.ambiguous_cutover_advanced_without_republish,
+            "durable_tenant_layout": restart.tenant_layout,
+            "durable_retirement_phase": restart.retirement_phase.map(|phase| format!("{phase:?}")),
+            "durable_tenant_record_version": restart.tenant_record_version,
                 "replacement_owner": {"range_id": 2, "generation": 1},
                 "marker_digest": completed.evidence.marker_digest,
             }))
