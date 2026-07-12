@@ -2624,6 +2624,7 @@ async fn recover_live_multirange_engines(
     let mut range0_tso_horizon = None;
     for recovery_config in recovery_configs {
         let range_id = recovery_config.range;
+        reset_substrate_range_cache(config.cache_dir.as_deref(), range_id)?;
         let store = open_substrate_range_cache(config.cache_dir.as_deref(), range_id)?;
         let recovered = open_live_range_substrate_engine(
             config,
@@ -4808,6 +4809,22 @@ fn open_substrate_range_cache(
     open_substrate_cache(Some(&dir.join(format!("r{}", range_id.as_u32()))))
 }
 
+fn reset_substrate_range_cache(
+    cache_dir: Option<&std::path::Path>,
+    range_id: crabka_gres_ranges::RangeId,
+) -> std::io::Result<()> {
+    let Some(base) = cache_dir else {
+        return Ok(());
+    };
+    let range_dir = base.join(format!("r{}", range_id.as_u32()));
+    match std::fs::remove_dir_all(&range_dir) {
+        Ok(()) => {}
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+        Err(error) => return Err(error),
+    }
+    std::fs::create_dir_all(range_dir)
+}
+
 /// Register Crabka's Kafka foreign-data scanner with the SQL engine.
 pub fn register_kafka_scanner(engine: &mut SqlEngine) {
     engine.set_foreign_scanner(Arc::new(crabka_gres_fdw::KafkaFdw::with_defaults(None)));
@@ -4934,6 +4951,62 @@ mod tests {
     use clap::{CommandFactory as _, Parser as _};
 
     use super::*;
+
+    #[test]
+    fn startup_reset_removes_nonempty_disposable_range_cache() {
+        let root = tempfile::tempdir().expect("cache root");
+        let range_dir = root.path().join("r1");
+        std::fs::create_dir_all(&range_dir).expect("range cache");
+        std::fs::write(range_dir.join("stale"), b"cache").expect("stale cache value");
+
+        reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(1))
+            .expect("reset disposable cache");
+
+        assert!(range_dir.is_dir());
+        assert!(
+            range_dir
+                .read_dir()
+                .expect("empty range cache")
+                .next()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn startup_reset_accepts_missing_cache_and_preserves_siblings() {
+        let root = tempfile::tempdir().expect("cache root");
+        let sibling = root.path().join("checkpoints");
+        std::fs::create_dir_all(&sibling).expect("checkpoint sibling");
+        std::fs::write(sibling.join("manifest"), b"durable").expect("checkpoint value");
+
+        reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(2))
+            .expect("reset absent disposable cache");
+
+        assert_eq!(
+            std::fs::read(sibling.join("manifest")).expect("checkpoint sibling remains"),
+            b"durable"
+        );
+        assert!(root.path().join("r2").is_dir());
+    }
+
+    #[test]
+    fn startup_reset_is_scoped_to_each_hosted_range() {
+        let root = tempfile::tempdir().expect("cache root");
+        for range in [0, 1, 2] {
+            let dir = root.path().join(format!("r{range}"));
+            std::fs::create_dir_all(&dir).expect("range cache");
+            std::fs::write(dir.join("stale"), b"cache").expect("stale cache");
+        }
+
+        for range in [0, 2] {
+            reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(range))
+                .expect("reset hosted range");
+        }
+
+        assert!(root.path().join("r0").is_dir());
+        assert!(root.path().join("r1/stale").exists());
+        assert!(root.path().join("r2").is_dir());
+    }
 
     fn registry_test_record(
         version: u64,
