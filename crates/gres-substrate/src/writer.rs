@@ -188,6 +188,77 @@ pub trait TransactionalWalWriter: Send + Sync {
     ) -> Result<GroupCommitAck, SubstrateError>;
 }
 
+/// Write-once activation handle used to assemble recovered engines without
+/// acquiring the canonical producer lease.
+///
+/// Every engine-facing operation fails closed until [`Self::activate`] binds
+/// the already-prepared live writer. Activation is an infallible pointer swap
+/// after ownership of `writer` has been constructed by the caller.
+pub struct DeferredWalWriter<W> {
+    live: std::sync::RwLock<Option<Arc<W>>>,
+}
+
+impl<W> DeferredWalWriter<W> {
+    /// Create an unbound writer for staged recovery.
+    #[must_use]
+    pub const fn staged() -> Self {
+        Self {
+            live: std::sync::RwLock::new(None),
+        }
+    }
+
+    /// Bind the canonical writer exactly once.
+    ///
+    /// # Errors
+    ///
+    /// Returns an unavailable error if the lock is poisoned or the handle was
+    /// already activated.
+    pub fn activate(&self, writer: Arc<W>) -> Result<(), SubstrateError> {
+        let mut live = self
+            .live
+            .write()
+            .map_err(|_| SubstrateError::Unavailable("deferred writer lock poisoned".into()))?;
+        if live.is_some() {
+            return Err(SubstrateError::Unavailable(
+                "deferred writer is already activated".into(),
+            ));
+        }
+        *live = Some(writer);
+        Ok(())
+    }
+
+    fn current(&self) -> Result<Arc<W>, SubstrateError> {
+        self.live
+            .read()
+            .map_err(|_| SubstrateError::Unavailable("deferred writer lock poisoned".into()))?
+            .clone()
+            .ok_or_else(|| SubstrateError::Unavailable("deferred writer is not activated".into()))
+    }
+}
+
+#[async_trait::async_trait]
+impl<W> TransactionalWalWriter for DeferredWalWriter<W>
+where
+    W: TransactionalWalWriter + 'static,
+{
+    async fn commit_group(
+        &self,
+        request: GroupCommitRequest,
+    ) -> Result<GroupCommitAck, SubstrateError> {
+        self.current()?.commit_group(request).await
+    }
+}
+
+#[async_trait::async_trait]
+impl<W> FenceLease for DeferredWalWriter<W>
+where
+    W: FenceLease + 'static,
+{
+    async fn assert_current(&self, generation: WriterGeneration) -> Result<(), SubstrateError> {
+        self.current()?.assert_current(generation).await
+    }
+}
+
 /// An exact committed WAL boundary established while its range writer is paused.
 ///
 /// Dropping this value resumes the writer. Call [`Self::resume`] when the
@@ -938,6 +1009,46 @@ mod tests {
     use crabka_gres_ranges::tso::{GrantLease, TsoOracle};
     use crabka_pgkv::{Kv, MemKv};
     use tokio::sync::Notify;
+
+    #[tokio::test]
+    async fn deferred_writer_rejects_until_atomically_activated() {
+        let deferred = DeferredWalWriter::staged();
+        let request = GroupCommitRequest {
+            generation: WriterGeneration(7),
+            frames: vec![WalFrame {
+                journal_seq: 1,
+                ops: Vec::new(),
+            }],
+        };
+
+        let staged = deferred
+            .commit_group(request.clone())
+            .await
+            .expect_err("staged writer must fail closed");
+        assert!(matches!(staged, SubstrateError::Unavailable(_)));
+
+        let live = Arc::new(FakeWalWriter {
+            current_generation: AtomicU64::new(7),
+            next_offset: AtomicU64::new(0),
+        });
+        deferred
+            .activate(live.clone())
+            .expect("first activation succeeds");
+        deferred
+            .commit_group(request)
+            .await
+            .expect("activated writer delegates");
+        deferred
+            .assert_current(WriterGeneration(7))
+            .await
+            .expect("activated fence lease delegates");
+        assert_eq!(live.next_offset.load(Ordering::SeqCst), 1);
+
+        let second = deferred
+            .activate(Arc::new(FakeWalWriter::default()))
+            .expect_err("activation is write-once");
+        assert!(matches!(second, SubstrateError::Unavailable(_)));
+    }
 
     use super::*;
     use crate::recovery::RecoveryFencer;
