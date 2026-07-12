@@ -636,10 +636,6 @@ impl SplitKillPoint {
             Self::InitiatedBeforeRunningCas
                 | Self::CheckpointReceiptBeforeJournalCas
                 | Self::CheckpointedAfterJournalCas
-                | Self::PauseReceiptBeforeJournalCas
-                | Self::PausedBeforeStage
-                | Self::StageReceiptBeforeJournalCas
-                | Self::StagedAfterJournalCas
         )
     }
 
@@ -715,6 +711,20 @@ impl SplitKillPoint {
             | Self::CompletedAfterJournalCas => "r0,r2,r3",
         }
     }
+}
+
+#[test]
+fn split_marker_is_injected_before_cli_once_restart_can_reacquire_pause() {
+    for point in SplitKillPoint::ALL {
+        let expected = !matches!(
+            point,
+            SplitKillPoint::InitiatedBeforeRunningCas
+                | SplitKillPoint::CheckpointReceiptBeforeJournalCas
+                | SplitKillPoint::CheckpointedAfterJournalCas
+        );
+        assert_eq!(point.inject_marker_before_cli(), expected, "{}", point.name());
+    }
+    assert!(SplitKillPoint::PauseReceiptBeforeJournalCas.inject_marker_before_cli());
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Serialize)]
