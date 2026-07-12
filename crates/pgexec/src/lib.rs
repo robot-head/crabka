@@ -962,6 +962,55 @@ impl SqlEngine {
         Ok(self.kv.get(&key)? == Some(value))
     }
 
+    /// Read one durable topology-activation receipt from range zero.
+    pub fn topology_activation_receipt(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+    ) -> Result<Option<Vec<u8>>, ExecError> {
+        self.kv
+            .get(&crabka_pgkv::key::topology_activation_receipt_key(
+                tenant,
+                operation_id,
+            ))
+            .map_err(Into::into)
+    }
+
+    /// Enumerate topology activations that startup must reconcile before readiness.
+    pub fn topology_activation_receipts(&self, tenant: &str) -> Result<Vec<Vec<u8>>, ExecError> {
+        self.kv
+            .scan_prefix(&crabka_pgkv::key::topology_activation_receipt_prefix(tenant))
+            .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect())
+            .map_err(Into::into)
+    }
+
+    /// CAS one topology activation phase through range zero's durable committer.
+    pub async fn compare_and_swap_topology_activation_receipt(
+        &self,
+        tenant: &str,
+        operation_id: &str,
+        expected: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<bool, ExecError> {
+        let key = crabka_pgkv::key::topology_activation_receipt_key(tenant, operation_id);
+        let operation = crabka_pgkv::WriteOp::ConditionalPut {
+            key: key.clone(),
+            expected: expected.clone(),
+            value: value.clone(),
+        };
+        if let Err(error) = self.committer.commit(vec![operation]).await {
+            let actual = self.kv.get(&key)?;
+            if actual == Some(value) {
+                return Ok(true);
+            }
+            if actual != expected {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        Ok(self.kv.get(&key)? == Some(value))
+    }
+
     pub fn durable_timestamp_intent_identities(
         &self,
     ) -> Result<Vec<crate::timestamp_txn::DurableTimestampIntentIdentity>, ExecError> {

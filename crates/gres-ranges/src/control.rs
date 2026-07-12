@@ -6,6 +6,120 @@ use async_trait::async_trait;
 
 use crate::transport::{RangeControlReq, RangeControlResp};
 
+/// Irreversible topology-activation progress persisted on range zero.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopologyActivationPhase {
+    Prepared,
+    WriterActivated,
+    CheckpointDurable,
+    TopologyCommitted,
+}
+
+/// Per-target progress needed to resume activation after a crash.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ActivationTargetProgress {
+    pub range_id: crate::RangeId,
+    pub wal_generation: u64,
+    pub endpoint: String,
+    pub interval: crate::RangeSpec,
+    pub writer_activated: bool,
+    pub bootstrap_checkpoint: Option<crate::CheckpointManifest>,
+}
+
+/// Durable split activation intent and its monotone completion state.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TopologyActivationReceipt {
+    pub tenant: String,
+    pub operation_id: String,
+    pub revision: u64,
+    pub phase: TopologyActivationPhase,
+    pub split: crate::SplitState,
+    pub source_checkpoint: Option<crate::CheckpointManifest>,
+    pub barrier_offset: Option<i64>,
+    pub tail_sha256: Option<String>,
+    pub targets: BTreeMap<crate::RangeId, ActivationTargetProgress>,
+}
+
+#[async_trait]
+pub trait TopologyActivationReceiptStore: Send + Sync {
+    async fn load(&self, operation_id: &str) -> Result<Option<TopologyActivationReceipt>, String>;
+    async fn list(&self) -> Result<Vec<TopologyActivationReceipt>, String>;
+    async fn compare_and_swap(
+        &self,
+        operation_id: &str,
+        expected_revision: Option<u64>,
+        receipt: TopologyActivationReceipt,
+    ) -> Result<bool, String>;
+}
+
+/// Production activation store committed through range zero's writer.
+pub struct RangeZeroTopologyActivationStore {
+    tenant: String,
+    engine: crabka_pgexec::SqlEngine,
+}
+
+impl RangeZeroTopologyActivationStore {
+    #[must_use]
+    pub fn new(tenant: impl Into<String>, engine: crabka_pgexec::SqlEngine) -> Self {
+        Self {
+            tenant: tenant.into(),
+            engine,
+        }
+    }
+}
+
+#[async_trait]
+impl TopologyActivationReceiptStore for RangeZeroTopologyActivationStore {
+    async fn load(&self, operation_id: &str) -> Result<Option<TopologyActivationReceipt>, String> {
+        self.engine
+            .topology_activation_receipt(&self.tenant, operation_id)
+            .map_err(|error| format!("{error:?}"))?
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+            .transpose()
+    }
+
+    async fn list(&self) -> Result<Vec<TopologyActivationReceipt>, String> {
+        self.engine
+            .topology_activation_receipts(&self.tenant)
+            .map_err(|error| format!("{error:?}"))?
+            .into_iter()
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+            .collect()
+    }
+
+    async fn compare_and_swap(
+        &self,
+        operation_id: &str,
+        expected_revision: Option<u64>,
+        receipt: TopologyActivationReceipt,
+    ) -> Result<bool, String> {
+        let current = self
+            .engine
+            .topology_activation_receipt(&self.tenant, operation_id)
+            .map_err(|error| format!("{error:?}"))?;
+        let current_revision = current
+            .as_deref()
+            .map(serde_json::from_slice::<TopologyActivationReceipt>)
+            .transpose()
+            .map_err(|error| error.to_string())?
+            .map(|receipt| receipt.revision);
+        if current_revision != expected_revision {
+            return Ok(false);
+        }
+        let value = serde_json::to_vec(&receipt).map_err(|error| error.to_string())?;
+        self.engine
+            .compare_and_swap_topology_activation_receipt(
+                &self.tenant,
+                operation_id,
+                current,
+                value,
+            )
+            .await
+            .map_err(|error| format!("{error:?}"))
+    }
+}
+
 /// Runtime capability behind authenticated range-control requests.
 #[async_trait]
 pub trait RangeControlExecutor: Send + Sync {
