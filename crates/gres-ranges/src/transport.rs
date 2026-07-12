@@ -71,6 +71,8 @@ pub enum RangeRequest {
     ResolveTxn(ResolveTxnReq),
     /// Durably prewrite timestamp intents on an owning participant.
     TimestampPrewrite(TimestampPrewriteReq),
+    /// Durably acknowledge secondary operations on the authenticated primary.
+    TimestampPrimaryAck(TimestampPrimaryAckReq),
     /// Resolve timestamp intents after the primary has chosen a decision.
     TimestampResolve(TimestampResolveReq),
     /// Idempotently settle participant intents from a durable primary descriptor.
@@ -429,7 +431,23 @@ pub struct WireTimestampWrite {
 pub struct TimestampPrewriteReq {
     pub range_id: RangeId,
     pub identity: WireTimestampIdentity,
+    #[serde(default)]
+    pub primary_participants: Vec<u32>,
+    #[serde(default)]
+    pub secondary: bool,
+    #[serde(default)]
+    pub existing_primary: bool,
     pub writes: Vec<WireTimestampWrite>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TimestampPrimaryAckReq {
+    pub primary_range: RangeId,
+    pub identity: WireTimestampIdentity,
+    pub participant_range: u32,
+    pub operations: Vec<WireTimestampOperation>,
+    #[serde(default)]
+    pub add_participant: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
@@ -1406,6 +1424,7 @@ mod tests {
                 | RangeRequest::ExplicitGate(_)
                 | RangeRequest::RecoverGlobal { .. }
                 | RangeRequest::TimestampPrewrite(_)
+                | RangeRequest::TimestampPrimaryAck(_)
                 | RangeRequest::TimestampResolve(_)
                 | RangeRequest::TimestampRecover(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,

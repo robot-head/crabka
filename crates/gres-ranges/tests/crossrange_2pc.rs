@@ -1,5 +1,6 @@
 use crabka_gres_ranges::{
-    GatewayCommitFault, MultiRangeTenant, MultiRangeTenantConfig, TenantName, TransactionDecision,
+    GatewayCommitFault, MultiRangeTenant, MultiRangeTenantConfig, RangeId, TenantName,
+    TransactionDecision,
 };
 use crabka_pgexec::{SqlEngine, TimestampTransactionId, TimestampWrite};
 use crabka_pgkv::Kv;
@@ -671,6 +672,21 @@ async fn literal_row_key_scatter_insert_commits_two_ranges_atomically() {
         select_ids(&mut session, "SELECT id FROM t50 ORDER BY id").await,
         [1, 11]
     );
+    let engines = gateway.hosted_range_engines();
+    assert!(
+        engines[&RangeId::COORDINATOR]
+            .timestamp_transaction_descriptors()
+            .expect("r0 descriptors")
+            .is_empty()
+    );
+    let primaries = engines[&RangeId::new(1)]
+        .timestamp_transaction_descriptors()
+        .expect("first-write primary descriptors");
+    assert_eq!(primaries.len(), 1);
+    assert!(matches!(
+        primaries[0].decision,
+        crabka_pgexec::PrimaryTxnDecision::Committed(_)
+    ));
 }
 
 #[tokio::test]

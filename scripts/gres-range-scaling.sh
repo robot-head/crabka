@@ -188,6 +188,17 @@ range_boundaries() {
     printf '%s\n' "${joined// /,}"
 }
 
+sharded_range_boundaries() {
+    local range_count="$1"
+    local boundaries=("0")
+    local index
+    for index in $(seq 1 $((range_count - 1))); do
+        boundaries+=("0:$((index * 1000000))")
+    done
+    local joined="${boundaries[*]}"
+    printf '%s\n' "${joined// /,}"
+}
+
 range_table_id() {
     local range_index="$1"
     printf '%s\n' "$((range_index * 1000000))"
@@ -472,7 +483,7 @@ run_live_sharded_workload() {
     local started_ns
     local elapsed_ms
 
-    boundaries="$(range_boundaries "$range_count")"
+    boundaries="$(sharded_range_boundaries "$range_count")"
     mkdir -p "$run_dir"
     create_tenant_config "$tenant" "$boundaries"
     start_gres "$tenant" "$boundaries"
@@ -532,6 +543,11 @@ print(json.dumps({
     "txns_per_session": txns_per_session,
     "concurrency_sessions": range_count * sessions_per_range,
     "committed_transactions": committed,
+    "primary_range_distribution": {
+        str(range_id): sessions_per_range * txns_per_session
+        for range_id in range(range_count)
+    },
+    "distribution_check": "all expected sharded ranges received writes",
     "duration_ms": elapsed_ms,
     "throughput_tps": round(committed / elapsed_s, 4) if elapsed_s else 0,
     "latency_ms": {

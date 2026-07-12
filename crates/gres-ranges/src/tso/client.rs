@@ -74,6 +74,16 @@ where
     }
 }
 
+#[async_trait::async_trait]
+impl<R> TsoRpc for BatchedTsoClient<R>
+where
+    R: TsoRpc,
+{
+    async fn grant(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
+        BatchedTsoClient::grant(self, count).await
+    }
+}
+
 struct PendingGrant {
     count: NonZeroU64,
     sender: oneshot::Sender<Result<GrantLease, TsoError>>,

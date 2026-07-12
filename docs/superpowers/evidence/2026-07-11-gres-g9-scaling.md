@@ -39,3 +39,25 @@ The earlier two-transaction measurements above are retained as historical eviden
 Command: `CRABKA_GRES_SKIP_BUILD=1 CRABKA_GRES_RANGE_SCALING_MODE=fast CRABKA_GRES_RANGE_SCALING_ARTIFACT_DIR=target/gres-scaling-task3-review2 ./scripts/gres-range-scaling.sh`.
 
 This environment-qualified result fails the intended G-9 scaling gate and is reported rather than relabeled as passing. The corrected CI job will likewise fail until the sharded commit bottleneck is removed or the intended multi-process topology is represented by the harness.
+
+## Primary-range remediation and final robust rerun
+
+The flat result above exposed two product/harness defects: sharded workers used table-ID boundaries rather than row-ID boundaries, and timestamp decisions were still anchored on range 0. The corrected path uses `table:rowid` boundaries, assigns the first-write range as the immutable timestamp primary, atomically persists its pending descriptor with primary intents, and resolves/recoveries through that primary. Timestamp leases and epoch-liveness certificates remove per-write sequence allocation and per-grant heartbeats from the steady-state path.
+
+Fresh command:
+
+```bash
+CRABKA_GRES_SKIP_BUILD=1 \
+CRABKA_GRES_RANGE_SCALING_MODE=fast \
+CRABKA_GRES_RANGE_SCALING_ARTIFACT_DIR=target/gres-scaling-primary-range-final \
+./scripts/gres-range-scaling.sh
+```
+
+The robust workload used two persistent sessions/range, five warmups, 50 measured transactions/session, three trials, and median aggregation. The retained artifact reports:
+
+- range-local: 564.9718, 1030.9278, 1860.4651 tx/s (`3.2930x`, passed);
+- sharded: 248.1390, 455.5809, 852.8785 tx/s (`3.4371x`, passed);
+- range-4 measured/envelope efficiency: `0.8593` (passed);
+- range-4 G-9/G-8 decision-ceiling contrast: `1.7185`, unflattened;
+- primary distribution: `{0: 100}`, `{0: 100, 1: 100}`, then `{0: 100, 1: 100, 2: 100, 3: 100}`;
+- all JSON gates: passed.

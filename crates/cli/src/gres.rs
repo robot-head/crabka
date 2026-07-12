@@ -717,15 +717,24 @@ fn parse_range_layout(
         .map(str::trim)
         .filter(|token| !token.is_empty())
         .map(|token| {
-            token
+            let (table, rowid) = token.split_once(':').map_or((token, "0"), |parts| parts);
+            let table = table
                 .parse::<u64>()
-                .map_err(|error| format!("invalid --ranges boundary {token:?}: {error}"))
+                .map_err(|error| format!("invalid --ranges boundary {token:?}: {error}"))?;
+            let rowid = rowid
+                .parse::<u64>()
+                .map_err(|error| format!("invalid --ranges boundary {token:?}: {error}"))?;
+            Ok::<RangeBoundary, String>(RangeBoundary::new(table, rowid))
         })
         .collect::<Result<Vec<_>, _>>()?;
     if boundaries.is_empty() {
         return Err("--ranges must contain at least one boundary".to_string());
     }
-    if boundaries[0] != 0 || boundaries.windows(2).any(|pair| pair[0] >= pair[1]) {
+    if boundaries[0] != RangeBoundary::table_start(0)
+        || boundaries
+            .windows(2)
+            .any(|pair| (pair[0].table_id, pair[0].rowid) >= (pair[1].table_id, pair[1].rowid))
+    {
         return Err("--ranges boundaries must be strictly increasing and start at 0".to_string());
     }
     boundaries
@@ -735,10 +744,7 @@ fn parse_range_layout(
             let range_id = u32::try_from(index).map_err(|_| "too many ranges".to_string())?;
             Ok(RangeLayoutEntry {
                 range_id,
-                end_key: boundaries
-                    .get(index + 1)
-                    .copied()
-                    .map(RangeBoundary::table_start),
+                end_key: boundaries.get(index + 1).copied(),
                 endpoint: range_endpoint(tenant, range_id),
                 wal_generation: 0,
             })

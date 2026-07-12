@@ -23,7 +23,7 @@ use crabka_pgwire::{
     },
     error::{PgError, sqlstate},
 };
-use tokio::sync::Mutex;
+use tokio::sync::{Mutex, RwLock};
 
 use crate::{
     CheckpointManifest, HashShardSpec, MapEpoch, RangeId, RangeKey, RangeMap, RangeScanSegment,
@@ -585,7 +585,7 @@ impl MultiRangeTenant {
                 None
             } else {
                 let table_write_gate = self.inner.table_write_gate(table_id);
-                let table_write_gate = table_write_gate.lock_owned().await;
+                let table_write_gate = table_write_gate.write_owned().await;
                 let serving = self.inner.serving.load_full();
                 self.validate_empty_table_split(&serving, successor, table_id)?;
                 Some(table_write_gate)
@@ -611,7 +611,7 @@ impl MultiRangeTenant {
             hook.wait_after_initial_validation().await;
         }
         let table_write_gate = self.inner.table_write_gate(table_id);
-        let _table_write_gate = table_write_gate.lock_owned().await;
+        let _table_write_gate = table_write_gate.write_owned().await;
         let serving = self.inner.serving.load_full();
         self.validate_empty_table_split(&serving, successor, table_id)?;
         let predecessor = serving
@@ -647,7 +647,7 @@ impl MultiRangeTenant {
         let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
         let operation_id = operation_id.into();
         let table_write_gate = self.inner.table_write_gate(table_id);
-        let _table_write_gate = table_write_gate.lock_owned().await;
+        let _table_write_gate = table_write_gate.write_owned().await;
         let serving = self.inner.serving.load_full();
         let transfer_table = self.validate_populated_table_split(&serving, successor, table_id)?;
         let state = SplitState::for_split(
@@ -889,19 +889,22 @@ impl MultiRangeTenant {
     }
 }
 
-/// Settle every descriptor recovered from range 0 before this tenant can serve.
-/// A pending descriptor is abort-won under range 0's descriptor lock; a durable
+/// Settle every primary descriptor recovered from hosted ranges before serving.
+/// A pending descriptor is abort-won under its primary-range descriptor lock; a durable
 /// commit is physically replayed with the operations stored in that descriptor.
 fn recover_durable_timestamp_transactions(
     engines: &BTreeMap<RangeId, SqlEngine>,
     remote: Option<(RangeRegistry, FramedTcpClient)>,
 ) -> Result<(), TenantError> {
-    let Some(coordinator) = engines.get(&RangeId::COORDINATOR) else {
-        return Ok(());
-    };
-    let descriptors = coordinator
-        .timestamp_transaction_descriptors()
-        .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+    let mut descriptors = Vec::new();
+    for (primary_range, engine) in engines {
+        for descriptor in engine
+            .timestamp_transaction_descriptors()
+            .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?
+        {
+            descriptors.push((*primary_range, descriptor));
+        }
+    }
     std::thread::scope(|scope| {
         scope
             .spawn(|| {
@@ -910,8 +913,9 @@ fn recover_durable_timestamp_transactions(
                     .build()
                     .map_err(|error| TenantError::TimestampRecovery(error.to_string()))?
                     .block_on(async {
-                        for descriptor in descriptors {
-                            let decision = coordinator
+                        for (primary_range, descriptor) in descriptors {
+                            let primary = engines.get(&primary_range).expect("hosted primary");
+                            let decision = primary
                                 .recover_timestamp_transaction(descriptor.start_ts)
                                 .await
                                 .map_err(|error| {
@@ -922,7 +926,7 @@ fn recover_durable_timestamp_transactions(
                                 let identity = crabka_pgexec::TimestampTxnIdentity {
                                     start_ts: descriptor.start_ts,
                                     global_xid: descriptor.global_xid,
-                                    primary_range: RangeId::COORDINATOR.as_u32(),
+                                    primary_range: primary_range.as_u32(),
                                 };
                                 let operations = descriptor
                                     .operations
@@ -970,6 +974,63 @@ fn recover_durable_timestamp_transactions(
                                 resolve_result.map_err(|error| {
                                     TenantError::TimestampRecovery(format!("{error:?}"))
                                 })?;
+                            }
+                        }
+                        let mut orphan_participants = BTreeMap::<
+                            crabka_pgexec::TimestampTxnIdentity,
+                            Vec<RangeId>,
+                        >::new();
+                        for engine in engines.values() {
+                            for durable in engine.durable_timestamp_intent_identities().map_err(|error| {
+                                TenantError::TimestampRecovery(format!("{error:?}"))
+                            })? {
+                                orphan_participants.entry(durable.identity).or_default()
+                                    .push(RangeId::new(durable.participant_range));
+                            }
+                        }
+                        for (identity, mut participants) in orphan_participants {
+                            participants.sort_unstable();
+                            participants.dedup();
+                            let primary_range = RangeId::new(identity.primary_range);
+                            let Some(primary) = engines.get(&primary_range) else {
+                                return Err(TenantError::TimestampRecovery(format!(
+                                    "timestamp primary r{primary_range} is unreachable for orphan {}",
+                                    identity.start_ts.get()
+                                )));
+                            };
+                            let primary_decision = primary.primary_timestamp_decision(identity.start_ts)
+                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                            if primary_decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+                                let descriptor = primary.timestamp_transaction_descriptors()
+                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?
+                                    .into_iter().find(|descriptor| descriptor.start_ts == identity.start_ts)
+                                    .ok_or_else(|| TenantError::TimestampRecovery("terminal primary descriptor disappeared".into()))?;
+                                for range_id in participants {
+                                    let operations = descriptor.operations.iter().copied()
+                                        .filter(|operation| operation.range_id == range_id.as_u32())
+                                        .collect::<Vec<_>>();
+                                    engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
+                                        format!("terminal participant r{range_id} is not hosted")
+                                    ))?.resolve_timestamp_transaction_operations(
+                                        range_id.as_u32(), identity, primary_decision, &operations,
+                                    ).await.map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                                }
+                                continue;
+                            }
+                            let descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(
+                                identity.start_ts, identity.global_xid,
+                                participants.iter().map(|range| range.as_u32()).collect(),
+                            );
+                            primary.begin_timestamp_transaction(&descriptor).await
+                                .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                            primary.decide_timestamp_transaction(
+                                identity.start_ts, crabka_pgexec::PrimaryTxnDecision::Aborted,
+                            ).await.map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                            for range_id in participants {
+                                engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
+                                    format!("orphan participant r{range_id} is not hosted")
+                                ))?.abort_timestamp_transaction_intents(identity.start_ts).await
+                                    .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
                             }
                         }
                         Ok(())
@@ -1095,6 +1156,46 @@ where
         crabka_pgexec::TimestampTransactionId::new(timestamp).map_err(Into::into)
     }
 
+    async fn allocate_write_lease(
+        &self,
+        hidden_rowid_count: usize,
+    ) -> Result<
+        crabka_pgexec::timestamp_txn::TimestampWriteLease,
+        crabka_pgexec::TimestampOracleError,
+    > {
+        let count = u64::try_from(hidden_rowid_count)
+            .ok()
+            .and_then(|count| count.checked_add(1))
+            .and_then(NonZeroU64::new)
+            .ok_or_else(|| {
+                crabka_pgexec::TimestampOracleError::Unavailable(
+                    "timestamp write lease is too large".into(),
+                )
+            })?;
+        let lease =
+            self.client.grant(count).await.map_err(|error| {
+                crabka_pgexec::TimestampOracleError::Unavailable(error.to_string())
+            })?;
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(lease.first_ts.get())?;
+        let hidden_rowids = (1..=hidden_rowid_count)
+            .map(|offset| {
+                lease
+                    .first_ts
+                    .get()
+                    .checked_add(u64::try_from(offset).expect("offset fits u64"))
+                    .ok_or_else(|| {
+                        crabka_pgexec::TimestampOracleError::Unavailable(
+                            "timestamp write lease overflow".into(),
+                        )
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+        Ok(crabka_pgexec::timestamp_txn::TimestampWriteLease {
+            start_ts,
+            hidden_rowids,
+        })
+    }
+
     async fn allocate_commit_after(
         &self,
         start_ts: crabka_pgexec::TimestampTransactionId,
@@ -1159,7 +1260,8 @@ where
         stride,
         persisted_max_ts,
     )?);
-    let rpc: Arc<dyn TsoRpc> = Arc::new(InProcessTsoRpc { oracle });
+    let rpc: Arc<dyn TsoRpc> =
+        Arc::new(BatchedTsoClient::new(Arc::new(InProcessTsoRpc { oracle })));
     Ok(pgexec_timestamp_oracle_from_rpc(rpc))
 }
 
@@ -1192,7 +1294,9 @@ where
         stride,
         persisted_max_ts,
     )?);
-    Ok(Arc::new(InProcessTsoRpc { oracle }))
+    Ok(Arc::new(BatchedTsoClient::new(Arc::new(InProcessTsoRpc {
+        oracle,
+    }))))
 }
 
 fn install_memory_timestamp_oracle(
@@ -1458,7 +1562,7 @@ struct TenantInner {
     split_states: Mutex<BTreeMap<String, SplitState>>,
     split_lock: Mutex<()>,
     schema_gate: Arc<Mutex<()>>,
-    table_write_gates: StdMutex<BTreeMap<TableId, Arc<Mutex<()>>>>,
+    table_write_gates: StdMutex<BTreeMap<TableId, Arc<RwLock<()>>>>,
     explicit_transaction_gate: Arc<Mutex<()>>,
     active_explicit_transactions: AtomicUsize,
     empty_table_split_test_hook: Option<EmptyTableSplitTestHook>,
@@ -1506,14 +1610,14 @@ impl Drop for TransferPauseGuard<'_> {
 }
 
 impl TenantInner {
-    fn table_write_gate(&self, table_id: TableId) -> Arc<Mutex<()>> {
+    fn table_write_gate(&self, table_id: TableId) -> Arc<RwLock<()>> {
         let mut table_write_gates = self
             .table_write_gates
             .lock()
             .expect("table write gate lock must not be poisoned");
         table_write_gates
             .entry(table_id)
-            .or_insert_with(|| Arc::new(Mutex::new(())))
+            .or_insert_with(|| Arc::new(RwLock::new(())))
             .clone()
     }
 }
@@ -2560,8 +2664,10 @@ impl GatewaySession {
                 .map(|result| vec![result]);
         }
         if route.kind == StatementKind::Dml
-            && (matches!(self.transaction, GatewayTransaction::Timestamp { .. })
-                || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
+            && (matches!(
+                self.transaction,
+                GatewayTransaction::Idle | GatewayTransaction::Timestamp { .. }
+            ) || matches!(self.transaction, GatewayTransaction::Open { ref touched, .. } if touched.is_empty()))
             && self.statement_targets_sharded_table(statement)?
         {
             return self
@@ -3111,7 +3217,7 @@ impl GatewaySession {
     async fn acquire_routed_dml_gate(
         &self,
         route: &StatementRoute,
-    ) -> Result<Option<tokio::sync::OwnedMutexGuard<()>>, PgError> {
+    ) -> Result<Option<tokio::sync::OwnedRwLockReadGuard<()>>, PgError> {
         if route.kind != StatementKind::Dml {
             return Ok(None);
         }
@@ -3120,7 +3226,7 @@ impl GatewaySession {
         };
 
         let table_write_gate = self.inner.table_write_gate(table_id);
-        let table_write_gate = table_write_gate.lock_owned().await;
+        let table_write_gate = table_write_gate.read_owned().await;
         self.current_serving()?;
         Ok(Some(table_write_gate))
     }
@@ -3231,7 +3337,8 @@ impl GatewaySession {
                 "range r0 is not hosted by this tenant",
             )
         })?;
-        let plan = coordinator
+        let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
+        let mut plan = coordinator
             .plan_timestamp_write_sql(statement)
             .map_err(ExecError::into_pg)?;
         if plan.writes.is_empty() {
@@ -3251,6 +3358,21 @@ impl GatewaySession {
         let table = self
             .table_for_timestamp_writes(&plan.writes)
             .map_err(ExecError::into_pg)?;
+        let write_lease = {
+            let hidden_rowid_count = usize::from(table.sharding.is_some()) * plan.writes.len();
+            let lease = coordinator
+                .allocate_timestamp_write_lease(hidden_rowid_count)
+                .await
+                .map_err(ExecError::into_pg)?;
+            if table.sharding.is_some() {
+                plan = coordinator
+                    .plan_timestamp_write_sql_with_rowids(statement, &lease.hidden_rowids)
+                    .map_err(ExecError::into_pg)?;
+            } else {
+                plan.commit_ops.clear();
+            }
+            lease
+        };
         let write_routes = timestamp_insert_write_routes(
             &self.current_serving()?.range_map,
             &table,
@@ -3277,66 +3399,124 @@ impl GatewaySession {
                 "timestamp scatter plan does not match routed ranges",
             ));
         }
-        let autocommit = matches!(self.transaction, GatewayTransaction::Idle);
-        let (start_ts, identity) =
-            if let GatewayTransaction::Timestamp { identity, .. } = &self.transaction {
-                for range_id in writes_by_range.keys() {
-                    coordinator
-                        .add_timestamp_transaction_participant(identity.start_ts, range_id.as_u32())
-                        .await
-                        .map_err(ExecError::into_pg)?;
-                }
-                (identity.start_ts, *identity)
-            } else {
-                let begun = self
-                    .begin_timestamp_scatter(coordinator, writes_by_range.keys().copied())
-                    .await?;
-                if !autocommit {
-                    self.transaction = GatewayTransaction::Timestamp {
-                        identity: begun.1,
-                        participants: BTreeMap::new(),
-                        commit_ops: Vec::new(),
-                    };
-                }
-                begun
+        if autocommit {
+            let primary_range =
+                timestamp_primary_range(&writes_by_range).expect("one primary range");
+            let start_ts = write_lease.start_ts;
+            let identity = crabka_pgexec::TimestampTxnIdentity {
+                start_ts,
+                global_xid: start_ts.get(),
+                primary_range: primary_range.as_u32(),
             };
+            let participants = writes_by_range.keys().copied().collect::<Vec<_>>();
+            for (range_id, writes) in &writes_by_range {
+                if *range_id == primary_range {
+                    self.timestamp_prewrite_as_primary(*range_id, identity, &participants, writes)
+                        .await?;
+                } else {
+                    self.timestamp_prewrite_as_secondary(*range_id, identity, writes)
+                        .await?;
+                    self.acknowledge_primary_operations(primary_range, identity, *range_id, writes)
+                        .await?;
+                }
+            }
+            if self.take_commit_fault_for_testing(
+                GatewayCommitFault::AfterTimestampPrewriteBeforeDecision,
+            ) {
+                return Err(PgError::error(
+                    "XX000",
+                    "injected crash after timestamp prewrites before durable decision",
+                ));
+            }
+            let commit_ts = coordinator
+                .allocate_commit_timestamp_after(start_ts)
+                .await
+                .map_err(ExecError::into_pg)?;
+            self.timestamp_resolve(
+                primary_range,
+                identity,
+                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                writes_by_range.get(&primary_range).expect("primary writes"),
+            )
+            .await?;
+            for (range_id, writes) in &writes_by_range {
+                if *range_id != primary_range {
+                    self.timestamp_resolve(
+                        *range_id,
+                        identity,
+                        crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+                        writes,
+                    )
+                    .await?;
+                }
+            }
+            if self.take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampCommitDecision)
+            {
+                return Err(PgError::error(
+                    "XX000",
+                    "injected crash after durable timestamp commit decision",
+                ));
+            }
+            if !plan.commit_ops.is_empty() {
+                coordinator
+                    .commit_timestamp_statement_ops(plan.commit_ops)
+                    .await
+                    .map_err(ExecError::into_pg)?;
+            }
+            return Ok(plan.result);
+        }
+        let existing = matches!(self.transaction, GatewayTransaction::Timestamp { .. });
+        let identity = if let GatewayTransaction::Timestamp { identity, .. } = &self.transaction {
+            *identity
+        } else {
+            let primary_range = timestamp_primary_range(&writes_by_range).expect("primary range");
+            let identity = crabka_pgexec::TimestampTxnIdentity {
+                start_ts: write_lease.start_ts,
+                global_xid: write_lease.start_ts.get(),
+                primary_range: primary_range.as_u32(),
+            };
+            self.transaction = GatewayTransaction::Timestamp {
+                identity,
+                participants: BTreeMap::new(),
+                commit_ops: Vec::new(),
+            };
+            identity
+        };
+        let primary_range = RangeId::new(identity.primary_range);
         let mut statement_participants = Vec::with_capacity(writes_by_range.len());
         for (range_id, writes) in &writes_by_range {
-            if let Err(error) = self.timestamp_prewrite(*range_id, identity, writes).await {
+            if existing && *range_id != primary_range {
+                self.add_primary_participant(primary_range, identity, *range_id)
+                    .await?;
+            }
+            let prewrite = if *range_id == primary_range {
+                if existing {
+                    self.timestamp_prewrite_on_primary(*range_id, identity, writes)
+                        .await
+                } else {
+                    let participants = writes_by_range.keys().copied().collect::<Vec<_>>();
+                    self.timestamp_prewrite_as_primary(*range_id, identity, &participants, writes)
+                        .await
+                }
+            } else {
+                self.timestamp_prewrite_as_secondary(*range_id, identity, writes)
+                    .await
+            };
+            if let Err(error) = prewrite {
                 let participants = self.timestamp_participants_with(&statement_participants);
                 self.abort_timestamp_scatter(coordinator, identity, &participants)
                     .await
                     .map_err(ExecError::into_pg)?;
                 return Err(error);
             }
-            // Track durable prewrite before the range-0 acknowledgement. An ack
-            // write failure must still abort and resolve this participant.
             statement_participants.push((*range_id, writes.clone()));
-            let operations = writes
-                .iter()
-                .map(|write| crabka_pgexec::TimestampTxnOperation {
-                    range_id: range_id.as_u32(),
-                    table_id: write.table_id,
-                    rowid: write.rowid,
-                    delete: write.delete,
-                })
-                .collect::<Vec<_>>();
-            if let Err(error) = coordinator
-                .acknowledge_timestamp_participant_operations(
-                    start_ts,
-                    range_id.as_u32(),
-                    &operations,
-                )
-                .await
-            {
-                // The primary descriptor was begun durably; choose abort and
-                // resolve every participant known to have prewritten, including
-                // this one whose acknowledgement did not reach range 0.
-                let participants = self.timestamp_participants_with(&statement_participants);
-                self.abort_timestamp_scatter(coordinator, identity, &participants)
-                    .await
-                    .map_err(ExecError::into_pg)?;
-                return Err(error.into_pg());
+            if *range_id != primary_range {
+                if !existing {
+                    self.add_primary_participant(primary_range, identity, *range_id)
+                        .await?;
+                }
+                self.acknowledge_primary_operations(primary_range, identity, *range_id, writes)
+                    .await?;
             }
         }
         if !autocommit {
@@ -3358,55 +3538,7 @@ impl GatewaySession {
             commit_ops.clear();
             return Ok(plan.result);
         }
-        if self
-            .take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampPrewriteBeforeDecision)
-        {
-            return Err(PgError::error(
-                "XX000",
-                "injected crash after timestamp prewrites before durable decision",
-            ));
-        }
-        let commit_ts = coordinator
-            .allocate_commit_timestamp_after(start_ts)
-            .await
-            .map_err(ExecError::into_pg)?;
-        let decision = coordinator
-            .decide_timestamp_transaction(
-                start_ts,
-                crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
-            )
-            .await
-            .map_err(ExecError::into_pg)?;
-        let crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) = decision else {
-            self.abort_timestamp_scatter(coordinator, identity, &statement_participants)
-                .await
-                .map_err(ExecError::into_pg)?;
-            return Err(PgError::error("40001", "timestamp transaction aborted"));
-        };
-        if self.take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampCommitDecision) {
-            return Err(PgError::error(
-                "XX000",
-                "injected crash after durable timestamp commit decision",
-            ));
-        }
-        let mut commit_ops = Some(plan.commit_ops);
-        for (range_id, writes) in &statement_participants {
-            let extra_ops = commit_ops.take().unwrap_or_default();
-            self.timestamp_resolve(
-                *range_id,
-                identity,
-                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
-                writes,
-            )
-            .await?;
-            if !extra_ops.is_empty() {
-                coordinator
-                    .commit_timestamp_statement_ops(extra_ops)
-                    .await
-                    .map_err(ExecError::into_pg)?;
-            }
-        }
-        Ok(plan.result)
+        unreachable!("autocommit timestamp writes return through the primary-range fast path")
     }
 
     fn timestamp_participants_with(
@@ -3451,16 +3583,17 @@ impl GatewaySession {
             .allocate_commit_timestamp_after(identity.start_ts)
             .await
             .map_err(ExecError::into_pg)?;
-        let decision = coordinator
-            .decide_timestamp_transaction(
-                identity.start_ts,
-                crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
-            )
-            .await
-            .map_err(ExecError::into_pg)?;
-        let crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) = decision else {
-            return Err(PgError::error("40001", "timestamp transaction aborted"));
-        };
+        let primary_range = RangeId::new(identity.primary_range);
+        let primary_writes = participants.get(&primary_range).ok_or_else(|| {
+            PgError::error("XX000", "timestamp primary has no participant writes")
+        })?;
+        self.timestamp_resolve(
+            primary_range,
+            identity,
+            crabka_pgexec::TimestampTxnDecision::Committed(commit_ts),
+            primary_writes,
+        )
+        .await?;
         if self.take_commit_fault_for_testing(GatewayCommitFault::AfterTimestampCommitDecision) {
             return Err(PgError::error(
                 "XX000",
@@ -3468,6 +3601,9 @@ impl GatewaySession {
             ));
         }
         for (range_id, writes) in &participants {
+            if *range_id == primary_range {
+                continue;
+            }
             self.timestamp_resolve(
                 *range_id,
                 identity,
@@ -3488,43 +3624,6 @@ impl GatewaySession {
         }])
     }
 
-    async fn begin_timestamp_scatter(
-        &self,
-        coordinator: &SqlEngine,
-        participant_ranges: impl Iterator<Item = RangeId>,
-    ) -> Result<
-        (
-            crabka_pgexec::TimestampTransactionId,
-            crabka_pgexec::TimestampTxnIdentity,
-        ),
-        PgError,
-    > {
-        let start_ts = coordinator
-            .allocate_timestamp_transaction_id()
-            .await
-            .map_err(ExecError::into_pg)?;
-        // Timestamp transactions use the descriptor as their only primary record;
-        // allocating a GTM status would create a second, timestamp-less decision.
-        let global_xid = start_ts.get();
-        let descriptor = crabka_pgexec::TimestampTxnDescriptor::begun(
-            start_ts,
-            global_xid,
-            participant_ranges.map(RangeId::as_u32).collect(),
-        );
-        coordinator
-            .begin_timestamp_transaction(&descriptor)
-            .await
-            .map_err(ExecError::into_pg)?;
-        Ok((
-            start_ts,
-            crabka_pgexec::TimestampTxnIdentity {
-                start_ts,
-                global_xid,
-                primary_range: RangeId::COORDINATOR.as_u32(),
-            },
-        ))
-    }
-
     fn timestamp_participant(
         &self,
         range_id: RangeId,
@@ -3543,15 +3642,20 @@ impl GatewaySession {
             })
     }
 
-    async fn timestamp_prewrite(
+    async fn timestamp_prewrite_as_primary(
         &self,
         range_id: RangeId,
         identity: crabka_pgexec::TimestampTxnIdentity,
+        participants: &[RangeId],
         writes: &[crabka_pgexec::TimestampWrite],
     ) -> Result<(), PgError> {
+        let participants = participants
+            .iter()
+            .map(|range| range.as_u32())
+            .collect::<Vec<_>>();
         if let Ok(participant) = self.timestamp_participant(range_id) {
             return participant
-                .prewrite_with_primary(identity, writes)
+                .prewrite_as_primary(identity, &participants, writes)
                 .await
                 .map_err(ExecError::into_pg);
         }
@@ -3560,7 +3664,106 @@ impl GatewaySession {
             .ok_or_else(|| {
                 PgError::error("08003", "remote timestamp participant session is missing")
             })?
-            .timestamp_prewrite(identity, writes)
+            .timestamp_prewrite_as_primary(identity, &participants, writes)
+            .await
+    }
+
+    async fn timestamp_prewrite_as_secondary(
+        &self,
+        range_id: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        if let Ok(participant) = self.timestamp_participant(range_id) {
+            return participant
+                .prewrite_as_secondary(identity, writes)
+                .await
+                .map_err(ExecError::into_pg);
+        }
+        self.remote_sessions
+            .get(&range_id)
+            .ok_or_else(|| {
+                PgError::error("08003", "remote timestamp participant session is missing")
+            })?
+            .timestamp_prewrite_as_secondary(identity, writes)
+            .await
+    }
+
+    async fn timestamp_prewrite_on_primary(
+        &self,
+        range_id: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        if let Ok(participant) = self.timestamp_participant(range_id) {
+            return participant
+                .prewrite_on_primary(identity, writes)
+                .await
+                .map_err(ExecError::into_pg);
+        }
+        self.remote_sessions
+            .get(&range_id)
+            .ok_or_else(|| PgError::error("08003", "remote timestamp primary session is missing"))?
+            .timestamp_prewrite_on_primary(identity, writes)
+            .await
+    }
+
+    async fn add_primary_participant(
+        &self,
+        primary_range: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        participant_range: RangeId,
+    ) -> Result<(), PgError> {
+        let serving = self.current_serving()?;
+        if let Some(engine) = serving.engine(primary_range) {
+            return engine
+                .add_timestamp_transaction_participant(
+                    identity.start_ts,
+                    participant_range.as_u32(),
+                )
+                .await
+                .map(|_| ())
+                .map_err(ExecError::into_pg);
+        }
+        self.remote_sessions
+            .get(&primary_range)
+            .ok_or_else(|| PgError::error("08003", "remote timestamp primary session is missing"))?
+            .timestamp_primary_add_participant(identity, participant_range)
+            .await
+    }
+
+    async fn acknowledge_primary_operations(
+        &self,
+        primary_range: RangeId,
+        identity: crabka_pgexec::TimestampTxnIdentity,
+        participant_range: RangeId,
+        writes: &[crabka_pgexec::TimestampWrite],
+    ) -> Result<(), PgError> {
+        let operations = writes
+            .iter()
+            .map(|write| crabka_pgexec::TimestampTxnOperation {
+                range_id: participant_range.as_u32(),
+                table_id: write.table_id,
+                rowid: write.rowid,
+                delete: write.delete,
+            })
+            .collect::<Vec<_>>();
+        let serving = self.current_serving()?;
+        if let Some(engine) = serving.engine(primary_range) {
+            return engine
+                .acknowledge_timestamp_participant_operations(
+                    identity.start_ts,
+                    participant_range.as_u32(),
+                    &operations,
+                )
+                .await
+                .map(|_| ())
+                .map_err(ExecError::into_pg);
+        }
+        self.remote_sessions
+            .get(&primary_range)
+            .ok_or_else(|| PgError::error("08003", "remote timestamp primary session is missing"))?
+            .timestamp_primary_ack(identity, participant_range, writes)
             .await
     }
 
@@ -3572,10 +3775,16 @@ impl GatewaySession {
         writes: &[crabka_pgexec::TimestampWrite],
     ) -> Result<(), PgError> {
         if let Ok(participant) = self.timestamp_participant(range_id) {
-            return participant
-                .resolve_with_primary(identity, decision, writes)
-                .await
-                .map_err(ExecError::into_pg);
+            return if identity.primary_range == range_id.as_u32() {
+                participant
+                    .resolve_as_primary(identity, decision, writes)
+                    .await
+            } else {
+                participant
+                    .resolve_as_secondary(identity, decision, writes)
+                    .await
+            }
+            .map_err(ExecError::into_pg);
         }
         self.remote_sessions
             .get(&range_id)
@@ -3588,33 +3797,38 @@ impl GatewaySession {
 
     async fn abort_timestamp_scatter(
         &self,
-        coordinator: &SqlEngine,
+        _coordinator: &SqlEngine,
         identity: crabka_pgexec::TimestampTxnIdentity,
         participants: &[(RangeId, Vec<crabka_pgexec::TimestampWrite>)],
     ) -> Result<(), ExecError> {
-        let decision = coordinator
-            .decide_timestamp_transaction(
-                identity.start_ts,
-                crabka_pgexec::PrimaryTxnDecision::Aborted,
-            )
-            .await?;
-        let effective_decision = match decision {
-            crabka_pgexec::PrimaryTxnDecision::Aborted => {
-                crabka_pgexec::TimestampTxnDecision::Aborted
-            }
-            crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) => {
-                crabka_pgexec::TimestampTxnDecision::Committed(commit_ts)
-            }
-            crabka_pgexec::PrimaryTxnDecision::Pending => {
-                return Err(ExecError::Unsupported(
-                    "timestamp transaction primary remained pending during abort cleanup".into(),
-                ));
-            }
-        };
+        let primary_range = RangeId::new(identity.primary_range);
+        let primary_writes = participants
+            .iter()
+            .find(|(range_id, _)| *range_id == primary_range)
+            .map(|(_, writes)| writes)
+            .ok_or_else(|| {
+                ExecError::Unsupported("timestamp primary participant is missing".into())
+            })?;
+        self.timestamp_resolve(
+            primary_range,
+            identity,
+            crabka_pgexec::TimestampTxnDecision::Aborted,
+            primary_writes,
+        )
+        .await
+        .map_err(|error| ExecError::Unsupported(error.message))?;
         for (range_id, writes) in participants {
-            self.timestamp_resolve(*range_id, identity, effective_decision, writes)
-                .await
-                .map_err(|error| ExecError::Unsupported(error.message))?;
+            if *range_id == primary_range {
+                continue;
+            }
+            self.timestamp_resolve(
+                *range_id,
+                identity,
+                crabka_pgexec::TimestampTxnDecision::Aborted,
+                writes,
+            )
+            .await
+            .map_err(|error| ExecError::Unsupported(error.message))?;
         }
         Ok(())
     }
@@ -3834,33 +4048,61 @@ async fn cleanup_dropped_timestamp_session(
     identity: crabka_pgexec::TimestampTxnIdentity,
     participants: BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
 ) -> Result<(), PgError> {
-    let coordinator = serving
-        .engine(RangeId::COORDINATOR)
-        .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
-    let decision = coordinator
-        .decide_timestamp_transaction(
-            identity.start_ts,
-            crabka_pgexec::PrimaryTxnDecision::Aborted,
-        )
-        .await
-        .map_err(ExecError::into_pg)?;
-    let decision = match decision {
+    let primary_range = RangeId::new(identity.primary_range);
+    let primary_decision = if let Some(engine) = serving.engine(primary_range) {
+        engine
+            .primary_timestamp_decision(identity.start_ts)
+            .map_err(ExecError::into_pg)?
+    } else {
+        remote_sessions
+            .get(&primary_range)
+            .ok_or_else(|| PgError::error("08003", "remote timestamp primary session is missing"))?
+            .timestamp_primary_decision(identity.start_ts)
+            .await?
+    };
+    let decision = match primary_decision {
+        crabka_pgexec::PrimaryTxnDecision::Pending => {
+            let primary_writes = participants.get(&primary_range).ok_or_else(|| {
+                PgError::error("XX000", "timestamp primary participant is missing")
+            })?;
+            if let Some(engine) = serving.engine(primary_range) {
+                engine
+                    .timestamp_txn_participant(primary_range.as_u32())
+                    .resolve_as_primary(
+                        identity,
+                        crabka_pgexec::TimestampTxnDecision::Aborted,
+                        primary_writes,
+                    )
+                    .await
+                    .map_err(ExecError::into_pg)?;
+            } else {
+                remote_sessions
+                    .get(&primary_range)
+                    .ok_or_else(|| {
+                        PgError::error("08003", "remote timestamp primary session is missing")
+                    })?
+                    .timestamp_resolve(
+                        identity,
+                        crabka_pgexec::TimestampTxnDecision::Aborted,
+                        primary_writes,
+                    )
+                    .await?;
+            }
+            crabka_pgexec::TimestampTxnDecision::Aborted
+        }
         crabka_pgexec::PrimaryTxnDecision::Aborted => crabka_pgexec::TimestampTxnDecision::Aborted,
         crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts) => {
             crabka_pgexec::TimestampTxnDecision::Committed(commit_ts)
         }
-        crabka_pgexec::PrimaryTxnDecision::Pending => {
-            return Err(PgError::error(
-                "XX000",
-                "timestamp cleanup remained pending",
-            ));
-        }
     };
     for (range_id, writes) in participants {
+        if range_id == primary_range {
+            continue;
+        }
         if let Some(engine) = serving.engine(range_id) {
             engine
                 .timestamp_txn_participant(range_id.as_u32())
-                .resolve_with_primary(identity, decision, &writes)
+                .resolve_as_secondary(identity, decision, &writes)
                 .await
                 .map_err(ExecError::into_pg)?;
         } else {
@@ -4285,6 +4527,12 @@ fn route_statement(
 struct RouteTarget {
     range_id: RangeId,
     scatter_ranges: Option<Vec<RangeId>>,
+}
+
+fn timestamp_primary_range(
+    writes_by_range: &BTreeMap<RangeId, Vec<crabka_pgexec::TimestampWrite>>,
+) -> Option<RangeId> {
+    writes_by_range.keys().next().copied()
 }
 
 impl RouteTarget {
@@ -5145,6 +5393,59 @@ mod tests {
     use crabka_pgkv::{Kv, MemKv};
 
     use super::*;
+
+    #[test]
+    fn timestamp_primary_is_the_first_write_range_not_range_zero() {
+        let writes = BTreeMap::from([
+            (
+                RangeId::new(3),
+                vec![crabka_pgexec::TimestampWrite {
+                    table_id: 50,
+                    rowid: 1,
+                    row: vec![Datum::Int4(1)],
+                    delete: false,
+                    global_index_intents: Vec::new(),
+                }],
+            ),
+            (
+                RangeId::new(4),
+                vec![crabka_pgexec::TimestampWrite {
+                    table_id: 50,
+                    rowid: 2,
+                    row: vec![Datum::Int4(2)],
+                    delete: false,
+                    global_index_intents: Vec::new(),
+                }],
+            ),
+        ]);
+
+        assert_eq!(timestamp_primary_range(&writes), Some(RangeId::new(3)));
+    }
+
+    #[tokio::test]
+    async fn table_fence_allows_overlapping_dml_and_blocks_exclusive_split() {
+        let config = MultiRangeTenantConfig::from_boundaries(
+            TenantName::parse("table_fence_overlap").expect("tenant"),
+            "0,100",
+        )
+        .expect("config");
+        let (_gateway, handles) = MultiRangeTenant::start(config).expect("start");
+        let gate = handles.inner.table_write_gate(TableId::new(50));
+        let first_dml = Arc::clone(&gate).read_owned().await;
+        let second_dml = tokio::time::timeout(
+            std::time::Duration::from_millis(50),
+            Arc::clone(&gate).read_owned(),
+        )
+        .await
+        .expect("DML overlaps");
+        let exclusive = tokio::spawn(Arc::clone(&gate).write_owned());
+        tokio::task::yield_now().await;
+        assert!(!exclusive.is_finished());
+        drop(first_dml);
+        assert!(!exclusive.is_finished());
+        drop(second_dml);
+        exclusive.await.expect("exclusive fence");
+    }
 
     fn tenant() -> TenantName {
         TenantName::parse("tenant_a").expect("tenant")
