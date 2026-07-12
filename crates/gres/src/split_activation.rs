@@ -1590,7 +1590,7 @@ pub(super) async fn reconcile_before_readiness(
                 "authoritative target journal names an unrecovered activation target",
             ));
         }
-        return Ok((Some(discovered.recovery_map.clone()), true));
+        return Ok((Some(discovered.recovery_map.clone()), false));
     }
     let tenant = range0.resources.recovery_config.tenant.to_string();
     let source_store =
@@ -1627,8 +1627,10 @@ pub(super) async fn reconcile_before_readiness(
     }
     receipts.sort_by_key(|receipt| receipt.split.target_map.epoch());
     let defer_timestamp_recovery = receipts.iter().any(|receipt| {
-        matches!(receipt.phase, TopologyActivationPhase::SourceCheckpoint)
-            && control_recovery_operations.contains(&receipt.operation_id)
+        should_defer_timestamp_recovery(
+            receipt.phase,
+            control_recovery_operations.contains(&receipt.operation_id),
+        )
     });
 
     let mut activation = None;
@@ -1652,11 +1654,18 @@ pub(super) async fn reconcile_before_readiness(
         return Ok((None, defer_timestamp_recovery));
     };
     if topology_is_recovered(engines, &receipt) {
-        return Ok((Some(receipt.split.target_map), true));
+        return Ok((Some(receipt.split.target_map), false));
     }
     complete_post_activation(config, engines, checkpoint_store, receipt)
         .await
-        .map(|map| (Some(map), true))
+        .map(|map| (Some(map), false))
+}
+
+const fn should_defer_timestamp_recovery(
+    phase: TopologyActivationPhase,
+    has_active_control_pause: bool,
+) -> bool {
+    matches!(phase, TopologyActivationPhase::SourceCheckpoint) && has_active_control_pause
 }
 
 fn topology_is_recovered(
@@ -2079,7 +2088,7 @@ mod tests {
 
     use super::{
         ActivationDiscovery, canonicalize_receipt_history, next_replacement_generation,
-        routing_table_id, validate_receipt_extension, validate_receipt_history,
+        routing_table_id, should_defer_timestamp_recovery, validate_receipt_extension, validate_receipt_history,
         validate_receipt_wal_identity,
     };
     use crabka_gres_ranges::{
@@ -2092,6 +2101,26 @@ mod tests {
     fn routing_id_matches_split_catalog_contract() {
         assert_eq!(routing_table_id("accounts42"), TableId::new(42));
         assert_eq!(routing_table_id("accounts"), TableId::ZERO);
+    }
+
+    #[test]
+    fn timestamp_recovery_is_deferred_only_for_reversible_source_pause() {
+        assert!(should_defer_timestamp_recovery(
+            TopologyActivationPhase::SourceCheckpoint,
+            true,
+        ));
+        assert!(!should_defer_timestamp_recovery(
+            TopologyActivationPhase::SourceCheckpoint,
+            false,
+        ));
+        assert!(!should_defer_timestamp_recovery(
+            TopologyActivationPhase::MustActivate,
+            true,
+        ));
+        assert!(!should_defer_timestamp_recovery(
+            TopologyActivationPhase::TopologyCommitted,
+            true,
+        ));
     }
 
     #[test]

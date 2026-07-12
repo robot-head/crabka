@@ -6649,7 +6649,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn activation_startup_defers_pending_timestamp_recovery() {
+    async fn paused_source_startup_preserves_pending_timestamp_transaction() {
         let (mut engine, observer, start_ts) = pending_engine_for_startup_test(820).await;
         MultiRangeTenant::start_with_engine_factory(
             MultiRangeTenantConfig::from_boundaries(tenant(), "0")
