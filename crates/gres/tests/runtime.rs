@@ -946,12 +946,13 @@ async fn advance_control_operation(
     let mut registry = crabka_gres_control::Registry::connect(bootstrap)
         .await
         .unwrap();
+    registry.ensure_topic(1).await.unwrap();
     let current = registry
         .load_split_operation(tenant, operation_id)
         .await
         .unwrap()
         .expect("seeded control operation");
-    if current.phase == phase || current.phase > phase {
+    if current.phase == phase {
         return;
     }
     let next = current
@@ -983,6 +984,156 @@ async fn control_binding(bootstrap: &str, tenant: &str, operation_id: &str) -> (
         .digest()
         .to_string();
     (revision, digest)
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_authority_allows_exact_target_status_at_activated_before_layout_cutover() {
+    use crabka_gres_ranges::control::IntentAuthorizationContext;
+    use crabka_gres_ranges::transport::{RangeControlOperation, RangeControlReq};
+    let broker_dir = tempfile::tempdir().unwrap();
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .unwrap();
+    let bootstrap = broker.listen_addr().to_string();
+    let tenant = "authority-activated";
+    let map = crabka_gres_ranges::RangeMap::new(
+        crabka_gres_ranges::TenantName::parse(tenant).unwrap(),
+        crabka_gres_ranges::MapEpoch::new(0),
+        vec![RangeSpec::for_interval(
+            RangeId::COORDINATOR,
+            RangeKey::MIN,
+            None,
+        )],
+    )
+    .unwrap();
+    let split_at = RangeKey::new(TableId::new(7), 50);
+    let split = crabka_gres_ranges::SplitState::for_split(
+        "authority-op",
+        SplitCommand {
+            current_map: map,
+            predecessor: RangeId::COORDINATOR,
+            predecessor_generation: 0,
+            left: SuccessorDescriptor {
+                range_id: RangeId::COORDINATOR,
+                endpoint: "left:7443".into(),
+                wal_generation: 1,
+                interval: RangeSpec::for_interval(
+                    RangeId::COORDINATOR,
+                    RangeKey::MIN,
+                    Some(split_at),
+                ),
+            },
+            right: SuccessorDescriptor {
+                range_id: RangeId::new(1),
+                endpoint: "right:7443".into(),
+                wal_generation: 1,
+                interval: RangeSpec::for_interval(RangeId::new(1), split_at, None),
+            },
+        },
+    )
+    .unwrap();
+    seed_control_operation(&bootstrap, tenant, &split).await;
+    let evidence = crabka_gres_control::SplitOperationEvidence {
+        manifest_key: Some("manifest".into()),
+        covered_offset: Some(8),
+        barrier_offset: Some(10),
+        tail_sha256: Some("tail".into()),
+        marker_digest: Some("markers".into()),
+    };
+    for phase in [
+        crabka_gres_control::SplitOperationPhase::Checkpointed,
+        crabka_gres_control::SplitOperationPhase::Paused,
+        crabka_gres_control::SplitOperationPhase::Restored,
+        crabka_gres_control::SplitOperationPhase::Activated,
+    ] {
+        advance_control_operation(
+            &bootstrap,
+            tenant,
+            "authority-op",
+            phase,
+            Some(evidence.clone()),
+        )
+        .await;
+    }
+    let authority = crabka_gres::live_split_intent_authority(
+        bootstrap,
+        crabka_gres_control::TenantName::try_from(tenant).unwrap(),
+    );
+    let exact = RangeControlReq {
+        tenant: tenant.into(),
+        range_id: RangeId::new(1),
+        generation: 1,
+        operation_id: "authority-op".into(),
+        operation: RangeControlOperation::Status,
+    };
+    assert!(
+        authority
+            .authorize_request(&exact, IntentAuthorizationContext::New)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let mut forged = exact;
+    forged.generation = 2;
+    assert!(
+        authority
+            .authorize_request(&forged, IntentAuthorizationContext::New)
+            .await
+            .unwrap()
+            .is_none()
+    );
+
+    let mut registry = crabka_gres_control::Registry::connect(&broker.listen_addr().to_string())
+        .await
+        .unwrap();
+    registry.ensure_topic(1).await.unwrap();
+    let operation = registry
+        .load_split_operation(tenant, "authority-op")
+        .await
+        .unwrap()
+        .unwrap();
+    let source_record = registry.get(tenant).await.unwrap().unwrap();
+    let target_record = source_record
+        .with_range_layout(operation.plan.as_ref().unwrap().target_layout.clone())
+        .unwrap();
+    registry
+        .replace_if_version(&target_record, Some(1))
+        .await
+        .unwrap();
+    let published = operation
+        .advance(
+            crabka_gres_control::SplitOperationPhase::LayoutPublished,
+            operation.attempts,
+            None,
+        )
+        .unwrap();
+    registry
+        .compare_and_swap_split_operation(Some(operation.revision), &published)
+        .await
+        .unwrap();
+    let exact_target = RangeControlReq {
+        generation: 1,
+        ..forged.clone()
+    };
+    assert!(
+        authority
+            .authorize_request(&exact_target, IntentAuthorizationContext::New)
+            .await
+            .unwrap()
+            .is_some()
+    );
+    let stale_source = RangeControlReq {
+        range_id: RangeId::COORDINATOR,
+        generation: 0,
+        ..exact_target
+    };
+    assert!(
+        authority
+            .authorize_request(&stale_source, IntentAuthorizationContext::New)
+            .await
+            .unwrap()
+            .is_none()
+    );
 }
 
 async fn drive_live_control_split(

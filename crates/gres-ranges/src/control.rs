@@ -810,7 +810,7 @@ fn request_matches_split_operation(
         && request.generation == intent.predecessor_generation;
     match &request.operation {
         RangeControlOperation::Status => {
-            source
+            (source && !operation.phase.expects_target_registry_layout())
                 || [intent.left.clone(), intent.right.clone()]
                     .iter()
                     .any(|successor| {

@@ -237,6 +237,17 @@ impl SplitOperationRecord {
     }
 }
 
+impl SplitOperationPhase {
+    /// Whether registry authority must already expose the sealed target layout.
+    #[must_use]
+    pub const fn expects_target_registry_layout(self) -> bool {
+        matches!(
+            self,
+            Self::LayoutPublished | Self::Retiring | Self::Resuming | Self::Completed
+        )
+    }
+}
+
 impl SplitOperationPlan {
     fn ensure_valid(&self, split: &SplitState) -> Result<(), crate::ControlError> {
         if self.source_record_version == 0 || self.routing_table_id == 0 {
@@ -301,9 +312,9 @@ const fn progress_rank(phase: SplitOperationPhase) -> Option<u8> {
         SplitOperationPhase::Running => Some(1),
         SplitOperationPhase::Checkpointed => Some(2),
         SplitOperationPhase::Paused => Some(3),
-        SplitOperationPhase::LayoutPublished => Some(4),
-        SplitOperationPhase::Restored => Some(5),
-        SplitOperationPhase::Activated => Some(6),
+        SplitOperationPhase::Restored => Some(4),
+        SplitOperationPhase::Activated => Some(5),
+        SplitOperationPhase::LayoutPublished => Some(6),
         SplitOperationPhase::Retiring => Some(7),
         SplitOperationPhase::Resuming => Some(8),
         SplitOperationPhase::Completed => Some(9),
