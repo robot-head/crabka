@@ -664,9 +664,26 @@ impl GenerationFencedRangeControl {
                                 digest: actual_digest,
                             },
                         ) if expected_markers == actual_markers
-                            && expected_left_markers == actual_left_markers
-                            && expected_right_markers == actual_right_markers
-                            && expected_digest == actual_digest =>
+                            && expected_digest == actual_digest
+                            && match (expected_left_markers, expected_right_markers) {
+                                (Some(expected_left), Some(expected_right)) => {
+                                    actual_left_markers.as_ref() == Some(expected_left)
+                                        && actual_right_markers.as_ref() == Some(expected_right)
+                                }
+                                (None, None) => match (actual_left_markers, actual_right_markers) {
+                                    (Some(actual_left), Some(actual_right)) => {
+                                        actual_left
+                                            .iter()
+                                            .chain(actual_right)
+                                            .eq(actual_markers.iter())
+                                            && actual_left.iter().all(|left| {
+                                                actual_right.iter().all(|right| left != right)
+                                            })
+                                    }
+                                    _ => false,
+                                },
+                                _ => false,
+                            } =>
                         {
                             true
                         }

@@ -616,8 +616,8 @@ mod tests {
             },
             RangeControlResp::Markers {
                 markers: vec![],
-                left_markers: vec![],
-                right_markers: vec![],
+                left_markers: Some(vec![]),
+                right_markers: Some(vec![]),
                 digest: "markers".into(),
             },
             RangeControlResp::Applied,
@@ -703,8 +703,8 @@ mod tests {
             &staged,
             RangeControlResp::Markers {
                 markers: vec![],
-                left_markers: vec![],
-                right_markers: vec![],
+                left_markers: Some(vec![]),
+                right_markers: Some(vec![]),
                 digest: "markers".into(),
             },
         )
@@ -875,8 +875,8 @@ mod tests {
                         running.clone(),
                         RangeControlResp::Markers {
                             markers: vec![],
-                            left_markers: vec![],
-                            right_markers: vec![],
+                            left_markers: Some(vec![]),
+                            right_markers: Some(vec![]),
                             digest: "markers".into(),
                         },
                     )
@@ -886,8 +886,8 @@ mod tests {
                         &running,
                         RangeControlResp::Markers {
                             markers: vec![],
-                            left_markers: vec![],
-                            right_markers: vec![],
+                            left_markers: Some(vec![]),
+                            right_markers: Some(vec![]),
                             digest: "markers".into(),
                         },
                     )
@@ -941,8 +941,8 @@ mod tests {
             },
             RangeControlResp::Markers {
                 markers: vec![],
-                left_markers: vec![],
-                right_markers: vec![],
+                left_markers: Some(vec![]),
+                right_markers: Some(vec![]),
                 digest: "markers".into(),
             },
             RangeControlResp::Applied,
@@ -993,8 +993,8 @@ mod tests {
             },
             RangeControlResp::Markers {
                 markers: vec![],
-                left_markers: vec![],
-                right_markers: vec![],
+                left_markers: Some(vec![]),
+                right_markers: Some(vec![]),
                 digest: "markers".into(),
             },
             RangeControlResp::Applied,
@@ -1043,8 +1043,8 @@ mod tests {
             },
             RangeControlResp::Markers {
                 markers: vec![],
-                left_markers: vec![],
-                right_markers: vec![],
+                left_markers: Some(vec![]),
+                right_markers: Some(vec![]),
                 digest: "markers".into(),
             },
             RangeControlResp::Applied,

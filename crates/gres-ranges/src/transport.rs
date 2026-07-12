@@ -226,8 +226,10 @@ pub enum RangeControlResp {
     },
     Markers {
         markers: Vec<WireInDoubtMarker>,
-        left_markers: Vec<WireInDoubtMarker>,
-        right_markers: Vec<WireInDoubtMarker>,
+        #[serde(default)]
+        left_markers: Option<Vec<WireInDoubtMarker>>,
+        #[serde(default)]
+        right_markers: Option<Vec<WireInDoubtMarker>>,
         digest: String,
     },
 }
@@ -1695,8 +1697,8 @@ mod tests {
                         rowid: 12,
                     },
                 }],
-                left_markers: vec![],
-                right_markers: vec![],
+                left_markers: Some(vec![]),
+                right_markers: Some(vec![]),
                 digest: "fixture-digest".into(),
             },
         ];
@@ -1708,6 +1710,22 @@ mod tests {
                 response
             );
         }
+    }
+
+    #[test]
+    fn legacy_marker_response_decodes_without_successor_partitions() {
+        let response: RangeControlResp =
+            serde_json::from_str(r#"{"result":"markers","markers":[],"digest":"legacy-digest"}"#)
+                .expect("decode durable pre-partition marker receipt");
+        assert_eq!(
+            response,
+            RangeControlResp::Markers {
+                markers: vec![],
+                left_markers: None,
+                right_markers: None,
+                digest: "legacy-digest".into(),
+            }
+        );
     }
 
     #[derive(Default)]
