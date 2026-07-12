@@ -8,6 +8,144 @@ use crate::ControlError;
 
 /// The compacted Kafka topic that stores whole-tenant registry snapshots.
 pub const TENANT_REGISTRY_TOPIC: &str = "__gres_tenants";
+
+/// Ordered durable progress for one registry-owned split initiation.
+#[derive(
+    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
+)]
+#[serde(rename_all = "snake_case", deny_unknown_fields)]
+pub enum SplitOperationPhase {
+    /// Immutable split intent has been accepted by the registry.
+    Initiated,
+    /// At least one execution attempt has started.
+    Running,
+    /// The latest attempt failed and may be retried.
+    Failed,
+    /// The split completed successfully.
+    Completed,
+}
+
+/// Durable registry journal record for initiating an explicit two-successor split.
+#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SplitOperationRecord {
+    /// Tenant whose range layout is being split.
+    pub tenant: TenantName,
+    /// Caller-chosen idempotency identity.
+    pub operation_id: String,
+    /// CAS revision, beginning at zero.
+    pub revision: u64,
+    /// Immutable explicit left/right successor intent.
+    pub split: SplitState,
+    /// Monotone operation phase.
+    pub phase: SplitOperationPhase,
+    /// Monotone number of execution attempts begun.
+    pub attempts: u32,
+    /// Append-only failure history.
+    pub errors: Vec<String>,
+}
+
+impl SplitOperationRecord {
+    /// Construct a revision-zero initiation record.
+    pub fn new(
+        tenant: TenantName,
+        operation_id: impl Into<String>,
+        split: SplitState,
+    ) -> Result<Self, crate::ControlError> {
+        let record = Self {
+            tenant,
+            operation_id: operation_id.into(),
+            revision: 0,
+            split,
+            phase: SplitOperationPhase::Initiated,
+            attempts: 0,
+            errors: Vec::new(),
+        };
+        record.ensure_valid()?;
+        Ok(record)
+    }
+
+    /// Build the next revision while preserving monotone progress.
+    pub fn advance(
+        &self,
+        phase: SplitOperationPhase,
+        attempts: u32,
+        error: Option<String>,
+    ) -> Result<Self, crate::ControlError> {
+        let mut next = self.clone();
+        next.revision = next.revision.checked_add(1).ok_or_else(|| {
+            crate::ControlError::invalid_field("split_operation.revision", "must not overflow")
+        })?;
+        next.phase = phase;
+        next.attempts = attempts;
+        if let Some(error) = error {
+            next.errors.push(error);
+        }
+        next.ensure_monotone_extension(self)?;
+        Ok(next)
+    }
+
+    pub(crate) fn ensure_valid(&self) -> Result<(), crate::ControlError> {
+        if self.operation_id.is_empty() {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.operation_id",
+                "must not be empty",
+            ));
+        }
+        if self.errors.iter().any(String::is_empty) {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.errors",
+                "entries must not be empty",
+            ));
+        }
+        self.split.ensure_intent_valid()?;
+        let phase_shape = match self.phase {
+            SplitOperationPhase::Initiated => {
+                self.revision == 0 && self.attempts == 0 && self.errors.is_empty()
+            }
+            SplitOperationPhase::Running | SplitOperationPhase::Completed => {
+                self.revision > 0 && self.attempts > 0
+            }
+            SplitOperationPhase::Failed => {
+                self.revision > 0 && self.attempts > 0 && !self.errors.is_empty()
+            }
+        };
+        if !phase_shape || self.errors.len() > self.attempts as usize {
+            return Err(crate::ControlError::invalid_field(
+                "split_operation.progress",
+                "phase, attempts, and errors are inconsistent",
+            ));
+        }
+        Ok(())
+    }
+
+    pub(crate) fn ensure_monotone_extension(
+        &self,
+        prior: &Self,
+    ) -> Result<(), crate::ControlError> {
+        self.ensure_valid()?;
+        let revision = prior.revision.checked_add(1);
+        let immutable = self.tenant == prior.tenant
+            && self.operation_id == prior.operation_id
+            && self.split == prior.split;
+        let errors_extend = self.errors.starts_with(&prior.errors);
+        if immutable
+            && revision == Some(self.revision)
+            && self.phase >= prior.phase
+            && prior.phase != SplitOperationPhase::Completed
+            && self.attempts >= prior.attempts
+            && errors_extend
+        {
+            Ok(())
+        } else {
+            Err(crate::ControlError::SplitOperationConflict {
+                tenant: prior.tenant.clone(),
+                operation_id: prior.operation_id.clone(),
+                reason: "update is not a monotone extension".to_string(),
+            })
+        }
+    }
+}
 /// Prefix for the ACL-scoped per-tenant config topic read by the compute.
 pub const TENANT_CONFIG_TOPIC_PREFIX: &str = "__gres_cfg.";
 
@@ -309,7 +447,8 @@ pub struct RangeBoundary {
 }
 
 /// Parsed request to split one registry range layout entry.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct RangeLayoutSplit {
     /// Existing range id that owns `split_key`.
     pub source_range_id: u32,
@@ -320,6 +459,49 @@ pub struct RangeLayoutSplit {
     /// Fresh right replacement placement.
     pub right: RangeLayoutEntry,
 }
+
+impl RangeLayoutSplit {
+    fn ensure_intent_valid(&self) -> Result<(), ControlError> {
+        if self.left.range_id == self.right.range_id
+            || (self.source_range_id == self.left.range_id && self.source_range_id != 0)
+            || self.source_range_id == self.right.range_id
+        {
+            return Err(ControlError::invalid_field(
+                "split_operation.split.range_id",
+                "two distinct successors must differ from the source range id",
+            ));
+        }
+        if self.left.endpoint.is_empty() || self.right.endpoint.is_empty() {
+            return Err(ControlError::invalid_field(
+                "split_operation.split.endpoint",
+                "successor endpoints must not be empty",
+            ));
+        }
+        if self.left.wal_generation <= self.predecessor_generation
+            || self.right.wal_generation <= self.predecessor_generation
+        {
+            return Err(ControlError::invalid_field(
+                "split_operation.split.wal_generation",
+                "successor generations must fence the predecessor generation",
+            ));
+        }
+        if self.left.end_key.is_none()
+            || self.left.lifecycle != RangeLifecycle::Serving
+            || self.right.lifecycle != RangeLifecycle::Serving
+            || self.left.retirement.is_some()
+            || self.right.retirement.is_some()
+        {
+            return Err(ControlError::invalid_field(
+                "split_operation.split.successors",
+                "successors must be fresh serving placements and the left must be bounded",
+            ));
+        }
+        Ok(())
+    }
+}
+
+/// Durable explicit two-successor split state used by the initiation journal.
+pub type SplitState = RangeLayoutSplit;
 
 /// Parsed request to merge two adjacent registry range layout entries.
 #[derive(Debug, Clone, PartialEq, Eq)]
