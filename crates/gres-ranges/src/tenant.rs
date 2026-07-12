@@ -330,6 +330,58 @@ pub struct MultiRangeTenant {
 }
 
 impl MultiRangeTenant {
+    #[must_use]
+    pub fn control_range_map(&self) -> RangeMap {
+        self.inner.serving.load().range_map.clone()
+    }
+
+    #[must_use]
+    pub fn control_range_is_hosted(&self, range_id: RangeId) -> bool {
+        self.inner.serving.load().engines.contains_key(&range_id)
+    }
+
+    /// Snapshot pending timestamp descriptors as split-transfer in-doubt markers.
+    pub fn control_in_doubt_markers(
+        &self,
+        interval_start: RangeKey,
+        interval_end: Option<RangeKey>,
+    ) -> Result<Vec<crate::InDoubtMarker>, SplitError> {
+        let serving = self.inner.serving.load_full();
+        let coordinator = serving
+            .engines
+            .get(&RangeId::COORDINATOR)
+            .ok_or_else(|| SplitError::Hook("range zero is not hosted".into()))?;
+        let routing_by_physical = crabka_pgcatalog::list_tables(coordinator.catalog_kv())
+            .map_err(|error| SplitError::Hook(format!("list marker tables: {error}")))?
+            .into_iter()
+            .map(|table| (table.id, routing_table_id(&table.name)))
+            .collect::<BTreeMap<_, _>>();
+        let mut markers = Vec::new();
+        for descriptor in coordinator
+            .timestamp_transaction_descriptors()
+            .map_err(|error| SplitError::Hook(format!("read timestamp descriptors: {error:?}")))?
+        {
+            if descriptor.decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+                continue;
+            }
+            for operation in descriptor.operations {
+                let Some(table_id) = routing_by_physical.get(&operation.table_id).copied() else {
+                    continue;
+                };
+                let key = RangeKey::new(table_id, operation.rowid);
+                if key >= interval_start && interval_end.is_none_or(|end| key < end) {
+                    markers.push(crate::InDoubtMarker {
+                        transaction_id: descriptor.start_ts.get(),
+                        key,
+                    });
+                }
+            }
+        }
+        markers.sort_unstable_by_key(|marker| (marker.transaction_id, marker.key));
+        markers.dedup();
+        Ok(markers)
+    }
+
     /// Settle durable ordinary 2PC participants before publishing SQL readiness.
     pub async fn recover_ordinary_globals_before_serving(&self) -> Result<(), ExecError> {
         let serving = self.inner.serving.load_full();
