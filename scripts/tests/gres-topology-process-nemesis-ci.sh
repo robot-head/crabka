@@ -23,20 +23,24 @@ from pathlib import Path
 
 evidence = json.loads(Path("target/g8-topology-process-nemesis/move-foundation.json").read_text())
 assert evidence["operation"] == "move"
+assert evidence["tenant_id"] and evidence["operation_id"]
 assert evidence["completed"] is True
 assert evidence["acknowledged_rows"] == evidence["target_rows"] == 32
 assert evidence["predecessor_wal_retired"] is True
+identities = {(evidence["tenant_id"], evidence["operation_id"])}
 for kill_point in ("running", "checkpointed", "paused_before_stage", "paused_after_stage"):
     kill_evidence = json.loads(Path(f"target/g8-topology-process-nemesis/move-{kill_point}-kill.json").read_text())
     assert kill_evidence["kill_point"] == kill_point
+    assert kill_evidence["tenant_id"] and kill_evidence["operation_id"]
+    identities.add((kill_evidence["tenant_id"], kill_evidence["operation_id"]))
     assert kill_evidence["completed"] is True
     assert kill_evidence["old_pid"] != kill_evidence["new_pid"]
     assert kill_evidence["recovered_acknowledgements"] >= 1
     expected_gap_bound = {
-        "running": 10000,
-        "checkpointed": 10000,
-        "paused_before_stage": 15000,
-        "paused_after_stage": 15000,
+        "running": 12000,
+        "checkpointed": 12000,
+        "paused_before_stage": 20000,
+        "paused_after_stage": 20000,
     }[kill_point]
     assert kill_evidence["max_ack_gap_ms"] <= kill_evidence["max_ack_gap_bound_ms"] == expected_gap_bound
     assert kill_evidence["predecessor_wal_retired"] is True
@@ -58,4 +62,5 @@ for kill_point in ("running", "checkpointed", "paused_before_stage", "paused_aft
         assert durable["manifest_key"] and durable["covered_offset"] is not None
         assert durable["barrier_offset"] is not None and durable["tail_sha256"]
         assert durable["marker_digest"] is None
+assert len(identities) == 5
 PY

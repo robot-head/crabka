@@ -15,9 +15,13 @@ The process nemesis kills and replaces the real GRES child at four exact durable
 
 Every run issued exactly one delete request, and the request named only the exact predecessor topic. No replay except `BeforeDelete` reissued deletion. All runs preserved the unrelated sentinel topic and observed an ACK after `Completed` became durable.
 
-## Three-run distributions
+At `Resuming`, the harness independently replays the sealed `RetirePredecessor` request and requires `AlreadyApplied` from the durable completed control receipt both before SIGKILL and after restart. Earlier boundaries do not issue this mutating probe.
+
+## Historical diagnostic distributions
 
 Values are `maximum acknowledged-write gap / operation duration`, in milliseconds.
+
+These early repetitions reused tenant and operation identities against a persistent broker. They are retained only as diagnostic timing history and are not the final acceptance artifacts.
 
 | Kill point | Run 1 | Run 2 | Run 3 | Maximum gap |
 |---|---:|---:|---:|---:|
@@ -27,6 +31,19 @@ Values are `maximum acknowledged-write gap / operation duration`, in millisecond
 | `resuming` | 9,652 / 41,855 | 9,067 / 42,122 | 9,856 / 42,156 | 9,856 |
 
 The enforced retirement bound is 12,000 ms. The largest observed gap was 10,549 ms, leaving 1,451 ms (13.8 percent) headroom and matching the established cutover bound.
+
+## Authoritative unique-identity validation
+
+After hardening every invocation with a timestamp-and-PID tenant/operation suffix and asserting the operation was absent before CLI initiation, the dedicated shard passed all four cases and its uniqueness validator:
+
+| Kill point | ACK gap | Operation duration | Receipt replay before/after restart |
+|---|---:|---:|---|
+| `retiring_before_delete` | 9,764 ms | 41,348 ms | false / false |
+| `retiring_after_delete` | 9,668 ms | 43,887 ms | false / false |
+| `retiring_parked` | 10,173 ms | 43,731 ms | false / false |
+| `resuming` | 9,662 ms | 41,967 ms | true / true |
+
+All authoritative gaps remained below 12,000 ms. The Resuming probes received `AlreadyApplied` from the exact durable completed `RetirePredecessor` receipt both before SIGKILL and after restart.
 
 ## Recovery findings
 

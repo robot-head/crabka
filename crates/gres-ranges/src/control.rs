@@ -562,11 +562,6 @@ impl GenerationFencedRangeControl {
             return rejected("wrong_tenant", "control request belongs to another tenant");
         }
         let expected_generations = self.generations.get(&request.range_id);
-        if expected_generations.is_none()
-            && !matches!(request.operation, RangeControlOperation::Status)
-        {
-            return rejected("wrong_range", "range is not hosted by this compute");
-        }
         if request.operation_id.is_empty() {
             return rejected("invalid_operation_id", "operation_id must not be empty");
         }
@@ -576,6 +571,24 @@ impl GenerationFencedRangeControl {
             Ok(existing) => existing,
             Err(message) => return rejected("receipt_store", message),
         };
+        let completed_exact_retire_replay = existing.as_ref().is_some_and(|receipt| {
+            receipt.request == request
+                && receipt.request_digest == digest
+                && matches!(
+                    receipt.result,
+                    Some(RangeControlResp::Applied | RangeControlResp::AlreadyApplied)
+                )
+                && request.operation == RangeControlOperation::RetirePredecessor
+        });
+        if expected_generations.is_none()
+            && !matches!(request.operation, RangeControlOperation::Status)
+            && !completed_exact_retire_replay
+        {
+            return rejected("wrong_range", "range is not hosted by this compute");
+        }
+        if completed_exact_retire_replay {
+            return RangeControlResp::AlreadyApplied;
+        }
         let authorization_context = match existing
             .as_ref()
             .and_then(|receipt| receipt.result.as_ref())
@@ -712,12 +725,20 @@ impl GenerationFencedRangeControl {
         let expected = receipt.revision;
         receipt.revision += 1;
         receipt.result = Some(response.clone());
+        let completed = receipt.clone();
         match self
             .receipts
             .compare_and_swap(key, Some(expected), receipt)
             .await
         {
-            Ok(true) => response,
+            Ok(true) => match self.receipts.load(key).await {
+                Ok(Some(actual)) if actual == completed => response,
+                Ok(actual) => rejected(
+                    "receipt_store",
+                    format!("completed control receipt failed read-after-write: {actual:?}"),
+                ),
+                Err(message) => rejected("receipt_store", message),
+            },
             Ok(false) => rejected("receipt_race", "control completion raced another writer"),
             Err(message) => rejected("receipt_store", message),
         }
@@ -1268,6 +1289,18 @@ mod tests {
             &record,
             IntentAuthorizationContext::New,
         ));
+        record.phase = crabka_gres_control::SplitOperationPhase::Resuming;
+        assert!(request_matches_split_operation(
+            &RangeControlReq {
+                tenant: "tenant-a".into(),
+                range_id: RangeId::new(1),
+                generation: 4,
+                operation_id: "move-1".into(),
+                operation: RangeControlOperation::RetirePredecessor,
+            },
+            &record,
+            IntentAuthorizationContext::CompletedReplay,
+        ));
         let authorized = AuthorizedSplitIntent::from_record(record).unwrap();
         assert_eq!(authorized.split().operation, crate::SplitOperation::Move);
         assert!(authorized.split().right.is_none());
@@ -1413,6 +1446,100 @@ mod tests {
             matches!(control.handle(mismatch).await, RangeControlResp::Rejected { code, .. } if code == "operation_mismatch")
         );
         assert_eq!(calls.load(Ordering::SeqCst), 2);
+    }
+
+    #[tokio::test]
+    async fn completed_exact_receipt_replays_after_range_is_no_longer_hosted() {
+        let store = Arc::new(MemoryRangeControlReceiptStore::default());
+        let calls = Arc::new(AtomicUsize::new(0));
+        let mut original = request("tenant-a", 7, "retired");
+        original.operation = RangeControlOperation::RetirePredecessor;
+        let before = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            7,
+            Box::new(CountingExecutor {
+                calls: Arc::clone(&calls),
+                response: RangeControlResp::Applied,
+            }),
+            allow_authority(),
+        )
+        .with_receipt_store(store.clone());
+        assert_eq!(before.handle(original.clone()).await, RangeControlResp::Applied);
+        assert_eq!(
+            before.handle(original.clone()).await,
+            RangeControlResp::AlreadyApplied,
+            "stale static generation membership cannot block an exact cached retire replay"
+        );
+
+        let after = GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(2),
+            9,
+            Box::new(CountingExecutor {
+                calls: Arc::clone(&calls),
+                response: RangeControlResp::Applied,
+            }),
+            allow_authority(),
+        )
+        .with_receipt_store(store);
+        assert_eq!(
+            after.handle(original.clone()).await,
+            RangeControlResp::AlreadyApplied
+        );
+
+        let mut forged = original;
+        forged.operation = RangeControlOperation::PauseAtCoveredOffset {
+            manifest_key: "forged".into(),
+            covered_offset: 1,
+        };
+        assert!(matches!(
+            after.handle(forged).await,
+            RangeControlResp::Rejected { code, .. } if code == "wrong_range"
+        ));
+        assert!(matches!(
+            after.handle(request("tenant-a", 7, "new")).await,
+            RangeControlResp::Rejected { code, .. } if code == "wrong_range"
+        ));
+
+        for result in [None, Some(RangeControlResp::Checkpoint {
+            generation: 7,
+            covered_offset: 1,
+            manifest_key: "wrong-result".into(),
+        })] {
+            let store = Arc::new(MemoryRangeControlReceiptStore::default());
+            let mut request = request("tenant-a", 7, "not-completed-applied");
+            request.operation = RangeControlOperation::RetirePredecessor;
+            let receipt = RangeControlReceipt {
+                request: request.clone(),
+                request_digest: request_digest(&request),
+                generation: request.generation,
+                revision: 1,
+                result,
+            };
+            assert!(
+                store
+                    .compare_and_swap(&receipt_key(&request), None, receipt)
+                    .await
+                    .expect("seed receipt")
+            );
+            let control = GenerationFencedRangeControl::new(
+                "tenant-a",
+                RangeId::new(2),
+                9,
+                Box::new(CountingExecutor {
+                    calls: Arc::clone(&calls),
+                    response: RangeControlResp::Applied,
+                }),
+                allow_authority(),
+            )
+            .with_receipt_store(store);
+            assert!(matches!(
+                control.handle(request).await,
+                RangeControlResp::Rejected { code, .. } if code == "wrong_range"
+            ));
+        }
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     #[tokio::test]

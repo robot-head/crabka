@@ -22,9 +22,12 @@ expected = {
     "activated_after_tenant_cas": ("Activated", "target", "Parking", 3, 12000),
     "layout_published": ("LayoutPublished", "target", "Parking", 3, 12000),
 }
+identities = set()
 for kill_point, (phase, layout, retirement, record_version, gap_bound) in expected.items():
     evidence = json.loads(Path(f"target/g8-topology-process-nemesis/cutover-{kill_point}-kill.json").read_text())
     assert evidence["operation"] == "move" and evidence["kill_point"] == kill_point
+    assert evidence["tenant_id"] and evidence["operation_id"]
+    identities.add((evidence["tenant_id"], evidence["operation_id"]))
     assert evidence["completed"] is True and evidence["old_pid"] != evidence["new_pid"]
     assert evidence["durable_phase"] == phase
     durable = evidence["durable_evidence"]
@@ -41,4 +44,5 @@ for kill_point, (phase, layout, retirement, record_version, gap_bound) in expect
     assert evidence["marker_digest"] == durable["marker_digest"]
     if kill_point == "activated_after_tenant_cas":
         assert evidence["ambiguous_cutover_advanced_without_republish"] is True
+assert len(identities) == len(expected)
 PY

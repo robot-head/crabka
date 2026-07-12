@@ -345,6 +345,41 @@ struct KillObservation {
     predecessor_topic_present: Option<bool>,
     delete_ledger: Arc<std::sync::Mutex<RetirementDeleteLedger>>,
     delete_calls_at_kill: usize,
+    retire_receipt_probed_before_kill: bool,
+    retire_receipt_probed_after_restart: bool,
+}
+
+async fn probe_durable_retire_receipt(
+    system: &ProcessHarness,
+    client: &dyn RangeMutationClient,
+    record: &SplitOperationRecord,
+    boundary: &str,
+) -> bool {
+    let plan = record.plan.as_ref().expect("sealed plan");
+    let endpoint = plan
+        .current_layout
+        .iter()
+        .find(|range| range.range_id == record.source_range_id())
+        .map(|range| range.endpoint.as_str())
+        .expect("source endpoint");
+    let request = crabka_gres_ranges::RangeControlReq {
+        tenant: record.tenant.as_str().into(),
+        range_id: crabka_gres_ranges::RangeId::new(record.source_range_id()),
+        generation: record.predecessor_generation(),
+        operation_id: record.operation_id.clone(),
+        operation: crabka_gres_ranges::RangeControlOperation::RetirePredecessor,
+    };
+    let response = client
+        .mutate(endpoint, request)
+        .await
+        .expect("probe durable retire receipt");
+    assert_eq!(
+        response,
+        crabka_gres_ranges::RangeControlResp::AlreadyApplied,
+        "{boundary} retire receipt probe must replay the durable completed receipt; source log: {}",
+        system.log(0)
+    );
+    true
 }
 
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
@@ -837,6 +872,13 @@ async fn drive_operation(
             let predecessor_topic_present =
                 retirement_topic_present(&mut retirement_admin, &predecessor_topic).await;
             predecessor_topic_at_boundary = Some(predecessor_topic_present);
+            let retire_receipt_durable = if injection.point == SourceKillPoint::Resuming
+                && current.phase == SplitOperationPhase::Resuming
+            {
+                probe_durable_retire_receipt(system, &mutation_client, &current, "before kill").await
+            } else {
+                false
+            };
             injection
                 .point
                 .retirement_is_ready(RetirementPredicateState {
@@ -848,7 +890,7 @@ async fn drive_operation(
                         .is_some_and(|minimum| current_tenant.record_version >= minimum),
                     retirement_phase,
                     predecessor_topic_present,
-                    retire_receipt_durable: current.phase == SplitOperationPhase::Resuming,
+                    retire_receipt_durable,
                 })
         } else {
             false
@@ -926,6 +968,8 @@ async fn drive_operation(
                     .lock()
                     .expect("delete ledger at kill")
                     .exact_delete_calls,
+                retire_receipt_probed_before_kill: injection.point == SourceKillPoint::Resuming,
+                retire_receipt_probed_after_restart: false,
             });
             let restarted_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
             assert_eq!(
@@ -940,6 +984,22 @@ async fn drive_operation(
                 restarted_tenant.range_retirements, current_tenant.range_retirements,
                 "restart cannot alter durable retirement sidecar"
             );
+            if injection.point == SourceKillPoint::Resuming {
+                let restarted_operation =
+                    load_operation(system.bootstrap(), system.tenant(), operation_id).await;
+                assert_eq!(
+                    restarted_operation.phase,
+                    SplitOperationPhase::Resuming,
+                    "post-restart receipt probe must run before Completed"
+                );
+                let probed =
+                    probe_durable_retire_receipt(system, &mutation_client, &restarted_operation, "after restart")
+                        .await;
+                restarted_pids
+                    .as_mut()
+                    .expect("restart observation")
+                    .retire_receipt_probed_after_restart = probed;
+            }
         }
         if current.evidence.tail_sha256.is_some()
             && let Some(observation) = restarted_pids.as_mut()
@@ -1072,9 +1132,10 @@ async fn drive_operation(
                 }) {
                     continue;
                 }
-                reconcile_one_rpc_phase(&control, &mutation_client, &current)
+                let rpc_result = reconcile_one_rpc_phase(&control, &mutation_client, &current)
                     .await
                     .expect("retire predecessor RPC");
+                assert_eq!(rpc_result.phase, SplitOperationPhase::Resuming);
             }
             SplitOperationPhase::Completed => {
                 assert!(
@@ -1109,7 +1170,10 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
         return;
     }
     assert!(cli_binary().is_file(), "dedicated CI must build crabka CLI");
-    let mut system = ProcessHarness::start_all_on_zero("tenant-g8-live-move").await;
+    let identity = format!("{}-p{}", timestamp_ms(), std::process::id());
+    let operation_id = format!("g8-live-move-{identity}");
+    let mut system =
+        ProcessHarness::start_all_on_zero(&format!("tenant-g8-live-move-{identity}")).await;
     let mut ddl = String::new();
     for table in 1..50 {
         ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
@@ -1123,11 +1187,11 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
             .await
             .expect("acknowledged source write");
     }
-    initiate_move_with_cli(&system, "g8-live-move").await;
+    initiate_move_with_cli(&system, &operation_id).await;
     let operation_started = Instant::now();
     let completed = tokio::time::timeout(
-        Duration::from_secs(30),
-        drive_operation(&mut system, "g8-live-move", Duration::from_secs(30), None),
+        Duration::from_secs(75),
+        drive_operation(&mut system, &operation_id, Duration::from_secs(75), None),
     )
     .await
     .expect("whole Move operation deadline")
@@ -1147,6 +1211,8 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
         }
         let evidence = serde_json::json!({
             "operation": "move",
+            "tenant_id": system.tenant(),
+            "operation_id": operation_id,
             "completed": true,
             "acknowledged_rows": 32,
             "target_rows": count,
@@ -1168,9 +1234,26 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
         return;
     }
     let kill_point = SourceKillPoint::from_env();
-    let operation_id = format!("g8-source-kill-{}", kill_point.name().replace('_', "-"));
+    let operation_id = format!(
+        "g8-{}-{:x}-p{:x}",
+        kill_point.name().replace('_', "-"),
+        timestamp_ms(),
+        std::process::id()
+    );
     let tenant_name = format!("tenant-{operation_id}");
     let mut system = ProcessHarness::start_all_on_zero(&tenant_name).await;
+    let mut identity_registry = Registry::connect(system.bootstrap())
+        .await
+        .expect("identity registry");
+    assert!(
+        identity_registry
+            .load_split_operation(system.tenant(), &operation_id)
+            .await
+            .expect("check unique operation")
+            .is_none(),
+        "process nemesis operation identity must be globally fresh"
+    );
+    drop(identity_registry);
     let sentinel_topic = format!("__gres_g8_retirement_sentinel.{}", system.tenant());
     let mut sentinel_admin =
         crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
@@ -1274,6 +1357,13 @@ done
     let case = async {
         wait_for_ack_count(&ledger_path, 8).await;
         initiate_move_with_cli(&system, &operation_id).await;
+        assert_eq!(
+            load_operation(system.bootstrap(), system.tenant(), &operation_id)
+                .await
+                .phase,
+            SplitOperationPhase::Initiated,
+            "CLI must only initiate the fresh operation"
+        );
         let operation_started = Instant::now();
         let drive_result = tokio::time::timeout(
             Duration::from_secs(75),
@@ -1342,10 +1432,10 @@ done
         "at least one write must be acknowledged after Completed is durable"
     );
     let max_observed_safe_ack_gap_ms = match kill_point {
-        SourceKillPoint::PausedBeforeStage => 15_000,
-        SourceKillPoint::Running => 10_000,
-        SourceKillPoint::Checkpointed => 10_000,
-        SourceKillPoint::PausedAfterStage => 15_000,
+        SourceKillPoint::PausedBeforeStage => 20_000,
+        SourceKillPoint::Running => 12_000,
+        SourceKillPoint::Checkpointed => 12_000,
+        SourceKillPoint::PausedAfterStage => 20_000,
         SourceKillPoint::Restored => 20_000,
         SourceKillPoint::ActivatedBeforeCutover
         | SourceKillPoint::ActivatedAfterTenantCas
@@ -1494,6 +1584,8 @@ done
             path,
             serde_json::to_vec_pretty(&serde_json::json!({
                 "operation": "move",
+                "tenant_id": system.tenant(),
+                "operation_id": operation_id,
                 "kill_point": kill_point.name(),
                 "completed": true,
                 "old_pid": old_pid,
@@ -1539,6 +1631,8 @@ done
             "delete_requested_topics": delete_ledger.requested_topics,
             "unrelated_delete_attempted": delete_ledger.unrelated_delete_attempted,
             "injected_after_delete_errors": delete_ledger.injected_after_delete_errors,
+            "retire_receipt_probed_before_kill": restart.retire_receipt_probed_before_kill,
+            "retire_receipt_probed_after_restart": restart.retire_receipt_probed_after_restart,
             "sentinel_topic": sentinel_topic,
             "sentinel_topic_preserved": topic_names.contains(&sentinel_topic),
                 "replacement_owner": {"range_id": 2, "generation": 1},

@@ -22,11 +22,14 @@ expected = {
     "retiring_parked": ("Retiring", "Parked", 4, False, 1, 0, 0),
     "resuming": ("Resuming", "Parked", 4, False, 1, 0, 0),
 }
+identities = set()
 for kill_point, values in expected.items():
     phase, retirement, version, topic_at_kill, calls_at_kill, replay_calls, injected = values
     path = Path(f"target/g8-topology-process-nemesis/retirement-{kill_point}-kill.json")
     evidence = json.loads(path.read_text())
     assert evidence["operation"] == "move" and evidence["kill_point"] == kill_point
+    assert evidence["tenant_id"] and evidence["operation_id"]
+    identities.add((evidence["tenant_id"], evidence["operation_id"]))
     assert evidence["completed"] is True and evidence["old_pid"] != evidence["new_pid"]
     assert evidence["durable_phase"] == phase
     assert evidence["durable_tenant_layout"] == "target"
@@ -37,6 +40,9 @@ for kill_point, values in expected.items():
     assert evidence["delete_calls_at_kill"] == calls_at_kill
     assert evidence["replay_delete_calls"] == replay_calls
     assert evidence["injected_after_delete_errors"] == injected
+    receipt_expected = kill_point == "resuming"
+    assert evidence["retire_receipt_probed_before_kill"] is receipt_expected
+    assert evidence["retire_receipt_probed_after_restart"] is receipt_expected
     assert evidence["unrelated_delete_attempted"] is False
     assert evidence["delete_requested_topics"] == [
         evidence["sentinel_topic"].replace("__gres_g8_retirement_sentinel.", "__gres_wal.") + ".r1"
@@ -50,4 +56,5 @@ for kill_point, values in expected.items():
     assert evidence["post_completed_ack"] is True
     assert evidence["acknowledged_rows"] > evidence["acknowledgements_at_completion"]
     assert evidence["max_ack_gap_ms"] <= evidence["max_ack_gap_bound_ms"] == 12000
+assert len(identities) == len(expected)
 PY
