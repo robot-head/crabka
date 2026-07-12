@@ -7,7 +7,10 @@ use std::{
 use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
-use crabka_gres_ranges::{RangeId, TableId};
+use crabka_gres_ranges::{
+    MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SuccessorDescriptor, TableId,
+    TableTransferRequest, TenantName,
+};
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
 use crabka_protocol::owned::create_topics_request::{CreatableTopic, CreateTopicsRequest};
@@ -551,20 +554,29 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .await
         .expect_err("write while paused must be rejected");
 
-    let successor = transfer
-        .stage_empty_successor(
-            crabka_gres_ranges::TableTransferRequest {
-                target_range,
-                routing_table_id,
-                physical_table_id: table_id,
-            },
+    let other_target = RangeId::new(target_range.as_u32() + 1);
+    let successors = transfer
+        .stage_successors(
+            [
+                crabka_gres_ranges::TableTransferRequest {
+                    target_range,
+                    routing_table_id,
+                    physical_table_id: table_id,
+                },
+                crabka_gres_ranges::TableTransferRequest {
+                    target_range: other_target,
+                    routing_table_id,
+                    physical_table_id: table_id,
+                },
+            ],
             &manifest,
             &tail,
             barrier,
         )
         .await
-        .expect("stage populated successor");
-    assert_eq!(successor.range_id, target_range);
+        .expect("stage populated successors");
+    assert_eq!(successors.left.range_id, target_range);
+    assert_eq!(successors.right.range_id, other_target);
     let hosted_error = runtime
         .inspect_hosted_range_kv(target_range)
         .expect_err("staged successor must be absent from the hosted range map");
@@ -574,11 +586,11 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             &crabka_gres_ranges::TenantName::parse(tenant).expect("tenant"),
             target_range,
             0,
-            successor.bootstrap_checkpoint.covered_offset,
+            successors.left.bootstrap_checkpoint.covered_offset,
             0,
         ));
     assert_eq!(
-        successor.bootstrap_checkpoint.manifest_key,
+        successors.left.bootstrap_checkpoint.manifest_key,
         expected_bootstrap_manifest
     );
 
@@ -751,8 +763,51 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
         .id;
     assert_ne!(u64::from(physical_table_id), 10);
 
+    let current_map = RangeMap::new(
+        TenantName::parse("runtime-physical-t10").expect("tenant"),
+        MapEpoch::new(1),
+        vec![
+            RangeSpec::new(RangeId::COORDINATOR, TableId::ZERO, Some(TableId::new(5))),
+            RangeSpec::new(RangeId::new(1), TableId::new(5), None),
+        ],
+    )
+    .expect("current map");
+    let split_at = RangeKey::table_start(TableId::new(10));
+    let command = SplitCommand {
+        current_map,
+        predecessor: RangeId::new(1),
+        predecessor_generation: 0,
+        left: SuccessorDescriptor {
+            range_id: RangeId::new(3),
+            endpoint: "left.internal:7443".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(
+                RangeId::new(3),
+                RangeKey::table_start(TableId::new(5)),
+                Some(split_at),
+            ),
+        },
+        right: SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            endpoint: "right.internal:7443".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::new(2), split_at, None),
+        },
+    };
+    let requests = [
+        TableTransferRequest {
+            target_range: RangeId::new(3),
+            routing_table_id: TableId::new(10),
+            physical_table_id,
+        },
+        TableTransferRequest {
+            target_range: RangeId::new(2),
+            routing_table_id: TableId::new(10),
+            physical_table_id,
+        },
+    ];
     runtime
-        .split_populated_table_successor("physical-t10", RangeId::new(2), TableId::new(10))
+        .split_successors("physical-t10", command, requests)
         .await
         .expect("publish live populated t10 successor");
 

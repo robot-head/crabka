@@ -622,14 +622,14 @@ impl MultiRangeTenant {
     ///
     /// This first bridge intentionally performs no physical data migration. It accepts only a
     /// table boundary whose moved table has no rows and whose row-id allocator has not advanced.
-    pub async fn split_empty_table_successor(
+    pub async fn split_empty_successors(
         &self,
         operation_id: impl Into<String>,
-        successor: RangeId,
-        table_id: TableId,
+        command: SplitCommand,
     ) -> Result<SplitState, LocalSqlSplitError> {
         let _split_guard = self.inner.split_lock.lock().await;
         let operation_id = operation_id.into();
+        let table_id = command.right.interval.start.table_id;
         if let Some(state) = self
             .inner
             .split_states
@@ -638,8 +638,11 @@ impl MultiRangeTenant {
             .get(&operation_id)
             .cloned()
         {
-            if state.successor != successor
-                || state.successor_after.start != RangeKey::table_start(table_id)
+            if state.current_map != command.current_map
+                || state.predecessor != command.predecessor
+                || state.predecessor_generation != command.predecessor_generation
+                || state.left != command.left
+                || state.right.as_ref() != Some(&command.right)
             {
                 return Err(LocalSqlSplitError::RetryMismatch);
             }
@@ -650,44 +653,23 @@ impl MultiRangeTenant {
                 let table_write_gate = self.inner.table_write_gate(table_id);
                 let table_write_gate = table_write_gate.write_owned().await;
                 let serving = self.inner.serving.load_full();
-                self.validate_empty_table_split(&serving, successor, table_id)?;
+                self.validate_empty_table_split(&serving, command.right.range_id, table_id)?;
                 Some(table_write_gate)
             };
             let bridge = LocalSqlSplitBridge { tenant: self };
-            return run_split(
-                operation_id,
-                SplitCommand {
-                    current_map: state.current_map,
-                    predecessor: state.predecessor,
-                    successor: state.successor,
-                    split_at: state.successor_after.start,
-                },
-                &bridge,
-                &bridge,
-            )
-            .await
-            .map_err(Into::into);
+            return run_split(operation_id, command, &bridge, &bridge)
+                .await
+                .map_err(Into::into);
         }
         let serving = self.inner.serving.load_full();
-        self.validate_empty_table_split(&serving, successor, table_id)?;
+        self.validate_empty_table_split(&serving, command.right.range_id, table_id)?;
         if let Some(hook) = &self.inner.empty_table_split_test_hook {
             hook.wait_after_initial_validation().await;
         }
         let table_write_gate = self.inner.table_write_gate(table_id);
         let _table_write_gate = table_write_gate.write_owned().await;
         let serving = self.inner.serving.load_full();
-        self.validate_empty_table_split(&serving, successor, table_id)?;
-        let predecessor = serving
-            .range_map
-            .range_for_key(table_id, 0)
-            .map_err(SplitError::from)?
-            .range_id;
-        let command = SplitCommand {
-            current_map: serving.range_map.clone(),
-            predecessor,
-            successor,
-            split_at: RangeKey::table_start(table_id),
-        };
+        self.validate_empty_table_split(&serving, command.right.range_id, table_id)?;
         let bridge = LocalSqlSplitBridge { tenant: self };
         run_split(operation_id, command, &bridge, &bridge)
             .await
@@ -699,45 +681,52 @@ impl MultiRangeTenant {
     /// This is intentionally limited to a target interval containing exactly one
     /// catalog-visible table.  The table gate and source WAL pause are held until
     /// the complete successor engine is atomically published with the new map.
-    pub async fn split_populated_table_successor(
+    pub async fn split_successors(
         &self,
         operation_id: impl Into<String>,
-        successor: RangeId,
-        table_id: TableId,
+        command: SplitCommand,
+        requests: [TableTransferRequest; 2],
         transfer: &dyn RangeTransferCapability,
     ) -> Result<SplitState, LocalSqlSplitError> {
         let _split_guard = self.inner.split_lock.lock().await;
         let _schema_gate = self.inner.schema_gate.clone().lock_owned().await;
         let operation_id = operation_id.into();
+        let table_id = command.right.interval.start.table_id;
         let table_write_gate = self.inner.table_write_gate(table_id);
         let _table_write_gate = table_write_gate.write_owned().await;
         let serving = self.inner.serving.load_full();
-        let transfer_table = self.validate_populated_table_split(&serving, successor, table_id)?;
-        let state = SplitState::for_split(
-            operation_id,
-            SplitCommand {
-                current_map: serving.range_map.clone(),
-                predecessor: transfer_table.predecessor,
-                successor,
-                split_at: RangeKey::table_start(table_id),
-            },
-        )?;
+        let transfer_table =
+            self.validate_populated_table_split(&serving, command.right.range_id, table_id)?;
+        if command.current_map != serving.range_map
+            || command.predecessor != transfer_table.predecessor
+        {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
+        let state = SplitState::for_split(operation_id, command)?;
         Self::validate_successor_interval(&serving, &state, table_id)?;
+        let right = state
+            .right
+            .as_ref()
+            .ok_or(SplitError::InvalidSuccessorPartition)?;
+        if requests[0].target_range != state.left.range_id
+            || requests[1].target_range != right.range_id
+            || requests
+                .iter()
+                .any(|request| request.physical_table_id != transfer_table.physical_table_id)
+        {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
 
         let checkpoint = transfer
             .force_checkpoint(transfer_table.predecessor)
             .await?;
         let barrier = transfer.pause_at_checkpoint(&checkpoint).await?;
         let pause = TransferPauseGuard::new(transfer, barrier);
-        self.stage_and_publish_successor(
+        self.stage_and_publish_successors(
             transfer,
             &serving,
             &state,
-            TableTransferRequest {
-                target_range: state.successor,
-                routing_table_id: table_id,
-                physical_table_id: transfer_table.physical_table_id,
-            },
+            requests,
             &checkpoint,
             barrier,
         )
@@ -751,12 +740,12 @@ impl MultiRangeTenant {
         Ok(state)
     }
 
-    async fn stage_and_publish_successor(
+    async fn stage_and_publish_successors(
         &self,
         transfer: &dyn RangeTransferCapability,
         serving: &ServingSnapshot,
         state: &SplitState,
-        request: TableTransferRequest,
+        requests: [TableTransferRequest; 2],
         checkpoint: &CheckpointManifest,
         barrier: crate::RangeTransferBarrier,
     ) -> Result<(), LocalSqlSplitError> {
@@ -764,36 +753,39 @@ impl MultiRangeTenant {
             .read_committed_tail(state.predecessor, checkpoint.covered_offset, barrier)
             .await?;
         let staged = transfer
-            .stage_empty_successor(request, checkpoint, &tail, barrier)
+            .stage_successors(requests, checkpoint, &tail, barrier)
             .await?;
-        let claimed = transfer.claim_staged_successor(&staged, barrier).await?;
-        self.publish_claimed_successor(serving, state, claimed)
+        let claimed = transfer.claim_successors(&staged, barrier).await?;
+        self.publish_claimed_successors(serving, state, claimed)
     }
 
-    fn publish_claimed_successor(
+    fn publish_claimed_successors(
         &self,
         serving: &ServingSnapshot,
         state: &SplitState,
-        claimed: crate::ClaimedStagedSuccessor,
+        claimed: crate::ClaimedStagedSuccessors,
     ) -> Result<(), LocalSqlSplitError> {
         let coordinator = serving
             .engines
             .get(&RangeId::COORDINATOR)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
-        let mut successor = claimed.engine;
-        successor.set_catalog_kv(coordinator.kv_handle());
-        coordinator.share_gtm_to(&mut successor);
-        successor.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
-        if let Some(scanner) = coordinator.foreign_scanner_handle() {
-            successor.set_foreign_scanner(scanner);
-        }
+        let mut left = claimed.left.engine;
+        let mut right = claimed.right.engine;
+        configure_successor_engine(coordinator, &mut left);
+        configure_successor_engine(coordinator, &mut right);
 
         let mut engines = serving
             .engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
             .collect::<BTreeMap<_, _>>();
-        engines.insert(state.successor, successor);
+        engines.remove(&state.predecessor);
+        engines.insert(state.left.range_id, left);
+        let right_descriptor = state
+            .right
+            .as_ref()
+            .ok_or(SplitError::InvalidSuccessorPartition)?;
+        engines.insert(right_descriptor.range_id, right);
         let scanner: Arc<dyn crabka_pgexec::RangeScanner> = Arc::new(InProcessRangeScanner {
             engines: engines
                 .iter()
@@ -805,7 +797,9 @@ impl MultiRangeTenant {
             engine.set_range_scanner(Arc::clone(&scanner));
         }
         let mut keepalives = serving.keepalives.clone();
-        keepalives.insert(state.successor, claimed.keepalive);
+        keepalives.remove(&state.predecessor);
+        keepalives.insert(state.left.range_id, claimed.left.keepalive);
+        keepalives.insert(right_descriptor.range_id, claimed.right.keepalive);
         self.inner
             .serving
             .store(Arc::new(ServingSnapshot::ready_with_keepalives(
@@ -817,46 +811,26 @@ impl MultiRangeTenant {
     }
 
     /// Publish a fully restored, fenced control-plane successor as one atomic serving snapshot.
-    pub fn publish_control_successor(
+    pub fn publish_control_successors(
         &self,
-        successor: RangeId,
-        target_map: RangeMap,
-        claimed: crate::ClaimedStagedSuccessor,
+        command: SplitCommand,
+        claimed: crate::ClaimedStagedSuccessors,
     ) -> Result<(), LocalSqlSplitError> {
         let serving = self.inner.serving.load_full();
+        if command.current_map != serving.range_map {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
         let next_epoch = u64::from(serving.range_map.epoch())
             .checked_add(1)
             .map(MapEpoch::new)
             .ok_or(SplitError::MapEpochOverflow)?;
-        if target_map.epoch() != next_epoch {
+        let state = SplitState::for_split("control-publication", command)?;
+        if state.target_map.epoch() != next_epoch {
             return Err(LocalSqlSplitError::Orchestration(SplitError::Hook(
                 "control successor target map is not the next epoch".into(),
             )));
         }
-        let state = SplitState::for_split(
-            "control-publication",
-            SplitCommand {
-                current_map: serving.range_map.clone(),
-                predecessor: target_map
-                    .ranges()
-                    .iter()
-                    .find(|range| range.range_id != successor)
-                    .map_or(RangeId::COORDINATOR, |range| range.range_id),
-                successor,
-                split_at: target_map
-                    .ranges()
-                    .iter()
-                    .find(|range| range.range_id == successor)
-                    .ok_or(LocalSqlSplitError::RemoteRange)?
-                    .start,
-            },
-        )?;
-        if state.target_map != target_map {
-            return Err(LocalSqlSplitError::Orchestration(SplitError::Hook(
-                "control successor target map does not match split plan".into(),
-            )));
-        }
-        self.publish_claimed_successor(&serving, &state, claimed)
+        self.publish_claimed_successors(&serving, &state, claimed)
     }
 
     fn validate_populated_table_split(
@@ -5644,6 +5618,15 @@ fn row_shard_key_error() -> PgError {
         sqlstate::FEATURE_NOT_SUPPORTED,
         "row-sharded INSERT requires statically known id shard keys",
     )
+}
+
+fn configure_successor_engine(coordinator: &SqlEngine, successor: &mut SqlEngine) {
+    successor.set_catalog_kv(coordinator.kv_handle());
+    coordinator.share_gtm_to(successor);
+    successor.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
+    if let Some(scanner) = coordinator.foreign_scanner_handle() {
+        successor.set_foreign_scanner(scanner);
+    }
 }
 
 #[cfg(test)]

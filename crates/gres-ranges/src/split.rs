@@ -49,6 +49,44 @@ pub struct InDoubtMarker {
     pub key: RangeKey,
 }
 
+/// Fully specified placement for one replacement range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct SuccessorDescriptor {
+    /// Fresh range identity.
+    pub range_id: RangeId,
+    /// Authenticated range-control endpoint.
+    pub endpoint: String,
+    /// Fresh WAL generation used to fence stale computes.
+    pub wal_generation: u64,
+    /// Exact key interval owned after atomic publication.
+    pub interval: RangeSpec,
+}
+
+impl SuccessorDescriptor {
+    fn ensure_valid(&self, predecessor_generation: u64) -> Result<(), SplitError> {
+        if self.endpoint.is_empty() {
+            return Err(SplitError::EmptySuccessorEndpoint {
+                range_id: self.range_id,
+            });
+        }
+        if self.interval.range_id != self.range_id {
+            return Err(SplitError::SuccessorIntervalRangeMismatch {
+                descriptor: self.range_id,
+                interval: self.interval.range_id,
+            });
+        }
+        if self.wal_generation <= predecessor_generation {
+            return Err(SplitError::StaleSuccessorGeneration {
+                range_id: self.range_id,
+                predecessor_generation,
+                successor_generation: self.wal_generation,
+            });
+        }
+        Ok(())
+    }
+}
+
 /// User request to replace one range with two fresh successor halves.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -57,10 +95,12 @@ pub struct SplitCommand {
     pub current_map: RangeMap,
     /// Existing range that owns the whole interval before commit.
     pub predecessor: RangeId,
-    /// New range that owns the right half after commit.
-    pub successor: RangeId,
-    /// Split point; belongs to the successor after commit.
-    pub split_at: RangeKey,
+    /// WAL generation being retired with the predecessor.
+    pub predecessor_generation: u64,
+    /// Fresh placement for the left half.
+    pub left: SuccessorDescriptor,
+    /// Fresh placement for the right half.
+    pub right: SuccessorDescriptor,
 }
 
 /// User request to move one whole range to a new generation.
@@ -71,8 +111,10 @@ pub struct MoveRangeCommand {
     pub current_map: RangeMap,
     /// Range being moved.
     pub range_id: RangeId,
-    /// New generation used by the successor compute.
-    pub successor_generation: u64,
+    /// WAL generation being retired with the predecessor.
+    pub predecessor_generation: u64,
+    /// Fresh placement replacing the whole predecessor interval.
+    pub replacement: SuccessorDescriptor,
 }
 
 /// User request to merge two adjacent ranges into the left range id.
@@ -157,6 +199,12 @@ pub struct SplitState {
     pub operation: SplitOperation,
     /// Range that owned the interval before the map commit.
     pub predecessor: RangeId,
+    /// WAL generation retired by this operation.
+    pub predecessor_generation: u64,
+    /// Left or sole replacement placement.
+    pub left: SuccessorDescriptor,
+    /// Right replacement placement for a proper split.
+    pub right: Option<SuccessorDescriptor>,
     /// Range that owns the moved interval after the map commit.
     pub successor: RangeId,
     /// Successor WAL generation for whole-range moves.
@@ -191,26 +239,23 @@ impl SplitState {
         operation_id: impl Into<String>,
         command: SplitCommand,
     ) -> Result<Self, SplitError> {
-        let plan = command.current_map.plan_split_at_key(
+        let predecessor_before = predecessor_before(&command.current_map, command.predecessor)?;
+        command.left.ensure_valid(command.predecessor_generation)?;
+        command.right.ensure_valid(command.predecessor_generation)?;
+        ensure_two_successors_partition(
+            &predecessor_before,
             command.predecessor,
-            command.split_at,
-            command.successor,
+            &command.left,
+            &command.right,
         )?;
-        let left_successor = if command.predecessor.is_coordinator() {
-            RangeId::COORDINATOR
-        } else {
-            next_unused_range_id(&command.current_map, &[command.successor])?
-        };
-        let left = RangeSpec::for_interval(
-            left_successor,
-            plan.left.start,
-            plan.left.end,
-        );
         let target_map = map_with_replaced_ranges(
             &command.current_map,
             command.current_map.epoch().next()?,
             command.predecessor,
-            &[left.clone(), plan.right.clone()],
+            &[
+                command.left.interval.clone(),
+                command.right.interval.clone(),
+            ],
         )?;
 
         let operation_id = operation_id.into();
@@ -222,11 +267,14 @@ impl SplitState {
             operation_id,
             operation: SplitOperation::Split,
             predecessor: command.predecessor,
-            successor: command.successor,
+            predecessor_generation: command.predecessor_generation,
+            left: command.left.clone(),
+            right: Some(command.right.clone()),
+            successor: command.right.range_id,
             successor_generation: None,
-            predecessor_before: predecessor_before(&command.current_map, command.predecessor)?,
-            predecessor_after: left,
-            successor_after: plan.right,
+            predecessor_before,
+            predecessor_after: command.left.interval,
+            successor_after: command.right.interval,
             merge_right_before: None,
             conversion_table: None,
             current_map: command.current_map,
@@ -244,16 +292,20 @@ impl SplitState {
         command: MoveRangeCommand,
     ) -> Result<Self, SplitError> {
         let predecessor_before = predecessor_before(&command.current_map, command.range_id)?;
-        let successor = next_unused_range_id(&command.current_map, &[])?;
+        command
+            .replacement
+            .ensure_valid(command.predecessor_generation)?;
+        if command.replacement.interval.start != predecessor_before.start
+            || command.replacement.interval.end != predecessor_before.end
+        {
+            return Err(SplitError::MoveReplacementIntervalMismatch);
+        }
+        let successor = command.replacement.range_id;
         let target_map = map_with_replaced_ranges(
             &command.current_map,
             command.current_map.epoch().next()?,
             command.range_id,
-            &[RangeSpec::for_interval(
-                successor,
-                predecessor_before.start,
-                predecessor_before.end,
-            )],
+            &[command.replacement.interval.clone()],
         )?;
 
         let operation_id = operation_id.into();
@@ -265,19 +317,14 @@ impl SplitState {
             operation_id,
             operation: SplitOperation::Move,
             predecessor: command.range_id,
+            predecessor_generation: command.predecessor_generation,
+            left: command.replacement.clone(),
+            right: None,
             successor,
-            successor_generation: Some(command.successor_generation),
+            successor_generation: Some(command.replacement.wal_generation),
             predecessor_before: predecessor_before.clone(),
-            predecessor_after: RangeSpec::for_interval(
-                successor,
-                predecessor_before.start,
-                predecessor_before.end,
-            ),
-            successor_after: RangeSpec::for_interval(
-                successor,
-                predecessor_before.start,
-                predecessor_before.end,
-            ),
+            predecessor_after: command.replacement.interval.clone(),
+            successor_after: command.replacement.interval,
             merge_right_before: None,
             conversion_table: None,
             current_map: command.current_map,
@@ -312,6 +359,14 @@ impl SplitState {
             operation_id,
             operation: SplitOperation::Merge,
             predecessor: command.left,
+            predecessor_generation: command.successor_generation.saturating_sub(1),
+            left: SuccessorDescriptor {
+                range_id: command.left,
+                endpoint: "local".into(),
+                wal_generation: command.successor_generation,
+                interval: plan.merged.clone(),
+            },
+            right: None,
             successor: command.left,
             successor_generation: Some(command.successor_generation),
             predecessor_before: predecessor_before(&command.current_map, command.left)?,
@@ -356,6 +411,14 @@ impl SplitState {
             operation_id,
             operation: SplitOperation::ConvertTable,
             predecessor: command.range_id,
+            predecessor_generation: command.successor_generation.saturating_sub(1),
+            left: SuccessorDescriptor {
+                range_id: command.range_id,
+                endpoint: "local".into(),
+                wal_generation: command.successor_generation,
+                interval: predecessor_before.clone(),
+            },
+            right: None,
             successor: command.range_id,
             successor_generation: Some(command.successor_generation),
             predecessor_before: predecessor_before.clone(),
@@ -675,6 +738,38 @@ pub enum SplitError {
     /// Map epoch overflowed.
     #[error("range map epoch must not overflow")]
     MapEpochOverflow,
+    /// A successor endpoint was empty.
+    #[error("successor r{range_id} endpoint must not be empty")]
+    EmptySuccessorEndpoint {
+        /// Invalid successor.
+        range_id: RangeId,
+    },
+    /// Descriptor identity disagreed with the interval identity.
+    #[error("successor descriptor r{descriptor} carries interval for r{interval}")]
+    SuccessorIntervalRangeMismatch {
+        /// Descriptor identity.
+        descriptor: RangeId,
+        /// Interval identity.
+        interval: RangeId,
+    },
+    /// A successor generation did not fence the predecessor generation.
+    #[error(
+        "successor r{range_id} generation {successor_generation} must exceed predecessor generation {predecessor_generation}"
+    )]
+    StaleSuccessorGeneration {
+        /// Invalid successor.
+        range_id: RangeId,
+        /// Retiring generation.
+        predecessor_generation: u64,
+        /// Proposed generation.
+        successor_generation: u64,
+    },
+    /// The two successor intervals were not an exact partition.
+    #[error("split successors must be distinct and exactly partition the predecessor interval")]
+    InvalidSuccessorPartition,
+    /// A move replacement did not cover the predecessor interval exactly.
+    #[error("move replacement interval must equal the predecessor interval")]
+    MoveReplacementIntervalMismatch,
     /// No fresh range identity can be allocated.
     #[error("range id must not overflow")]
     RangeIdOverflow,
@@ -769,21 +864,23 @@ fn predecessor_before(range_map: &RangeMap, predecessor: RangeId) -> Result<Rang
         .map_err(Into::into)
 }
 
-fn next_unused_range_id(
-    range_map: &RangeMap,
-    reserved: &[RangeId],
-) -> Result<RangeId, SplitError> {
-    range_map
-        .ranges()
-        .iter()
-        .map(|range| range.range_id)
-        .chain(reserved.iter().copied())
-        .max()
-        .unwrap_or(RangeId::COORDINATOR)
-        .as_u32()
-        .checked_add(1)
-        .map(RangeId::new)
-        .ok_or(SplitError::RangeIdOverflow)
+fn ensure_two_successors_partition(
+    predecessor: &RangeSpec,
+    predecessor_id: RangeId,
+    left: &SuccessorDescriptor,
+    right: &SuccessorDescriptor,
+) -> Result<(), SplitError> {
+    if left.range_id == right.range_id
+        || (!predecessor_id.is_coordinator() && left.range_id == predecessor_id)
+        || (predecessor_id.is_coordinator() && left.range_id != predecessor_id)
+        || right.range_id == predecessor_id
+        || left.interval.start != predecessor.start
+        || left.interval.end != Some(right.interval.start)
+        || right.interval.end != predecessor.end
+    {
+        return Err(SplitError::InvalidSuccessorPartition);
+    }
+    Ok(())
 }
 
 fn map_with_replaced_ranges(
@@ -814,6 +911,9 @@ fn ensure_same_operation(
     if stored.operation_id != initial_state.operation_id
         || stored.operation != initial_state.operation
         || stored.predecessor != initial_state.predecessor
+        || stored.predecessor_generation != initial_state.predecessor_generation
+        || stored.left != initial_state.left
+        || stored.right != initial_state.right
         || stored.successor != initial_state.successor
         || stored.successor_generation != initial_state.successor_generation
         || stored.merge_right_before != initial_state.merge_right_before
@@ -1028,7 +1128,44 @@ mod tests {
         assert!(state.next_step == SplitStep::Complete);
         assert!(state.target_map.epoch() == MapEpoch::new(8));
         assert!(state.inherited_markers == vec![markers()[1].clone()]);
-        assert!(hooks.events() == expected_split_events(RangeId::new(2)));
+        assert!(hooks.events() == expected_split_events(RangeId::new(4)));
+    }
+
+    #[test]
+    fn split_replaces_predecessor_with_two_explicit_successors() {
+        let predecessor = predecessor_before(&range_map(), RangeId::new(1)).expect("predecessor");
+        let split_at = RangeKey::table_start(TableId::new(20));
+        let state = SplitState::for_split(
+            "split-explicit-successors",
+            SplitCommand {
+                current_map: range_map(),
+                predecessor: RangeId::new(1),
+                predecessor_generation: 7,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::new(4),
+                    endpoint: "left.internal:7443".into(),
+                    wal_generation: 8,
+                    interval: RangeSpec::for_interval(
+                        RangeId::new(4),
+                        predecessor.start,
+                        Some(split_at),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(5),
+                    endpoint: "right.internal:7443".into(),
+                    wal_generation: 9,
+                    interval: RangeSpec::for_interval(RangeId::new(5), split_at, predecessor.end),
+                },
+            },
+        )
+        .expect("valid explicit split");
+
+        assert!(state.predecessor_generation == 7);
+        assert!(state.left.range_id == RangeId::new(4));
+        assert!(state.right.as_ref().expect("right").range_id == RangeId::new(5));
+        assert!(state.target_map.ranges()[1] == state.left.interval);
+        assert!(state.target_map.ranges()[2] == state.right.expect("right").interval);
     }
 
     #[tokio::test]
@@ -1071,7 +1208,17 @@ mod tests {
             MoveRangeCommand {
                 current_map: range_map(),
                 range_id: RangeId::new(1),
-                successor_generation: 9,
+                predecessor_generation: 8,
+                replacement: SuccessorDescriptor {
+                    range_id: RangeId::new(4),
+                    endpoint: "moved.internal:7443".into(),
+                    wal_generation: 9,
+                    interval: RangeSpec::for_interval(
+                        RangeId::new(4),
+                        RangeKey::table_start(TableId::new(10)),
+                        Some(RangeKey::table_start(TableId::new(30))),
+                    ),
+                },
             },
             &store,
             &hooks,
@@ -1247,8 +1394,8 @@ mod tests {
 
         assert!(owners(&initial, left_key) == vec![RangeId::new(1)]);
         assert!(owners(&initial, right_key) == vec![RangeId::new(1)]);
-        assert!(owners(&state.target_map, left_key) == vec![RangeId::new(4)]);
-        assert!(owners(&state.target_map, right_key) == vec![RangeId::new(2)]);
+        assert!(owners(&state.target_map, left_key) == vec![RangeId::new(2)]);
+        assert!(owners(&state.target_map, right_key) == vec![RangeId::new(4)]);
     }
 
     #[tokio::test]
@@ -1281,11 +1428,31 @@ mod tests {
     }
 
     fn split_command() -> SplitCommand {
+        let split_at = RangeKey::table_start(TableId::new(20));
         SplitCommand {
             current_map: range_map(),
             predecessor: RangeId::new(1),
-            successor: RangeId::new(2),
-            split_at: RangeKey::table_start(TableId::new(20)),
+            predecessor_generation: 7,
+            left: SuccessorDescriptor {
+                range_id: RangeId::new(2),
+                endpoint: "left.internal:7443".into(),
+                wal_generation: 8,
+                interval: RangeSpec::for_interval(
+                    RangeId::new(2),
+                    RangeKey::table_start(TableId::new(10)),
+                    Some(split_at),
+                ),
+            },
+            right: SuccessorDescriptor {
+                range_id: RangeId::new(4),
+                endpoint: "right.internal:7443".into(),
+                wal_generation: 8,
+                interval: RangeSpec::for_interval(
+                    RangeId::new(4),
+                    split_at,
+                    Some(RangeKey::table_start(TableId::new(30))),
+                ),
+            },
         }
     }
 
@@ -1305,7 +1472,10 @@ mod tests {
                 .iter()
                 .filter(|range| range.range_id != state.predecessor && range.contains_key(key))
                 .count();
-            assert_eq!(owners, 1, "key {key:?} must have one serving owner after park");
+            assert_eq!(
+                owners, 1,
+                "key {key:?} must have one serving owner after park"
+            );
         }
     }
 

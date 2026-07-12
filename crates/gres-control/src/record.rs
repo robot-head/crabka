@@ -313,14 +313,12 @@ pub struct RangeBoundary {
 pub struct RangeLayoutSplit {
     /// Existing range id that owns `split_key`.
     pub source_range_id: u32,
-    /// First key owned by the successor range.
-    pub split_key: RangeBoundary,
-    /// New successor range id.
-    pub successor_range_id: u32,
-    /// New successor compute endpoint.
-    pub successor_endpoint: String,
-    /// Initial successor WAL generation.
-    pub successor_wal_generation: u64,
+    /// Generation expected on the predecessor being retired.
+    pub predecessor_generation: u64,
+    /// Fresh left replacement placement.
+    pub left: RangeLayoutEntry,
+    /// Fresh right replacement placement.
+    pub right: RangeLayoutEntry,
 }
 
 /// Parsed request to merge two adjacent registry range layout entries.
@@ -641,23 +639,18 @@ impl TenantRecord {
 
     /// Return a record whose layout splits one row-key interval into two ranges.
     pub fn split_range_layout(mut self, split: RangeLayoutSplit) -> Result<Self, ControlError> {
-        if split.successor_endpoint.is_empty() {
-            return Err(ControlError::invalid_field(
-                "ranges.endpoint",
-                "must not be empty",
-            ));
-        }
-        if split.source_range_id == split.successor_range_id {
+        if split.left.range_id == split.right.range_id
+            || split.source_range_id == split.left.range_id
+            || split.source_range_id == split.right.range_id
+        {
             return Err(ControlError::invalid_field(
                 "ranges.range_id",
-                "successor range id must differ from source range id",
+                "two distinct successors must differ from the source range id",
             ));
         }
-        if self
-            .ranges
-            .iter()
-            .any(|range| range.range_id == split.successor_range_id)
-        {
+        if self.ranges.iter().any(|range| {
+            range.range_id == split.left.range_id || range.range_id == split.right.range_id
+        }) {
             return Err(ControlError::invalid_field(
                 "ranges.range_id",
                 "successor range id is already in layout",
@@ -680,25 +673,47 @@ impl TenantRecord {
                 "only a serving range may split",
             ));
         }
+        if self.ranges[index].wal_generation != split.predecessor_generation {
+            return Err(ControlError::invalid_field(
+                "ranges.wal_generation",
+                "predecessor generation does not match the serving layout",
+            ));
+        }
+        if split.left.wal_generation <= split.predecessor_generation
+            || split.right.wal_generation <= split.predecessor_generation
+        {
+            return Err(ControlError::invalid_field(
+                "ranges.wal_generation",
+                "successor generations must fence the predecessor generation",
+            ));
+        }
+        if split.left.lifecycle != RangeLifecycle::Serving
+            || split.right.lifecycle != RangeLifecycle::Serving
+            || split.left.retirement.is_some()
+            || split.right.retirement.is_some()
+        {
+            return Err(ControlError::invalid_field(
+                "ranges.lifecycle",
+                "successors must be fresh serving placements",
+            ));
+        }
         let previous_end = index
             .checked_sub(1)
             .and_then(|previous| self.ranges[previous].end_key)
             .unwrap_or(RangeBoundary::MIN);
-        ensure_split_key_inside_range(previous_end, self.ranges[index].end_key, split.split_key)?;
+        let split_key = split.left.end_key.ok_or_else(|| {
+            ControlError::invalid_field("ranges.end_key", "left successor must be bounded")
+        })?;
+        ensure_split_key_inside_range(previous_end, self.ranges[index].end_key, split_key)?;
 
         let source_end = self.ranges[index].end_key;
-        self.ranges[index].end_key = Some(split.split_key);
-        self.ranges.insert(
-            index + 1,
-            RangeLayoutEntry {
-                range_id: split.successor_range_id,
-                end_key: source_end,
-                endpoint: split.successor_endpoint,
-                wal_generation: split.successor_wal_generation,
-                lifecycle: RangeLifecycle::Serving,
-                retirement: None,
-            },
-        );
+        if split.right.end_key != source_end {
+            return Err(ControlError::invalid_field(
+                "ranges.end_key",
+                "right successor must preserve the predecessor end boundary",
+            ));
+        }
+        self.ranges.splice(index..=index, [split.left, split.right]);
         self.record_version = self.next_record_version()?;
         self.ensure_valid()?;
         Ok(self)
@@ -1414,7 +1429,7 @@ mod tests {
     }
 
     #[test]
-    fn split_range_layout_inserts_successor_and_bumps_version() {
+    fn split_range_layout_atomically_replaces_predecessor_with_two_successors() {
         let record = record(4)
             .with_range_layout(vec![
                 RangeLayoutEntry {
@@ -1439,10 +1454,23 @@ mod tests {
         let split = record
             .split_range_layout(RangeLayoutSplit {
                 source_range_id: 1,
-                split_key: RangeBoundary::table_start(20),
-                successor_range_id: 2,
-                successor_endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
-                successor_wal_generation: 5,
+                predecessor_generation: 2,
+                left: RangeLayoutEntry {
+                    range_id: 2,
+                    end_key: Some(RangeBoundary::table_start(20)),
+                    endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
+                    wal_generation: 5,
+                    lifecycle: Default::default(),
+                    retirement: None,
+                },
+                right: RangeLayoutEntry {
+                    range_id: 3,
+                    end_key: None,
+                    endpoint: "tenant-a-r3.gres.svc:7432".to_string(),
+                    wal_generation: 6,
+                    lifecycle: Default::default(),
+                    retirement: None,
+                },
             })
             .unwrap();
 
@@ -1459,18 +1487,18 @@ mod tests {
                         retirement: None,
                     },
                     RangeLayoutEntry {
-                        range_id: 1,
+                        range_id: 2,
                         end_key: Some(RangeBoundary::table_start(20)),
-                        endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
-                        wal_generation: 2,
+                        endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
+                        wal_generation: 5,
                         lifecycle: Default::default(),
                         retirement: None,
                     },
                     RangeLayoutEntry {
-                        range_id: 2,
+                        range_id: 3,
                         end_key: None,
-                        endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
-                        wal_generation: 5,
+                        endpoint: "tenant-a-r3.gres.svc:7432".to_string(),
+                        wal_generation: 6,
                         lifecycle: Default::default(),
                         retirement: None,
                     },

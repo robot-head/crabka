@@ -51,7 +51,8 @@ pub use self::{
     split::{
         CheckpointManifest, ConvertTableCommand, InDoubtMarker, MergeRangeCommand,
         MoveRangeCommand, SplitCommand, SplitError, SplitHooks, SplitOperation, SplitOrchestrator,
-        SplitState, SplitStateStore, SplitStep, run_conversion, run_merge, run_move, run_split,
+        SplitState, SplitStateStore, SplitStep, SuccessorDescriptor, run_conversion, run_merge,
+        run_move, run_split,
     },
     split_hooks::{
         CheckpointOperation, FilteredSuccessorRestoreOperation, InDoubtMarkerInheritanceOperation,
@@ -65,8 +66,9 @@ pub use self::{
         pgexec_timestamp_oracle_from_rpc, tso_rpc_from_horizon,
     },
     transfer::{
-        ClaimedStagedSuccessor, CommittedTailRecord, RangeTransferBarrier, RangeTransferCapability,
-        RangeTransferError, StagedRangeSuccessor, TableTransferRequest,
+        ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord, RangeTransferBarrier,
+        RangeTransferCapability, RangeTransferError, StagedRangeSuccessor, StagedRangeSuccessors,
+        TableTransferRequest,
     },
     transport::{
         FramedTcpClient, RangeRequest, RangeResponse, RangeService, RangeTlsClientConfig,
