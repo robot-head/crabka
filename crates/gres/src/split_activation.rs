@@ -268,8 +268,7 @@ pub(super) async fn persist_must_activate(
         .cloned()
         .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
             range_id: RangeId::COORDINATOR,
-            reason: "predecessor range zero resources unavailable for must-activate receipt"
-                .into(),
+            reason: "predecessor range zero resources unavailable for must-activate receipt".into(),
         })?;
     let tenant = source_resources.recovery_config.tenant.to_string();
     let store = RangeZeroTopologyActivationStore::new(tenant.clone(), engine);
@@ -323,7 +322,10 @@ pub(super) async fn persist_must_activate(
             reason: error.to_string(),
         }
     })?;
-    transfer.activation_fault(TopologyActivationFault::BeforeMustActivate, pending.predecessor)?;
+    transfer.activation_fault(
+        TopologyActivationFault::BeforeMustActivate,
+        pending.predecessor,
+    )?;
     let authorization = {
         let pause = source_resources
             .pause
@@ -379,7 +381,10 @@ pub(super) async fn persist_must_activate(
     transfer
         .activation_irreversible
         .store(true, std::sync::atomic::Ordering::Release);
-    transfer.activation_fault(TopologyActivationFault::AfterMustActivate, pending.predecessor)?;
+    transfer.activation_fault(
+        TopologyActivationFault::AfterMustActivate,
+        pending.predecessor,
+    )?;
     Ok(())
 }
 
@@ -426,10 +431,16 @@ pub(super) async fn copy_must_activate_before_bind(
     receipt.source_checkpoint = Some(pending.source_checkpoint.clone());
     receipt.barrier_offset = Some(pending.barrier_offset);
     receipt.tail_sha256 = Some(pending.tail_sha256.clone());
-    receipt.targets.get_mut(&pending.left_id).expect("left target").replay_journal_seq =
-        Some(pending.left_replay_journal_seq);
-    receipt.targets.get_mut(&pending.right_id).expect("right target").replay_journal_seq =
-        Some(pending.right_replay_journal_seq);
+    receipt
+        .targets
+        .get_mut(&pending.left_id)
+        .expect("left target")
+        .replay_journal_seq = Some(pending.left_replay_journal_seq);
+    receipt
+        .targets
+        .get_mut(&pending.right_id)
+        .expect("right target")
+        .replay_journal_seq = Some(pending.right_replay_journal_seq);
     let expected = serde_json::to_vec(&expected_receipt).map_err(|error| {
         crabka_gres_ranges::RangeTransferError::Runtime {
             range_id: RangeId::COORDINATOR,
@@ -494,7 +505,10 @@ pub(super) async fn discover_activation_receipt(
     let mut receipts = BTreeMap::new();
     for receipt in read_only_receipts(&recovery, checkpoint_store).await? {
         validate_receipt_shape(&receipt)?;
-        if receipts.insert(receipt.operation_id.clone(), receipt).is_some() {
+        if receipts
+            .insert(receipt.operation_id.clone(), receipt)
+            .is_some()
+        {
             return Err(std::io::Error::other(
                 "duplicate activation operation id in range-zero state",
             ));
@@ -503,8 +517,7 @@ pub(super) async fn discover_activation_receipt(
     let mut generation = 0;
     let mut visited = std::collections::BTreeSet::from([generation]);
     loop {
-        let Some(next_generation) =
-            next_replacement_generation(generation, receipts.values())?
+        let Some(next_generation) = next_replacement_generation(generation, receipts.values())?
         else {
             break;
         };
@@ -527,11 +540,8 @@ pub(super) async fn discover_activation_receipt(
             // predecessor receipt so recovery can construct and activate the successor.
             break;
         }
-        let checkpoint_receipts = read_checkpoint_receipts(
-            &candidate_recovery,
-            checkpoint_store,
-        )
-        .await?;
+        let checkpoint_receipts =
+            read_checkpoint_receipts(&candidate_recovery, checkpoint_store).await?;
         let mut histories = BTreeMap::<String, Vec<TopologyActivationReceipt>>::new();
         for candidate in receipt_values_from_wal(&candidate_recovery, candidate_end).await? {
             histories
@@ -652,8 +662,9 @@ async fn read_checkpoint_receipts(
     if restored.is_none() {
         return Ok(BTreeMap::new());
     }
-    let engine = SqlEngine::with_kv(kv as Arc<dyn crabka_pgkv::Kv>)
-        .map_err(|error| std::io::Error::other(format!("activation checkpoint engine: {error:?}")))?;
+    let engine = SqlEngine::with_kv(kv as Arc<dyn crabka_pgkv::Kv>).map_err(|error| {
+        std::io::Error::other(format!("activation checkpoint engine: {error:?}"))
+    })?;
     let mut receipts = BTreeMap::new();
     for receipt in RangeZeroTopologyActivationStore::new(recovery.tenant.to_string(), engine)
         .list()
@@ -661,7 +672,10 @@ async fn read_checkpoint_receipts(
         .map_err(|error| std::io::Error::other(format!("list checkpoint receipts: {error}")))?
     {
         validate_receipt_shape(&receipt)?;
-        if receipts.insert(receipt.operation_id.clone(), receipt).is_some() {
+        if receipts
+            .insert(receipt.operation_id.clone(), receipt)
+            .is_some()
+        {
             return Err(std::io::Error::other(
                 "checkpoint contains duplicate activation operation ids",
             ));
@@ -674,9 +688,7 @@ async fn receipt_values_from_wal(
     recovery: &crabka_gres_substrate::LiveRecoveryConfig,
     end: i64,
 ) -> std::io::Result<Vec<TopologyActivationReceipt>> {
-    let prefix = crabka_pgkv::key::topology_activation_receipt_prefix(
-        &recovery.tenant.to_string(),
-    );
+    let prefix = crabka_pgkv::key::topology_activation_receipt_prefix(&recovery.tenant.to_string());
     let items = crabka_gres_substrate::read_live_retained_committed(recovery, end)
         .await
         .map_err(|error| std::io::Error::other(format!("read replacement receipt WAL: {error}")))?;
@@ -870,6 +882,31 @@ fn next_replacement_generation<'a>(
     Ok(edge)
 }
 
+fn canonicalize_receipt_history(
+    operation_id: &str,
+    receipts: impl IntoIterator<Item = TopologyActivationReceipt>,
+) -> std::io::Result<Vec<TopologyActivationReceipt>> {
+    let mut canonical = BTreeMap::new();
+    for receipt in receipts {
+        if receipt.operation_id != operation_id {
+            return Err(std::io::Error::other(
+                "activation history contains another operation id",
+            ));
+        }
+        if let Some(prior) = canonical.insert(receipt.revision, receipt.clone())
+            && prior != receipt
+        {
+            return Err(std::io::Error::other(format!(
+                "activation operation {operation_id} has divergent values at revision {}",
+                receipt.revision
+            )));
+        }
+    }
+    let canonical = canonical.into_values().collect::<Vec<_>>();
+    validate_receipt_history(&canonical)?;
+    Ok(canonical)
+}
+
 fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Result<()> {
     let source = receipt.source_checkpoint.is_some();
     let boundary = receipt.barrier_offset.is_some() && receipt.tail_sha256.is_some();
@@ -878,8 +915,14 @@ fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Resul
         .targets
         .values()
         .all(|target| target.replay_journal_seq.is_some());
-    let any_writer = receipt.targets.values().any(|target| target.writer_activated);
-    let all_writers = receipt.targets.values().all(|target| target.writer_activated);
+    let any_writer = receipt
+        .targets
+        .values()
+        .any(|target| target.writer_activated);
+    let all_writers = receipt
+        .targets
+        .values()
+        .all(|target| target.writer_activated);
     let any_checkpoint = receipt
         .targets
         .values()
@@ -924,9 +967,12 @@ fn validate_receipt_history(receipts: &[TopologyActivationReceipt]) -> std::io::
     for pair in receipts.windows(2) {
         let prior = &pair[0];
         let next = &pair[1];
-        if next.revision != prior.revision.checked_add(1).ok_or_else(|| {
-            std::io::Error::other("activation receipt revision overflow")
-        })? {
+        if next.revision
+            != prior
+                .revision
+                .checked_add(1)
+                .ok_or_else(|| std::io::Error::other("activation receipt revision overflow"))?
+        {
             return Err(std::io::Error::other(format!(
                 "activation receipt revision is not contiguous: {} {:?} -> {} {:?}",
                 prior.revision, prior.phase, next.revision, next.phase
@@ -1266,7 +1312,9 @@ async fn ensure_must_activate_receipt(
         )
         .await
         .map_err(|error| {
-            std::io::Error::other(format!("copy MustActivate receipt to replacement r0: {error}"))
+            std::io::Error::other(format!(
+                "copy MustActivate receipt to replacement r0: {error}"
+            ))
         })?
     {
         return Err(std::io::Error::other(
@@ -1461,8 +1509,8 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        next_replacement_generation, routing_table_id, validate_receipt_extension,
-        validate_receipt_history,
+        canonicalize_receipt_history, next_replacement_generation, routing_table_id,
+        validate_receipt_extension, validate_receipt_history,
     };
     use crabka_gres_ranges::{
         MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
@@ -1600,14 +1648,58 @@ mod tests {
         second.split.operation_id = second.operation_id.clone();
         second.split.predecessor_generation = 1;
         second.source_checkpoint.as_mut().unwrap().manifest_key = "g1".into();
-        second.targets.get_mut(&RangeId::COORDINATOR).unwrap().wal_generation = 2;
-        assert_eq!(next_replacement_generation(1, [&first, &second]).unwrap(), Some(2));
+        second
+            .targets
+            .get_mut(&RangeId::COORDINATOR)
+            .unwrap()
+            .wal_generation = 2;
+        assert_eq!(
+            next_replacement_generation(1, [&first, &second]).unwrap(),
+            Some(2)
+        );
 
         let mut fork = second.clone();
         fork.operation_id = "activation-op-fork".into();
         fork.split.operation_id = fork.operation_id.clone();
-        fork.targets.get_mut(&RangeId::COORDINATOR).unwrap().wal_generation = 3;
+        fork.targets
+            .get_mut(&RangeId::COORDINATOR)
+            .unwrap()
+            .wal_generation = 3;
         assert!(next_replacement_generation(1, [&first, &second, &fork]).is_err());
+    }
+
+    #[test]
+    fn receipt_history_canonicalization_accepts_identical_duplicates_only() {
+        let prepared = receipt();
+        let mut source = prepared.clone();
+        source.revision += 1;
+        source.phase = TopologyActivationPhase::SourceCheckpoint;
+        source.source_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+            range_id: source.split.predecessor,
+            covered_offset: 3,
+            manifest_key: "checkpoint".into(),
+        });
+        let canonical = canonicalize_receipt_history(
+            &prepared.operation_id,
+            [prepared.clone(), prepared.clone(), source.clone()],
+        )
+        .expect("identical duplicate canonicalizes");
+        assert_eq!(canonical, [prepared.clone(), source.clone()]);
+
+        let mut divergent = prepared.clone();
+        divergent.tenant = "forged".into();
+        assert!(
+            canonicalize_receipt_history(
+                &prepared.operation_id,
+                [prepared.clone(), divergent, source.clone()],
+            )
+            .is_err()
+        );
+
+        let mut missing = source;
+        missing.revision += 1;
+        let operation_id = prepared.operation_id.clone();
+        assert!(canonicalize_receipt_history(&operation_id, [prepared, missing]).is_err());
     }
 
     fn receipt() -> TopologyActivationReceipt {
