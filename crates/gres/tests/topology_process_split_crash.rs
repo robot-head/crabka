@@ -762,7 +762,7 @@ impl SplitPredicateState {
     const fn target(phase: Phase, sidecar: Sidecar, topic: bool, deletes: usize) -> Self {
         Self {
             phase,
-            receipt: Receipt::None,
+            receipt: Receipt::Prologue,
             evidence: Self::CHECKPOINT | Self::PAUSE | Self::TAIL | Self::MARKERS,
             layout: Layout::Target,
             sidecar,
@@ -1305,6 +1305,19 @@ fn crash_family_availability_bounds_are_strict_and_distinct() {
 }
 
 #[test]
+fn publication_and_early_retirement_predicates_retain_prologue_receipt() {
+    for point in [
+        SplitKillPoint::TenantCasBeforeJournalCas,
+        SplitKillPoint::LayoutPublishedAfterJournalCas,
+        SplitKillPoint::RetiringBeforeDelete,
+        SplitKillPoint::DeleteSuccessBeforeSidecarCas,
+        SplitKillPoint::ParkedAfterSidecarCas,
+    ] {
+        assert_eq!(SplitPredicateState::for_point(point).receipt, Receipt::Prologue);
+    }
+}
+
+#[test]
 fn marker_session_lifecycle_preserves_pending_state_until_prologue_or_crash() {
     assert_eq!(
         marker_session_action(true, false, false, &SplitOperationPhase::Paused),
@@ -1321,6 +1334,22 @@ fn marker_session_lifecycle_preserves_pending_state_until_prologue_or_crash() {
         MarkerSessionAction::RollbackAfterPrologue,
         "authenticated Prologue permits an explicit rollback"
     );
+}
+
+#[test]
+fn marker_rollback_accepts_only_the_post_publication_stale_session_rejection() {
+    assert!(is_expected_marker_rollback_rejection(
+        "0A000",
+        "range map changed; reconnect before issuing another statement"
+    ));
+    assert!(!is_expected_marker_rollback_rejection(
+        "XX000",
+        "range map changed; reconnect before issuing another statement"
+    ));
+    assert!(!is_expected_marker_rollback_rejection(
+        "0A000",
+        "unrelated feature rejection"
+    ));
 }
 
 fn cli_binary() -> PathBuf {
@@ -1643,6 +1672,11 @@ struct SplitCrashEvidence {
     predecessor_topic_absent: bool,
     sentinel_topic: String,
     sentinel_topic_present: bool,
+    left_endpoint: String,
+    right_endpoint: String,
+    left_wal_generation: u64,
+    right_wal_generation: u64,
+    topology_topics: Vec<String>,
     workload_process_reaped: bool,
 }
 
@@ -1833,6 +1867,11 @@ async fn verify_completed_split_case(
     assert_ne!(old_pid, new_pid);
     assert!(workload_process_reaped);
     assert!(elapsed_ms < point.operation_bound_ms());
+    let topology_topics = topics
+        .iter()
+        .filter(|topic| topic.starts_with(&format!("__gres_wal.{}.", system.tenant())) || *topic == sentinel_topic)
+        .cloned()
+        .collect();
 
     SplitCrashEvidence {
         schema_version: 1,
@@ -1860,6 +1899,11 @@ async fn verify_completed_split_case(
         predecessor_topic_absent,
         sentinel_topic: sentinel_topic.to_owned(),
         sentinel_topic_present,
+        left_endpoint: r2.endpoint.clone(),
+        right_endpoint: r3.endpoint.clone(),
+        left_wal_generation: r2.wal_generation,
+        right_wal_generation: r3.wal_generation,
+        topology_topics,
         workload_process_reaped,
     }
 }
@@ -1975,11 +2019,14 @@ const fn marker_session_action(
 
 async fn close_marker_session(marker: MarkerSession, rollback: bool) {
     if rollback {
-        marker
-            .client
-            .simple_query("ROLLBACK")
-            .await
-            .expect("release marker session publication guard");
+        if let Err(error) = marker.client.simple_query("ROLLBACK").await {
+            assert!(
+                error.as_db_error().is_some_and(|db| {
+                    is_expected_marker_rollback_rejection(db.code().code(), db.message())
+                }),
+                "release marker session publication guard: {error}"
+            );
+        }
     }
     let MarkerSession { client, mut driver } = marker;
     drop(client);
@@ -1990,6 +2037,10 @@ async fn close_marker_session(marker: MarkerSession, rollback: bool) {
         driver.abort();
         let _ = driver.await;
     }
+}
+
+fn is_expected_marker_rollback_rejection(code: &str, message: &str) -> bool {
+    code == "0A000" && message.contains("range map changed; reconnect")
 }
 
 async fn reconcile_rpc_with_diagnostics(
