@@ -27,6 +27,7 @@ kill_evidence = json.loads(Path("target/g8-topology-process-nemesis/move-paused-
 assert kill_evidence["kill_point"] == "paused_after_stage"
 assert kill_evidence["completed"] is True
 assert kill_evidence["old_pid"] != kill_evidence["new_pid"]
+assert kill_evidence["recovered_acknowledgements"] >= 1
 assert kill_evidence["max_ack_gap_ms"] <= kill_evidence["max_ack_gap_bound_ms"] == 7000
 assert kill_evidence["predecessor_wal_retired"] is True
 PY

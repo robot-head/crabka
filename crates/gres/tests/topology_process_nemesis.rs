@@ -17,14 +17,14 @@ use crabka_operator::{
     context::{GresControlHandle, GresControlLike, GresControlWriteError},
     controller::{
         gres_split_operation::{
-            MtlsRangeMutationClient, RangeMutationClient, reconcile_activated_cutover,
-            reconcile_one_rpc_phase, verify_target_topology_ready,
+            MtlsRangeMutationClient, RangeMutationClient, SplitReconcileError,
+            reconcile_activated_cutover, reconcile_one_rpc_phase, verify_target_topology_ready,
         },
         gres_tenant::reconcile_one_retiring_range_wal,
     },
 };
-use process::ProcessHarness;
 use futures_util::FutureExt as _;
+use process::ProcessHarness;
 use tokio::sync::Mutex;
 
 #[derive(Debug)]
@@ -68,6 +68,13 @@ fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
             recovered += usize::from(event.kind == "recovered_ack");
         }
     }
+    for (expected, actual) in (0_i64..).zip(acknowledgements.keys().copied()) {
+        if actual != expected {
+            return Err(format!(
+                "acknowledgement sequence is not contiguous: expected {expected}, found {actual}"
+            ));
+        }
+    }
     let max_ack_gap_ms = acknowledgements
         .values()
         .zip(acknowledgements.values().skip(1))
@@ -98,23 +105,20 @@ struct WorkloadChild {
 impl WorkloadChild {
     async fn shutdown(&mut self) {
         std::fs::write(&self.stop_path, b"stop").expect("signal workload child stop");
-        let status = match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
-            Ok(status) => status.expect("wait workload child"),
+        let (status, forced) = match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+            Ok(status) => (status.expect("wait workload child"), false),
             Err(_) => {
                 terminate_process_group(self.process_group);
-                tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+                let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
                     .await
                     .expect("terminated workload child stop timeout")
-                    .expect("wait terminated workload child")
+                    .expect("wait terminated workload child");
+                (status, true)
             }
         };
-        assert!(status.success(), "workload child failed");
+        assert!(forced || status.success(), "workload child failed");
         self.stopped = true;
-        assert!(
-            !process_group_exists(self.process_group),
-            "workload process group {} remains after shutdown",
-            self.process_group
-        );
+        wait_for_process_group_exit(self.process_group).await;
     }
 }
 
@@ -146,6 +150,26 @@ fn process_group_exists(process_group: u32) -> bool {
         .is_ok_and(|status| status.success())
 }
 
+async fn wait_for_process_group_exit(process_group: u32) {
+    let deadline = Instant::now() + Duration::from_secs(5);
+    while process_group_exists(process_group) && Instant::now() < deadline {
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    assert!(!process_group_exists(process_group), "workload process group remains");
+}
+
+async fn run_with_workload_cleanup<F, T>(
+    workload: &mut WorkloadChild,
+    case: F,
+) -> std::thread::Result<T>
+where
+    F: std::future::Future<Output = T>,
+{
+    let outcome = std::panic::AssertUnwindSafe(case).catch_unwind().await;
+    workload.shutdown().await;
+    outcome
+}
+
 #[tokio::test]
 async fn workload_cleanup_reaps_descendants_on_error_path() {
     let root = tempfile::tempdir().expect("cleanup root");
@@ -164,11 +188,11 @@ async fn workload_cleanup_reaps_descendants_on_error_path() {
         stopped: false,
     };
     assert!(process_group_exists(process_group));
-    let outcome: Result<(), &str> = Err("intentional case failure");
-    terminate_process_group(process_group);
-    let _ = workload.child.wait().await.expect("wait cleanup fixture");
-    workload.stopped = true;
-    assert_eq!(outcome, Err("intentional case failure"));
+    let outcome = run_with_workload_cleanup(&mut workload, async {
+        panic!("intentional case failure")
+    })
+    .await;
+    assert!(outcome.is_err());
     assert!(!process_group_exists(process_group));
 }
 
@@ -195,6 +219,15 @@ fn ack_ledger_rejects_duplicate_acknowledgements() {
         "{\"kind\":\"attempt\",\"seq\":1,\"timestamp_ms\":10}\n",
         "{\"kind\":\"ack\",\"seq\":1,\"timestamp_ms\":11}\n",
         "{\"kind\":\"recovered_ack\",\"seq\":1,\"timestamp_ms\":12}\n",
+    );
+    assert!(parse_ack_ledger(ledger).is_err());
+}
+
+#[test]
+fn ack_ledger_rejects_noncontiguous_sequences() {
+    let ledger = concat!(
+        "{\"kind\":\"ack\",\"seq\":0,\"timestamp_ms\":10}\n",
+        "{\"kind\":\"ack\",\"seq\":2,\"timestamp_ms\":12}\n",
     );
     assert!(parse_ack_ledger(ledger).is_err());
 }
@@ -410,15 +443,21 @@ async fn drive_operation(
                 return (current, restarted_pids);
             }
             _ => {
-                if let Err(error) =
-                    reconcile_one_rpc_phase(&control, &mutation_client, &current).await
-                {
-                    assert!(
-                        started.elapsed() < max_operation_duration,
-                        "operation deadline after reconcile error: {error}; source log: {}",
-                        system.log(0)
-                    );
-                    tokio::time::sleep(Duration::from_millis(100)).await;
+                match reconcile_one_rpc_phase(&control, &mutation_client, &current).await {
+                    Ok(_) => {}
+                    Err(
+                        error @ (SplitReconcileError::Transport(_)
+                        | SplitReconcileError::Ambiguous(_)
+                        | SplitReconcileError::Registry(_)),
+                    ) => {
+                        assert!(
+                            started.elapsed() < max_operation_duration,
+                            "operation deadline after transient reconcile error: {error}; source log: {}",
+                            system.log(0)
+                        );
+                        tokio::time::sleep(Duration::from_millis(100)).await;
+                    }
+                    Err(error) => panic!("non-retryable reconcile error: {error}"),
                 }
             }
         }
@@ -447,15 +486,18 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
     }
     initiate_move_with_cli(&system, "g8-live-move").await;
     let operation_started = Instant::now();
-    let completed =
+    let completed = tokio::time::timeout(
+        Duration::from_secs(30),
         drive_operation(
             &mut system,
             "g8-live-move",
-            std::time::Duration::from_secs(30),
+            Duration::from_secs(30),
             None,
-        )
-        .await
-        .0;
+        ),
+    )
+    .await
+    .expect("whole Move operation deadline")
+    .0;
     assert_eq!(completed.phase, SplitOperationPhase::Completed);
     let target = system.sql(0).await;
     let count: i64 = target
@@ -508,6 +550,7 @@ async fn real_process_move_recovers_after_paused_stage_sigkill_with_exact_ack_le
     let workload_root = tempfile::tempdir().expect("workload root");
     let ledger_path = workload_root.path().join("acks.jsonl");
     let workload_error_path = workload_root.path().join("workload-errors.log");
+    let response_loss_path = workload_root.path().join("response-loss-injected");
     let stop_path = workload_root.path().join("stop");
     assert!(!ledger_path.exists(), "one fresh workload ledger per case");
     let sql_port = system.stable_sql_port();
@@ -520,6 +563,16 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   printf '{"kind":"attempt","seq":%s,"timestamp_ms":%s}\n' "$seq" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
   sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
   if timeout 2s psql -X -q -v ON_ERROR_STOP=1 -c "INSERT INTO live_ledger (id, checksum) VALUES ($seq, '$checksum')" >/dev/null 2>>"$CRABKA_G8_WORKLOAD_ERRORS"; then
+    if [[ "$seq" -eq 2 && ! -e "$CRABKA_G8_RESPONSE_LOSS" ]]; then
+      touch "$CRABKA_G8_RESPONSE_LOSS"
+      response_known=false
+    else
+      response_known=true
+    fi
+  else
+    response_known=false
+  fi
+  if [[ "$response_known" == true ]]; then
     kind=ack
   else
     actual=$(timeout 2s psql -X -A -t -q -v ON_ERROR_STOP=1 -c "SELECT checksum FROM live_ledger WHERE id = $seq" 2>>"$CRABKA_G8_WORKLOAD_ERRORS" || true)
@@ -539,6 +592,7 @@ done
         .env("CRABKA_G8_WORKLOAD_LEDGER", &ledger_path)
         .env("CRABKA_G8_WORKLOAD_STOP", &stop_path)
         .env("CRABKA_G8_WORKLOAD_ERRORS", &workload_error_path)
+        .env("CRABKA_G8_RESPONSE_LOSS", &response_loss_path)
         .env("PGHOST", "127.0.0.1")
         .env("PGPORT", sql_port.to_string())
         .env("PGUSER", "alice")
@@ -555,17 +609,21 @@ done
         stop_path: stop_path.clone(),
         stopped: false,
     };
-    let case = std::panic::AssertUnwindSafe(async {
+    let case = async {
         wait_for_ack_count(&ledger_path, 8).await;
         initiate_move_with_cli(&system, "g8-paused-stage-kill").await;
         let operation_started = Instant::now();
-        let (completed, restart) = drive_operation(
-            &mut system,
-            "g8-paused-stage-kill",
+        let (completed, restart) = tokio::time::timeout(
             Duration::from_secs(45),
-            Some(&ledger_path),
+            drive_operation(
+                &mut system,
+                "g8-paused-stage-kill",
+                Duration::from_secs(45),
+                Some(&ledger_path),
+            ),
         )
-        .await;
+        .await
+        .expect("whole PausedAfterStage Move operation deadline");
         assert_eq!(completed.phase, SplitOperationPhase::Completed);
         let acknowledgements_at_completion = parse_ack_ledger(
             &std::fs::read_to_string(&ledger_path).expect("live acknowledgement ledger"),
@@ -575,10 +633,8 @@ done
         .len();
         wait_for_ack_count(&ledger_path, acknowledgements_at_completion + 1).await;
         (completed, restart, operation_started.elapsed().as_millis())
-    })
-    .catch_unwind()
-    .await;
-    workload.shutdown().await;
+    };
+    let case = run_with_workload_cleanup(&mut workload, case).await;
     let (completed, restart, operation_elapsed_ms) = match case {
         Ok(result) => result,
         Err(_) => panic!(
@@ -593,6 +649,7 @@ done
     )
     .expect("valid final acknowledgement ledger");
     const MAX_OBSERVED_SAFE_ACK_GAP_MS: u128 = 7_000;
+    assert!(ledger.recovered >= 1, "deterministic response loss must recover an ACK");
     assert!(
         ledger.max_ack_gap_ms <= MAX_OBSERVED_SAFE_ACK_GAP_MS,
         "maximum acknowledged-write gap {}ms exceeded observed-safe {}ms bound",
