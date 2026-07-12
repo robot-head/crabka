@@ -1,26 +1,33 @@
-use std::collections::{BTreeMap, BTreeSet};
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    io::Write as _,
+    path::{Path, PathBuf},
+    sync::{
+        Arc,
+        atomic::{AtomicBool, Ordering},
+    },
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
+};
 
 use async_trait::async_trait;
 use crabka_gres_control::{
     RangeRetirementPhase, Registry, SplitOperationPhase, SplitOperationRecord, TenantName,
     TenantRecord,
 };
-use crabka_gres_ranges::{RangeControlOperation, RangeControlReq, RangeControlResp, RangeId};
-use crabka_gres_ranges::AuthorizedSplitIntent;
-use crabka_operator::context::{GresControlHandle, GresControlLike, GresControlWriteError};
-use crabka_operator::controller::gres_split_operation::{
-    MtlsRangeMutationClient, RangeMutationClient, SplitReconcileError, reconcile_activated_cutover,
-    reconcile_one_rpc_phase, verify_target_topology_ready,
+use crabka_gres_ranges::{
+    AuthorizedSplitIntent, RangeControlOperation, RangeControlReq, RangeControlResp, RangeId,
 };
-use crabka_operator::controller::gres_tenant::{
-    RangeRetirementAdmin, reconcile_one_retiring_range_wal,
+use crabka_operator::{
+    context::{GresControlHandle, GresControlLike, GresControlWriteError},
+    controller::{
+        gres_split_operation::{
+            MtlsRangeMutationClient, RangeMutationClient, SplitReconcileError,
+            reconcile_activated_cutover, reconcile_one_rpc_phase, verify_target_topology_ready,
+        },
+        gres_tenant::{RangeRetirementAdmin, reconcile_one_retiring_range_wal},
+    },
 };
 use serde::{Deserialize, Serialize};
-use std::sync::Arc;
-use std::sync::atomic::{AtomicBool, Ordering};
 use tokio::sync::Mutex;
 
 #[path = "../../gres-ranges/tests/harness/process.rs"]
@@ -722,7 +729,12 @@ fn split_marker_is_injected_before_cli_once_restart_can_reacquire_pause() {
                 | SplitKillPoint::CheckpointReceiptBeforeJournalCas
                 | SplitKillPoint::CheckpointedAfterJournalCas
         );
-        assert_eq!(point.inject_marker_before_cli(), expected, "{}", point.name());
+        assert_eq!(
+            point.inject_marker_before_cli(),
+            expected,
+            "{}",
+            point.name()
+        );
     }
     assert!(SplitKillPoint::PauseReceiptBeforeJournalCas.inject_marker_before_cli());
 }
@@ -1814,6 +1826,7 @@ struct SplitCrashEvidence {
     left_markers: Vec<MarkerIdentityEvidence>,
     right_markers: Vec<MarkerIdentityEvidence>,
     marker_response_digest: String,
+    terminal_operation_evidence: TerminalOperationEvidence,
     completed_phase: String,
     terminal_layout: Vec<TerminalRangeEvidence>,
     pre_kill_predicate: SplitPredicateState,
@@ -1841,6 +1854,15 @@ struct SplitCrashEvidence {
     retirement_source_generation: u64,
     retirement_successor_generations: Vec<(u32, u64)>,
     workload_process_reaped: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct TerminalOperationEvidence {
+    manifest_key: String,
+    covered_offset: i64,
+    barrier_offset: i64,
+    tail_sha256: String,
+    marker_digest: String,
 }
 
 async fn verify_completed_split_case(
@@ -1917,14 +1939,7 @@ async fn verify_completed_split_case(
         assert_eq!(successor_partition(row.table_id, row.rowid).is_ok(), true);
     }
     let mut direct_physical_rows = Vec::new();
-    for (range_id, table_id) in [
-        (0, 50),
-        (0, 51),
-        (2, 50),
-        (2, 51),
-        (3, 50),
-        (3, 51),
-    ] {
+    for (range_id, table_id) in [(0, 50), (0, 51), (2, 50), (2, 51), (3, 50), (3, 51)] {
         let mut rows = direct_payload_rows(system, range_id, table_id, None, None).await;
         rows.sort();
         direct_physical_rows.push(DirectScanEvidence {
@@ -2112,7 +2127,7 @@ async fn verify_completed_split_case(
     assert!(!workload_process_group_alive);
 
     SplitCrashEvidence {
-        schema_version: 1,
+        schema_version: 2,
         evidence_id,
         family: family_name(point.family()),
         case: point.name(),
@@ -2152,6 +2167,31 @@ async fn verify_completed_split_case(
         left_markers,
         right_markers,
         marker_response_digest: marker_digest.clone(),
+        terminal_operation_evidence: TerminalOperationEvidence {
+            manifest_key: operation
+                .evidence
+                .manifest_key
+                .clone()
+                .expect("terminal manifest key"),
+            covered_offset: operation
+                .evidence
+                .covered_offset
+                .expect("terminal covered offset"),
+            barrier_offset: operation
+                .evidence
+                .barrier_offset
+                .expect("terminal barrier offset"),
+            tail_sha256: operation
+                .evidence
+                .tail_sha256
+                .clone()
+                .expect("terminal tail digest"),
+            marker_digest: operation
+                .evidence
+                .marker_digest
+                .clone()
+                .expect("terminal marker digest"),
+        },
         completed_phase: "completed".into(),
         terminal_layout,
         pre_kill_predicate,
@@ -2214,9 +2254,7 @@ fn control_operation_name(operation: &RangeControlOperation) -> Option<&'static 
     }
 }
 
-fn journal_receipt_expectation(
-    record: &SplitOperationRecord,
-) -> Option<JournalReceiptExpectation> {
+fn journal_receipt_expectation(record: &SplitOperationRecord) -> Option<JournalReceiptExpectation> {
     let plan = record.plan.as_ref()?;
     let predecessor = plan
         .current_layout
