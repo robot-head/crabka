@@ -16,7 +16,7 @@ INTS = {"schema_version", "acknowledged_rows", "recovered_acknowledgements", "ma
 STRINGS = {"evidence_id", "family", "case", "tenant_id", "operation_id", "sentinel_topic", "coordinator_endpoint", "left_endpoint", "right_endpoint", "marker_response_digest", "completed_phase", "operation_marker_digest", "retirement_marker_digest"}
 BOOLS = {"post_publication_r2_ack", "post_publication_r3_ack", "predecessor_topic_absent", "sentinel_topic_present", "workload_process_reaped", "unrelated_delete_attempted", "new_source_pid_alive_at_verification", "old_source_pid_alive", "new_source_pid_alive", "old_source_process_group_alive", "new_source_process_group_alive", "workload_process_group_alive"}
 LISTS = {"topology_topics", "payload_events", "reopened_oracle_rows", "direct_physical_rows", "sql_union_rows", "source_markers", "left_markers", "right_markers", "authenticated_receipts", "journal_receipt_expectations", "delete_attempts", "terminal_layout", "retirement_successor_generations"}
-OBJECTS = {"pre_kill_predicate"}
+OBJECTS = {"pre_kill_predicate", "terminal_operation_evidence"}
 KEYS = INTS | STRINGS | BOOLS | LISTS | OBJECTS
 RECEIPTS = {"checkpoint", "pause", "stage", "markers", "prologue", "retire"}
 RECEIPT_ORDER = ["checkpoint", "pause", "stage", "markers", "prologue", "retire"]
@@ -108,7 +108,7 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
         if not isinstance(r[key], list): fail(f"{source}: {key} must be list")
     for key in OBJECTS:
         if not isinstance(r[key], dict): fail(f"{source}: {key} must be object")
-    if r["schema_version"] != 1 or r["family"] != family or r["case"] != case or case not in EXPECTED[family]: fail(f"{source}: schema/family/case mismatch")
+    if r["schema_version"] != 2 or r["family"] != family or r["case"] != case or case not in EXPECTED[family]: fail(f"{source}: schema/family/case mismatch")
     expected_evidence_id = digest(f"{family}\0{case}\0{r['tenant_id']}\0{r['operation_id']}".encode())
     if r["evidence_id"] != expected_evidence_id: fail(f"{source}: evidence_id mismatch")
 
@@ -157,6 +157,8 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
     if marker_digest(source_markers) != r["marker_response_digest"]: fail(f"{source}: marker digest mismatch")
     if (len(source_markers), len(left), len(right)) != (r["marker_count"], r["left_marker_count"], r["right_marker_count"]) or (len(source_markers), len(left), len(right)) != (1, 0, 1): fail(f"{source}: marker counts/partition mismatch")
 
+    terminal=exact_object(r["terminal_operation_evidence"],{"manifest_key","covered_offset","barrier_offset","tail_sha256","marker_digest"},"terminal operation evidence")
+    if not isinstance(terminal["manifest_key"],str) or not terminal["manifest_key"] or type(terminal["covered_offset"]) is not int or terminal["covered_offset"] < 0 or type(terminal["barrier_offset"]) is not int or terminal["barrier_offset"] <= 0 or any(not isinstance(terminal[key],str) or len(terminal[key])!=64 for key in ["tail_sha256","marker_digest"]): fail(f"{source}: malformed terminal operation evidence")
     seen_receipts: set[str] = set(); receipt_events=[]
     marker_response = None
     for proof in r["authenticated_receipts"]:
@@ -187,7 +189,15 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
         if name == "pause":
             offsets = [proof["response"].get("barrier_offset") for proof in group]
             if any(type(offset) is not int or offset <= 0 for offset in offsets) or offsets != sorted(offsets): fail(f"{source}: pause replay barrier offsets decrease or are invalid")
-        elif name not in {"prologue", "retire"} and len({proof["response_sha256"] for proof in group})!=1: fail(f"{source}: response replay identity differs")
+            if offsets[-1]!=terminal["barrier_offset"]: fail(f"{source}: pause replay does not end at durable barrier")
+        elif name == "checkpoint":
+            response=group[-1]["response"]
+            if response.get("manifest_key")!=terminal["manifest_key"] or response.get("covered_offset")!=terminal["covered_offset"] or len({proof["response_sha256"] for proof in group})!=1: fail(f"{source}: checkpoint replay differs from durable evidence")
+        elif name == "stage":
+            tails=[proof["response"].get("tail_sha256") for proof in group]
+            if any(not isinstance(tail,str) or len(tail)!=64 for tail in tails) or tails[-1]!=terminal["tail_sha256"]: fail(f"{source}: stage replay does not end at durable tail")
+        elif name == "markers":
+            if any(proof["response"].get("digest")!=terminal["marker_digest"] for proof in group) or len({proof["response_sha256"] for proof in group})!=1: fail(f"{source}: marker replay differs from durable evidence")
         allowed=RESPONSE_KINDS[name]
         expected_kind=expected["expected_response_kind"]
         if expected_kind=="applied_or_already_applied":
@@ -208,7 +218,7 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
     if not r["new_source_pid_alive_at_verification"] or r["old_source_pid_alive"] or r["new_source_pid_alive"] or r["old_source_process_group_alive"] or r["new_source_process_group_alive"] or r["workload_process_group_alive"] or not r["workload_process_reaped"]: fail(f"{source}: terminal process cleanup invalid")
     if r["operation_revision"] <= 0 or r["operation_attempts"] < 1 or r["tenant_record_version"] != r["source_record_version"] + 2 or r["retirement_source_generation"] != 0 or r["retirement_successor_generations"] != [[0, 0], [2, 1], [3, 1]]: fail(f"{source}: journal/tenant/retirement versions invalid")
     if r["completed_phase"]!="completed" or r["pre_kill_predicate"]!=expected_predicate(case): fail(f"{source}: completed/pre-kill state mismatch")
-    if not (r["marker_response_digest"]==r["operation_marker_digest"]==r["retirement_marker_digest"]): fail(f"{source}: marker digest chain differs")
+    if not (r["marker_response_digest"]==r["operation_marker_digest"]==r["retirement_marker_digest"]==terminal["marker_digest"]): fail(f"{source}: marker digest chain differs")
     expected_layout=[{"range_id":0,"end_table_id":50,"end_rowid":10,"endpoint":r["coordinator_endpoint"],"wal_generation":0},{"range_id":2,"end_table_id":51,"end_rowid":16,"endpoint":r["left_endpoint"],"wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":r["right_endpoint"],"wal_generation":1}]
     layout=[]
     for entry in r["terminal_layout"]:
@@ -263,6 +273,11 @@ def synthetic(family: str, case: str, index: int) -> dict[str, Any]:
     empty=lambda range_id,table_id:{"range_id":range_id,"table_id":table_id,"rows":[]}
     scans=[empty(0,50),empty(0,51),{"range_id":2,"table_id":50,"rows":synthetic_rows[:2]},empty(2,51),empty(3,50),{"range_id":3,"table_id":51,"rows":[synthetic_rows[2]]}]
     result.update({"acknowledged_rows":3,"max_ack_gap_ms":40,"kill_ms":20,"restart_ms":30,"publication_ms":40,"coordinator_endpoint":"coordinator","old_source_process_group":result["old_source_pid"],"new_source_process_group":result["new_source_pid"],"payload_events":payload,"reopened_oracle_rows":synthetic_rows,"direct_physical_rows":scans,"sql_union_rows":synthetic_rows,"journal_receipt_expectations":expectations,"completed_phase":"completed","pre_kill_predicate":expected_predicate(case),"operation_marker_digest":result["marker_response_digest"],"retirement_marker_digest":result["marker_response_digest"],"terminal_layout":[{"range_id":0,"end_table_id":50,"end_rowid":10,"endpoint":"coordinator","wal_generation":0},{"range_id":2,"end_table_id":51,"end_rowid":16,"endpoint":"left","wal_generation":1},{"range_id":3,"end_table_id":None,"end_rowid":None,"endpoint":"right","wal_generation":1}]})
+    result["schema_version"]=2
+    result["terminal_operation_evidence"]={"manifest_key":"manifest","covered_offset":1,"barrier_offset":1,"tail_sha256":"1"*64,"marker_digest":result["marker_response_digest"]}
+    checkpoint=next(item for item in result["authenticated_receipts"] if item["operation"]=="checkpoint"); checkpoint["response"].update(manifest_key="manifest",covered_offset=1); checkpoint["response_sha256"]=digest(compact(checkpoint["response"]))
+    stage=next(item for item in result["authenticated_receipts"] if item["operation"]=="stage"); stage["response"]["tail_sha256"]="1"*64; stage["response_sha256"]=digest(compact(stage["response"]))
+    pause=next(item for item in result["authenticated_receipts"] if item["operation"]=="pause"); pause["response"]["barrier_offset"]=1; pause["response_sha256"]=digest(compact(pause["response"]))
     return result
 
 def expect_bad(record: dict[str,Any], family:str, case:str, mutate:Callable[[dict[str,Any]],None], label:str) -> None:
@@ -283,6 +298,9 @@ def append_replay(record: dict[str,Any], operation: str, response: dict[str,Any]
     replay=copy.deepcopy(original); replay["sequence"]=max(item["sequence"] for item in record["authenticated_receipts"])+1; replay["timestamp_ms"]=max(item["timestamp_ms"] for item in record["authenticated_receipts"])+1
     replay["response"]=response; replay["response_sha256"]=digest(compact(response)); replay["replay_count"]=1
     record["authenticated_receipts"].append(replay)
+def mutate_last_response(record: dict[str,Any], operation: str, response: dict[str,Any]) -> None:
+    replay=max((item for item in record["authenticated_receipts"] if item["operation"]==operation),key=lambda item:item["sequence"])
+    replay["response"]=response; replay["response_sha256"]=digest(compact(response))
 def self_test() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root=Path(raw); all_records=[]
@@ -295,6 +313,8 @@ def self_test() -> None:
         family="publication"; case=EXPECTED[family][0]; good=synthetic(family,case,999)
         pause=next(item for item in good["authenticated_receipts"] if item["operation"]=="pause")
         pause["response"]={"result":"paused","barrier_offset":1}; pause["response_sha256"]=digest(compact(pause["response"])); append_replay(good,"pause",{"result":"paused","barrier_offset":2})
+        good["terminal_operation_evidence"]["barrier_offset"]=2
+        append_replay(good,"stage",{"result":"staged","tail_sha256":"2"*64}); good["terminal_operation_evidence"]["tail_sha256"]="2"*64
         for operation in ["prologue","retire"]:
             original=next(item for item in good["authenticated_receipts"] if item["operation"]==operation)["response"]["result"]
             append_replay(good,operation,{"result":"applied" if original=="already_applied" else "already_applied"})
@@ -302,10 +322,12 @@ def self_test() -> None:
             ("evidence id",lambda r:r.__setitem__("evidence_id","0"*64)),("wrong family",lambda r:r.__setitem__("family","source_restore")),("wrong case",lambda r:r.__setitem__("case",EXPECTED[family][1])),("schema missing",lambda r:r.pop("delete_count")),("payload checksum",lambda r:r["payload_events"][1].__setitem__("checksum","wrong")),("recovered count",lambda r:r.__setitem__("recovered_acknowledgements",2)),("computed gap",lambda r:r.__setitem__("max_ack_gap_ms",39)),("pre-kill ack",lambda r:r.__setitem__("kill_ms",5)),("post-restart ack",lambda r:r.__setitem__("restart_ms",60)),("post-publication stream",lambda r:r.__setitem__("publication_ms",51)),("oracle mismatch",lambda r:r["reopened_oracle_rows"][0].__setitem__("seq",99)),("direct ownership",lambda r:r["direct_physical_rows"][0].__setitem__("range_id",3)),("direct scan missing",lambda r:r["direct_physical_rows"].pop()),("sql mismatch",lambda r:r["sql_union_rows"].clear()),("row count",lambda r:r.__setitem__("acknowledged_rows",2)),("marker overlap",lambda r:r.__setitem__("left_markers",r["right_markers"])),("marker order",lambda r:r.__setitem__("source_markers",r["source_markers"]*2)),("marker digest",lambda r:r.__setitem__("marker_response_digest","0"*64)),("marker response",lambda r:r["authenticated_receipts"][3]["response"].__setitem__("right_markers",[])),("receipt hash",lambda r:r["authenticated_receipts"][0].__setitem__("request_sha256","0"*64)),("receipt identity",lambda r:r["authenticated_receipts"][0].__setitem__("operation_id","wrong")),("receipt operation",lambda r:r["authenticated_receipts"][0].__setitem__("operation","pause")),("receipt response",lambda r:r["authenticated_receipts"][0]["response"].__setitem__("result","rejected")),("receipt order",lambda r:r["authenticated_receipts"][0].__setitem__("sequence",99)),("receipt timestamp",lambda r:r["authenticated_receipts"][0].__setitem__("timestamp_ms",99)),("receipt replay",lambda r:r["authenticated_receipts"][0].__setitem__("replay_count",0)),("receipt missing",lambda r:r["authenticated_receipts"].pop()),("expectation tenant",lambda r:mutate_expectation(r,"stage","tenant","wrong")),("expectation endpoint",lambda r:mutate_expectation(r,"stage","endpoint","wrong")),("expectation range",lambda r:mutate_expectation(r,"stage","range_id",2)),("expectation generation",lambda r:mutate_expectation(r,"stage","generation",1)),("expectation journal digest",lambda r:mutate_expectation(r,"stage","journal_digest","0"*64)),("delete target",lambda r:r["delete_attempts"][0].__setitem__("targets",["other"])),("delete outcome",lambda r:r["delete_attempts"][0].__setitem__("outcome","error")),("delete count",lambda r:r.__setitem__("delete_count",2)),("unrelated delete",lambda r:r.__setitem__("unrelated_delete_attempted",True)),("pid identity",lambda r:r.__setitem__("old_source_pid",999)),("pgid identity",lambda r:r.__setitem__("old_source_process_group",999)),("old pid alive",lambda r:r.__setitem__("old_source_pid_alive",True)),("old group alive",lambda r:r.__setitem__("old_source_process_group_alive",True)),("new pid dead at verify",lambda r:r.__setitem__("new_source_pid_alive_at_verification",False)),("new pid alive terminal",lambda r:r.__setitem__("new_source_pid_alive",True)),("new group alive terminal",lambda r:r.__setitem__("new_source_process_group_alive",True)),("workload alive",lambda r:r.__setitem__("workload_process_group_alive",True)),("completed phase",lambda r:r.__setitem__("completed_phase","retiring")),("pre-kill predicate",lambda r:r["pre_kill_predicate"].__setitem__("phase","wrong")),("operation digest",lambda r:r.__setitem__("operation_marker_digest","0"*64)),("retirement digest",lambda r:r.__setitem__("retirement_marker_digest","0"*64)),("terminal layout",lambda r:r["terminal_layout"][1].__setitem__("range_id",9)),("journal revision",lambda r:r.__setitem__("operation_revision",0)),("operation attempts",lambda r:r.__setitem__("operation_attempts",0)),("tenant version",lambda r:r.__setitem__("tenant_record_version",4)),("retirement source",lambda r:r.__setitem__("retirement_source_generation",1)),("retirement versions",lambda r:r.__setitem__("retirement_successor_generations",[[2,1],[3,2]])),("endpoint",lambda r:r.__setitem__("right_endpoint","left")),("generation",lambda r:r.__setitem__("right_wal_generation",2)),("topics",lambda r:r["topology_topics"].pop()),("sentinel",lambda r:r.__setitem__("sentinel_topic","bad")),("false invariant",lambda r:r.__setitem__("post_publication_r2_ack",False)),("wrong bound",lambda r:r.__setitem__("max_ack_gap_bound_ms",25000)),("schema extra",lambda r:r.__setitem__("extra",1))]
         negatives=[(label,(lambda r:r["authenticated_receipts"].pop(0)) if label=="receipt missing" else mutation) for label,mutation in negatives]
         negatives.extend([
-            ("pause replay decreasing",lambda r:r["authenticated_receipts"][-3].update(response={"result":"paused","barrier_offset":0},response_sha256=digest(compact({"result":"paused","barrier_offset":0})))),
-            ("pause replay changed result",lambda r:r["authenticated_receipts"][-3].update(response={"result":"rejected","barrier_offset":2},response_sha256=digest(compact({"result":"rejected","barrier_offset":2})))),
-            ("prologue replay forbidden kind",lambda r:r["authenticated_receipts"][-2].update(response={"result":"rejected"},response_sha256=digest(compact({"result":"rejected"})))),
-            ("retire replay forbidden kind",lambda r:r["authenticated_receipts"][-1].update(response={"result":"rejected"},response_sha256=digest(compact({"result":"rejected"})))),
+            ("pause replay decreasing",lambda r:mutate_last_response(r,"pause",{"result":"paused","barrier_offset":0})),
+            ("pause replay changed result",lambda r:mutate_last_response(r,"pause",{"result":"rejected","barrier_offset":2})),
+            ("prologue replay forbidden kind",lambda r:mutate_last_response(r,"prologue",{"result":"rejected"})),
+            ("retire replay forbidden kind",lambda r:mutate_last_response(r,"retire",{"result":"rejected"})),
+            ("stage replay invalid hash",lambda r:next(item for item in r["authenticated_receipts"] if item["operation"]=="stage").update(response={"result":"staged","tail_sha256":"bad"},response_sha256=digest(compact({"result":"staged","tail_sha256":"bad"})))),
+            ("stage replay terminal mismatch",lambda r:r["terminal_operation_evidence"].__setitem__("tail_sha256","3"*64)),
         ])
         validate_record(good,family,case,"operation-specific replay positive")
         for label,mutation in negatives: expect_bad(good,family,case,mutation,label)
