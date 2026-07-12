@@ -1782,6 +1782,9 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         let Some(operation) = operation else {
             return Ok(false);
         };
+        let Some(plan) = operation.plan.as_ref() else {
+            return Ok(false);
+        };
         let current = registry
             .get(self.tenant.as_str())
             .await
@@ -1789,12 +1792,20 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         let Some(current) = current else {
             return Ok(false);
         };
-        let layout_matches = current.ranges.iter().any(|range| {
-            range.range_id == operation.split.source_range_id
-                && range.wal_generation == operation.split.predecessor_generation
-        }) || [&operation.split.left, &operation.split.right]
-            .into_iter()
-            .all(|expected| current.ranges.iter().any(|range| range == expected));
+        let target_phase =
+            operation.phase >= crabka_gres_control::SplitOperationPhase::LayoutPublished;
+        let expected_layout = if target_phase {
+            &plan.target_layout
+        } else {
+            &plan.current_layout
+        };
+        let expected_version = if target_phase {
+            plan.source_record_version.checked_add(1)
+        } else {
+            Some(plan.source_record_version)
+        };
+        let layout_matches =
+            current.ranges == *expected_layout && Some(current.record_version) == expected_version;
         if !layout_matches {
             return Ok(false);
         }

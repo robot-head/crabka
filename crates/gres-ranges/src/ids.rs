@@ -187,6 +187,11 @@ impl MapEpoch {
     pub const fn new(value: u64) -> Self {
         Self(value)
     }
+
+    #[must_use]
+    pub const fn as_u64(self) -> u64 {
+        self.0
+    }
 }
 
 #[derive(
