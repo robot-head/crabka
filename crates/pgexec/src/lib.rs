@@ -927,6 +927,14 @@ impl SqlEngine {
             .map_err(Into::into)
     }
 
+    /// Enumerate this tenant's durable range-control receipts before SQL readiness.
+    pub fn range_control_receipts(&self, tenant: &str) -> Result<Vec<Vec<u8>>, ExecError> {
+        self.kv
+            .scan_prefix(&crabka_pgkv::key::range_control_receipt_prefix(tenant))
+            .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect())
+            .map_err(Into::into)
+    }
+
     /// Compare-and-swap one range-control receipt through this engine's durable committer.
     pub async fn compare_and_swap_range_control_receipt(
         &self,

@@ -30,6 +30,7 @@ pub struct RangeControlReceipt {
 #[async_trait]
 pub trait RangeControlReceiptStore: Send + Sync {
     async fn load(&self, key: &str) -> Result<Option<RangeControlReceipt>, String>;
+    async fn list(&self) -> Result<Vec<RangeControlReceipt>, String>;
     async fn compare_and_swap(
         &self,
         key: &str,
@@ -47,6 +48,10 @@ pub struct MemoryRangeControlReceiptStore {
 impl RangeControlReceiptStore for MemoryRangeControlReceiptStore {
     async fn load(&self, key: &str) -> Result<Option<RangeControlReceipt>, String> {
         Ok(self.receipts.lock().await.get(key).cloned())
+    }
+
+    async fn list(&self) -> Result<Vec<RangeControlReceipt>, String> {
+        Ok(self.receipts.lock().await.values().cloned().collect())
     }
 
     async fn compare_and_swap(
@@ -88,6 +93,15 @@ impl RangeControlReceiptStore for RangeZeroReceiptStore {
             .map_err(|error| format!("{error:?}"))?
             .map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
             .transpose()
+    }
+
+    async fn list(&self) -> Result<Vec<RangeControlReceipt>, String> {
+        self.engine
+            .range_control_receipts(&self.tenant)
+            .map_err(|error| format!("{error:?}"))?
+            .into_iter()
+            .map(|bytes| serde_json::from_slice(&bytes).map_err(|error| error.to_string()))
+            .collect()
     }
 
     async fn compare_and_swap(
