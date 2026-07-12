@@ -328,6 +328,19 @@ impl TenantRegistryStore for InMemoryRegistryStore {
                 "operation id already names a different split intent",
             )),
             None => {
+                if operations.values().any(|current| {
+                    current.tenant == operation.tenant
+                        && !matches!(
+                            current.phase,
+                            crate::record::SplitOperationPhase::Completed
+                                | crate::record::SplitOperationPhase::Failed
+                        )
+                }) {
+                    return Err(split_operation_conflict(
+                        &operation,
+                        "tenant already has an active range mutation",
+                    ));
+                }
                 operations.insert(key, operation.clone());
                 Ok(operation)
             }
@@ -873,6 +886,24 @@ impl Registry {
         let current = read_split_operations(&self.split_operations)
             .get(&key)
             .cloned();
+        if current.is_none()
+            && read_split_operations(&self.split_operations)
+                .values()
+                .any(|active| {
+                    active.tenant == *tenant
+                        && !matches!(
+                            active.phase,
+                            crate::record::SplitOperationPhase::Completed
+                                | crate::record::SplitOperationPhase::Failed
+                        )
+                })
+        {
+            return Err(ControlError::SplitOperationConflict {
+                tenant: tenant.clone(),
+                operation_id: operation_id.to_string(),
+                reason: "tenant already has an active range mutation".into(),
+            });
+        }
         let Some(next) = transform(current.clone())? else {
             return current.ok_or_else(|| ControlError::SplitOperationConflict {
                 tenant: tenant.clone(),
@@ -1911,6 +1942,44 @@ mod tests {
             store.begin_split_operation(conflicting),
             Err(ControlError::SplitOperationConflict { .. })
         ));
+    }
+
+    #[test]
+    fn tenant_active_mutation_slot_rejects_preemption_until_terminal() {
+        let mut store = InMemoryRegistryStore::new();
+        let first = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-z",
+            split_layout(RangeBoundary::table_start(100)),
+        )
+        .unwrap();
+        let earlier = SplitOperationRecord::new(
+            tenant_name("tenant-a"),
+            "split-a",
+            split_layout(RangeBoundary::table_start(200)),
+        )
+        .unwrap();
+        store.begin_split_operation(first.clone()).unwrap();
+        assert!(matches!(
+            store.begin_split_operation(earlier.clone()),
+            Err(ControlError::SplitOperationConflict { .. })
+        ));
+        let running = first
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        store
+            .compare_and_swap_split_operation(Some(0), running.clone())
+            .unwrap();
+        let completed = running
+            .advance(SplitOperationPhase::Completed, 1, None)
+            .unwrap();
+        store
+            .compare_and_swap_split_operation(Some(1), completed)
+            .unwrap();
+        assert_eq!(
+            store.begin_split_operation(earlier.clone()).unwrap(),
+            earlier
+        );
     }
 
     #[test]

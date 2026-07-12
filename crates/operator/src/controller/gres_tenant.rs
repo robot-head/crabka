@@ -39,7 +39,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::controller::gres_split_operation::{
     MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
-    reconcile_one_rpc_phase, successors_may_be_deployed,
+    reconcile_one_rpc_phase, successors_may_be_deployed, verify_target_topology_ready,
 };
 use crate::{
     context::Context,
@@ -207,7 +207,8 @@ async fn reconcile_inner(
     let kafka_sasl = kafka
         .as_ref()
         .is_some_and(kafka_internal_listener_requires_sasl);
-    let range_tls_hash = if tenant_ranges.len() > 1 {
+    let range_control_enabled = tenant_ranges.len() > 1 || active_split.is_some();
+    let range_tls_hash = if range_control_enabled {
         Some(reconcile_range_tls_secret(&ctx, &ns, &obj).await?)
     } else {
         None
@@ -360,6 +361,7 @@ async fn reconcile_inner(
                 &cfg_topic,
                 record.state,
                 kafka_sasl,
+                range_control_enabled,
                 range_tls_hash.as_deref(),
             )
             .await?;
@@ -407,12 +409,16 @@ async fn reconcile_inner(
             &cfg_topic,
             record.state,
             kafka_sasl,
+            range_control_enabled,
             range_tls_hash.as_deref(),
         )
         .await?;
         if deployments_ready && let Some(operation) = active_split.as_ref() {
             let mutation_client = operator_control_mutation_client(&ctx, &ns, &obj).await?;
             if operation.phase == crabka_gres_control::SplitOperationPhase::Activated {
+                verify_target_topology_ready(&mutation_client, operation)
+                    .await
+                    .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
                 reconcile_activated_cutover(&control, operation)
                     .await
                     .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
@@ -538,6 +544,7 @@ async fn reconcile_compute_deployments(
     config_topic: &str,
     lifecycle_state: TenantState,
     kafka_sasl: bool,
+    range_control_enabled: bool,
     range_tls_hash: Option<&str>,
 ) -> Result<bool, ReconcileError> {
     let dep_api: Api<Deployment> = Api::namespaced(ctx.client.clone(), namespace);
@@ -560,6 +567,7 @@ async fn reconcile_compute_deployments(
             compute_replicas(lifecycle_state),
             &ctx.config,
             kafka_sasl,
+            range_control_enabled,
             range_tls_hash,
         )?;
         apply_object(
@@ -1594,6 +1602,7 @@ fn render_deployment(
     replicas: i32,
     operator_config: &crate::config::OperatorConfig,
     kafka_sasl: bool,
+    range_control_enabled: bool,
     range_tls_hash: Option<&str>,
 ) -> Result<Deployment, ReconcileError> {
     let name = obj.name_any();
@@ -1608,7 +1617,7 @@ fn render_deployment(
         "--tenant".to_owned(),
         name.clone(),
     ];
-    if all_ranges.len() > 1 {
+    if range_control_enabled {
         args.extend([
             "--ranges".to_owned(),
             ranges.clone(),
@@ -1651,7 +1660,7 @@ fn render_deployment(
     }
     let mut ports =
         vec![json!({ "name": "postgres", "containerPort": COMPUTE_PORT, "protocol": "TCP" })];
-    let (range_tls_mounts, range_tls_volumes) = if all_ranges.len() > 1 {
+    let (range_tls_mounts, range_tls_volumes) = if range_control_enabled {
         ports.push(json!({ "name": "range", "containerPort": RANGE_PORT, "protocol": "TCP" }));
         (
             vec![json!({ "name": "range-tls", "mountPath": RANGE_TLS_DIR, "readOnly": true })],
@@ -2055,6 +2064,7 @@ mod tests {
             1,
             &ConfigArgs::parse_from(["operator"]).config,
             false,
+            false,
             None,
         )
         .unwrap();
@@ -2066,6 +2076,56 @@ mod tests {
             .clone()
             .unwrap();
         assert!(!args.iter().any(|arg| arg == "--ranges"));
+    }
+
+    #[test]
+    fn active_first_split_enables_control_listener_without_changing_hosted_ranges() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let ranges = [GresTenantRangeSpec {
+            range_id: 0,
+            end_key: None,
+        }];
+        let deployment = render_deployment(
+            &obj,
+            &ranges[0],
+            &ranges,
+            "image",
+            "k:9092",
+            "__gres_wal.tenant-a.r0",
+            "__gres_cfg.tenant-a",
+            1,
+            &ConfigArgs::parse_from(["operator"]).config,
+            false,
+            true,
+            Some("range-tls-hash"),
+        )
+        .unwrap();
+        let container = &deployment
+            .spec
+            .as_ref()
+            .unwrap()
+            .template
+            .spec
+            .as_ref()
+            .unwrap()
+            .containers[0];
+        let args = container.args.as_ref().unwrap();
+        assert!(args.windows(2).any(|pair| pair == ["--host-ranges", "r0"]));
+        assert!(args.iter().any(|arg| arg == "--range-listen"));
+        assert!(
+            args.windows(2)
+                .any(|pair| pair == ["--operator-control-principal", "CN=tenant-a-operator"])
+        );
+        assert!(
+            container
+                .volume_mounts
+                .as_ref()
+                .unwrap()
+                .iter()
+                .any(|mount| mount.name == "range-tls")
+        );
     }
 
     #[test]
@@ -2088,6 +2148,7 @@ mod tests {
             1,
             &ConfigArgs::parse_from(["operator"]).config,
             true,
+            false,
             None,
         )
         .unwrap();
@@ -2126,6 +2187,7 @@ mod tests {
             1,
             &ConfigArgs::parse_from(["operator"]).config,
             false,
+            true,
             Some("range-tls-hash"),
         )
         .expect("render r1 deployment");
