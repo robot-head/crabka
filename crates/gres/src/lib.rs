@@ -2170,27 +2170,12 @@ async fn load_live_split_operation(
             if record.key.as_deref() != Some(expected_key.as_slice()) {
                 continue;
             }
-            latest = match record.value {
-                None => None,
-                Some(value) => {
-                    let operation =
-                        serde_json::from_slice::<crabka_gres_control::SplitOperationRecord>(&value)
-                            .map_err(|error| {
-                                std::io::Error::new(
-                                    std::io::ErrorKind::InvalidData,
-                                    format!("activation operation: {error}"),
-                                )
-                            })?;
-                    if operation.tenant.as_str() != tenant || operation.operation_id != operation_id
-                    {
-                        return Err(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            "activation operation record conflicts with its registry key",
-                        ));
-                    }
-                    Some(operation)
-                }
-            };
+            apply_live_split_operation_record(
+                &mut latest,
+                record.value.as_deref(),
+                tenant,
+                operation_id,
+            )?;
         }
         let Some(progress) = result.next_offset else {
             conn.close();
@@ -2198,6 +2183,55 @@ async fn load_live_split_operation(
         };
         next_offset = progress;
     }
+}
+
+fn apply_live_split_operation_record(
+    latest: &mut Option<crabka_gres_control::SplitOperationRecord>,
+    value: Option<&[u8]>,
+    tenant: &str,
+    operation_id: &str,
+) -> std::io::Result<()> {
+    let Some(value) = value else {
+        *latest = None;
+        return Ok(());
+    };
+    let operation = serde_json::from_slice::<crabka_gres_control::SplitOperationRecord>(value)
+        .map_err(|error| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                format!("activation operation: {error}"),
+            )
+        })?;
+    if operation.tenant.as_str() != tenant || operation.operation_id != operation_id {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "activation operation record conflicts with its registry key",
+        ));
+    }
+    operation.ensure_valid().map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!("invalid activation operation: {error}"),
+        )
+    })?;
+    if let Some(prior) = latest.as_ref() {
+        if operation.revision <= prior.revision {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "activation operation revision is not strictly monotone",
+            ));
+        }
+        operation
+            .ensure_monotone_extension(prior)
+            .map_err(|error| {
+                std::io::Error::new(
+                    std::io::ErrorKind::InvalidData,
+                    format!("non-monotone activation operation: {error}"),
+                )
+            })?;
+    }
+    *latest = Some(operation);
+    Ok(())
 }
 
 fn activation_registry_connection_options(
@@ -4973,6 +5007,95 @@ mod tests {
         assert_eq!(security.protocol, ListenerProtocol::SaslPlaintext);
         assert!(matches!(security.sasl, Some(SaslCredentials::Scram { .. })));
         assert_eq!(security.sasl_host.as_deref(), Some("broker.internal"));
+    }
+
+    #[test]
+    fn activation_registry_reader_fails_closed_on_noncanonical_history() {
+        use crabka_gres_control::SplitOperationPhase;
+
+        let initiated = test_authorized_split_intent()
+            .expect("intent")
+            .record()
+            .clone();
+        let running = initiated
+            .advance(SplitOperationPhase::Running, 1, None)
+            .expect("running");
+        let encode = |record: &crabka_gres_control::SplitOperationRecord| {
+            serde_json::to_vec(record).expect("encode operation")
+        };
+
+        let mut latest = None;
+        apply_live_split_operation_record(
+            &mut latest,
+            Some(&encode(&initiated)),
+            initiated.tenant.as_str(),
+            &initiated.operation_id,
+        )
+        .expect("initial record");
+        apply_live_split_operation_record(
+            &mut latest,
+            Some(&encode(&running)),
+            initiated.tenant.as_str(),
+            &initiated.operation_id,
+        )
+        .expect("monotone record");
+
+        let mut malformed = initiated.clone();
+        malformed.phase = SplitOperationPhase::Running;
+        assert!(
+            apply_live_split_operation_record(
+                &mut None,
+                Some(&encode(&malformed)),
+                initiated.tenant.as_str(),
+                &initiated.operation_id,
+            )
+            .is_err()
+        );
+        assert!(
+            apply_live_split_operation_record(
+                &mut latest.clone(),
+                Some(&encode(&initiated)),
+                initiated.tenant.as_str(),
+                &initiated.operation_id,
+            )
+            .is_err()
+        );
+
+        let divergent = initiated
+            .advance(SplitOperationPhase::Running, 2, None)
+            .expect("independently valid equal revision");
+        assert!(
+            apply_live_split_operation_record(
+                &mut Some(running.clone()),
+                Some(&encode(&divergent)),
+                initiated.tenant.as_str(),
+                &initiated.operation_id,
+            )
+            .is_err()
+        );
+
+        let mut nonmonotone = divergent.clone();
+        nonmonotone.revision += 1;
+        nonmonotone.attempts = 1;
+        assert!(nonmonotone.ensure_valid().is_ok());
+        assert!(
+            apply_live_split_operation_record(
+                &mut Some(divergent),
+                Some(&encode(&nonmonotone)),
+                initiated.tenant.as_str(),
+                &initiated.operation_id,
+            )
+            .is_err()
+        );
+
+        apply_live_split_operation_record(
+            &mut latest,
+            None,
+            initiated.tenant.as_str(),
+            &initiated.operation_id,
+        )
+        .expect("tombstone");
+        assert!(latest.is_none());
     }
 
     #[test]

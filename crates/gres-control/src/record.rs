@@ -245,7 +245,8 @@ impl SplitOperationRecord {
         Ok(next)
     }
 
-    pub(crate) fn ensure_valid(&self) -> Result<(), crate::ControlError> {
+    /// Validate the complete durable operation shape and phase invariants.
+    pub fn ensure_valid(&self) -> Result<(), crate::ControlError> {
         if self.operation_id.is_empty() {
             return Err(crate::ControlError::invalid_field(
                 "split_operation.operation_id",
@@ -292,10 +293,8 @@ impl SplitOperationRecord {
         Ok(())
     }
 
-    pub(crate) fn ensure_monotone_extension(
-        &self,
-        prior: &Self,
-    ) -> Result<(), crate::ControlError> {
+    /// Validate that this record is the next monotone revision of `prior`.
+    pub fn ensure_monotone_extension(&self, prior: &Self) -> Result<(), crate::ControlError> {
         self.ensure_valid()?;
         let revision = prior.revision.checked_add(1);
         let immutable = self.tenant == prior.tenant
