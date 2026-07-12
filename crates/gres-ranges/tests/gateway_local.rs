@@ -861,18 +861,32 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     .expect("gateway");
     let hosted = gateway.hosted_range_engines();
     let coordinator = hosted.get(&RangeId::COORDINATOR).expect("r0");
+    let (primary_address, primary_server) = spawn_tls_with_handle(
+        Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            hosted[&RangeId::new(1)].clone_handle(),
+        )]))),
+        fixture.server.clone(),
+    )
+    .await;
+    let mut live_record = record;
+    live_record.ranges[1].endpoint = primary_address.to_string();
+    let range_client = restart_config
+        .range_client
+        .clone()
+        .expect("configured range client");
     remote.set_catalog_kv(coordinator.kv_handle());
     coordinator.share_gtm_to(&mut remote);
     remote.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
     let service = Arc::new(CountingTimestampService {
-        inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())])),
+        inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())]))
+            .with_timestamp_primary_remote(registry.clone(), range_client.clone()),
         prewrites: AtomicUsize::new(0),
         resolves: AtomicUsize::new(0),
         recoveries: AtomicUsize::new(0),
     });
     let (address, server_task) =
         spawn_tls_with_handle(service.clone(), fixture.server.clone()).await;
-    let mut live_record = record;
     live_record.ranges[2].endpoint = address.to_string();
     registry
         .refresh_from_tenant_record(&live_record)
@@ -918,6 +932,8 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     let _ = server_task.await;
     drop(service);
     drop(remote);
+    primary_server.abort();
+    let _ = primary_server.await;
 
     let mut recovered_engines = BTreeMap::from([
         (
@@ -933,9 +949,19 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     let recovered_coordinator = recovered_engines
         .get(&RangeId::COORDINATOR)
         .expect("recovered r0");
+    let recovered_primary_address = spawn_tls(
+        Arc::new(HostedRangeService::new(BTreeMap::from([(
+            RangeId::new(1),
+            recovered_engines[&RangeId::new(1)].clone_handle(),
+        )]))),
+        fixture.server.clone(),
+    )
+    .await;
+    live_record.ranges[1].endpoint = recovered_primary_address.to_string();
     remote.set_catalog_kv(recovered_coordinator.kv_handle());
     let recovered_service = Arc::new(CountingTimestampService {
-        inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())])),
+        inner: HostedRangeService::new(BTreeMap::from([(RangeId::new(2), remote.clone_handle())]))
+            .with_timestamp_primary_remote(registry.clone(), range_client),
         prewrites: AtomicUsize::new(0),
         resolves: AtomicUsize::new(0),
         recoveries: AtomicUsize::new(0),
