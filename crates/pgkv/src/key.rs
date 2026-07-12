@@ -284,6 +284,23 @@ pub fn range_control_receipt_prefix(tenant: &str) -> Vec<u8> {
     key
 }
 
+/// Durable topology-activation receipt key under system table zero.
+#[must_use]
+pub fn topology_activation_receipt_key(tenant: &str, operation_id: &str) -> Vec<u8> {
+    let mut key = topology_activation_receipt_prefix(tenant);
+    key.extend_from_slice(operation_id.as_bytes());
+    key
+}
+
+/// Prefix containing every incomplete or completed topology activation receipt.
+#[must_use]
+pub fn topology_activation_receipt_prefix(tenant: &str) -> Vec<u8> {
+    let mut key = system_prefix("topology_activation_receipt");
+    key.extend_from_slice(tenant.as_bytes());
+    key.push(b'/');
+    key
+}
+
 /// Key for a table's stored schema: `/0/catalog/<name>`.
 #[must_use]
 pub fn catalog_key(table_name: &str) -> Vec<u8> {
@@ -756,5 +773,18 @@ mod tests {
         assert!(server_key("pg").starts_with(&prefix));
         assert!(!fdw_key("x").starts_with(&prefix));
         assert!(!catalog_key("t").starts_with(&prefix));
+    }
+
+    #[test]
+    fn topology_activation_receipts_have_an_isolated_tenant_namespace() {
+        let prefix = topology_activation_receipt_prefix("tenant-a");
+        let key = topology_activation_receipt_key("tenant-a", "split-7");
+
+        assert!(key.starts_with(&prefix));
+        assert_ne!(prefix, range_control_receipt_prefix("tenant-a"));
+        assert_ne!(
+            key,
+            topology_activation_receipt_key("tenant-b", "split-7")
+        );
     }
 }
