@@ -343,8 +343,8 @@ fn split_command() -> SplitCommand {
         predecessor: RangeId::new(1),
         predecessor_generation: 0,
         left: SuccessorDescriptor {
-            range_id: RangeId::new(1),
-            interval: RangeSpec::new(RangeId::new(1), TableId::new(10), Some(TableId::new(20))),
+            range_id: RangeId::new(4),
+            interval: RangeSpec::new(RangeId::new(4), TableId::new(10), Some(TableId::new(20))),
             endpoint: "local.test:7443".into(),
             wal_generation: 1,
         },

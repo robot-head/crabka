@@ -671,6 +671,79 @@ impl GresRuntime {
         self.range_service.clone()
     }
 
+    /// Exercise the currently published authenticated range-service topology.
+    #[doc(hidden)]
+    pub async fn handle_range_request(
+        &self,
+        request: crabka_gres_ranges::RangeRequest,
+    ) -> Option<crabka_gres_ranges::RangeResponse> {
+        let service = self.range_service.as_ref()?;
+        Some(service.handle(request).await)
+    }
+
+    /// Verify durable range-control receipts through the currently published r0 engine.
+    #[doc(hidden)]
+    pub async fn verify_current_range0_receipt_store(&self) -> Result<(), String> {
+        let transfer = self
+            .staged_transfer
+            .as_ref()
+            .ok_or_else(|| "live topology unavailable".to_owned())?;
+        let engine = transfer
+            .engines
+            .read()
+            .map_err(|_| "live topology lock poisoned".to_owned())?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .ok_or_else(|| "replacement r0 unavailable".to_owned())?
+            .clone_handle();
+        let request = crabka_gres_ranges::transport::RangeControlReq {
+            tenant: transfer.config.tenant.clone(),
+            range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+            generation: transfer
+                .ranges
+                .read()
+                .map_err(|_| "live resources lock poisoned".to_owned())?
+                .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+                .ok_or_else(|| "replacement r0 resources unavailable".to_owned())?
+                .generation
+                .0,
+            operation_id: "post-r0-receipt".into(),
+            operation: crabka_gres_ranges::transport::RangeControlOperation::Status,
+        };
+        let receipt = crabka_gres_ranges::control::RangeControlReceipt {
+            request,
+            request_digest: "post-r0-receipt-digest".into(),
+            generation: 1,
+            revision: 0,
+            result: Some(crabka_gres_ranges::transport::RangeControlResp::Applied),
+        };
+        let first = crabka_gres_ranges::control::RangeZeroReceiptStore::new(
+            transfer.config.tenant.clone(),
+            engine.clone_handle(),
+        );
+        if !crabka_gres_ranges::control::RangeControlReceiptStore::compare_and_swap(
+            &first,
+            "post-r0-receipt",
+            None,
+            receipt.clone(),
+        )
+        .await?
+        {
+            return Err("replacement r0 receipt CAS failed".into());
+        }
+        let reopened = crabka_gres_ranges::control::RangeZeroReceiptStore::new(
+            transfer.config.tenant.clone(),
+            engine,
+        );
+        let loaded = crabka_gres_ranges::control::RangeControlReceiptStore::load(
+            &reopened,
+            "post-r0-receipt",
+        )
+        .await?;
+        (loaded == Some(receipt))
+            .then_some(())
+            .ok_or_else(|| "replacement r0 receipt did not replay".into())
+    }
+
     /// Return the hosted-range transfer foundation when this is a live multi-range runtime.
     #[must_use]
     pub fn range_transfer_capability(
@@ -2138,7 +2211,7 @@ async fn open_live_range_substrate_engine(
     };
     Ok(LiveRangeEngine {
         engine,
-        tso_horizon,
+        tso_horizon: tso_horizon.clone(),
         resources: LiveRangeResources {
             store,
             writer,
@@ -2147,6 +2220,7 @@ async fn open_live_range_substrate_engine(
             recovery_config,
             generation: recovered.generation,
             pause: Arc::new(std::sync::Mutex::new(RangePauseState::Idle)),
+            tso_horizon: tso_horizon.clone(),
         },
     })
 }
@@ -2165,6 +2239,66 @@ struct LiveRangeResources {
     recovery_config: crabka_gres_substrate::LiveRecoveryConfig,
     generation: crabka_gres_substrate::WriterGeneration,
     pause: Arc<std::sync::Mutex<RangePauseState>>,
+    tso_horizon: Option<crabka_gres_substrate::SubstrateTsoHorizon>,
+}
+
+struct DynamicLiveRangeService {
+    current: std::sync::RwLock<Arc<crabka_gres_ranges::HostedRangeService>>,
+    publishing: std::sync::atomic::AtomicBool,
+}
+
+impl DynamicLiveRangeService {
+    fn new(service: crabka_gres_ranges::HostedRangeService) -> Self {
+        Self {
+            current: std::sync::RwLock::new(Arc::new(service)),
+            publishing: std::sync::atomic::AtomicBool::new(false),
+        }
+    }
+
+    fn replace(&self, service: crabka_gres_ranges::HostedRangeService) {
+        self.publishing
+            .store(true, std::sync::atomic::Ordering::Release);
+        *self.current.write().expect("live range service lock") = Arc::new(service);
+    }
+
+    fn finish_publication(&self) {
+        self.publishing
+            .store(false, std::sync::atomic::Ordering::Release);
+    }
+
+    fn load(&self) -> Arc<crabka_gres_ranges::HostedRangeService> {
+        Arc::clone(&self.current.read().expect("live range service lock"))
+    }
+}
+
+#[async_trait::async_trait]
+impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
+    async fn handle(
+        &self,
+        request: crabka_gres_ranges::RangeRequest,
+    ) -> crabka_gres_ranges::RangeResponse {
+        if self.publishing.load(std::sync::atomic::Ordering::Acquire) {
+            return crabka_gres_ranges::RangeResponse::Error {
+                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
+                message: "range topology publication is in progress; retry".into(),
+            };
+        }
+        self.load().handle(request).await
+    }
+
+    async fn handle_connection(
+        &self,
+        request: crabka_gres_ranges::RangeRequest,
+        writer: &mut (dyn tokio::io::AsyncWrite + Unpin + Send),
+    ) -> Result<Option<crabka_gres_ranges::RangeResponse>, crabka_gres_ranges::TransportError> {
+        if self.publishing.load(std::sync::atomic::Ordering::Acquire) {
+            return Ok(Some(crabka_gres_ranges::RangeResponse::Error {
+                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
+                message: "range topology publication is in progress; retry".into(),
+            }));
+        }
+        self.load().handle_connection(request, writer).await
+    }
 }
 
 enum RangePauseState {
@@ -2237,14 +2371,11 @@ async fn open_live_multirange_tenant(
     mut live_engines: LiveMultirangeEngines,
     config: &SubstrateRuntimeConfig,
 ) -> std::io::Result<GresRuntime> {
-    let transfer = Arc::new(LiveMultiRangeTransfer::new(
-        live_engines
-            .engines
-            .iter()
-            .map(|(range_id, engine)| (*range_id, engine.resources.clone()))
-            .collect(),
-        (*config).clone(),
-    ));
+    let live_resources = live_engines
+        .engines
+        .iter()
+        .map(|(range_id, engine)| (*range_id, engine.resources.clone()))
+        .collect();
     let (gateway, _handles, tso_rpc) = if let Some(tso_horizon) =
         live_engines.range0_tso_horizon.take()
     {
@@ -2305,14 +2436,21 @@ async fn open_live_multirange_tenant(
     if let Some((registry, client)) = gateway.timestamp_primary_remote() {
         range_service = range_service.with_timestamp_primary_remote(registry, client);
     }
-    if let Some(tso_rpc) = tso_rpc {
-        range_service = range_service.with_tso(tso_rpc);
+    if let Some(tso_rpc) = &tso_rpc {
+        range_service = range_service.with_tso(Arc::clone(tso_rpc));
     }
-    let range_service = Arc::new(range_service);
+    let dynamic_service = Arc::new(DynamicLiveRangeService::new(range_service));
+    let transfer = Arc::new(LiveMultiRangeTransfer::new(
+        live_resources,
+        (*config).clone(),
+        Arc::clone(&dynamic_service),
+        gateway.hosted_range_engines(),
+        tso_rpc,
+    ));
     Ok(GresRuntime {
         engine: RuntimeEngine::Multi(Box::new(gateway)),
         checkpoint_runtime: None,
-        range_service: Some(range_service),
+        range_service: Some(dynamic_service),
         range_transfer: Some(transfer.clone()),
         staged_transfer: Some(transfer),
     })
@@ -2366,15 +2504,20 @@ impl Clone for LiveRangeResources {
             recovery_config: self.recovery_config.clone(),
             generation: self.generation,
             pause: Arc::clone(&self.pause),
+            tso_horizon: self.tso_horizon.clone(),
         }
     }
 }
 
 /// Live resources retained for foundation-only transfer operations.
 struct LiveMultiRangeTransfer {
-    ranges: BTreeMap<crabka_gres_ranges::RangeId, LiveRangeResources>,
+    ranges: std::sync::RwLock<BTreeMap<crabka_gres_ranges::RangeId, LiveRangeResources>>,
     config: SubstrateRuntimeConfig,
     staged: std::sync::Mutex<BTreeMap<crabka_gres_ranges::RangeId, StagedLiveRangeSuccessor>>,
+    engines: std::sync::RwLock<BTreeMap<crabka_gres_ranges::RangeId, SqlEngine>>,
+    tso_rpc: std::sync::RwLock<Option<Arc<dyn crabka_gres_ranges::TsoRpc>>>,
+    range_service: Arc<DynamicLiveRangeService>,
+    retired: std::sync::Mutex<BTreeMap<crabka_gres_ranges::RangeId, LiveRangeResources>>,
 }
 
 /// Runtime-owned successor kept outside the serving snapshot until its caller
@@ -2396,24 +2539,93 @@ impl LiveMultiRangeTransfer {
     fn new(
         ranges: BTreeMap<crabka_gres_ranges::RangeId, LiveRangeResources>,
         config: SubstrateRuntimeConfig,
+        range_service: Arc<DynamicLiveRangeService>,
+        engines: BTreeMap<crabka_gres_ranges::RangeId, SqlEngine>,
+        tso_rpc: Option<Arc<dyn crabka_gres_ranges::TsoRpc>>,
     ) -> Self {
         Self {
-            ranges,
+            ranges: std::sync::RwLock::new(ranges),
             config,
             staged: std::sync::Mutex::new(BTreeMap::new()),
+            engines: std::sync::RwLock::new(engines),
+            tso_rpc: std::sync::RwLock::new(tso_rpc),
+            range_service,
+            retired: std::sync::Mutex::new(BTreeMap::new()),
         }
+    }
+
+    fn publish_topology(
+        &self,
+        serving_engines: &BTreeMap<crabka_gres_ranges::RangeId, SqlEngine>,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        let mut engines = self
+            .engines
+            .write()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?;
+        *engines = serving_engines
+            .iter()
+            .map(|(id, engine)| (*id, engine.clone_handle()))
+            .collect();
+        let coordinator_resources = self
+            .ranges
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .cloned();
+        if let Some(horizon) = coordinator_resources.and_then(|resources| resources.tso_horizon) {
+            let persisted_max_ts = horizon.load_max_ts().map_err(|error| {
+                crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                    reason: format!("load replacement TSO horizon: {error}"),
+                }
+            })?;
+            let rpc = crabka_gres_ranges::tso_rpc_from_horizon(
+                horizon.clone(),
+                horizon.clone(),
+                horizon.epoch(),
+                persisted_max_ts,
+            )
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("open replacement TSO RPC: {error}"),
+            })?;
+            *self
+                .tso_rpc
+                .write()
+                .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))? =
+                Some(rpc);
+        }
+        let mut service = crabka_gres_ranges::HostedRangeService::new(
+            engines
+                .iter()
+                .map(|(id, engine)| (*id, engine.clone_handle()))
+                .collect(),
+        );
+        if let Some(tso) = self
+            .tso_rpc
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .clone()
+        {
+            service = service.with_tso(tso);
+        }
+        self.range_service.replace(service);
+        Ok(())
     }
 
     fn range(
         &self,
         range_id: crabka_gres_ranges::RangeId,
-    ) -> Result<&LiveRangeResources, crabka_gres_ranges::RangeTransferError> {
-        self.ranges.get(&range_id).ok_or_else(|| {
-            crabka_gres_ranges::RangeTransferError::Unavailable {
+    ) -> Result<LiveRangeResources, crabka_gres_ranges::RangeTransferError> {
+        self.ranges
+            .read()
+            .map_err(|_| range_pause_lock_error(range_id))?
+            .get(&range_id)
+            .cloned()
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
                 range_id,
                 reason: "range is not hosted by this live runtime".to_owned(),
-            }
-        })
+            })
     }
 
     fn staged_successor_kv(
@@ -2442,7 +2654,13 @@ impl LiveMultiRangeTransfer {
         &self,
         barrier: crabka_gres_ranges::RangeTransferBarrier,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
-        let resources = self.range(barrier.range_id)?;
+        let resources = self
+            .retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(barrier.range_id))?
+            .get(&barrier.range_id)
+            .cloned()
+            .map_or_else(|| self.range(barrier.range_id), Ok)?;
         let mut state = resources
             .pause
             .lock()
@@ -2465,6 +2683,10 @@ impl LiveMultiRangeTransfer {
         };
         drop(state);
         paused.resume();
+        self.retired
+            .lock()
+            .map_err(|_| range_pause_lock_error(barrier.range_id))?
+            .remove(&barrier.range_id);
         Ok(())
     }
 }
@@ -2475,13 +2697,28 @@ impl LiveMultiRangeTransfer {
 )]
 #[async_trait::async_trait]
 impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
+    fn publish_serving_topology(
+        &self,
+        engines: &BTreeMap<crabka_gres_ranges::RangeId, SqlEngine>,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        self.publish_topology(engines)
+    }
+
+    fn finish_serving_topology_publication(&self) {
+        self.range_service.finish_publication();
+    }
+
     fn validate_successors(
         &self,
         plan: &crabka_gres_ranges::ValidatedSplitTransferPlan,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
         let state = plan.state();
         let Some(expected) = self.config.advertised_endpoint.as_deref() else {
-            return Ok(());
+            return Err(crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: state.predecessor,
+                reason: "live successor staging requires an authenticated advertised endpoint"
+                    .to_owned(),
+            });
         };
         let right = state.right.as_ref().ok_or_else(|| {
             crabka_gres_ranges::RangeTransferError::Boundary {
@@ -2665,7 +2902,11 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     reason: "source writer does not hold the requested transfer barrier".to_owned(),
                 });
             }
-            if self.ranges.contains_key(&request.target_range)
+            if self
+                .ranges
+                .read()
+                .map_err(|_| range_pause_lock_error(request.target_range))?
+                .contains_key(&request.target_range)
                 && request.target_range != checkpoint.range_id
             {
                 return Err(crabka_gres_ranges::RangeTransferError::Boundary {
@@ -2816,7 +3057,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     range_id: request.target_range,
                     reason: format!("write successor bootstrap checkpoint: {error}"),
                 })?;
-            let (engine, _) = build_replicated_substrate_engine_with_committer(
+            let (mut engine, committer) = build_replicated_substrate_engine_with_committer(
                 &target_store,
                 Arc::clone(&writer),
                 recovered.generation,
@@ -2828,6 +3069,40 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 range_id: request.target_range,
                 reason: format!("build successor SQL engine: {error}"),
             })?;
+            let tso_horizon = request.target_range.is_coordinator().then(|| {
+                let tso_store: Arc<dyn Kv> = target_store.clone();
+                let tso_committer: Arc<dyn crabka_pgexec::Committer> = committer;
+                let tso_lease: Arc<dyn crabka_gres_substrate::FenceLease> = writer.clone();
+                crabka_gres_substrate::SubstrateTsoHorizon::new(
+                    tso_store,
+                    tso_committer,
+                    tso_lease,
+                    recovered.generation,
+                )
+            });
+            if let Some(horizon) = &tso_horizon {
+                let persisted_max_ts = horizon.load_max_ts().map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id: request.target_range,
+                        reason: format!("recover successor TSO horizon: {error}"),
+                    }
+                })?;
+                let tso_rpc = crabka_gres_ranges::tso_rpc_from_horizon(
+                    horizon.clone(),
+                    horizon.clone(),
+                    horizon.epoch(),
+                    persisted_max_ts,
+                )
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id: request.target_range,
+                        reason: format!("recover successor TSO oracle: {error}"),
+                    }
+                })?;
+                engine.set_timestamp_oracle(crabka_gres_ranges::pgexec_timestamp_oracle_from_rpc(
+                    tso_rpc,
+                ));
+            }
             let resources = LiveRangeResources {
                 store: target_store,
                 writer,
@@ -2836,6 +3111,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 recovery_config: target_recovery,
                 generation: recovered.generation,
                 pause: Arc::new(std::sync::Mutex::new(RangePauseState::Idle)),
+                tso_horizon,
             };
             self.staged
                 .lock()
@@ -2920,6 +3196,20 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "right successor disappeared during atomic claim".to_owned(),
             }
         })?;
+        {
+            let mut ranges = self
+                .ranges
+                .write()
+                .map_err(|_| range_pause_lock_error(barrier.range_id))?;
+            if let Some(retired) = ranges.remove(&barrier.range_id) {
+                self.retired
+                    .lock()
+                    .map_err(|_| range_pause_lock_error(barrier.range_id))?
+                    .insert(barrier.range_id, retired);
+            }
+            ranges.insert(staged.left.range_id, left.resources.clone());
+            ranges.insert(staged.right.range_id, right.resources.clone());
+        }
         Ok(crabka_gres_ranges::ClaimedStagedSuccessors {
             left: crabka_gres_ranges::ClaimedStagedSuccessor {
                 range_id: staged.left.range_id,
@@ -4478,5 +4768,35 @@ mod tests {
         .expect("config");
         let (multi, _handles) = crabka_gres_ranges::MultiRangeTenant::start(config).expect("multi");
         assert_runtime_session_v2(RuntimeEngine::Multi(Box::new(multi)).connect()).await;
+    }
+
+    #[tokio::test]
+    async fn dynamic_range_service_fails_closed_during_topology_publication() {
+        let dynamic = DynamicLiveRangeService::new(crabka_gres_ranges::HostedRangeService::new(
+            BTreeMap::new(),
+        ));
+        dynamic.replace(crabka_gres_ranges::HostedRangeService::new(BTreeMap::from(
+            [(crabka_gres_ranges::RangeId::COORDINATOR, SqlEngine::new())],
+        )));
+        let request = crabka_gres_ranges::RangeRequest::Sql {
+            range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+            sql: "SELECT 1".into(),
+        };
+        assert!(matches!(
+            crabka_gres_ranges::RangeService::handle(&dynamic, request.clone()).await,
+            crabka_gres_ranges::RangeResponse::Error {
+                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
+                ..
+            }
+        ));
+        dynamic.finish_publication();
+        let after = crabka_gres_ranges::RangeService::handle(&dynamic, request).await;
+        assert!(!matches!(
+            after,
+            crabka_gres_ranges::RangeResponse::Error {
+                error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
+                ..
+            }
+        ));
     }
 }

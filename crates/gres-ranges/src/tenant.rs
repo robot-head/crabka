@@ -737,7 +737,7 @@ impl MultiRangeTenant {
             .stage_successors(plan, checkpoint, &tail, barrier)
             .await?;
         let claimed = transfer.claim_successors(&staged, barrier).await?;
-        self.publish_claimed_successors(serving, state, claimed)
+        self.publish_claimed_successors(serving, state, claimed, Some(transfer))
     }
 
     fn publish_claimed_successors(
@@ -745,6 +745,7 @@ impl MultiRangeTenant {
         serving: &ServingSnapshot,
         state: &SplitState,
         claimed: crate::ClaimedStagedSuccessors,
+        transfer: Option<&dyn RangeTransferCapability>,
     ) -> Result<(), LocalSqlSplitError> {
         let coordinator = serving
             .engines
@@ -776,8 +777,6 @@ impl MultiRangeTenant {
                     error,
                 }
             })?;
-            left.engine
-                .set_timestamp_oracle(coordinator.timestamp_oracle_handle());
             if let Some(scanner) = coordinator.foreign_scanner_handle() {
                 left.engine.set_foreign_scanner(scanner);
             }
@@ -820,6 +819,19 @@ impl MultiRangeTenant {
         keepalives.remove(&state.predecessor);
         keepalives.insert(state.left.range_id, left.keepalive);
         keepalives.insert(right_descriptor.range_id, right.keepalive);
+        if let Some(transfer) = transfer {
+            self.inner
+                .serving
+                .store(Arc::new(ServingSnapshot::publishing_with_keepalives(
+                    state.target_map.clone(),
+                    engines
+                        .iter()
+                        .map(|(id, engine)| (*id, engine.clone_handle()))
+                        .collect(),
+                    keepalives.clone(),
+                )));
+            transfer.publish_serving_topology(&engines)?;
+        }
         self.inner
             .serving
             .store(Arc::new(ServingSnapshot::ready_with_keepalives(
@@ -827,6 +839,9 @@ impl MultiRangeTenant {
                 engines,
                 keepalives,
             )));
+        if let Some(transfer) = transfer {
+            transfer.finish_serving_topology_publication();
+        }
         Ok(())
     }
 
@@ -850,7 +865,7 @@ impl MultiRangeTenant {
                 "control successor target map is not the next epoch".into(),
             )));
         }
-        self.publish_claimed_successors(&serving, &state, claimed)
+        self.publish_claimed_successors(&serving, &state, claimed, None)
     }
 
     fn validate_populated_table_split(
@@ -878,7 +893,7 @@ impl MultiRangeTenant {
             .range_for_key(table_id, 0)
             .map_err(SplitError::from)?
             .range_id;
-        if predecessor == RangeId::COORDINATOR || !serving.engines.contains_key(&predecessor) {
+        if !serving.engines.contains_key(&predecessor) {
             return Err(LocalSqlSplitError::RemoteRange);
         }
         let coordinator = serving
@@ -930,7 +945,6 @@ impl MultiRangeTenant {
                 | crabka_pgkv::key::KeyClass::PrimaryVersion { table_id, .. }
                 | crabka_pgkv::key::KeyClass::HashPrimaryRow { table_id, .. }
                 | crabka_pgkv::key::KeyClass::HashPrimaryVersion { table_id, .. }
-                | crabka_pgkv::key::KeyClass::SecondaryIndex { table_id, .. }
                 | crabka_pgkv::key::KeyClass::Sequence { table_id } => {
                     Some(TableId::new(u64::from(table_id)))
                 }
@@ -1870,6 +1884,19 @@ impl ServingSnapshot {
             range_map,
             engines,
             ready,
+            keepalives,
+        }
+    }
+
+    fn publishing_with_keepalives(
+        range_map: RangeMap,
+        engines: BTreeMap<RangeId, SqlEngine>,
+        keepalives: BTreeMap<RangeId, Arc<dyn std::any::Any + Send + Sync>>,
+    ) -> Self {
+        Self {
+            range_map,
+            engines,
+            ready: BTreeSet::new(),
             keepalives,
         }
     }
