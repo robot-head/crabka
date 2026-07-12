@@ -62,8 +62,14 @@ fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
             ),
         };
         if event.kind == "ack" || event.kind == "recovered_ack" {
-            if acknowledgements.insert(event.seq, event.timestamp_ms).is_some() {
-                return Err(format!("duplicate acknowledgement for sequence {}", event.seq));
+            if acknowledgements
+                .insert(event.seq, event.timestamp_ms)
+                .is_some()
+            {
+                return Err(format!(
+                    "duplicate acknowledgement for sequence {}",
+                    event.seq
+                ));
             }
             recovered += usize::from(event.kind == "recovered_ack");
         }
@@ -105,17 +111,18 @@ struct WorkloadChild {
 impl WorkloadChild {
     async fn shutdown(&mut self) {
         std::fs::write(&self.stop_path, b"stop").expect("signal workload child stop");
-        let (status, forced) = match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
-            Ok(status) => (status.expect("wait workload child"), false),
-            Err(_) => {
-                terminate_process_group(self.process_group);
-                let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-                    .await
-                    .expect("terminated workload child stop timeout")
-                    .expect("wait terminated workload child");
-                (status, true)
-            }
-        };
+        let (status, forced) =
+            match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+                Ok(status) => (status.expect("wait workload child"), false),
+                Err(_) => {
+                    terminate_process_group(self.process_group);
+                    let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+                        .await
+                        .expect("terminated workload child stop timeout")
+                        .expect("wait terminated workload child");
+                    (status, true)
+                }
+            };
         assert!(forced || status.success(), "workload child failed");
         self.stopped = true;
         wait_for_process_group_exit(self.process_group).await;
@@ -155,7 +162,10 @@ async fn wait_for_process_group_exit(process_group: u32) {
     while process_group_exists(process_group) && Instant::now() < deadline {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
-    assert!(!process_group_exists(process_group), "workload process group remains");
+    assert!(
+        !process_group_exists(process_group),
+        "workload process group remains"
+    );
 }
 
 async fn run_with_workload_cleanup<F, T>(
@@ -175,9 +185,7 @@ async fn workload_cleanup_reaps_descendants_on_error_path() {
     let root = tempfile::tempdir().expect("cleanup root");
     let stop_path = root.path().join("stop");
     let mut command = tokio::process::Command::new("bash");
-    command
-        .args(["-c", "sleep 60 & wait"])
-        .kill_on_drop(true);
+    command.args(["-c", "sleep 60 & wait"]).kill_on_drop(true);
     command.as_std_mut().process_group(0);
     let child = command.spawn().expect("spawn cleanup fixture");
     let process_group = child.id().expect("cleanup fixture pid");
@@ -188,10 +196,9 @@ async fn workload_cleanup_reaps_descendants_on_error_path() {
         stopped: false,
     };
     assert!(process_group_exists(process_group));
-    let outcome = run_with_workload_cleanup(&mut workload, async {
-        panic!("intentional case failure")
-    })
-    .await;
+    let outcome =
+        run_with_workload_cleanup(&mut workload, async { panic!("intentional case failure") })
+            .await;
     assert!(outcome.is_err());
     assert!(!process_group_exists(process_group));
 }
@@ -200,8 +207,7 @@ async fn wait_for_ack_count(path: &Path, minimum: usize) {
     let deadline = Instant::now() + Duration::from_secs(10);
     loop {
         let contents = std::fs::read_to_string(path).unwrap_or_default();
-        if parse_ack_ledger(&contents)
-            .is_ok_and(|ledger| ledger.acknowledgements.len() >= minimum)
+        if parse_ack_ledger(&contents).is_ok_and(|ledger| ledger.acknowledgements.len() >= minimum)
         {
             return;
         }
@@ -367,11 +373,17 @@ async fn drive_operation(
             tokio::time::sleep(Duration::from_millis(150)).await;
             system.restart_with_hosted_ranges(0, "r0,r1").await;
             let new_pid = system.pid(0);
-            assert_ne!(old_pid, new_pid, "SIGKILL restart must replace the real child");
+            assert_ne!(
+                old_pid, new_pid,
+                "SIGKILL restart must replace the real child"
+            );
             let mut fresh_registry = Registry::connect(system.bootstrap())
                 .await
                 .expect("fresh post-kill registry");
-            fresh_registry.ensure_topic(1).await.expect("registry topic");
+            fresh_registry
+                .ensure_topic(1)
+                .await
+                .expect("registry topic");
             control = Arc::new(BrokerControl {
                 registry: Mutex::new(fresh_registry),
             });
@@ -382,7 +394,7 @@ async fn drive_operation(
             SplitOperationPhase::Activated => {
                 let readiness_deadline = Instant::now() + std::time::Duration::from_secs(5);
                 loop {
-                            match verify_target_topology_ready(&mutation_client, &current).await {
+                    match verify_target_topology_ready(&mutation_client, &current).await {
                         Ok(()) => break,
                         Err(error) if Instant::now() < readiness_deadline => {
                             let mut debug_registry = Registry::connect(system.bootstrap())
@@ -442,24 +454,22 @@ async fn drive_operation(
                 );
                 return (current, restarted_pids);
             }
-            _ => {
-                match reconcile_one_rpc_phase(&control, &mutation_client, &current).await {
-                    Ok(_) => {}
-                    Err(
-                        error @ (SplitReconcileError::Transport(_)
-                        | SplitReconcileError::Ambiguous(_)
-                        | SplitReconcileError::Registry(_)),
-                    ) => {
-                        assert!(
-                            started.elapsed() < max_operation_duration,
-                            "operation deadline after transient reconcile error: {error}; source log: {}",
-                            system.log(0)
-                        );
-                        tokio::time::sleep(Duration::from_millis(100)).await;
-                    }
-                    Err(error) => panic!("non-retryable reconcile error: {error}"),
+            _ => match reconcile_one_rpc_phase(&control, &mutation_client, &current).await {
+                Ok(_) => {}
+                Err(
+                    error @ (SplitReconcileError::Transport(_)
+                    | SplitReconcileError::Ambiguous(_)
+                    | SplitReconcileError::Registry(_)),
+                ) => {
+                    assert!(
+                        started.elapsed() < max_operation_duration,
+                        "operation deadline after transient reconcile error: {error}; source log: {}",
+                        system.log(0)
+                    );
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-            }
+                Err(error) => panic!("non-retryable reconcile error: {error}"),
+            },
         }
     }
 }
@@ -488,12 +498,7 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
     let operation_started = Instant::now();
     let completed = tokio::time::timeout(
         Duration::from_secs(30),
-        drive_operation(
-            &mut system,
-            "g8-live-move",
-            Duration::from_secs(30),
-            None,
-        ),
+        drive_operation(&mut system, "g8-live-move", Duration::from_secs(30), None),
     )
     .await
     .expect("whole Move operation deadline")
@@ -602,7 +607,10 @@ done
     workload_command.as_std_mut().process_group(0);
     let child = workload_command.spawn().expect("spawn real workload child");
     let workload_pid = child.id().expect("workload child pid");
-    assert!(process_group_exists(workload_pid), "workload process group started");
+    assert!(
+        process_group_exists(workload_pid),
+        "workload process group started"
+    );
     let mut workload = WorkloadChild {
         child,
         process_group: workload_pid,
@@ -649,7 +657,10 @@ done
     )
     .expect("valid final acknowledgement ledger");
     const MAX_OBSERVED_SAFE_ACK_GAP_MS: u128 = 7_000;
-    assert!(ledger.recovered >= 1, "deterministic response loss must recover an ACK");
+    assert!(
+        ledger.recovered >= 1,
+        "deterministic response loss must recover an ACK"
+    );
     assert!(
         ledger.max_ack_gap_ms <= MAX_OBSERVED_SAFE_ACK_GAP_MS,
         "maximum acknowledged-write gap {}ms exceeded observed-safe {}ms bound",
@@ -657,11 +668,17 @@ done
         MAX_OBSERVED_SAFE_ACK_GAP_MS
     );
     assert!(
-        ledger.acknowledgements.values().any(|timestamp| *timestamp < restart_ms),
+        ledger
+            .acknowledgements
+            .values()
+            .any(|timestamp| *timestamp < restart_ms),
         "at least one write must be acknowledged before SIGKILL"
     );
     assert!(
-        ledger.acknowledgements.values().any(|timestamp| *timestamp > restart_ms),
+        ledger
+            .acknowledgements
+            .values()
+            .any(|timestamp| *timestamp > restart_ms),
         "at least one write must be acknowledged after restart"
     );
     let expected = ledger
@@ -678,10 +695,15 @@ done
         .into_iter()
         .map(|row| (i64::from(row.get::<_, i32>(0)), row.get::<_, String>(1)))
         .collect::<Vec<_>>();
-    assert_eq!(rows, expected, "database rows must exactly equal durable ACK ledger");
+    assert_eq!(
+        rows, expected,
+        "database rows must exactly equal durable ACK ledger"
+    );
 
     let durable_tenant = {
-        let mut registry = Registry::connect(system.bootstrap()).await.expect("registry");
+        let mut registry = Registry::connect(system.bootstrap())
+            .await
+            .expect("registry");
         registry
             .get(system.tenant())
             .await
@@ -694,7 +716,12 @@ done
         .find(|range| range.range_id == 2)
         .expect("replacement owner r2");
     assert_eq!(moved_owner.wal_generation, 1);
-    assert!(durable_tenant.ranges.iter().all(|range| range.range_id != 1));
+    assert!(
+        durable_tenant
+            .ranges
+            .iter()
+            .all(|range| range.range_id != 1)
+    );
     let retirement = durable_tenant
         .range_retirements
         .iter()
@@ -722,10 +749,7 @@ done
         .map(|topic| topic.name)
         .collect::<std::collections::BTreeSet<_>>();
     assert!(!topic_names.contains(&format!("__gres_wal.{}.r1", system.tenant())));
-    assert!(topic_names.contains(&format!(
-        "__gres_wal.{}.r2.g0000000001",
-        system.tenant()
-    )));
+    assert!(topic_names.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
     assert!(topic_names.contains(&format!("__gres_wal.{}.r0", system.tenant())));
 
     if let Some(path) = std::env::var_os("CRABKA_G8_KILL_EVIDENCE") {
