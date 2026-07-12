@@ -319,7 +319,8 @@ impl TenantRegistryStore for InMemoryRegistryStore {
             Some(current)
                 if current.tenant == operation.tenant
                     && current.operation_id == operation.operation_id
-                    && current.split == operation.split =>
+                    && current.mutation == operation.mutation
+                    && current.plan == operation.plan =>
             {
                 Ok(current.clone())
             }
@@ -703,7 +704,8 @@ impl Registry {
                 Some(current)
                     if current.tenant == operation.tenant
                         && current.operation_id == operation.operation_id
-                        && current.split == operation.split =>
+                        && current.mutation == operation.mutation
+                        && current.plan == operation.plan =>
                 {
                     Ok(None)
                 }

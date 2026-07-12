@@ -465,16 +465,19 @@ impl SplitState {
         self.operation == SplitOperation::ConvertTable
     }
 
-    /// Derive the only valid pair of transfer requests from durable split state.
-    pub fn transfer_requests(&self) -> Result<[crate::TableTransferRequest; 2], SplitError> {
-        let right = self
-            .right
-            .as_ref()
-            .ok_or(SplitError::InvalidSuccessorPartition)?;
-        Ok([
-            crate::TableTransferRequest::from_successor(&self.left, self.predecessor_generation),
-            crate::TableTransferRequest::from_successor(right, self.predecessor_generation),
-        ])
+    /// Derive the only valid one-or-two transfer requests from durable mutation state.
+    pub fn transfer_requests(&self) -> Result<Vec<crate::TableTransferRequest>, SplitError> {
+        let mut requests = vec![crate::TableTransferRequest::from_successor(
+            &self.left,
+            self.predecessor_generation,
+        )];
+        if let Some(right) = &self.right {
+            requests.push(crate::TableTransferRequest::from_successor(
+                right,
+                self.predecessor_generation,
+            ));
+        }
+        Ok(requests)
     }
 }
 
@@ -1239,6 +1242,8 @@ mod tests {
         .expect("move");
 
         assert!(state.operation == SplitOperation::Move);
+        assert!(state.right.is_none());
+        assert!(state.transfer_requests().unwrap().len() == 1);
         assert!(state.predecessor_after == state.successor_after);
         assert!(state.successor_generation == Some(9));
         assert!(hooks.events() == expected_split_events(RangeId::new(4)));

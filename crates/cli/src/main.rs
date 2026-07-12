@@ -92,4 +92,19 @@ mod tests {
         assert!(help.contains("--tls-certificate"));
         assert!(help.contains("--tls-private-key"));
     }
+
+    #[test]
+    fn gres_move_exposes_sealed_journal_arguments() {
+        let mut command = Cli::command();
+        let help = command
+            .find_subcommand_mut("gres")
+            .and_then(|gres| gres.find_subcommand_mut("move"))
+            .expect("gres move command")
+            .render_long_help()
+            .to_string();
+
+        assert!(help.contains("--operation-id"));
+        assert!(help.contains("--source-range-id"));
+        assert!(help.contains("--replacement-range-id"));
+    }
 }

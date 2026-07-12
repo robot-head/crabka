@@ -132,7 +132,7 @@ pub struct StagedRangeSuccessors {
     /// Staged left half. Range zero is replaced, never reused in place.
     pub left: StagedRangeSuccessor,
     /// Staged right half.
-    pub right: StagedRangeSuccessor,
+    pub right: Option<StagedRangeSuccessor>,
 }
 
 /// Runtime resources claimed from a staged successor at the publication boundary.
@@ -157,7 +157,7 @@ pub struct ClaimedStagedSuccessors {
     /// Claimed left half. Range zero is replaced, never reused in place.
     pub left: ClaimedStagedSuccessor,
     /// Claimed right half.
-    pub right: ClaimedStagedSuccessor,
+    pub right: Option<ClaimedStagedSuccessor>,
 }
 
 /// A committed WAL record retained for a bounded range transfer tail.

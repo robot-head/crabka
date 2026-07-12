@@ -105,8 +105,8 @@ pub async fn reconcile_one_rpc_phase(
             .ok_or_else(|| SplitReconcileError::InvalidJournal("tenant disappeared".into()))?;
         let parked = tenant.range_retirements.iter().any(|retirement| {
             retirement.operation_id == record.operation_id
-                && retirement.source_range_id == record.split.source_range_id
-                && retirement.source_generation == record.split.predecessor_generation
+                && retirement.source_range_id == record.source_range_id()
+                && retirement.source_generation == record.predecessor_generation()
                 && retirement.phase == RangeRetirementPhase::Parked
         });
         if !parked {
@@ -144,8 +144,8 @@ pub async fn reconcile_activated_cutover(
         .ok_or_else(|| SplitReconcileError::InvalidJournal("tenant disappeared".into()))?;
     let matching_retirement = tenant.range_retirements.iter().find(|retirement| {
         retirement.operation_id == record.operation_id
-            && retirement.source_range_id == record.split.source_range_id
-            && retirement.source_generation == record.split.predecessor_generation
+            && retirement.source_range_id == record.source_range_id()
+            && retirement.source_generation == record.predecessor_generation()
     });
     if let Some(retirement) = matching_retirement {
         if tenant.ranges != plan.target_layout
@@ -179,8 +179,8 @@ pub async fn reconcile_activated_cutover(
     let cutover = tenant
         .publish_split_target_with_retirement(
             record.operation_id.clone(),
-            record.split.source_range_id,
-            record.split.predecessor_generation,
+            record.source_range_id(),
+            record.predecessor_generation(),
             evidence,
             plan.target_layout.clone(),
         )
@@ -259,7 +259,7 @@ fn source_endpoint(record: &SplitOperationRecord) -> Result<&str, SplitReconcile
         .and_then(|plan| {
             plan.current_layout
                 .iter()
-                .find(|range| range.range_id == record.split.source_range_id)
+                .find(|range| range.range_id == record.source_range_id())
         })
         .map(|range| range.endpoint.as_str())
         .ok_or_else(|| SplitReconcileError::InvalidJournal("source endpoint is missing".into()))
@@ -315,8 +315,8 @@ fn request_for_phase(
     source_endpoint(record)?;
     Ok(RangeControlReq {
         tenant: record.tenant.as_str().into(),
-        range_id: RangeId::new(record.split.source_range_id),
-        generation: record.split.predecessor_generation,
+        range_id: RangeId::new(record.source_range_id()),
+        generation: record.predecessor_generation(),
         operation_id: record.operation_id.clone(),
         operation,
     })
@@ -345,7 +345,7 @@ fn apply_response(
                 manifest_key,
             },
         ) => {
-            if generation != record.split.predecessor_generation
+            if generation != record.predecessor_generation()
                 || covered_offset < 0
                 || manifest_key.is_empty()
             {
@@ -506,6 +506,49 @@ mod tests {
             routing_table_id: 7,
             current_layout: vec![source],
             target_layout: vec![left, right],
+        })
+        .unwrap()
+    }
+
+    fn move_operation() -> SplitOperationRecord {
+        let coordinator = RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(RangeBoundary::new(7, 0)),
+            endpoint: "coordinator:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let source = RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: "old:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let replacement = RangeLayoutEntry {
+            range_id: 9,
+            end_key: None,
+            endpoint: "replacement:7443".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        SplitOperationRecord::new_move(
+            TenantName::try_from("tenant-a").unwrap(),
+            "move-1",
+            source.range_id,
+            source.wal_generation,
+            replacement.clone(),
+        )
+        .unwrap()
+        .with_plan(SplitOperationPlan {
+            source_record_version: 9,
+            source_map_epoch: 9,
+            routing_table_id: 7,
+            current_layout: vec![coordinator.clone(), source],
+            target_layout: vec![coordinator, replacement],
         })
         .unwrap()
     }
@@ -762,96 +805,99 @@ mod tests {
 
     #[tokio::test]
     async fn crash_after_each_rpc_side_effect_replays_the_exact_receipt_request() {
-        let mut running = operation()
-            .advance(SplitOperationPhase::Running, 1, None)
-            .unwrap();
-        let cases = vec![
-            (
-                running.clone(),
-                RangeControlResp::Checkpoint {
-                    generation: 4,
-                    covered_offset: 8,
-                    manifest_key: "manifest".into(),
-                },
-            ),
-            {
-                running = apply_response(
-                    &running,
+        for operation in [operation(), move_operation()] {
+            let mut running = operation
+                .advance(SplitOperationPhase::Running, 1, None)
+                .unwrap();
+            let cases = vec![
+                (
+                    running.clone(),
                     RangeControlResp::Checkpoint {
                         generation: 4,
                         covered_offset: 8,
                         manifest_key: "manifest".into(),
                     },
-                )
-                .unwrap();
-                (
-                    running.clone(),
-                    RangeControlResp::Paused { barrier_offset: 10 },
-                )
-            },
-            {
-                running = apply_response(&running, RangeControlResp::Paused { barrier_offset: 10 })
+                ),
+                {
+                    running = apply_response(
+                        &running,
+                        RangeControlResp::Checkpoint {
+                            generation: 4,
+                            covered_offset: 8,
+                            manifest_key: "manifest".into(),
+                        },
+                    )
                     .unwrap();
-                (
-                    running.clone(),
-                    RangeControlResp::Staged {
-                        tail_sha256: "tail".into(),
-                    },
-                )
-            },
-            {
-                running = apply_response(
-                    &running,
-                    RangeControlResp::Staged {
-                        tail_sha256: "tail".into(),
-                    },
-                )
-                .unwrap();
-                (
-                    running.clone(),
-                    RangeControlResp::Markers {
-                        markers: vec![],
-                        digest: "markers".into(),
-                    },
-                )
-            },
-            {
-                running = apply_response(
-                    &running,
-                    RangeControlResp::Markers {
-                        markers: vec![],
-                        digest: "markers".into(),
-                    },
-                )
-                .unwrap();
-                (running.clone(), RangeControlResp::Applied)
-            },
-        ];
-        for (record, response) in cases {
-            let control = Arc::new(CrashOnceControl {
-                operation: Mutex::new(record.clone()),
-                tenant: Mutex::new(tenant_for(&record)),
-                fail_next_cas: AtomicBool::new(true),
-                apply_replace_then_fail: AtomicBool::new(false),
-            });
-            let handle: crate::context::GresControlHandle = control.clone();
-            let client = ReceiptClient {
-                response,
-                requests: Mutex::new(Vec::new()),
-            };
-            assert!(
+                    (
+                        running.clone(),
+                        RangeControlResp::Paused { barrier_offset: 10 },
+                    )
+                },
+                {
+                    running =
+                        apply_response(&running, RangeControlResp::Paused { barrier_offset: 10 })
+                            .unwrap();
+                    (
+                        running.clone(),
+                        RangeControlResp::Staged {
+                            tail_sha256: "tail".into(),
+                        },
+                    )
+                },
+                {
+                    running = apply_response(
+                        &running,
+                        RangeControlResp::Staged {
+                            tail_sha256: "tail".into(),
+                        },
+                    )
+                    .unwrap();
+                    (
+                        running.clone(),
+                        RangeControlResp::Markers {
+                            markers: vec![],
+                            digest: "markers".into(),
+                        },
+                    )
+                },
+                {
+                    running = apply_response(
+                        &running,
+                        RangeControlResp::Markers {
+                            markers: vec![],
+                            digest: "markers".into(),
+                        },
+                    )
+                    .unwrap();
+                    (running.clone(), RangeControlResp::Applied)
+                },
+            ];
+            for (record, response) in cases {
+                let control = Arc::new(CrashOnceControl {
+                    operation: Mutex::new(record.clone()),
+                    tenant: Mutex::new(tenant_for(&record)),
+                    fail_next_cas: AtomicBool::new(true),
+                    apply_replace_then_fail: AtomicBool::new(false),
+                });
+                let handle: crate::context::GresControlHandle = control.clone();
+                let client = ReceiptClient {
+                    response,
+                    requests: Mutex::new(Vec::new()),
+                };
+                assert!(
+                    reconcile_one_rpc_phase(&handle, &client, &record)
+                        .await
+                        .is_err()
+                );
+                assert_eq!(control.operation.lock().await.revision, record.revision);
                 reconcile_one_rpc_phase(&handle, &client, &record)
                     .await
-                    .is_err()
-            );
-            assert_eq!(control.operation.lock().await.revision, record.revision);
-            reconcile_one_rpc_phase(&handle, &client, &record)
-                .await
-                .unwrap();
-            let requests = client.requests.lock().await;
-            assert_eq!(requests.len(), 2);
-            assert_eq!(requests[0], requests[1]);
-            assert_eq!(control.operation.lock().await.revision, record.revision + 1);
+                    .unwrap();
+                let requests = client.requests.lock().await;
+                assert_eq!(requests.len(), 2);
+                assert_eq!(requests[0], requests[1]);
+                assert_eq!(control.operation.lock().await.revision, record.revision + 1);
+            }
         }
     }
 
@@ -898,6 +944,54 @@ mod tests {
             activated.plan.as_ref().unwrap().target_layout
         );
         assert_eq!(durable.range_retirements.len(), 1);
+        let published = reconcile_activated_cutover(&handle, &activated)
+            .await
+            .unwrap();
+        assert_eq!(published.phase, SplitOperationPhase::LayoutPublished);
+        assert_eq!(control.tenant.lock().await.range_retirements.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn move_replays_one_replacement_cutover_after_ambiguous_registry_ack() {
+        let mut activated = move_operation()
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        for response in [
+            RangeControlResp::Checkpoint {
+                generation: 4,
+                covered_offset: 8,
+                manifest_key: "manifest".into(),
+            },
+            RangeControlResp::Paused { barrier_offset: 10 },
+            RangeControlResp::Staged {
+                tail_sha256: "tail".into(),
+            },
+            RangeControlResp::Markers {
+                markers: vec![],
+                digest: "markers".into(),
+            },
+            RangeControlResp::Applied,
+        ] {
+            activated = apply_response(&activated, response).unwrap();
+        }
+        let control = Arc::new(CrashOnceControl {
+            operation: Mutex::new(activated.clone()),
+            tenant: Mutex::new(tenant_for(&activated)),
+            fail_next_cas: AtomicBool::new(false),
+            apply_replace_then_fail: AtomicBool::new(true),
+        });
+        let handle: crate::context::GresControlHandle = control.clone();
+
+        assert!(
+            reconcile_activated_cutover(&handle, &activated)
+                .await
+                .is_err()
+        );
+        let durable = control.tenant.lock().await.clone();
+        assert_eq!(durable.ranges.len(), 2);
+        assert_eq!(durable.ranges[1].range_id, 9);
+        assert_eq!(durable.range_retirements.len(), 1);
+
         let published = reconcile_activated_cutover(&handle, &activated)
             .await
             .unwrap();

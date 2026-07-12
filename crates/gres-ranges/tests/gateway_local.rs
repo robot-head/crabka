@@ -533,13 +533,16 @@ impl RangeTransferCapability for InProcessTransfer {
                 .notified()
                 .await;
         }
-        let [left, right] = plan
+        let mut requests = plan
             .state()
             .transfer_requests()
-            .expect("valid split requests");
+            .expect("valid split requests")
+            .into_iter();
+        let left = requests.next().expect("left request");
+        let right = requests.next().expect("right request");
         Ok(StagedRangeSuccessors {
             left: self.stage_range(left).await?,
-            right: self.stage_range(right).await?,
+            right: Some(self.stage_range(right).await?),
         })
     }
 
@@ -549,17 +552,18 @@ impl RangeTransferCapability for InProcessTransfer {
         _barrier: RangeTransferBarrier,
     ) -> Result<ClaimedStagedSuccessors, RangeTransferError> {
         let mut engines = self.staged.lock().expect("staged lock");
+        let right_descriptor = staged.right.as_ref().expect("split right");
         if !engines.contains_key(&staged.left.range_id)
-            || !engines.contains_key(&staged.right.range_id)
+            || !engines.contains_key(&right_descriptor.range_id)
         {
             return Err(Self::error(
-                staged.right.range_id,
+                right_descriptor.range_id,
                 "both successors must be staged",
             ));
         }
         let left = engines.remove(&staged.left.range_id).expect("checked left");
-        let right = engines
-            .remove(&staged.right.range_id)
+        let right_engine = engines
+            .remove(&right_descriptor.range_id)
             .expect("checked right");
         Ok(ClaimedStagedSuccessors {
             left: ClaimedStagedSuccessor {
@@ -569,13 +573,13 @@ impl RangeTransferCapability for InProcessTransfer {
                 engine: left,
                 keepalive: Arc::new(()),
             },
-            right: ClaimedStagedSuccessor {
-                range_id: staged.right.range_id,
-                endpoint: staged.right.endpoint.clone(),
-                wal_generation: staged.right.wal_generation,
-                engine: right,
+            right: Some(ClaimedStagedSuccessor {
+                range_id: right_descriptor.range_id,
+                endpoint: right_descriptor.endpoint.clone(),
+                wal_generation: right_descriptor.wal_generation,
+                engine: right_engine,
                 keepalive: Arc::new(()),
-            },
+            }),
         })
     }
 }

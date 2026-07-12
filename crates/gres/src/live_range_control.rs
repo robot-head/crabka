@@ -7,7 +7,7 @@ use std::{
 
 use async_trait::async_trait;
 use crabka_gres_ranges::{
-    CheckpointManifest, RangeId, RangeTransferBarrier, RangeTransferCapability, SplitCommand,
+    CheckpointManifest, RangeId, RangeTransferBarrier, RangeTransferCapability,
     control::RangeControlExecutor,
     transport::{RangeControlOperation, RangeControlReq, RangeControlResp},
 };
@@ -353,12 +353,7 @@ impl LiveRangeControlExecutor {
                     )
                 };
                 self.gateway
-                    .publish_control_successors_with_transfer(
-                        request.operation_id.clone(),
-                        split_command(&split)?,
-                        claimed,
-                        transfer.as_ref(),
-                    )
+                    .publish_control_mutation_with_transfer(split, claimed, transfer.as_ref())
                     .await
                     .map_err(|error| rejected("publication_failed", error.to_string()))?;
                 self.operations
@@ -399,12 +394,20 @@ impl LiveRangeControlExecutor {
                             split.predecessor_after.end,
                         )
                         .map_err(|error| rejected("marker_verify_failed", error.to_string()))?,
-                        crabka_gres_ranges::tenant::in_doubt_markers_for_engine(
-                            &claimed.right.engine,
-                            split.successor_after.start,
-                            split.successor_after.end,
-                        )
-                        .map_err(|error| rejected("marker_verify_failed", error.to_string()))?,
+                        claimed
+                            .right
+                            .as_ref()
+                            .map(|right| {
+                                crabka_gres_ranges::tenant::in_doubt_markers_for_engine(
+                                    &right.engine,
+                                    split.successor_after.start,
+                                    split.successor_after.end,
+                                )
+                                .map_err(|error| {
+                                    rejected("marker_verify_failed", error.to_string())
+                                })
+                            })
+                            .transpose()?,
                     )
                 } else {
                     let staged = runtime.staged.as_ref().ok_or_else(|| {
@@ -418,19 +421,25 @@ impl LiveRangeControlExecutor {
                                 split.predecessor_after.end,
                             )
                             .map_err(transfer_error)?,
-                        transfer
-                            .staged_successor_markers(
-                                staged.right.range_id,
-                                split.successor_after.start,
-                                split.successor_after.end,
-                            )
-                            .map_err(transfer_error)?,
+                        staged
+                            .right
+                            .as_ref()
+                            .map(|right| {
+                                transfer
+                                    .staged_successor_markers(
+                                        right.range_id,
+                                        split.successor_after.start,
+                                        split.successor_after.end,
+                                    )
+                                    .map_err(transfer_error)
+                            })
+                            .transpose()?,
                     )
                 };
                 verify_marker_partition(
                     &source,
                     &left,
-                    &right,
+                    right.as_deref(),
                     &split.predecessor_after,
                     &split.successor_after,
                 )?;
@@ -584,22 +593,6 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
     }
 }
 
-fn split_command(split: &crabka_gres_ranges::SplitState) -> Result<SplitCommand, RangeControlResp> {
-    let right = split.right.clone().ok_or_else(|| {
-        rejected(
-            "invalid_split",
-            "two-successor split is missing its right side",
-        )
-    })?;
-    Ok(SplitCommand {
-        current_map: split.current_map.clone(),
-        predecessor: split.predecessor,
-        predecessor_generation: split.predecessor_generation,
-        left: split.left.clone(),
-        right,
-    })
-}
-
 fn transfer_error(error: crabka_gres_ranges::RangeTransferError) -> RangeControlResp {
     rejected("transfer_failed", error.to_string())
 }
@@ -619,7 +612,7 @@ fn wire_marker(
 fn verify_marker_partition(
     source: &[crabka_gres_ranges::InDoubtMarker],
     left: &[crabka_gres_ranges::InDoubtMarker],
-    right: &[crabka_gres_ranges::InDoubtMarker],
+    right: Option<&[crabka_gres_ranges::InDoubtMarker]>,
     left_interval: &crabka_gres_ranges::RangeSpec,
     right_interval: &crabka_gres_ranges::RangeSpec,
 ) -> Result<(), RangeControlResp> {
@@ -627,6 +620,7 @@ fn verify_marker_partition(
         .iter()
         .any(|marker| !left_interval.contains_key(marker.key))
         || right
+            .unwrap_or_default()
             .iter()
             .any(|marker| !right_interval.contains_key(marker.key))
     {
@@ -635,13 +629,20 @@ fn verify_marker_partition(
             "successor contains a marker outside its owned interval",
         ));
     }
-    if left.iter().any(|marker| right.contains(marker)) {
+    if left
+        .iter()
+        .any(|marker| right.unwrap_or_default().contains(marker))
+    {
         return Err(rejected(
             "marker_wrong_owner",
             "successor marker sets overlap",
         ));
     }
-    let mut union = left.iter().chain(right).cloned().collect::<Vec<_>>();
+    let mut union = left
+        .iter()
+        .chain(right.unwrap_or_default())
+        .cloned()
+        .collect::<Vec<_>>();
     union.sort_unstable_by_key(|marker| (marker.transaction_id, marker.key));
     union.dedup();
     if union != source {
@@ -854,15 +855,35 @@ mod tests {
         let right =
             RangeSpec::for_interval(RangeId::new(2), RangeKey::new(TableId::new(7), 15), None);
         assert!(
-            verify_marker_partition(&source, &source[..1], &source[1..], &left, &right).is_ok()
-        );
-        assert!(verify_marker_partition(&source, &source, &source[..1], &left, &right).is_err());
-        assert!(verify_marker_partition(&source, &source[..1], &[], &left, &right).is_err());
-        assert!(
-            verify_marker_partition(&source, &source, &[marker(3, 30)], &left, &right).is_err()
+            verify_marker_partition(&source, &source[..1], Some(&source[1..]), &left, &right)
+                .is_ok()
         );
         assert!(
-            verify_marker_partition(&source, &source[1..], &source[..1], &left, &right).is_err()
+            verify_marker_partition(&source, &source, Some(&source[..1]), &left, &right).is_err()
+        );
+        assert!(verify_marker_partition(&source, &source[..1], Some(&[]), &left, &right).is_err());
+        assert!(
+            verify_marker_partition(&source, &source, Some(&[marker(3, 30)]), &left, &right)
+                .is_err()
+        );
+        assert!(
+            verify_marker_partition(&source, &source[1..], Some(&source[..1]), &left, &right)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn move_marker_inheritance_requires_all_source_markers_on_sole_replacement() {
+        let source = vec![marker(1, 10), marker(2, 20)];
+        let replacement =
+            RangeSpec::for_interval(RangeId::new(9), RangeKey::new(TableId::new(7), 0), None);
+
+        assert!(
+            verify_marker_partition(&source, &source, None, &replacement, &replacement).is_ok()
+        );
+        assert!(
+            verify_marker_partition(&source, &source[..1], None, &replacement, &replacement)
+                .is_err()
         );
     }
 
