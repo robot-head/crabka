@@ -26,11 +26,15 @@ CRABKA_GRES_SHARDED_CONFORMANCE_MODE=live \
 
 The live corpus report recorded 688 cases, with 616 matches and the remaining
 72 outcomes accepted by the existing baseline. The runtime ownership artifact
-recorded 15 committed timestamp-primary operations for range 0 and 7 for range
-1. Both counts come from the live Gres process log and are mandatory for the
-gate to pass.
+records committed timestamp-primary operations by physical user table ID and
+primary range. The observed corpus included user-table commits on both range 0
+and range 1 (22 distinct physical user table IDs in total). No individual table
+was observed with both primaries, and the report does not claim that every table
+spans both ranges. Catalog-only (`table_id = 0`) evidence is excluded and cannot
+satisfy either expected range.
 
 CI runs the same script in live mode with PostgreSQL 18 and uploads all gate
 artifacts. The static CI-contract test includes negative mutations for the live
-invocation, mode, `continue-on-error`, SHARDED flag, baseline path, and each
-runtime primary-owner assertion.
+invocation, mode, `continue-on-error`, SHARDED flag, baseline path, evidence
+parser invocation, and the catalog-table exclusion. Its behavioral fixture
+proves that a catalog-only range-0 event fails the gate.

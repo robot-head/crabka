@@ -3530,9 +3530,15 @@ impl GatewaySession {
                 writes_by_range.get(&primary_range).expect("primary writes"),
             )
             .await?;
+            let committed_table_ids = writes_by_range
+                .values()
+                .flatten()
+                .map(|write| write.table_id)
+                .collect::<BTreeSet<_>>();
             tracing::info!(
                 primary_range = primary_range.as_u32(),
                 start_ts = start_ts.get(),
+                table_ids = ?committed_table_ids,
                 "timestamp_primary_committed"
             );
             for (range_id, writes) in &writes_by_range {
