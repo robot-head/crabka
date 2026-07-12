@@ -742,18 +742,22 @@ fn recovery_extension_is_structural(
                 format!("decode recovery tail: {error}"),
             )
         })?;
-        let structural = frame.ops.iter().all(|op| {
+        let offending = frame.ops.iter().enumerate().find_map(|(op_index, op)| {
             let key = match op {
                 crabka_pgkv::WriteOp::Put { key, .. }
                 | crabka_pgkv::WriteOp::ConditionalPut { key, .. } => key,
-                crabka_pgkv::WriteOp::Delete { .. } => return false,
+                crabka_pgkv::WriteOp::Delete { key } => key,
             };
-            key.starts_with(&control_prefix) || key.starts_with(&activation_prefix)
+            (!key.starts_with(&control_prefix) && !key.starts_with(&activation_prefix))
+                .then(|| (op_index, recovery_key_class(key)))
         });
-        if !structural {
+        if let Some((op_index, key_class)) = offending {
             return Err(rejected(
                 "unsafe_recovery_tail",
-                "replacement pause extension contains a non-structural write",
+                format!(
+                    "replacement pause extension contains a non-structural write: old_barrier={old_barrier} new_barrier={new_barrier} frame_offset={} op_index={op_index} key_class={key_class}",
+                    record.offset
+                ),
             ));
         }
         previous_offset = record.offset;
@@ -765,6 +769,22 @@ fn recovery_extension_is_structural(
         ));
     }
     Ok(())
+}
+
+fn recovery_key_class(key: &[u8]) -> &'static str {
+    if key.starts_with(b"\0\0\0\0meta/ts_") {
+        "timestamp_metadata"
+    } else if key.starts_with(b"\0\0\0\0index/ts_") {
+        "timestamp_index"
+    } else if key.starts_with(b"\0\0\0\0row/") {
+        "row"
+    } else if key.starts_with(b"\0\0\0\0index/") {
+        "index"
+    } else if key.starts_with(b"\0\0\0\0meta/") {
+        "metadata"
+    } else {
+        "other"
+    }
 }
 
 fn rejected(code: &str, message: impl Into<String>) -> RangeControlResp {

@@ -87,6 +87,7 @@ pub use timestamp_txn::{
     CommitTimestamp, PrimaryTxnDecision, ReadTimestamp, TimestampOracle, TimestampOracleError,
     TimestampTransactionId, TimestampTxnDecision, TimestampTxnDescriptor, TimestampTxnIdentity,
     TimestampTxnOperation, TimestampTxnParticipant, TimestampWrite,
+    decode_timestamp_txn_descriptor_value, timestamp_txn_descriptor_op,
 };
 
 use crate::{lockmgr::RowLockManager, procarray::ProcArray, seq::SequenceManager};

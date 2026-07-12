@@ -65,6 +65,9 @@ pub struct MultiRangeTenantConfig {
     pub range_registry: Option<RangeRegistry>,
     /// TLS-only client used for every remote range call.
     pub range_client: Option<FramedTcpClient>,
+    /// Whether tenant assembly should settle durable timestamp transactions immediately.
+    /// Activation recovery disables this until successor publication owns recovery.
+    pub recover_timestamps_on_start: bool,
     #[doc(hidden)]
     pub commit_fault_for_testing: Option<GatewayCommitFault>,
     #[doc(hidden)]
@@ -133,6 +136,7 @@ impl MultiRangeTenantConfig {
             range0_replica: None,
             range_registry: None,
             range_client: None,
+            recover_timestamps_on_start: true,
             commit_fault_for_testing: None,
             empty_table_split_test_hook: None,
         })
@@ -179,6 +183,13 @@ impl MultiRangeTenantConfig {
     #[must_use]
     pub fn with_range_client(mut self, client: FramedTcpClient) -> Self {
         self.range_client = Some(client);
+        self
+    }
+
+    /// Defer timestamp recovery while durable split activation is being resumed.
+    #[must_use]
+    pub fn defer_timestamp_recovery(mut self) -> Self {
+        self.recover_timestamps_on_start = false;
         self
     }
 
@@ -366,11 +377,26 @@ impl MultiRangeTenant {
         interval_end: Option<RangeKey>,
     ) -> Result<Vec<crate::InDoubtMarker>, SplitError> {
         let serving = self.inner.serving.load_full();
-        let coordinator = serving
+        let owners = serving
+            .range_map
+            .ranges()
+            .iter()
+            .filter(|range| {
+                interval_end.is_none_or(|end| range.start < end)
+                    && range.end.is_none_or(|end| interval_start < end)
+            })
+            .map(|range| range.range_id)
+            .collect::<Vec<_>>();
+        let [owner] = owners.as_slice() else {
+            return Err(SplitError::Hook(format!(
+                "marker interval {interval_start:?}..{interval_end:?} must resolve to exactly one range, found {owners:?}"
+            )));
+        };
+        let engine = serving
             .engines
-            .get(&RangeId::COORDINATOR)
-            .ok_or_else(|| SplitError::Hook("range zero is not hosted".into()))?;
-        in_doubt_markers_for_engine(coordinator, interval_start, interval_end)
+            .get(owner)
+            .ok_or_else(|| SplitError::Hook(format!("marker owner r{owner} is not hosted")))?;
+        in_doubt_markers_for_engine(engine, interval_start, interval_end)
     }
 }
 
@@ -524,13 +550,15 @@ impl MultiRangeTenant {
             }
         }
 
-        recover_durable_timestamp_transactions(
-            &engines,
-            config
-                .range_registry
-                .clone()
-                .zip(config.range_client.clone()),
-        )?;
+        if config.recover_timestamps_on_start {
+            recover_durable_timestamp_transactions(
+                &engines,
+                config
+                    .range_registry
+                    .clone()
+                    .zip(config.range_client.clone()),
+            )?;
+        }
         let scanner_engines = engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
@@ -875,6 +903,15 @@ impl MultiRangeTenant {
                         .collect(),
                     keepalives.clone(),
                 )));
+            recover_durable_timestamp_transactions(
+                &engines,
+                self.inner.timestamp_primary_remote.clone(),
+            )
+            .map_err(|error| {
+                LocalSqlSplitError::Orchestration(SplitError::Hook(format!(
+                    "settle timestamp transactions before topology readiness: {error}"
+                )))
+            })?;
             transfer.commit_serving_topology();
             transfer.finish_topology_activation().await?;
         }
@@ -945,15 +982,6 @@ impl MultiRangeTenant {
             .acquire_table_publication_fence(state.predecessor_before.start.table_id)
             .await;
         let serving = self.inner.serving.load_full();
-        recover_durable_timestamp_transactions(
-            &serving.engines,
-            self.inner.timestamp_primary_remote.clone(),
-        )
-        .map_err(|error| {
-            LocalSqlSplitError::Orchestration(SplitError::Hook(format!(
-                "settle timestamp transactions before topology publication: {error}"
-            )))
-        })?;
         if state.current_map != serving.range_map {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
@@ -6257,6 +6285,93 @@ mod tests {
         TenantName::parse("tenant_a").expect("tenant")
     }
 
+    #[tokio::test]
+    async fn control_markers_reads_exact_r1_owner() {
+        let config =
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10").expect("config");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let engines = gateway.hosted_range_engines();
+        let r1 = &engines[&RangeId::new(1)];
+        r1.connect()
+            .simple_query("CREATE TABLE marker52 (id int4) SHARDED")
+            .await
+            .expect("marker table");
+        let table = r1.catalog_table("marker52").expect("marker catalog");
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(700).expect("timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 701,
+            primary_range: 1,
+        };
+        r1.timestamp_txn_participant(1)
+            .prewrite_as_primary(
+                identity,
+                &[1],
+                &[crabka_pgexec::TimestampWrite {
+                    table_id: table.id,
+                    rowid: 1,
+                    row: vec![Datum::Int4(1)],
+                    delete: false,
+                    global_index_intents: Vec::new(),
+                }],
+            )
+            .await
+            .expect("pending r1 prewrite");
+
+        assert_eq!(
+            gateway
+                .control_in_doubt_markers(RangeKey::new(TableId::new(50), 10), None)
+                .expect("r1 marker scan"),
+            vec![crate::InDoubtMarker {
+                transaction_id: 700,
+                key: RangeKey::new(TableId::new(52), 1),
+            }]
+        );
+    }
+
+    #[test]
+    fn control_markers_accepts_exact_r0_owner() {
+        let config =
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10").expect("config");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        assert!(
+            gateway
+                .control_in_doubt_markers(
+                    RangeKey::new(TableId::new(0), 0),
+                    Some(RangeKey::new(TableId::new(50), 10)),
+                )
+                .expect("r0 marker scan")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn control_markers_rejects_mixed_owner_interval() {
+        let config =
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10").expect("config");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let error = gateway
+            .control_in_doubt_markers(
+                RangeKey::new(TableId::new(50), 9),
+                Some(RangeKey::new(TableId::new(50), 11)),
+            )
+            .expect_err("mixed marker interval");
+        assert!(error.to_string().contains("exactly one range"));
+    }
+
+    #[test]
+    fn control_markers_rejects_unhosted_owner() {
+        let config = MultiRangeTenantConfig::from_boundaries(tenant(), "0:0,50:10")
+            .expect("config")
+            .with_hosted_ranges(vec![RangeId::COORDINATOR])
+            .expect("r0-only host");
+        let (gateway, _) = MultiRangeTenant::start(config).expect("tenant");
+        let error = gateway
+            .control_in_doubt_markers(RangeKey::new(TableId::new(50), 10), None)
+            .expect_err("unhosted marker owner");
+        assert!(error.to_string().contains("r1 is not hosted"));
+    }
+
     struct EmptyRange0End;
 
     #[async_trait::async_trait]
@@ -6497,6 +6612,57 @@ mod tests {
                 .load()
                 .engines
                 .contains_key(&RangeId::new(2))
+        );
+    }
+
+    async fn pending_engine_for_startup_test(
+        start_ts: u64,
+    ) -> (SqlEngine, SqlEngine, crabka_pgexec::TimestampTransactionId) {
+        let engine = SqlEngine::new();
+        let observer = engine.clone_handle();
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(start_ts).expect("timestamp");
+        engine
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                start_ts.get() + 1,
+                vec![RangeId::COORDINATOR.as_u32()],
+            ))
+            .await
+            .expect("pending descriptor");
+        (engine, observer, start_ts)
+    }
+
+    #[tokio::test]
+    async fn ordinary_startup_recovers_pending_timestamp_transactions() {
+        let (mut engine, observer, start_ts) = pending_engine_for_startup_test(810).await;
+        MultiRangeTenant::start_with_engine_factory(
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0").expect("config"),
+            move |_data_dir, _range_id| Ok(std::mem::replace(&mut engine, SqlEngine::new())),
+        )
+        .expect("ordinary startup");
+        assert_eq!(
+            observer
+                .primary_timestamp_decision(start_ts)
+                .expect("ordinary startup decision"),
+            crabka_pgexec::PrimaryTxnDecision::Aborted
+        );
+    }
+
+    #[tokio::test]
+    async fn activation_startup_defers_pending_timestamp_recovery() {
+        let (mut engine, observer, start_ts) = pending_engine_for_startup_test(820).await;
+        MultiRangeTenant::start_with_engine_factory(
+            MultiRangeTenantConfig::from_boundaries(tenant(), "0")
+                .expect("config")
+                .defer_timestamp_recovery(),
+            move |_data_dir, _range_id| Ok(std::mem::replace(&mut engine, SqlEngine::new())),
+        )
+        .expect("activation startup");
+        assert_eq!(
+            observer
+                .primary_timestamp_decision(start_ts)
+                .expect("deferred startup decision"),
+            crabka_pgexec::PrimaryTxnDecision::Pending
         );
     }
 
