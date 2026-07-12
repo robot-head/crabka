@@ -63,7 +63,7 @@ At the selected predicate the harness waits for at least eight fsynced ACKs, rec
 
 A separate child continuously attempts inserts into `live_ledger51(seq, route_key, checksum)`. It writes an fsynced JSON-lines ledger for `attempt`, `ack`, and `recovered_ack`. `route_key` alternates temporally across the low/high payload halves, while physical `(table_id,rowid)` remains the authoritative range key. After the case finishes, the workload is stopped, waited, and its process group verified absent. The ledger file is closed and reopened; parsed ACK/recovered-ACK records, not an in-memory mirror, are the sole payload oracle.
 
-The test measures the largest interval between consecutive acknowledged sequence numbers spanning the pause/cutover/restart. The bound is case-specific and encoded in evidence. At least one ACK must occur before the kill, after restart, and after target layout publication. Post-cutover acknowledgements must exercise both r2 and r3 physical intervals; if monotonic hidden rowids would otherwise remain on one side, the workload uses two tables/rowid seeds whose sealed ownership maps one active write stream to each successor.
+The test measures elapsed wall-clock time between fsynced ACK timestamps spanning pause/cutover/restart. The bound is case-specific and encoded in evidence. At least one ACK must occur before the kill, after restart, and after target layout publication. Every ledger record includes table identity. Post-cutover acknowledgements exercise both sealed physical intervals with two active streams: qualifying table50 rows route to r2, while table51 rowids at or above 16 route to r3. Each reopened ledger stream is verified against its own sealed `(table_id,rowid)` interval.
 
 ## Terminal verification and evidence
 
@@ -92,4 +92,4 @@ Each invocation has its own timeout, unique evidence path, and exact kill-point 
 
 ## Verification and review
 
-Unit/model tests first prove predicate truth tables, receipt probes, evidence parsing, exact family membership, and fail-closed validators. Then run all three real-process shards, existing Move CI, operator/range-control focused tests, locked checks, rustfmt, and `git diff --check`. Commit task-sized changes and request independent review of the final matrix and generated evidence. No remote operations are allowed, and the unrelated `crates/gres-ranges/src/control.rs` formatting dirt remains uncommitted.
+Unit/model tests first prove predicate truth tables, receipt probes, evidence parsing, exact family membership, and fail-closed validators. Then run all three real-process shards, the existing Split Stateright exhaustive gate, existing Move CI, operator/range-control focused tests, locked checks, rustfmt, and `git diff --check`. Commit task-sized changes and request independent review of the final matrix and generated evidence. No remote operations are allowed, and the unrelated `crates/gres-ranges/src/control.rs` formatting dirt remains uncommitted.
