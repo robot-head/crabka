@@ -2624,7 +2624,11 @@ async fn recover_live_multirange_engines(
     let mut range0_tso_horizon = None;
     for recovery_config in recovery_configs {
         let range_id = recovery_config.range;
-        reset_substrate_range_cache(config.cache_dir.as_deref(), range_id)?;
+        reset_substrate_range_cache(
+            config.cache_dir.as_deref(),
+            range_id,
+            local_checkpoint_root(config),
+        )?;
         let store = open_substrate_range_cache(config.cache_dir.as_deref(), range_id)?;
         let recovered = open_live_range_substrate_engine(
             config,
@@ -4812,17 +4816,80 @@ fn open_substrate_range_cache(
 fn reset_substrate_range_cache(
     cache_dir: Option<&std::path::Path>,
     range_id: crabka_gres_ranges::RangeId,
+    protected_checkpoint_root: Option<&std::path::Path>,
 ) -> std::io::Result<()> {
     let Some(base) = cache_dir else {
         return Ok(());
     };
     let range_dir = base.join(format!("r{}", range_id.as_u32()));
+    if let Some(protected) = protected_checkpoint_root {
+        let resolved_range = resolve_path_through_existing_ancestor(&range_dir)?;
+        let resolved_protected = resolve_path_through_existing_ancestor(protected)?;
+        if resolved_range.starts_with(&resolved_protected)
+            || resolved_protected.starts_with(&resolved_range)
+        {
+            return invalid_input(format!(
+                "disposable range cache {} overlaps local checkpoint root {}",
+                resolved_range.display(),
+                resolved_protected.display()
+            ));
+        }
+    }
     match std::fs::remove_dir_all(&range_dir) {
         Ok(()) => {}
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
         Err(error) => return Err(error),
     }
     std::fs::create_dir_all(range_dir)
+}
+
+fn resolve_path_through_existing_ancestor(path: &std::path::Path) -> std::io::Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()?.join(path)
+    };
+    let mut ancestor = absolute.as_path();
+    let mut missing = Vec::new();
+    while !ancestor.exists() {
+        let name = ancestor.file_name().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("cannot resolve protected path {}", absolute.display()),
+            )
+        })?;
+        missing.push(name.to_os_string());
+        ancestor = ancestor.parent().ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                format!("cannot resolve protected path {}", absolute.display()),
+            )
+        })?;
+    }
+    let mut resolved = std::fs::canonicalize(ancestor).map_err(|error| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            format!(
+                "cannot resolve protected path {}: {error}",
+                absolute.display()
+            ),
+        )
+    })?;
+    for component in missing.into_iter().rev() {
+        resolved.push(component);
+    }
+    Ok(resolved)
+}
+
+fn local_checkpoint_root(config: &SubstrateRuntimeConfig) -> Option<&std::path::Path> {
+    match config
+        .checkpoints
+        .as_ref()
+        .map(|checkpoint| &checkpoint.object_store)
+    {
+        Some(CheckpointObjectStoreConfig::Local { root }) => Some(root.as_path()),
+        _ => None,
+    }
 }
 
 /// Register Crabka's Kafka foreign-data scanner with the SQL engine.
@@ -4959,7 +5026,7 @@ mod tests {
         std::fs::create_dir_all(&range_dir).expect("range cache");
         std::fs::write(range_dir.join("stale"), b"cache").expect("stale cache value");
 
-        reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(1))
+        reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(1), None)
             .expect("reset disposable cache");
 
         assert!(range_dir.is_dir());
@@ -4979,8 +5046,12 @@ mod tests {
         std::fs::create_dir_all(&sibling).expect("checkpoint sibling");
         std::fs::write(sibling.join("manifest"), b"durable").expect("checkpoint value");
 
-        reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(2))
-            .expect("reset absent disposable cache");
+        reset_substrate_range_cache(
+            Some(root.path()),
+            crabka_gres_ranges::RangeId::new(2),
+            Some(&sibling),
+        )
+        .expect("reset absent disposable cache");
 
         assert_eq!(
             std::fs::read(sibling.join("manifest")).expect("checkpoint sibling remains"),
@@ -4999,13 +5070,62 @@ mod tests {
         }
 
         for range in [0, 2] {
-            reset_substrate_range_cache(Some(root.path()), crabka_gres_ranges::RangeId::new(range))
-                .expect("reset hosted range");
+            reset_substrate_range_cache(
+                Some(root.path()),
+                crabka_gres_ranges::RangeId::new(range),
+                None,
+            )
+            .expect("reset hosted range");
         }
 
         assert!(root.path().join("r0").is_dir());
         assert!(root.path().join("r1/stale").exists());
         assert!(root.path().join("r2").is_dir());
+    }
+
+    #[test]
+    fn startup_reset_rejects_checkpoint_overlap_in_both_directions_and_equality() {
+        let root = tempfile::tempdir().expect("cache root");
+        let range = root.path().join("cache/r1");
+        std::fs::create_dir_all(&range).expect("range cache");
+        for protected in [
+            range.clone(),
+            range.join("checkpoints"),
+            root.path().join("cache"),
+        ] {
+            std::fs::create_dir_all(&protected).expect("protected path");
+            let error = reset_substrate_range_cache(
+                Some(&root.path().join("cache")),
+                crabka_gres_ranges::RangeId::new(1),
+                Some(&protected),
+            )
+            .expect_err("overlap must fail closed");
+            assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+            assert!(range.exists(), "overlap rejection cannot delete cache");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn startup_reset_resolves_symlinked_checkpoint_overlap() {
+        use std::os::unix::fs::symlink;
+
+        let root = tempfile::tempdir().expect("cache root");
+        let cache = root.path().join("cache");
+        let range = cache.join("r1");
+        let protected = range.join("durable");
+        std::fs::create_dir_all(&protected).expect("protected path");
+        let alias = root.path().join("checkpoint-alias");
+        symlink(&protected, &alias).expect("checkpoint symlink");
+
+        let error = reset_substrate_range_cache(
+            Some(&cache),
+            crabka_gres_ranges::RangeId::new(1),
+            Some(&alias),
+        )
+        .expect_err("symlink overlap must fail closed");
+        assert_eq!(error.kind(), std::io::ErrorKind::InvalidInput);
+        assert!(protected.exists());
     }
 
     fn registry_test_record(
