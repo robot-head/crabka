@@ -184,7 +184,10 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
         if expected["tenant"]!=r["tenant_id"] or expected["range_id"]!=1 or expected["generation"]!=0 or expected["operation_id"]!=r["operation_id"] or not isinstance(expected["endpoint"],str) or not expected["endpoint"]: fail(f"{source}: journal expectation source identity differs")
         if digest(compact(expected["request"]))!=expected["request_sha256"] or expected["request"].get("tenant")!=expected["tenant"] or expected["request"].get("range_id")!=1 or expected["request"].get("generation")!=0 or expected["request"].get("operation_id")!=r["operation_id"] or expected["request"].get("operation",{}).get("operation")!=REQUEST_KIND[name]: fail(f"{source}: journal expectation request differs")
         if any(proof["endpoint"]!=expected["endpoint"] or proof["range_id"]!=1 or proof["generation"]!=0 or proof["operation_id"]!=r["operation_id"] or proof["request_sha256"]!=expected["request_sha256"] or proof["request"]!=expected["request"] for proof in group): fail(f"{source}: authenticated replay differs from journal expectation")
-        if len({proof["response_sha256"] for proof in group})!=1: fail(f"{source}: response replay identity differs")
+        if name == "pause":
+            offsets = [proof["response"].get("barrier_offset") for proof in group]
+            if any(type(offset) is not int or offset <= 0 for offset in offsets) or offsets != sorted(offsets): fail(f"{source}: pause replay barrier offsets decrease or are invalid")
+        elif name not in {"prologue", "retire"} and len({proof["response_sha256"] for proof in group})!=1: fail(f"{source}: response replay identity differs")
         allowed=RESPONSE_KINDS[name]
         expected_kind=expected["expected_response_kind"]
         if expected_kind=="applied_or_already_applied":
@@ -243,6 +246,7 @@ def synthetic(family: str, case: str, index: int) -> dict[str, Any]:
     for sequence,name in enumerate(RECEIPT_ORDER):
         request={"tenant":tenant,"range_id":1,"generation":0,"operation_id":operation,"operation":{"operation":REQUEST_KIND[name]}}
         response={"result":next(iter(RESPONSE_KINDS[name]))}
+        if name=="pause": response={"result":"paused","barrier_offset":1}
         if name=="markers": response={"result":"markers","markers":[wire],"left_markers":[],"right_markers":[wire],"digest":marker_digest([(700,52,1)])}
         proofs.append({"sequence":sequence,"timestamp_ms":sequence+1,"operation":name,"endpoint":"127.0.0.1:9000","range_id":1,"generation":0,"operation_id":operation,"request":request,"response":response,"request_sha256":digest(compact(request)),"response_sha256":digest(compact(response)),"replay_count":1})
     expectations=[]
@@ -274,6 +278,11 @@ def mutate_expectation(record: dict[str,Any], operation: str, field: str, value:
     else:
         expectation["request"]["operation"][field]=value
     expectation["request_sha256"]=digest(compact(expectation["request"]))
+def append_replay(record: dict[str,Any], operation: str, response: dict[str,Any]) -> None:
+    original=next(item for item in record["authenticated_receipts"] if item["operation"]==operation)
+    replay=copy.deepcopy(original); replay["sequence"]=max(item["sequence"] for item in record["authenticated_receipts"])+1; replay["timestamp_ms"]=max(item["timestamp_ms"] for item in record["authenticated_receipts"])+1
+    replay["response"]=response; replay["response_sha256"]=digest(compact(response)); replay["replay_count"]=1
+    record["authenticated_receipts"].append(replay)
 def self_test() -> None:
     with tempfile.TemporaryDirectory() as raw:
         root=Path(raw); all_records=[]
@@ -284,8 +293,21 @@ def self_test() -> None:
             validate_family(family,d)
         validate_matrix(root)
         family="publication"; case=EXPECTED[family][0]; good=synthetic(family,case,999)
+        pause=next(item for item in good["authenticated_receipts"] if item["operation"]=="pause")
+        pause["response"]={"result":"paused","barrier_offset":1}; pause["response_sha256"]=digest(compact(pause["response"])); append_replay(good,"pause",{"result":"paused","barrier_offset":2})
+        for operation in ["prologue","retire"]:
+            original=next(item for item in good["authenticated_receipts"] if item["operation"]==operation)["response"]["result"]
+            append_replay(good,operation,{"result":"applied" if original=="already_applied" else "already_applied"})
         negatives=[
             ("evidence id",lambda r:r.__setitem__("evidence_id","0"*64)),("wrong family",lambda r:r.__setitem__("family","source_restore")),("wrong case",lambda r:r.__setitem__("case",EXPECTED[family][1])),("schema missing",lambda r:r.pop("delete_count")),("payload checksum",lambda r:r["payload_events"][1].__setitem__("checksum","wrong")),("recovered count",lambda r:r.__setitem__("recovered_acknowledgements",2)),("computed gap",lambda r:r.__setitem__("max_ack_gap_ms",39)),("pre-kill ack",lambda r:r.__setitem__("kill_ms",5)),("post-restart ack",lambda r:r.__setitem__("restart_ms",60)),("post-publication stream",lambda r:r.__setitem__("publication_ms",51)),("oracle mismatch",lambda r:r["reopened_oracle_rows"][0].__setitem__("seq",99)),("direct ownership",lambda r:r["direct_physical_rows"][0].__setitem__("range_id",3)),("direct scan missing",lambda r:r["direct_physical_rows"].pop()),("sql mismatch",lambda r:r["sql_union_rows"].clear()),("row count",lambda r:r.__setitem__("acknowledged_rows",2)),("marker overlap",lambda r:r.__setitem__("left_markers",r["right_markers"])),("marker order",lambda r:r.__setitem__("source_markers",r["source_markers"]*2)),("marker digest",lambda r:r.__setitem__("marker_response_digest","0"*64)),("marker response",lambda r:r["authenticated_receipts"][3]["response"].__setitem__("right_markers",[])),("receipt hash",lambda r:r["authenticated_receipts"][0].__setitem__("request_sha256","0"*64)),("receipt identity",lambda r:r["authenticated_receipts"][0].__setitem__("operation_id","wrong")),("receipt operation",lambda r:r["authenticated_receipts"][0].__setitem__("operation","pause")),("receipt response",lambda r:r["authenticated_receipts"][0]["response"].__setitem__("result","rejected")),("receipt order",lambda r:r["authenticated_receipts"][0].__setitem__("sequence",99)),("receipt timestamp",lambda r:r["authenticated_receipts"][0].__setitem__("timestamp_ms",99)),("receipt replay",lambda r:r["authenticated_receipts"][0].__setitem__("replay_count",0)),("receipt missing",lambda r:r["authenticated_receipts"].pop()),("expectation tenant",lambda r:mutate_expectation(r,"stage","tenant","wrong")),("expectation endpoint",lambda r:mutate_expectation(r,"stage","endpoint","wrong")),("expectation range",lambda r:mutate_expectation(r,"stage","range_id",2)),("expectation generation",lambda r:mutate_expectation(r,"stage","generation",1)),("expectation journal digest",lambda r:mutate_expectation(r,"stage","journal_digest","0"*64)),("delete target",lambda r:r["delete_attempts"][0].__setitem__("targets",["other"])),("delete outcome",lambda r:r["delete_attempts"][0].__setitem__("outcome","error")),("delete count",lambda r:r.__setitem__("delete_count",2)),("unrelated delete",lambda r:r.__setitem__("unrelated_delete_attempted",True)),("pid identity",lambda r:r.__setitem__("old_source_pid",999)),("pgid identity",lambda r:r.__setitem__("old_source_process_group",999)),("old pid alive",lambda r:r.__setitem__("old_source_pid_alive",True)),("old group alive",lambda r:r.__setitem__("old_source_process_group_alive",True)),("new pid dead at verify",lambda r:r.__setitem__("new_source_pid_alive_at_verification",False)),("new pid alive terminal",lambda r:r.__setitem__("new_source_pid_alive",True)),("new group alive terminal",lambda r:r.__setitem__("new_source_process_group_alive",True)),("workload alive",lambda r:r.__setitem__("workload_process_group_alive",True)),("completed phase",lambda r:r.__setitem__("completed_phase","retiring")),("pre-kill predicate",lambda r:r["pre_kill_predicate"].__setitem__("phase","wrong")),("operation digest",lambda r:r.__setitem__("operation_marker_digest","0"*64)),("retirement digest",lambda r:r.__setitem__("retirement_marker_digest","0"*64)),("terminal layout",lambda r:r["terminal_layout"][1].__setitem__("range_id",9)),("journal revision",lambda r:r.__setitem__("operation_revision",0)),("operation attempts",lambda r:r.__setitem__("operation_attempts",0)),("tenant version",lambda r:r.__setitem__("tenant_record_version",4)),("retirement source",lambda r:r.__setitem__("retirement_source_generation",1)),("retirement versions",lambda r:r.__setitem__("retirement_successor_generations",[[2,1],[3,2]])),("endpoint",lambda r:r.__setitem__("right_endpoint","left")),("generation",lambda r:r.__setitem__("right_wal_generation",2)),("topics",lambda r:r["topology_topics"].pop()),("sentinel",lambda r:r.__setitem__("sentinel_topic","bad")),("false invariant",lambda r:r.__setitem__("post_publication_r2_ack",False)),("wrong bound",lambda r:r.__setitem__("max_ack_gap_bound_ms",25000)),("schema extra",lambda r:r.__setitem__("extra",1))]
+        negatives=[(label,(lambda r:r["authenticated_receipts"].pop(0)) if label=="receipt missing" else mutation) for label,mutation in negatives]
+        negatives.extend([
+            ("pause replay decreasing",lambda r:r["authenticated_receipts"][-3].update(response={"result":"paused","barrier_offset":0},response_sha256=digest(compact({"result":"paused","barrier_offset":0})))),
+            ("pause replay changed result",lambda r:r["authenticated_receipts"][-3].update(response={"result":"rejected","barrier_offset":2},response_sha256=digest(compact({"result":"rejected","barrier_offset":2})))),
+            ("prologue replay forbidden kind",lambda r:r["authenticated_receipts"][-2].update(response={"result":"rejected"},response_sha256=digest(compact({"result":"rejected"})))),
+            ("retire replay forbidden kind",lambda r:r["authenticated_receipts"][-1].update(response={"result":"rejected"},response_sha256=digest(compact({"result":"rejected"})))),
+        ])
+        validate_record(good,family,case,"operation-specific replay positive")
         for label,mutation in negatives: expect_bad(good,family,case,mutation,label)
         for key in ["tenant_id","operation_id","sentinel_topic","evidence_id"]:
             duplicate=copy.deepcopy(all_records); duplicate[-1][key]=duplicate[0][key]
