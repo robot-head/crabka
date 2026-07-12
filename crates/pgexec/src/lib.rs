@@ -634,6 +634,35 @@ impl SqlEngine {
         )
     }
 
+    /// Build a timestamp write plan using TSO-leased hidden row IDs.
+    pub fn plan_timestamp_write_sql_with_rowids(
+        &self,
+        sql: &str,
+        hidden_rowids: &[u64],
+    ) -> Result<crate::exec::TimestampWritePlan, ExecError> {
+        let mut plan = self.plan_timestamp_write_sql(sql)?;
+        if plan.writes.len() != hidden_rowids.len() {
+            return Err(ExecError::Unsupported(
+                "hidden row-id lease does not match timestamp write count".into(),
+            ));
+        }
+        for (write, rowid) in plan.writes.iter_mut().zip(hidden_rowids) {
+            write.rowid = *rowid;
+        }
+        plan.commit_ops.clear();
+        Ok(plan)
+    }
+
+    pub async fn allocate_timestamp_write_lease(
+        &self,
+        hidden_rowid_count: usize,
+    ) -> Result<crate::timestamp_txn::TimestampWriteLease, ExecError> {
+        self.timestamp_oracle
+            .allocate_write_lease(hidden_rowid_count)
+            .await
+            .map_err(|error| ExecError::Unsupported(error.to_string()))
+    }
+
     /// Return a timestamp transaction participant for this engine's local range.
     #[must_use]
     pub fn timestamp_txn_participant(&self, range_id: u32) -> TimestampTxnParticipant {
@@ -865,6 +894,12 @@ impl SqlEngine {
         &self,
     ) -> Result<Vec<TimestampTxnDescriptor>, ExecError> {
         timestamp_txn::timestamp_txn_descriptors(self.kv.as_ref()).map_err(Into::into)
+    }
+
+    pub fn durable_timestamp_intent_identities(
+        &self,
+    ) -> Result<Vec<crate::timestamp_txn::DurableTimestampIntentIdentity>, ExecError> {
+        crate::timestamp_txn::timestamp_intent_identities(self.kv.as_ref()).map_err(Into::into)
     }
 
     /// Idempotently abort every timestamp intent owned by this range for `start_ts`.
@@ -1518,6 +1553,29 @@ mod tests {
                 }
             ))
         );
+    }
+
+    #[tokio::test]
+    async fn supplied_hash_hidden_rowids_emit_no_sequence_commit_ops() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query("CREATE TABLE h (id int4) SHARDED BY HASH (id) BUCKETS 4")
+            .await
+            .expect("create hash table");
+
+        let plan = engine
+            .plan_timestamp_write_sql_with_rowids("INSERT INTO h VALUES (10), (20)", &[101, 102])
+            .expect("timestamp plan");
+
+        assert_eq!(
+            plan.writes
+                .iter()
+                .map(|write| write.rowid)
+                .collect::<Vec<_>>(),
+            [101, 102]
+        );
+        assert!(plan.commit_ops.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

@@ -726,6 +726,9 @@ async fn cross_range_single_statement_returns_feature_not_supported() {
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn gateway_forwards_remote_autocommit_over_tcp() {
     let mut remote = crabka_pgexec::SqlEngine::new();
+    let timestamp_oracle: Arc<dyn crabka_pgexec::TimestampOracle> =
+        Arc::new(crabka_pgexec::timestamp_txn::LocalTimestampOracle::default());
+    remote.set_timestamp_oracle(Arc::clone(&timestamp_oracle));
     let mut remote_session = remote.connect();
     remote_session
         .simple_query("CREATE TABLE t150 (id int4) SHARDED")
@@ -772,7 +775,13 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
         .expect("host r0")
         .with_range_registry(RangeRegistry::from_tenant_record(&record).expect("registry"))
         .with_range_client(FramedTcpClient::with_tls(fixture.client).expect("mTLS range client"));
-    let gateway = MultiRangeTenant::start(config).expect("gateway").0;
+    let gateway = MultiRangeTenant::start_with_engine_factory_and_timestamp_oracle(
+        config,
+        |_data_dir, _range_id| Ok(crabka_pgexec::SqlEngine::new()),
+        Some(timestamp_oracle),
+    )
+    .expect("gateway")
+    .0;
     gateway
         .hosted_range_engines()
         .get(&RangeId::COORDINATOR)
@@ -787,8 +796,7 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
         .simple_query("INSERT INTO t150 VALUES (7)")
         .await
         .expect("forward autocommit insert");
-
-    let rows = remote_session
+    let rows = session
         .simple_query("SELECT id FROM t150")
         .await
         .expect("read forwarded remote row");
@@ -892,13 +900,13 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
     assert!(service.prewrites.load(Ordering::Relaxed) > 0);
     assert_eq!(
         service.resolves.load(Ordering::Relaxed),
-        0,
-        "ambiguous commit is not retried"
+        1,
+        "the remote primary is atomically resolved before the injected ambiguity"
     );
     assert_eq!(service.recoveries.load(Ordering::Relaxed), 0);
-    let descriptor = coordinator
+    let descriptor = hosted[&RangeId::new(1)]
         .timestamp_transaction_descriptors()
-        .expect("descriptor scan")
+        .expect("first-write primary descriptor scan")
         .into_iter()
         .next()
         .expect("durable timestamp descriptor");

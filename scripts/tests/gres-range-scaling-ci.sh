@@ -51,6 +51,8 @@ def validate(source, benchmark=script):
         'aggregate["trials"] = samples', 'statistics.median',
         'decision_ceiling_passed = all(point["within_expected_envelope"] for point in decision_points)',
         'expected_min_tps <= measured_tps <= expected_max_tps',
+        'sharded_range_boundaries()', 'boundaries+=("0:$((index * 1000000))")',
+        'primary_range_distribution', 'all expected sharded ranges received writes',
     ]
     for needle in required_script:
         assert needle in benchmark, f'missing benchmark/gate contract: {needle}'
@@ -78,6 +80,14 @@ except AssertionError:
     pass
 else:
     raise AssertionError('upper envelope mutation unexpectedly passed')
+
+boundary_mutation = script.replace('boundaries+=("0:$((index * 1000000))")', 'boundaries+=("$((index * 1000000))")')
+try:
+    validate(workflow, boundary_mutation)
+except AssertionError:
+    pass
+else:
+    raise AssertionError('table-id sharded-boundary mutation unexpectedly passed')
 PY
 
 echo 'PASS: live Gres scaling CI contract and negative mutations'

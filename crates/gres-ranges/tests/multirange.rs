@@ -2,6 +2,41 @@ use crabka_gres_ranges::{
     HashShardSpec, MultiRangeTenant, MultiRangeTenantConfig, RangeId, StatementKind, TableId,
     TenantName,
 };
+
+#[tokio::test]
+async fn idle_sharded_autocommit_uses_owning_range_as_timestamp_primary() {
+    let config = MultiRangeTenantConfig::from_boundaries(
+        TenantName::parse("tenant_idle_ts_primary").expect("tenant"),
+        "0,50:0,50:10",
+    )
+    .expect("config");
+    let (gateway, _handles) = MultiRangeTenant::start(config).expect("tenant");
+    let mut session = gateway.connect();
+    session
+        .simple_query("CREATE TABLE t50 (id int4) SHARDED")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO t50 VALUES (1)")
+        .await
+        .expect("insert");
+
+    let engines = gateway.hosted_range_engines();
+    assert!(
+        engines[&RangeId::COORDINATOR]
+            .timestamp_transaction_descriptors()
+            .expect("r0 descriptors")
+            .is_empty()
+    );
+    let primaries = engines[&RangeId::new(1)]
+        .timestamp_transaction_descriptors()
+        .expect("r1 descriptors");
+    assert_eq!(primaries.len(), 1);
+    assert!(matches!(
+        primaries[0].decision,
+        crabka_pgexec::PrimaryTxnDecision::Committed(_)
+    ));
+}
 use crabka_pgwire::engine::{
     BoundParam, CloseTarget, Engine, ExecuteOutcome, QueryResult, Session,
 };

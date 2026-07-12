@@ -55,6 +55,13 @@ pub enum TimestampOracleError {
     Unavailable(String),
 }
 
+/// One transaction start timestamp followed by globally unique hidden row IDs.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TimestampWriteLease {
+    pub start_ts: TimestampTransactionId,
+    pub hidden_rowids: Vec<u64>,
+}
+
 /// Narrow timestamp grant seam used by sharded timestamp DML.
 #[async_trait::async_trait]
 pub trait TimestampOracle: Send + Sync {
@@ -64,6 +71,21 @@ pub trait TimestampOracle: Send + Sync {
     /// Allocate a start timestamp for a timestamp transaction.
     async fn allocate_transaction_id(&self)
     -> Result<TimestampTransactionId, TimestampOracleError>;
+
+    async fn allocate_write_lease(
+        &self,
+        hidden_rowid_count: usize,
+    ) -> Result<TimestampWriteLease, TimestampOracleError> {
+        let start_ts = self.allocate_transaction_id().await?;
+        let mut hidden_rowids = Vec::with_capacity(hidden_rowid_count);
+        for _ in 0..hidden_rowid_count {
+            hidden_rowids.push(self.allocate_read_timestamp().await?.get());
+        }
+        Ok(TimestampWriteLease {
+            start_ts,
+            hidden_rowids,
+        })
+    }
 
     /// Allocate a commit timestamp strictly after `start_ts`.
     async fn allocate_commit_after(
@@ -530,7 +552,7 @@ pub struct TimestampTxnOperation {
 /// The immutable primary identity attached to every distributed participant
 /// intent.  `global_xid` fences an old coordinator; `primary_range` tells a
 /// remote resolver where the authoritative decision lives.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct TimestampTxnIdentity {
     /// The transaction start timestamp.
     pub start_ts: TimestampTransactionId,
@@ -538,6 +560,37 @@ pub struct TimestampTxnIdentity {
     pub global_xid: u64,
     /// Range holding the primary descriptor (currently range 0).
     pub primary_range: u32,
+}
+
+/// Durable participant identity discovered from a local intent sidecar.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct DurableTimestampIntentIdentity {
+    pub identity: TimestampTxnIdentity,
+    pub participant_range: u32,
+}
+
+pub fn timestamp_intent_identities(
+    kv: &dyn crabka_pgkv::Kv,
+) -> Result<Vec<DurableTimestampIntentIdentity>, crabka_pgkv::KvError> {
+    let mut identities = std::collections::BTreeSet::new();
+    for (_, value) in kv.scan_prefix(b"\0\0\0\0meta/ts_intent/")? {
+        if value.len() != 24 {
+            continue;
+        }
+        let start_raw = u64::from_be_bytes(value[0..8].try_into().expect("8 bytes"));
+        let Some(start_ts) = TimestampTransactionId::new(start_raw).ok() else {
+            continue;
+        };
+        identities.insert(DurableTimestampIntentIdentity {
+            identity: TimestampTxnIdentity {
+                start_ts,
+                global_xid: u64::from_be_bytes(value[8..16].try_into().expect("8 bytes")),
+                primary_range: u32::from_be_bytes(value[16..20].try_into().expect("4 bytes")),
+            },
+            participant_range: u32::from_be_bytes(value[20..24].try_into().expect("4 bytes")),
+        });
+    }
+    Ok(identities.into_iter().collect())
 }
 
 impl TimestampTxnDescriptor {
@@ -1081,7 +1134,7 @@ impl TimestampTxnParticipant {
     }
 
     /// Prewrite intents for a transaction whose authoritative decision is the
-    /// range-0 descriptor. The descriptor already contains the complete
+    /// primary-range descriptor. The descriptor already contains the complete
     /// participant set, so no per-intent sidecar is needed for recovery.
     pub async fn prewrite_with_primary(
         &self,
@@ -1104,6 +1157,119 @@ impl TimestampTxnParticipant {
             return Err(map_ts_error(error));
         }
         Ok(())
+    }
+
+    /// Atomically persist the pending primary record and the primary range's
+    /// intents. The transaction's first write range calls this exactly once.
+    pub async fn prewrite_as_primary(
+        &self,
+        identity: TimestampTxnIdentity,
+        participants: &[u32],
+        writes: &[TimestampWrite],
+    ) -> Result<(), ExecError> {
+        if identity.primary_range != self.range_id || writes.is_empty() {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        let mut descriptor = TimestampTxnDescriptor::begun(
+            identity.start_ts,
+            identity.global_xid,
+            participants.to_vec(),
+        );
+        let operations = writes
+            .iter()
+            .map(|write| TimestampTxnOperation {
+                range_id: self.range_id,
+                table_id: write.table_id,
+                rowid: write.rowid,
+                delete: write.delete,
+            })
+            .collect::<Vec<_>>();
+        descriptor
+            .acknowledge_operations(self.range_id, &operations)
+            .map_err(map_ts_error)?;
+        let mut ops = prewrite_with_identity_ops(self.kv.as_ref(), identity, self.range_id, writes)
+            .map_err(map_ts_error)?;
+        ops.push(timestamp_txn_descriptor_cas_op(&descriptor, None));
+        self.committer.commit(ops).await?;
+        verify_local_prewrite(self.kv.as_ref(), identity, self.range_id, writes)
+            .map_err(map_ts_error)?;
+        let stored = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?;
+        if stored.as_ref() != Some(&descriptor) {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        Ok(())
+    }
+
+    /// Persist secondary intents carrying the immutable primary identity. The
+    /// authenticated gateway updates the primary descriptor after this returns.
+    pub async fn prewrite_as_secondary(
+        &self,
+        identity: TimestampTxnIdentity,
+        writes: &[TimestampWrite],
+    ) -> Result<(), ExecError> {
+        if identity.primary_range == self.range_id || writes.is_empty() {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        let ops = prewrite_with_identity_ops(self.kv.as_ref(), identity, self.range_id, writes)
+            .map_err(map_ts_error)?;
+        self.committer.commit(ops).await?;
+        verify_local_prewrite(self.kv.as_ref(), identity, self.range_id, writes)
+            .map_err(map_ts_error)
+    }
+
+    /// Add another primary-range write to an existing explicit transaction.
+    pub async fn prewrite_on_primary(
+        &self,
+        identity: TimestampTxnIdentity,
+        writes: &[TimestampWrite],
+    ) -> Result<(), ExecError> {
+        let current = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?
+            .ok_or_else(|| map_ts_error(TimestampTxnError::IdentityFenced))?;
+        if identity.primary_range != self.range_id || current.global_xid != identity.global_xid {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        let mut updated = current.clone();
+        let operations = writes
+            .iter()
+            .map(|write| TimestampTxnOperation {
+                range_id: self.range_id,
+                table_id: write.table_id,
+                rowid: write.rowid,
+                delete: write.delete,
+            })
+            .collect::<Vec<_>>();
+        updated
+            .acknowledge_operations(self.range_id, &operations)
+            .map_err(map_ts_error)?;
+        let mut ops = prewrite_with_identity_ops(self.kv.as_ref(), identity, self.range_id, writes)
+            .map_err(map_ts_error)?;
+        ops.push(timestamp_txn_descriptor_cas_op(&updated, Some(&current)));
+        self.committer.commit(ops).await
+    }
+
+    /// Resolve a secondary after an authenticated gateway has read the terminal
+    /// decision from the immutable primary range.
+    pub async fn resolve_as_secondary(
+        &self,
+        identity: TimestampTxnIdentity,
+        decision: TimestampTxnDecision,
+        writes: &[TimestampWrite],
+    ) -> Result<(), ExecError> {
+        if identity.primary_range == self.range_id || decision == TimestampTxnDecision::Pending {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        let mut ops =
+            resolve_ops_idempotent(self.kv.as_ref(), identity, self.range_id, decision, writes)
+                .map_err(map_ts_error)?;
+        if decision == TimestampTxnDecision::Aborted {
+            ops.extend(delete_global_index_intent_ops(identity.start_ts, writes));
+        } else {
+            ops.extend(scan_terminal_ops(
+                self.kv.as_ref(),
+                writes.iter().map(|write| (write.table_id, write.rowid)),
+            )?);
+        }
+        self.committer.commit(ops).await
     }
 
     /// Write the primary decision and resolve local intents to committed versions.
@@ -1175,7 +1341,7 @@ impl TimestampTxnParticipant {
         self.committer.commit(ops).await
     }
 
-    /// Idempotently apply a decision already made by the range-0 primary after
+    /// Idempotently apply a decision already made by the primary range after
     /// proving the durable primary identity and intent fence.
     pub async fn resolve_with_primary(
         &self,
@@ -1206,6 +1372,53 @@ impl TimestampTxnParticipant {
         Ok(())
     }
 
+    /// Atomically choose the write-once terminal decision on the primary range
+    /// and resolve that range's own intents.
+    pub async fn resolve_as_primary(
+        &self,
+        identity: TimestampTxnIdentity,
+        decision: TimestampTxnDecision,
+        writes: &[TimestampWrite],
+    ) -> Result<(), ExecError> {
+        if identity.primary_range != self.range_id {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        let current = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?
+            .ok_or_else(|| map_ts_error(TimestampTxnError::IdentityFenced))?;
+        if current.global_xid != identity.global_xid {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        let requested = match decision {
+            TimestampTxnDecision::Committed(commit_ts)
+            | TimestampTxnDecision::Deleted(commit_ts) => PrimaryTxnDecision::Committed(commit_ts),
+            TimestampTxnDecision::Aborted => PrimaryTxnDecision::Aborted,
+            TimestampTxnDecision::Pending => {
+                return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+            }
+        };
+        if current.decision != PrimaryTxnDecision::Pending && current.decision != requested {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        if current.decision == requested {
+            return Ok(());
+        }
+        let mut terminal = current.clone();
+        terminal.decide(requested).map_err(map_ts_error)?;
+        let mut ops =
+            resolve_ops_idempotent(self.kv.as_ref(), identity, self.range_id, decision, writes)
+                .map_err(map_ts_error)?;
+        ops.push(timestamp_txn_descriptor_cas_op(&terminal, Some(&current)));
+        if decision == TimestampTxnDecision::Aborted {
+            ops.extend(delete_global_index_intent_ops(identity.start_ts, writes));
+        } else {
+            ops.extend(scan_terminal_ops(
+                self.kv.as_ref(),
+                writes.iter().map(|write| (write.table_id, write.rowid)),
+            )?);
+        }
+        self.committer.commit(ops).await
+    }
+
     /// Idempotently settle durable operations after recovering a terminal range-0
     /// descriptor. Unlike normal resolution, restart recovery has no volatile
     /// `TimestampWrite` list to reconstruct global-index keys from.
@@ -1215,9 +1428,8 @@ impl TimestampTxnParticipant {
         decision: TimestampTxnDecision,
         operations: &[TimestampTxnOperation],
     ) -> Result<(), ExecError> {
-        self.ensure_primary_readable().await?;
-        validate_primary_identity_for_resolution(self.primary_kv.as_ref(), identity, decision)
-            .map_err(map_ts_error)?;
+        // Startup recovery is invoked only by the authenticated range service
+        // after it has read the terminal record from `identity.primary_range`.
         let mut ops = Vec::with_capacity(operations.len());
         for operation in operations {
             if operation.range_id != self.range_id {
@@ -1514,9 +1726,6 @@ fn validate_primary_identity(
     identity: TimestampTxnIdentity,
     participant_range: u32,
 ) -> Result<(), TimestampTxnError> {
-    if identity.primary_range != 0 {
-        return Err(TimestampTxnError::IdentityFenced);
-    }
     let descriptor = read_timestamp_txn_descriptor(primary_kv, identity.start_ts)
         .map_err(|_| TimestampTxnError::IdentityFenced)?
         .ok_or(TimestampTxnError::IdentityFenced)?;
@@ -1643,7 +1852,7 @@ pub(crate) fn local_intent_matches_descriptor(
     let Some((global_xid, rest)) = take_u64(rest) else {
         return Ok(false);
     };
-    let Some((primary_range, rest)) = take_u32(rest) else {
+    let Some((_primary_range, rest)) = take_u32(rest) else {
         return Ok(false);
     };
     let Some((range_id, [])) = take_u32(rest) else {
@@ -1651,7 +1860,6 @@ pub(crate) fn local_intent_matches_descriptor(
     };
     if start_ts != descriptor.start_ts.get()
         || global_xid != descriptor.global_xid
-        || primary_range != 0
         || !descriptor.prepared.contains(&range_id)
         || !descriptor.operations.iter().any(|operation| {
             operation.range_id == range_id
@@ -2275,6 +2483,44 @@ mod tests {
     use crabka_pgkv::Kv;
 
     use super::*;
+
+    #[tokio::test]
+    async fn primary_prewrite_atomically_persists_pending_record_on_first_write_range() {
+        let kv: Arc<dyn crabka_pgkv::Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let start_ts = TimestampTransactionId::new(10).expect("start timestamp");
+        let identity = TimestampTxnIdentity {
+            start_ts,
+            global_xid: 10,
+            primary_range: 3,
+        };
+        let participant = TimestampTxnParticipant::new(
+            Arc::clone(&kv),
+            Arc::clone(&kv),
+            Arc::new(crate::commit::LocalCommitter {
+                kv: Arc::clone(&kv),
+            }),
+            3,
+        );
+        let write = TimestampWrite {
+            table_id: 7,
+            rowid: 9,
+            row: vec![crabka_pgtypes::Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+
+        participant
+            .prewrite_as_primary(identity, &[3], std::slice::from_ref(&write))
+            .await
+            .expect("primary prewrite");
+
+        let descriptor = read_timestamp_txn_descriptor(kv.as_ref(), start_ts)
+            .expect("read descriptor")
+            .expect("pending primary record");
+        assert_eq!(descriptor.decision, PrimaryTxnDecision::Pending);
+        assert_eq!(descriptor.prepared, vec![3]);
+        assert_eq!(identity.primary_range, 3);
+    }
 
     struct PublishingPrimaryBarrier {
         primary: Arc<dyn crabka_pgkv::Kv>,

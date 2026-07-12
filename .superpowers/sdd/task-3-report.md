@@ -52,3 +52,13 @@ Result: exit 0; live mode; range-local 4x/1x `3.7538`; sharded 4x/1x `3.2558`; r
 - Decision-envelope success now requires every point to remain within both 0.70 and 1.25 bounds.
 
 Static checks and dry-run compatibility pass. The required fresh robust live run completed all trials but correctly exited nonzero: range-local scaled `3.2333x`, while sharded scaled only `0.9611x` (raw medians 155.7632 to 149.7006 tx/s). This is a genuine remaining product/topology scaling failure, not a harness error that can be honestly papered over in CI.
+
+## Primary-range architecture closure
+
+- Extended range-layout parsing with lexicographically validated `table:rowid` boundaries and changed the sharded benchmark to use row-ID cuts. The static anti-rot test mutates this contract back to table-only cuts and requires failure.
+- Made the first-write range the immutable timestamp primary for autocommit and explicit transactions. Primary prewrite atomically stores the pending descriptor and primary intents; secondary prewrite, participant expansion/acknowledgement, terminal resolution, dropped-session cleanup, and startup recovery all target that primary locally or over authenticated RPC.
+- Added startup recovery for descriptors and durable intent sidecars on every hosted range, including abort-won reconstruction for orphaned pending intents and fail-closed behavior when their primary is unreachable.
+- Added timestamp write leases, removed hidden-rowid sequence commit operations, wrapped TSO RPC with batching, and added a 10 ms epoch-liveness certificate that rechecks fencing on expiry.
+- Replaced the per-table DML mutex with an RW lock: concurrent DML takes shared access while split/conversion retains exclusive fencing.
+
+Final robust live result at `target/gres-scaling-primary-range-final/range-scaling.json`: range-local `3.2930x`, sharded `3.4371x`, decision-envelope efficiency `0.8593`, G-9/G-8 range-4 contrast `1.7185`, and every gate true. The artifact records balanced primary distributions across all expected ranges.

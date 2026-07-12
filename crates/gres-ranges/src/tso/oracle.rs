@@ -1,6 +1,10 @@
 //! Range-0 monotone timestamp oracle with stride-ahead durability.
 
-use std::{num::NonZeroU64, sync::Arc};
+use std::{
+    num::NonZeroU64,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 
 use crabka_pgkv::{Kv, WriteOp};
 use tokio::sync::Mutex;
@@ -104,7 +108,23 @@ pub enum HeartbeatVerdict {
 struct OracleState {
     next_ts: TsoTimestamp,
     durable_max_ts: u64,
+    certified_until_ms: u64,
+    has_granted: bool,
 }
+
+trait TsoClock: Send + Sync {
+    fn now_ms(&self) -> u64;
+}
+
+struct SystemTsoClock(Instant);
+
+impl TsoClock for SystemTsoClock {
+    fn now_ms(&self) -> u64 {
+        u64::try_from(self.0.elapsed().as_millis()).unwrap_or(u64::MAX)
+    }
+}
+
+const DEFAULT_HEARTBEAT_INTERVAL: Duration = Duration::from_millis(10);
 
 /// Range-0 timestamp oracle.
 pub struct TsoOracle<C, H> {
@@ -112,6 +132,8 @@ pub struct TsoOracle<C, H> {
     heartbeat: H,
     epoch: i16,
     stride: NonZeroU64,
+    heartbeat_interval: Duration,
+    clock: Arc<dyn TsoClock>,
     state: Mutex<OracleState>,
 }
 
@@ -128,14 +150,38 @@ where
         stride: NonZeroU64,
         persisted_max_ts: u64,
     ) -> Result<Self, TsoError> {
+        Self::recover_with_clock(
+            committer,
+            heartbeat,
+            epoch,
+            stride,
+            persisted_max_ts,
+            DEFAULT_HEARTBEAT_INTERVAL,
+            Arc::new(SystemTsoClock(Instant::now())),
+        )
+    }
+
+    fn recover_with_clock(
+        committer: C,
+        heartbeat: H,
+        epoch: i16,
+        stride: NonZeroU64,
+        persisted_max_ts: u64,
+        heartbeat_interval: Duration,
+        clock: Arc<dyn TsoClock>,
+    ) -> Result<Self, TsoError> {
         Ok(Self {
             committer,
             heartbeat,
             epoch,
             stride,
+            heartbeat_interval,
+            clock,
             state: Mutex::new(OracleState {
                 next_ts: TsoTimestamp::from_persisted_next(persisted_max_ts)?,
                 durable_max_ts: persisted_max_ts,
+                certified_until_ms: 0,
+                has_granted: false,
             }),
         })
     }
@@ -145,6 +191,7 @@ where
         let mut state = self.state.lock().await;
         let first_ts = state.next_ts;
         let requested_last = checked_last(first_ts, count)?;
+        let now_ms = self.clock.now_ms();
         if requested_last > state.durable_max_ts {
             let stride_last = checked_last(first_ts, self.stride)?;
             let new_horizon = requested_last.max(stride_last);
@@ -153,12 +200,22 @@ where
             self.committer
                 .persist_max_ts_for_epoch(self.epoch, persisted)
                 .await?;
+            if !state.has_granted {
+                self.ensure_epoch_live().await?;
+            }
             state.durable_max_ts = new_horizon;
-        } else {
+            state.certified_until_ms = now_ms.saturating_add(
+                u64::try_from(self.heartbeat_interval.as_millis()).unwrap_or(u64::MAX),
+            );
+        } else if now_ms >= state.certified_until_ms {
             self.ensure_epoch_live().await?;
+            state.certified_until_ms = now_ms.saturating_add(
+                u64::try_from(self.heartbeat_interval.as_millis()).unwrap_or(u64::MAX),
+            );
         }
 
         state.next_ts = TsoTimestamp::from_persisted_next(requested_last)?;
+        state.has_granted = true;
         Ok(GrantLease::new(first_ts, count))
     }
 
@@ -274,7 +331,11 @@ fn decode_u64(bytes: &[u8]) -> Result<u64, TsoError> {
 
 #[cfg(test)]
 mod tests {
-    use std::num::NonZeroU64;
+    use std::{
+        num::NonZeroU64,
+        sync::atomic::{AtomicU64, AtomicUsize, Ordering},
+        time::Duration,
+    };
 
     use assert2::assert;
     use crabka_pgkv::MemKv;
@@ -283,6 +344,84 @@ mod tests {
 
     fn nonzero(value: u64) -> NonZeroU64 {
         NonZeroU64::new(value).expect("test count is non-zero")
+    }
+
+    #[derive(Clone)]
+    struct CountingHeartbeat {
+        calls: Arc<AtomicUsize>,
+    }
+
+    #[async_trait::async_trait]
+    impl EpochHeartbeat for CountingHeartbeat {
+        async fn heartbeat(&self, _epoch: i16) -> Result<HeartbeatVerdict, TsoError> {
+            self.calls.fetch_add(1, Ordering::SeqCst);
+            Ok(HeartbeatVerdict::Live)
+        }
+    }
+
+    struct ManualClock(AtomicU64);
+
+    impl TsoClock for ManualClock {
+        fn now_ms(&self) -> u64 {
+            self.0.load(Ordering::SeqCst)
+        }
+    }
+
+    #[tokio::test]
+    async fn epoch_certificate_heartbeats_first_and_at_interval_expiry() {
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 3);
+        let calls = Arc::new(AtomicUsize::new(0));
+        let heartbeat = CountingHeartbeat {
+            calls: Arc::clone(&calls),
+        };
+        let clock = Arc::new(ManualClock(AtomicU64::new(1)));
+        let oracle = TsoOracle::recover_with_clock(
+            horizon,
+            heartbeat,
+            3,
+            nonzero(100),
+            100,
+            Duration::from_millis(10),
+            clock.clone(),
+        )
+        .expect("recover");
+
+        oracle.grant(nonzero(1)).await.expect("first");
+        oracle.grant(nonzero(1)).await.expect("certified");
+        assert!(calls.load(Ordering::SeqCst) == 1);
+        clock.0.store(11, Ordering::SeqCst);
+        oracle.grant(nonzero(1)).await.expect("renewed");
+        assert!(calls.load(Ordering::SeqCst) == 2);
+    }
+
+    #[tokio::test]
+    async fn epoch_certificate_detects_fence_at_expiry() {
+        let store = Arc::new(MemKv::default());
+        let horizon = MemoryTsoHorizon::new(store, 3);
+        let clock = Arc::new(ManualClock(AtomicU64::new(1)));
+        let oracle = TsoOracle::recover_with_clock(
+            horizon.clone(),
+            horizon.clone(),
+            3,
+            nonzero(100),
+            0,
+            Duration::from_millis(10),
+            clock.clone(),
+        )
+        .expect("recover");
+        oracle.grant(nonzero(1)).await.expect("first");
+        horizon.set_live_epoch(4).await;
+        oracle.grant(nonzero(1)).await.expect("within certificate");
+        clock.0.store(11, Ordering::SeqCst);
+        assert!(matches!(
+            oracle.grant(nonzero(1)).await,
+            Err(TsoError::FencedEpoch { epoch: 3 })
+        ));
+        assert!(matches!(
+            oracle.grant(nonzero(1)).await,
+            Err(TsoError::FencedEpoch { epoch: 3 })
+        ));
     }
 
     #[tokio::test]
