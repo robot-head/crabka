@@ -290,9 +290,7 @@ pub(super) async fn persist_must_activate(
             reason: "activation receipt missing before must-activate".into(),
         })?;
     if receipt.phase == TopologyActivationPhase::MustActivate {
-        transfer
-            .activation_irreversible
-            .store(true, std::sync::atomic::Ordering::Release);
+        transfer.note_activation_irreversible(&pending.operation_id);
         return Ok(());
     }
     if receipt.phase != TopologyActivationPhase::SourceCheckpoint {
@@ -398,9 +396,7 @@ pub(super) async fn persist_must_activate(
             reason: "must-activate receipt CAS raced".into(),
         });
     }
-    transfer
-        .activation_irreversible
-        .store(true, std::sync::atomic::Ordering::Release);
+    transfer.note_activation_irreversible(&pending.operation_id);
     transfer.activation_fault(
         TopologyActivationFault::AfterMustActivate,
         pending.predecessor,

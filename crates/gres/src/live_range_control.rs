@@ -333,7 +333,7 @@ impl LiveRangeControlExecutor {
                     ));
                 }
                 if self.gateway.control_range_map() == requested.target_map {
-                    transfer.note_activation_irreversible();
+                    transfer.note_activation_irreversible(&request.operation_id);
                     return Ok(RangeControlResp::AlreadyApplied);
                 }
                 let (split, claimed) = {
@@ -472,7 +472,7 @@ impl LiveRangeControlExecutor {
                 Ok(RangeControlResp::Applied)
             }
             RangeControlOperation::Resume => {
-                if transfer.activation_is_irreversible() {
+                if transfer.activation_is_irreversible(&request.operation_id) {
                     return Err(rejected(
                         "activation_irreversible",
                         "predecessor cannot resume after successor publication",
