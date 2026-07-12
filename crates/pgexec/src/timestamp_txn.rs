@@ -1244,7 +1244,14 @@ impl TimestampTxnParticipant {
         let mut ops = prewrite_with_identity_ops(self.kv.as_ref(), identity, self.range_id, writes)
             .map_err(map_ts_error)?;
         ops.push(timestamp_txn_descriptor_cas_op(&updated, Some(&current)));
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        verify_local_prewrite(self.kv.as_ref(), identity, self.range_id, writes)
+            .map_err(map_ts_error)?;
+        let stored = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?;
+        if stored.as_ref() != Some(&updated) {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        Ok(())
     }
 
     /// Resolve a secondary after an authenticated gateway has read the terminal
@@ -1416,7 +1423,12 @@ impl TimestampTxnParticipant {
                 writes.iter().map(|write| (write.table_id, write.rowid)),
             )?);
         }
-        self.committer.commit(ops).await
+        self.committer.commit(ops).await?;
+        let stored = read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?;
+        if stored.as_ref() != Some(&terminal) {
+            return Err(map_ts_error(TimestampTxnError::IdentityFenced));
+        }
+        Ok(())
     }
 
     /// Idempotently settle durable operations after recovering a terminal range-0
@@ -2483,6 +2495,117 @@ mod tests {
     use crabka_pgkv::Kv;
 
     use super::*;
+
+    struct DropDescriptorCasCommitter {
+        kv: Arc<dyn crabka_pgkv::Kv>,
+    }
+
+    #[async_trait::async_trait]
+    impl crate::Committer for DropDescriptorCasCommitter {
+        async fn commit(&self, ops: Vec<crabka_pgkv::WriteOp>) -> Result<(), crate::ExecError> {
+            let ops = ops
+                .into_iter()
+                .filter(|op| {
+                    !matches!(
+                        op,
+                        crabka_pgkv::WriteOp::ConditionalPut { key, expected: Some(_), .. }
+                            if key.starts_with(b"\0\0\0\0meta/ts_txn/")
+                    )
+                })
+                .collect::<Vec<_>>();
+            self.kv.write_batch(&ops)?;
+            Ok(())
+        }
+    }
+
+    fn test_write(rowid: u64) -> TimestampWrite {
+        TimestampWrite {
+            table_id: 7,
+            rowid,
+            row: vec![crabka_pgtypes::Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn prewrite_on_primary_fences_a_conditional_descriptor_noop() {
+        let kv: Arc<dyn crabka_pgkv::Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let identity = TimestampTxnIdentity {
+            start_ts: TimestampTransactionId::new(200).expect("start timestamp"),
+            global_xid: 201,
+            primary_range: 3,
+        };
+        let normal = TimestampTxnParticipant::new(
+            Arc::clone(&kv),
+            Arc::clone(&kv),
+            Arc::new(crate::commit::LocalCommitter {
+                kv: Arc::clone(&kv),
+            }),
+            3,
+        );
+        normal
+            .prewrite_as_primary(identity, &[3], &[test_write(1)])
+            .await
+            .expect("initial primary prewrite");
+        let raced = TimestampTxnParticipant::new(
+            Arc::clone(&kv),
+            Arc::clone(&kv),
+            Arc::new(DropDescriptorCasCommitter {
+                kv: Arc::clone(&kv),
+            }),
+            3,
+        );
+        assert!(
+            raced
+                .prewrite_on_primary(identity, &[test_write(2)])
+                .await
+                .is_err()
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_as_primary_fences_a_conditional_descriptor_noop() {
+        let kv: Arc<dyn crabka_pgkv::Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let identity = TimestampTxnIdentity {
+            start_ts: TimestampTransactionId::new(210).expect("start timestamp"),
+            global_xid: 211,
+            primary_range: 3,
+        };
+        let write = test_write(1);
+        let normal = TimestampTxnParticipant::new(
+            Arc::clone(&kv),
+            Arc::clone(&kv),
+            Arc::new(crate::commit::LocalCommitter {
+                kv: Arc::clone(&kv),
+            }),
+            3,
+        );
+        normal
+            .prewrite_as_primary(identity, &[3], std::slice::from_ref(&write))
+            .await
+            .expect("initial primary prewrite");
+        let raced = TimestampTxnParticipant::new(
+            Arc::clone(&kv),
+            Arc::clone(&kv),
+            Arc::new(DropDescriptorCasCommitter {
+                kv: Arc::clone(&kv),
+            }),
+            3,
+        );
+        let commit_ts =
+            CommitTimestamp::after_start(identity.start_ts, 212).expect("commit timestamp");
+        assert!(
+            raced
+                .resolve_as_primary(
+                    identity,
+                    TimestampTxnDecision::Committed(commit_ts),
+                    &[write]
+                )
+                .await
+                .is_err()
+        );
+    }
 
     #[tokio::test]
     async fn primary_prewrite_atomically_persists_pending_record_on_first_write_range() {
