@@ -647,6 +647,12 @@ pub enum TopologyActivationFault {
     CheckpointDurable = 7,
     TopologySwap = 8,
     TopologyCommitted = 9,
+    BeforeMustActivate = 10,
+    AfterMustActivate = 11,
+    BeforeProducerInit = 12,
+    AfterProducerInit = 13,
+    BeforeDeferredBind = 14,
+    AfterDeferredBind = 15,
 }
 
 impl GresRuntime {
@@ -2279,7 +2285,7 @@ async fn open_live_range_substrate_engine(
     )?;
     let tso_horizon = if range_id == crabka_gres_ranges::RangeId::COORDINATOR {
         let tso_store: Arc<dyn Kv> = store.clone();
-        let tso_committer: Arc<dyn crabka_pgexec::Committer> = committer;
+        let tso_committer: Arc<dyn crabka_pgexec::Committer> = committer.clone();
         let tso_lease: Arc<dyn crabka_gres_substrate::FenceLease> = writer.clone();
         Some(crabka_gres_substrate::SubstrateTsoHorizon::new(
             tso_store,
@@ -2296,6 +2302,7 @@ async fn open_live_range_substrate_engine(
         resources: LiveRangeResources {
             store,
             writer,
+            activation_committer: committer,
             snapshot_source,
             checkpoint,
             recovery_config,
@@ -2315,6 +2322,11 @@ struct LiveRangeEngine {
 struct LiveRangeResources {
     store: Arc<dyn SubstrateKv>,
     writer: Arc<crabka_gres_substrate::DeferredWalWriter<crabka_gres_substrate::ProducerWalWriter>>,
+    activation_committer: Arc<
+        crabka_gres_substrate::SubstrateCommitter<
+            crabka_gres_substrate::DeferredWalWriter<crabka_gres_substrate::ProducerWalWriter>,
+        >,
+    >,
     snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint: Option<Arc<StartedCheckpointRuntime>>,
     recovery_config: crabka_gres_substrate::LiveRecoveryConfig,
@@ -2583,6 +2595,7 @@ impl Clone for LiveRangeResources {
         Self {
             store: Arc::clone(&self.store),
             writer: Arc::clone(&self.writer),
+            activation_committer: Arc::clone(&self.activation_committer),
             snapshot_source: Arc::clone(&self.snapshot_source),
             checkpoint: self.checkpoint.clone(),
             recovery_config: self.recovery_config.clone(),
@@ -2858,8 +2871,16 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 })
             };
         }
+        if receipt.phase != crabka_gres_ranges::control::TopologyActivationPhase::Prepared {
+            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id: receipt.split.predecessor,
+                reason: "source checkpoint requires the prepared activation phase".into(),
+            });
+        }
         let expected = receipt.revision;
         receipt.revision = receipt.revision.saturating_add(1);
+        receipt.phase =
+            crabka_gres_ranges::control::TopologyActivationPhase::SourceCheckpoint;
         receipt.source_checkpoint = Some(checkpoint.clone());
         if !store
             .compare_and_swap(operation_id, Some(expected), receipt)
@@ -2977,6 +2998,12 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         self.range_service.begin_publication();
     }
 
+    async fn mark_topology_must_activate(
+        &self,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        split_activation::persist_must_activate(self).await
+    }
+
     async fn activate_serving_topology(
         &self,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
@@ -2994,11 +3021,9 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "activate without pending topology".into(),
             })?;
         let activation_tenant = pending.left.recovery_config.tenant.to_string();
-        self.activation_irreversible
-            .store(true, std::sync::atomic::Ordering::Release);
         for (index, (range_id, resources)) in [
-            (pending.left_id, pending.left),
-            (pending.right_id, pending.right),
+            (pending.left_id, pending.left.clone()),
+            (pending.right_id, pending.right.clone()),
         ]
         .into_iter()
         .enumerate()
@@ -3006,6 +3031,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             if resources.writer.is_activated() {
                 // A retry after the irreversible bind continues with durable checkpointing.
             } else {
+                self.activation_fault(TopologyActivationFault::BeforeProducerInit, range_id)?;
                 let recovered = crabka_gres_substrate::recover_live_for_range_with_restore(
                     resources.recovery_config.clone(),
                     resources.store.as_ref(),
@@ -3026,16 +3052,28 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         ),
                     });
                 }
+                self.activation_fault(TopologyActivationFault::AfterProducerInit, range_id)?;
+                let canonical = Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
+                    recovered.producer,
+                    resources.recovery_config.wal_topic(),
+                ));
+                if range_id == crabka_gres_ranges::RangeId::COORDINATOR {
+                    split_activation::copy_must_activate_before_bind(
+                        self,
+                        &pending,
+                        Arc::clone(&canonical),
+                    )
+                    .await?;
+                }
+                self.activation_fault(TopologyActivationFault::BeforeDeferredBind, range_id)?;
                 resources
                     .writer
-                    .activate(Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
-                        recovered.producer,
-                        resources.recovery_config.wal_topic(),
-                    )))
+                    .activate(canonical)
                     .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
                         range_id,
                         reason: format!("bind canonical successor writer: {error}"),
                     })?;
+                self.activation_fault(TopologyActivationFault::AfterDeferredBind, range_id)?;
             }
 
             let receipt_engine = self
@@ -3072,10 +3110,10 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     range_id,
                     reason: "writer activation receipt missing from replacement range zero".into(),
                 })?;
-            if receipt.barrier_offset.is_none() {
+            if receipt.phase == TopologyActivationPhase::SourceCheckpoint {
                 let expected = receipt.revision;
                 receipt.revision = receipt.revision.saturating_add(1);
-                receipt.phase = TopologyActivationPhase::WriterActivated;
+                receipt.phase = TopologyActivationPhase::MustActivate;
                 receipt.source_checkpoint = Some(pending.source_checkpoint.clone());
                 receipt.barrier_offset = Some(pending.barrier_offset);
                 receipt.tail_sha256 = Some(pending.tail_sha256.clone());
@@ -3102,14 +3140,6 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         reason: "activation boundary receipt CAS raced".into(),
                     });
                 }
-                self.activation_fault(
-                    if index == 0 {
-                        TopologyActivationFault::FirstWriterActivated
-                    } else {
-                        TopologyActivationFault::SecondWriterActivated
-                    },
-                    range_id,
-                )?;
             } else if receipt.barrier_offset != Some(pending.barrier_offset)
                 || receipt.tail_sha256.as_deref() != Some(pending.tail_sha256.as_str())
             {
@@ -3637,7 +3667,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             })?;
             let tso_horizon = request.target_range.is_coordinator().then(|| {
                 let tso_store: Arc<dyn Kv> = target_store.clone();
-                let tso_committer: Arc<dyn crabka_pgexec::Committer> = committer;
+                let tso_committer: Arc<dyn crabka_pgexec::Committer> = committer.clone();
                 let tso_lease: Arc<dyn crabka_gres_substrate::FenceLease> = writer.clone();
                 crabka_gres_substrate::SubstrateTsoHorizon::new(
                     tso_store,
@@ -3672,6 +3702,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             let resources = LiveRangeResources {
                 store: target_store,
                 writer,
+                activation_committer: committer,
                 snapshot_source,
                 checkpoint: Some(checkpoint),
                 recovery_config: target_recovery,

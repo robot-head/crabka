@@ -786,8 +786,12 @@ fn activation_crash_config(
 
 fn activation_fault_from_env(value: &str) -> crabka_gres::TopologyActivationFault {
     match value {
-        "prepared" => crabka_gres::TopologyActivationFault::Prepared,
-        "source_checkpoint" => crabka_gres::TopologyActivationFault::SourceCheckpoint,
+        "before_must_activate" => crabka_gres::TopologyActivationFault::BeforeMustActivate,
+        "after_must_activate" => crabka_gres::TopologyActivationFault::AfterMustActivate,
+        "before_producer_init" => crabka_gres::TopologyActivationFault::BeforeProducerInit,
+        "after_producer_init" => crabka_gres::TopologyActivationFault::AfterProducerInit,
+        "before_deferred_bind" => crabka_gres::TopologyActivationFault::BeforeDeferredBind,
+        "after_deferred_bind" => crabka_gres::TopologyActivationFault::AfterDeferredBind,
         "first_writer" => crabka_gres::TopologyActivationFault::FirstWriterActivated,
         "second_writer" => crabka_gres::TopologyActivationFault::SecondWriterActivated,
         "first_checkpoint" => crabka_gres::TopologyActivationFault::FirstCheckpointDurable,
@@ -836,7 +840,7 @@ async fn activation_crash_child() {
         .clone();
     let split_at = RangeKey::table_start(TableId::new(1));
     runtime.inject_topology_activation_fault(activation_fault_from_env(&fault_name));
-    runtime
+    let result = runtime
         .split_successors(
             "activation-crash",
             SplitCommand {
@@ -861,9 +865,8 @@ async fn activation_crash_child() {
                 },
             },
         )
-        .await
-        .expect_err("fault must terminate activation before normal return");
-    std::process::exit(86);
+        .await;
+    panic!("hard crash failpoint returned to the child: {result:?}");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
@@ -873,8 +876,12 @@ async fn activation_crash_matrix_reopens_before_readiness() {
         .await
         .expect("broker start");
     for (index, fault) in [
-        "prepared",
-        "source_checkpoint",
+        "before_must_activate",
+        "after_must_activate",
+        "before_producer_init",
+        "after_producer_init",
+        "before_deferred_bind",
+        "after_deferred_bind",
         "first_writer",
         "second_writer",
         "first_checkpoint",
@@ -902,19 +909,20 @@ async fn activation_crash_matrix_reopens_before_readiness() {
                     .env("CRABKA_GRES_ACTIVATION_BOOTSTRAP", bootstrap)
                     .env("CRABKA_GRES_ACTIVATION_TENANT", tenant)
                     .env("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT", checkpoint_root)
+                    .env("CRABKA_GRES_ACTIVATION_HARD_CRASH", "1")
                     .status()
                     .expect("run crash child")
             }
         })
         .await
         .expect("join crash child");
-        assert_eq!(child_status.code(), Some(86), "fault {fault}");
+        assert!(!child_status.success(), "fault {fault} must kill its process");
 
         let config = activation_crash_config(bootstrap, tenant, checkpoint_root);
         let runtime = crabka_gres::open_substrate_runtime(&config)
             .await
             .unwrap_or_else(|error| panic!("reopen after {fault}: {error}"));
-        let post_activation = index >= 2;
+        let post_activation = index >= 1;
         assert_eq!(
             runtime
                 .published_range_map()

@@ -827,6 +827,7 @@ impl MultiRangeTenant {
         if let Some(transfer) = transfer {
             transfer.publish_serving_topology(&engines)?;
             transfer.begin_serving_topology_publication();
+            transfer.mark_topology_must_activate().await?;
             transfer.activate_serving_topology().await?;
             self.inner
                 .serving

@@ -286,7 +286,22 @@ pub struct PausedWalWriter {
     pub barrier_offset: i64,
 }
 
+/// Unforgeable authorization tied to one writer's currently held pause barrier.
+#[derive(Clone)]
+pub struct PausedWalAuthorization {
+    state: Arc<Mutex<WriterPauseState>>,
+    barrier_offset: i64,
+}
+
 impl PausedWalWriter {
+    /// Borrow authority for the narrow activation-receipt append while this guard stays held.
+    #[must_use]
+    pub fn activation_authorization(&self) -> PausedWalAuthorization {
+        PausedWalAuthorization {
+            state: Arc::clone(&self.pause.state),
+            barrier_offset: self.barrier_offset,
+        }
+    }
     /// Resume commits accepted by this writer.
     pub fn resume(mut self) {
         self.pause.release();
@@ -399,6 +414,27 @@ fn classify_commit_failure(error: &ProducerError) -> CommitFailure {
 }
 
 impl ProducerWalWriter {
+    async fn commit_group_with_pause_authorization(
+        &self,
+        authorization: &PausedWalAuthorization,
+        expected_barrier_offset: i64,
+        request: GroupCommitRequest,
+    ) -> Result<GroupCommitAck, SubstrateError> {
+        if authorization.barrier_offset != expected_barrier_offset
+            || !Arc::ptr_eq(&authorization.state, &self.pause_state)
+            || *authorization
+                .state
+                .lock()
+                .map_err(|_| SubstrateError::Unavailable("writer pause state poisoned".into()))?
+                != WriterPauseState::Paused
+        {
+            return Err(SubstrateError::Unavailable(
+                "activation receipt append lacks the matching pause barrier".into(),
+            ));
+        }
+        self.commit_group_while_permitted(request).await
+    }
+
     /// Build a transactional producer-backed WAL writer.
     #[must_use]
     pub fn new(producer: Arc<Producer>, topic: String) -> Self {
@@ -974,6 +1010,168 @@ where
             .ok_or(ExecError::Unavailable)?;
         self.next_journal_seq.store(next, Ordering::SeqCst);
         Ok(())
+    }
+}
+
+impl SubstrateCommitter<DeferredWalWriter<ProducerWalWriter>> {
+    /// Copy the predecessor's exact MustActivate anchor into a newly initialized canonical
+    /// producer before the deferred engine handle is bound.
+    pub async fn commit_activation_anchor_before_bind(
+        &self,
+        canonical: Arc<ProducerWalWriter>,
+        tenant: &str,
+        operation_id: &str,
+        expected: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<bool, SubstrateError> {
+        if self.writer.is_activated() {
+            return Err(SubstrateError::Unavailable(
+                "activation anchor must precede deferred writer binding".into(),
+            ));
+        }
+        validate_must_activate_transition(tenant, operation_id, None, &expected, &value)?;
+        let key = crabka_pgkv::key::topology_activation_receipt_key(tenant, operation_id);
+        let _permit = Arc::clone(&self.commit_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
+        if self.kv.get(&key).map_err(SubstrateError::from)? != Some(expected.clone()) {
+            return Ok(false);
+        }
+        let next = self.next_journal_seq.load(Ordering::SeqCst);
+        let operation = WriteOp::ConditionalPut {
+            key: key.clone(),
+            expected: Some(expected),
+            value: value.clone(),
+        };
+        let frame = WalFrame {
+            journal_seq: next,
+            ops: vec![operation],
+        };
+        let ack = canonical
+            .commit_group(GroupCommitRequest {
+                generation: self.generation,
+                frames: vec![frame.clone()],
+            })
+            .await?;
+        apply_frame(self.kv.as_ref(), &frame.ops)?;
+        if let Some(source) = &self.checkpoint_snapshot_source
+            && let Some(last_ack) = ack.frames.last().copied()
+        {
+            source.record_commit(last_ack);
+        }
+        self.next_journal_seq.store(
+            next.checked_add(1)
+                .ok_or_else(|| SubstrateError::Frame("journal sequence overflow".into()))?,
+            Ordering::SeqCst,
+        );
+        Ok(self.kv.get(&key).map_err(SubstrateError::from)? == Some(value))
+    }
+
+    /// Commit exactly one validated MustActivate receipt while the predecessor writer is paused.
+    pub async fn commit_activation_receipt_cas(
+        &self,
+        authorization: &PausedWalAuthorization,
+        barrier_offset: i64,
+        tenant: &str,
+        operation_id: &str,
+        expected: Vec<u8>,
+        value: Vec<u8>,
+    ) -> Result<bool, SubstrateError> {
+        validate_must_activate_transition(
+            tenant,
+            operation_id,
+            Some(barrier_offset),
+            &expected,
+            &value,
+        )?;
+        let key = crabka_pgkv::key::topology_activation_receipt_key(tenant, operation_id);
+        let _permit = Arc::clone(&self.commit_gate)
+            .acquire_owned()
+            .await
+            .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
+        if self.kv.get(&key).map_err(SubstrateError::from)? != Some(expected.clone()) {
+            return Ok(false);
+        }
+        let next_journal_seq = self.next_journal_seq.load(Ordering::SeqCst);
+        let frame = WalFrame {
+            journal_seq: next_journal_seq,
+            ops: vec![WriteOp::ConditionalPut {
+                key,
+                expected: Some(expected),
+                value,
+            }],
+        };
+        let writer = self.writer.current()?;
+        let ack = writer
+            .commit_group_with_pause_authorization(
+                authorization,
+                barrier_offset,
+                GroupCommitRequest {
+                    generation: self.generation,
+                    frames: vec![frame.clone()],
+                },
+            )
+            .await?;
+        apply_frame(self.kv.as_ref(), &frame.ops)?;
+        if let Some(source) = &self.checkpoint_snapshot_source
+            && let Some(last_ack) = ack.frames.last().copied()
+        {
+            source.record_commit(last_ack);
+        }
+        self.next_journal_seq.store(
+            next_journal_seq
+                .checked_add(1)
+                .ok_or_else(|| SubstrateError::Frame("journal sequence overflow".into()))?,
+            Ordering::SeqCst,
+        );
+        Ok(self.kv.get(&crabka_pgkv::key::topology_activation_receipt_key(
+            tenant,
+            operation_id,
+        )).map_err(SubstrateError::from)? == Some(frame.ops.into_iter().find_map(|op| match op {
+            WriteOp::ConditionalPut { value, .. } => Some(value),
+            _ => None,
+        }).expect("activation frame contains its value")))
+    }
+}
+
+fn validate_must_activate_transition(
+    tenant: &str,
+    operation_id: &str,
+    barrier_offset: Option<i64>,
+    expected: &[u8],
+    value: &[u8],
+) -> Result<(), SubstrateError> {
+    use crabka_gres_ranges::control::{TopologyActivationPhase, TopologyActivationReceipt};
+    let prior: TopologyActivationReceipt = serde_json::from_slice(expected)
+        .map_err(|error| SubstrateError::Frame(format!("decode prior activation receipt: {error}")))?;
+    let next: TopologyActivationReceipt = serde_json::from_slice(value)
+        .map_err(|error| SubstrateError::Frame(format!("decode next activation receipt: {error}")))?;
+    let valid = prior.tenant == tenant
+        && next.tenant == tenant
+        && prior.operation_id == operation_id
+        && next.operation_id == operation_id
+        && prior.split == next.split
+        && prior.phase == TopologyActivationPhase::SourceCheckpoint
+        && next.phase == TopologyActivationPhase::MustActivate
+        && next.revision == prior.revision.checked_add(1).ok_or_else(|| {
+            SubstrateError::Frame("activation receipt revision overflow".into())
+        })?
+        && next.source_checkpoint == prior.source_checkpoint
+        && barrier_offset.is_none_or(|offset| next.barrier_offset == Some(offset))
+        && next.barrier_offset.is_some()
+        && next.tail_sha256.is_some()
+        && next.targets.values().all(|target| {
+            target.replay_journal_seq.is_some()
+                && !target.writer_activated
+                && target.bootstrap_checkpoint.is_none()
+        });
+    if valid {
+        Ok(())
+    } else {
+        Err(SubstrateError::Frame(
+            "invalid MustActivate receipt transition".into(),
+        ))
     }
 }
 

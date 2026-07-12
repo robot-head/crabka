@@ -80,6 +80,9 @@ impl LiveMultiRangeTransfer {
         {
             return Ok(());
         }
+        if std::env::var_os("CRABKA_GRES_ACTIVATION_HARD_CRASH").is_some() {
+            std::process::abort();
+        }
         Err(crabka_gres_ranges::RangeTransferError::Runtime {
             range_id,
             reason: format!("injected topology activation crash: {fault:?}"),
@@ -233,6 +236,236 @@ impl LiveMultiRangeTransfer {
     }
 }
 
+/// Commit the one-way activation decision through the still-canonical predecessor r0.
+/// This is the final fallible instruction before canonical producer construction.
+pub(super) async fn persist_must_activate(
+    transfer: &LiveMultiRangeTransfer,
+) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+    let pending = transfer
+        .pending
+        .lock()
+        .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+        .clone()
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "mark activation without pending topology".into(),
+        })?;
+    let engine = transfer
+        .engines
+        .read()
+        .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+        .get(&RangeId::COORDINATOR)
+        .map(SqlEngine::clone_handle)
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+            range_id: RangeId::COORDINATOR,
+            reason: "predecessor range zero unavailable for must-activate receipt".into(),
+        })?;
+    let source_resources = transfer
+        .ranges
+        .read()
+        .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+        .get(&RangeId::COORDINATOR)
+        .cloned()
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+            range_id: RangeId::COORDINATOR,
+            reason: "predecessor range zero resources unavailable for must-activate receipt"
+                .into(),
+        })?;
+    let tenant = source_resources.recovery_config.tenant.to_string();
+    let store = RangeZeroTopologyActivationStore::new(tenant.clone(), engine);
+    let mut receipt = store
+        .load(&pending.operation_id)
+        .await
+        .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: format!("load must-activate receipt: {reason}"),
+        })?
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "activation receipt missing before must-activate".into(),
+        })?;
+    if receipt.phase == TopologyActivationPhase::MustActivate {
+        transfer
+            .activation_irreversible
+            .store(true, std::sync::atomic::Ordering::Release);
+        return Ok(());
+    }
+    if receipt.phase != TopologyActivationPhase::SourceCheckpoint {
+        return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+            range_id: pending.predecessor,
+            reason: "must-activate requires the durable source-checkpoint phase".into(),
+        });
+    }
+    let expected_receipt = receipt.clone();
+    receipt.revision = receipt.revision.checked_add(1).ok_or_else(|| {
+        crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: pending.predecessor,
+            reason: "activation receipt revision overflow".into(),
+        }
+    })?;
+    receipt.phase = TopologyActivationPhase::MustActivate;
+    receipt.source_checkpoint = Some(pending.source_checkpoint.clone());
+    receipt.barrier_offset = Some(pending.barrier_offset);
+    receipt.tail_sha256 = Some(pending.tail_sha256.clone());
+    receipt
+        .targets
+        .get_mut(&pending.left_id)
+        .expect("validated left target")
+        .replay_journal_seq = Some(pending.left_replay_journal_seq);
+    receipt
+        .targets
+        .get_mut(&pending.right_id)
+        .expect("validated right target")
+        .replay_journal_seq = Some(pending.right_replay_journal_seq);
+    validate_receipt_shape(&receipt).map_err(|error| {
+        crabka_gres_ranges::RangeTransferError::Boundary {
+            range_id: pending.predecessor,
+            reason: error.to_string(),
+        }
+    })?;
+    transfer.activation_fault(TopologyActivationFault::BeforeMustActivate, pending.predecessor)?;
+    let authorization = {
+        let pause = source_resources
+            .pause
+            .lock()
+            .map_err(|_| range_pause_lock_error(pending.predecessor))?;
+        let super::RangePauseState::Paused(paused) = &*pause else {
+            return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: "must-activate append requires the held predecessor pause".into(),
+            });
+        };
+        if paused.barrier_offset != pending.barrier_offset {
+            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id: pending.predecessor,
+                reason: "must-activate pause barrier differs from staged evidence".into(),
+            });
+        }
+        paused.activation_authorization()
+    };
+    let expected = serde_json::to_vec(&expected_receipt).map_err(|reason| {
+        crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: pending.predecessor,
+            reason: format!("encode prior must-activate receipt: {reason}"),
+        }
+    })?;
+    let value = serde_json::to_vec(&receipt).map_err(|reason| {
+        crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: pending.predecessor,
+            reason: format!("encode must-activate receipt: {reason}"),
+        }
+    })?;
+    if !source_resources
+        .activation_committer
+        .commit_activation_receipt_cas(
+            &authorization,
+            pending.barrier_offset,
+            &tenant,
+            &pending.operation_id,
+            expected,
+            value,
+        )
+        .await
+        .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: pending.predecessor,
+            reason: format!("persist must-activate receipt: {reason}"),
+        })?
+    {
+        return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: pending.predecessor,
+            reason: "must-activate receipt CAS raced".into(),
+        });
+    }
+    transfer
+        .activation_irreversible
+        .store(true, std::sync::atomic::Ordering::Release);
+    transfer.activation_fault(TopologyActivationFault::AfterMustActivate, pending.predecessor)?;
+    Ok(())
+}
+
+pub(super) async fn copy_must_activate_before_bind(
+    transfer: &LiveMultiRangeTransfer,
+    pending: &PendingLiveTopology,
+    canonical: Arc<crabka_gres_substrate::ProducerWalWriter>,
+) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+    let receipt_engine = transfer
+        .prepared
+        .lock()
+        .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+        .as_ref()
+        .and_then(|prepared| prepared.engines.get(&RangeId::COORDINATOR))
+        .map(SqlEngine::clone_handle)
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "prepared range zero missing before canonical bind".into(),
+        })?;
+    let tenant = pending.left.recovery_config.tenant.to_string();
+    let store = RangeZeroTopologyActivationStore::new(tenant.clone(), receipt_engine);
+    let mut receipt = store
+        .load(&pending.operation_id)
+        .await
+        .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: format!("load replacement activation anchor: {reason}"),
+        })?
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "replacement activation anchor is missing".into(),
+        })?;
+    if receipt.phase == TopologyActivationPhase::MustActivate {
+        return Ok(());
+    }
+    let expected_receipt = receipt.clone();
+    receipt.revision = receipt.revision.checked_add(1).ok_or_else(|| {
+        crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "replacement activation revision overflow".into(),
+        }
+    })?;
+    receipt.phase = TopologyActivationPhase::MustActivate;
+    receipt.source_checkpoint = Some(pending.source_checkpoint.clone());
+    receipt.barrier_offset = Some(pending.barrier_offset);
+    receipt.tail_sha256 = Some(pending.tail_sha256.clone());
+    receipt.targets.get_mut(&pending.left_id).expect("left target").replay_journal_seq =
+        Some(pending.left_replay_journal_seq);
+    receipt.targets.get_mut(&pending.right_id).expect("right target").replay_journal_seq =
+        Some(pending.right_replay_journal_seq);
+    let expected = serde_json::to_vec(&expected_receipt).map_err(|error| {
+        crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: format!("encode prior activation anchor: {error}"),
+        }
+    })?;
+    let value = serde_json::to_vec(&receipt).map_err(|error| {
+        crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: format!("encode activation anchor: {error}"),
+        }
+    })?;
+    if !pending
+        .left
+        .activation_committer
+        .commit_activation_anchor_before_bind(
+            canonical,
+            &tenant,
+            &pending.operation_id,
+            expected,
+            value,
+        )
+        .await
+        .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: format!("commit replacement activation anchor: {error}"),
+        })?
+    {
+        return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "replacement activation anchor CAS raced".into(),
+        });
+    }
+    Ok(())
+}
+
 /// Read range zero without constructing a producer so startup can select the already
 /// activated writer generation instead of attempting to resurrect a fenced predecessor.
 pub(super) async fn discover_activation_receipt(
@@ -258,46 +491,130 @@ pub(super) async fn discover_activation_receipt(
     {
         return Ok(None);
     }
-    let base_receipts = read_only_receipts(&recovery, checkpoint_store).await?;
     let mut receipts = BTreeMap::new();
-    for receipt in base_receipts {
-        receipts.insert(receipt.operation_id.clone(), receipt);
+    for receipt in read_only_receipts(&recovery, checkpoint_store).await? {
+        validate_receipt_shape(&receipt)?;
+        if receipts.insert(receipt.operation_id.clone(), receipt).is_some() {
+            return Err(std::io::Error::other(
+                "duplicate activation operation id in range-zero state",
+            ));
+        }
     }
-    // A replacement r0 writes irreversible progress to its generation-scoped WAL.
-    // The old generation can therefore contain a stale Prepared prefix. Follow its
-    // authenticated descriptor and prefer only a structurally identical, monotone receipt.
-    let prefixes = receipts.values().cloned().collect::<Vec<_>>();
-    for prefix in prefixes {
-        let Some(target) = prefix.targets.get(&RangeId::COORDINATOR) else {
-            continue;
+    let mut generation = 0;
+    let mut visited = std::collections::BTreeSet::from([generation]);
+    loop {
+        let Some(next_generation) =
+            next_replacement_generation(generation, receipts.values())?
+        else {
+            break;
         };
-        if target.wal_generation == 0 {
-            continue;
+        if next_generation <= generation || !visited.insert(next_generation) {
+            return Err(std::io::Error::other(
+                "activation receipt graph contains a generation cycle or regression",
+            ));
         }
-        let candidate_recovery = recovery.clone().with_wal_generation(target.wal_generation);
-        let candidate_end =
-            match crabka_gres_substrate::live_committed_end(&candidate_recovery).await {
-                Ok(end) => end,
-                Err(_) => continue,
-            };
+        let candidate_recovery = recovery.clone().with_wal_generation(next_generation);
+        let candidate_end = crabka_gres_substrate::live_committed_end(&candidate_recovery)
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "read replacement range-zero generation {next_generation}: {error}"
+                ))
+            })?;
         if candidate_end < 0 {
-            continue;
+            // MustActivate deliberately precedes construction of this generation's producer.
+            // An empty target WAL is therefore the terminal pre-init crash state: return the
+            // predecessor receipt so recovery can construct and activate the successor.
+            break;
         }
-        // The replacement generation starts its journal sequence at the source fold's next
-        // sequence, so it cannot be replayed in isolation. Read only the self-contained receipt
-        // values from its committed frames; full state reconstruction happens below.
-        for candidate in
-            receipt_values_from_wal(&candidate_recovery, candidate_end, &prefix.operation_id)
-                .await?
-        {
-            validate_receipt_extension(&candidate, &prefix)?;
-            if receipts
-                .get(&candidate.operation_id)
-                .is_none_or(|current| candidate.revision > current.revision)
-            {
-                receipts.insert(candidate.operation_id.clone(), candidate);
+        let checkpoint_receipts = read_checkpoint_receipts(
+            &candidate_recovery,
+            checkpoint_store,
+        )
+        .await?;
+        let mut histories = BTreeMap::<String, Vec<TopologyActivationReceipt>>::new();
+        for candidate in receipt_values_from_wal(&candidate_recovery, candidate_end).await? {
+            histories
+                .entry(candidate.operation_id.clone())
+                .or_default()
+                .push(candidate);
+        }
+        if histories.is_empty() {
+            // Canonical producer initialization may create the target topic before the
+            // predecessor MustActivate value has been copied into it. The predecessor marker
+            // remains sufficient roll-forward authority for this exact crash window.
+            break;
+        }
+        for (operation_id, mut history) in histories {
+            let mut canonical = BTreeMap::new();
+            for candidate in history.drain(..) {
+                if let Some(prior) = canonical.insert(candidate.revision, candidate.clone())
+                    && prior != candidate
+                {
+                    return Err(std::io::Error::other(format!(
+                        "activation operation {operation_id} has divergent values at revision {}",
+                        candidate.revision
+                    )));
+                }
             }
+            history = canonical.into_values().collect();
+            let mut chain = Vec::with_capacity(history.len() + 1);
+            let mut compacted_edge = None;
+            if let Some(prefix) = receipts.get(&operation_id) {
+                chain.push(prefix.clone());
+                if let Some(checkpoint) = checkpoint_receipts.get(&operation_id)
+                    && checkpoint.revision > prefix.revision
+                {
+                    validate_compacted_receipt_extension(checkpoint, prefix)?;
+                    compacted_edge = Some((prefix.revision, checkpoint.revision));
+                    chain.push(checkpoint.clone());
+                }
+            } else if let Some(checkpoint) = checkpoint_receipts.get(&operation_id) {
+                validate_receipt_shape(checkpoint)?;
+                chain.push(checkpoint.clone());
+            } else {
+                if history.first().is_none_or(|receipt| {
+                    receipt.revision != 0 || receipt.phase != TopologyActivationPhase::Prepared
+                }) {
+                    return Err(std::io::Error::other(format!(
+                        "activation operation {operation_id} does not begin with revision-zero Prepared"
+                    )));
+                }
+                chain.push(history.remove(0));
+            }
+            for candidate in history {
+                let anchor = chain.last().expect("activation history has an anchor");
+                if candidate.revision < anchor.revision {
+                    continue;
+                }
+                if candidate.revision == anchor.revision {
+                    if candidate != *anchor {
+                        return Err(std::io::Error::other(format!(
+                            "activation operation {operation_id} conflicts at revision {}",
+                            candidate.revision
+                        )));
+                    }
+                    continue;
+                }
+                chain.push(candidate);
+            }
+            for receipt in &chain {
+                validate_receipt_shape(receipt)?;
+            }
+            for pair in chain.windows(2) {
+                if compacted_edge == Some((pair[0].revision, pair[1].revision)) {
+                    validate_compacted_receipt_extension(&pair[1], &pair[0])?;
+                } else {
+                    validate_receipt_history(pair)?;
+                    validate_receipt_extension(&pair[1], &pair[0])?;
+                }
+            }
+            let terminal = chain
+                .pop()
+                .expect("validated activation history is non-empty");
+            receipts.insert(operation_id, terminal);
         }
+        generation = next_generation;
     }
     let receipts = receipts.into_values().collect::<Vec<_>>();
     let latest = receipts
@@ -305,7 +622,8 @@ pub(super) async fn discover_activation_receipt(
         .filter(|receipt| {
             matches!(
                 receipt.phase,
-                TopologyActivationPhase::WriterActivated
+                TopologyActivationPhase::MustActivate
+                    | TopologyActivationPhase::WriterActivated
                     | TopologyActivationPhase::CheckpointDurable
                     | TopologyActivationPhase::TopologyCommitted
             )
@@ -314,14 +632,50 @@ pub(super) async fn discover_activation_receipt(
     Ok(latest)
 }
 
+async fn read_checkpoint_receipts(
+    recovery: &crabka_gres_substrate::LiveRecoveryConfig,
+    checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+) -> std::io::Result<BTreeMap<String, TopologyActivationReceipt>> {
+    let Some(checkpoint_store) = checkpoint_store else {
+        return Ok(BTreeMap::new());
+    };
+    let kv = Arc::new(crabka_pgkv::MemKv::default());
+    let restored = crabka_gres_substrate::checkpoint::restore_latest(
+        checkpoint_store,
+        &format!("{}/r{}", recovery.tenant, RangeId::COORDINATOR.as_u32()),
+        kv.as_ref(),
+        recovery.wal_generation,
+        None,
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("restore activation checkpoint: {error}")))?;
+    if restored.is_none() {
+        return Ok(BTreeMap::new());
+    }
+    let engine = SqlEngine::with_kv(kv as Arc<dyn crabka_pgkv::Kv>)
+        .map_err(|error| std::io::Error::other(format!("activation checkpoint engine: {error:?}")))?;
+    let mut receipts = BTreeMap::new();
+    for receipt in RangeZeroTopologyActivationStore::new(recovery.tenant.to_string(), engine)
+        .list()
+        .await
+        .map_err(|error| std::io::Error::other(format!("list checkpoint receipts: {error}")))?
+    {
+        validate_receipt_shape(&receipt)?;
+        if receipts.insert(receipt.operation_id.clone(), receipt).is_some() {
+            return Err(std::io::Error::other(
+                "checkpoint contains duplicate activation operation ids",
+            ));
+        }
+    }
+    Ok(receipts)
+}
+
 async fn receipt_values_from_wal(
     recovery: &crabka_gres_substrate::LiveRecoveryConfig,
     end: i64,
-    operation_id: &str,
 ) -> std::io::Result<Vec<TopologyActivationReceipt>> {
-    let key = crabka_pgkv::key::topology_activation_receipt_key(
+    let prefix = crabka_pgkv::key::topology_activation_receipt_prefix(
         &recovery.tenant.to_string(),
-        operation_id,
     );
     let items = crabka_gres_substrate::read_live_retained_committed(recovery, end)
         .await
@@ -341,7 +695,7 @@ async fn receipt_values_from_wal(
                     key: candidate,
                     value,
                     ..
-                } if candidate == key => Some(value),
+                } if candidate.starts_with(&prefix) => Some(value),
                 _ => None,
             };
             if let Some(value) = value {
@@ -402,12 +756,209 @@ fn validate_receipt_extension(
         })
     });
     if immutable_matches && boundary_is_monotone && targets_are_monotone {
-        Ok(())
+        validate_receipt_history(&[prefix.clone(), candidate.clone()])
     } else {
         Err(std::io::Error::other(
             "replacement range-zero receipt does not monotonically extend its prepared intent",
         ))
     }
+}
+
+fn validate_compacted_receipt_extension(
+    candidate: &TopologyActivationReceipt,
+    prefix: &TopologyActivationReceipt,
+) -> std::io::Result<()> {
+    validate_receipt_shape(prefix)?;
+    validate_receipt_shape(candidate)?;
+    let immutable = candidate.operation_id == prefix.operation_id
+        && candidate.tenant == prefix.tenant
+        && candidate.split == prefix.split
+        && same_target_intent(candidate, prefix);
+    let boundary = prefix
+        .source_checkpoint
+        .as_ref()
+        .is_none_or(|value| candidate.source_checkpoint.as_ref() == Some(value))
+        && prefix
+            .barrier_offset
+            .is_none_or(|value| candidate.barrier_offset == Some(value))
+        && prefix
+            .tail_sha256
+            .as_ref()
+            .is_none_or(|value| candidate.tail_sha256.as_ref() == Some(value));
+    let targets = prefix.targets.iter().all(|(range_id, prior)| {
+        candidate.targets.get(range_id).is_some_and(|next| {
+            (!prior.writer_activated || next.writer_activated)
+                && prior
+                    .replay_journal_seq
+                    .is_none_or(|value| next.replay_journal_seq == Some(value))
+                && prior
+                    .bootstrap_checkpoint
+                    .as_ref()
+                    .is_none_or(|value| next.bootstrap_checkpoint.as_ref() == Some(value))
+        })
+    });
+    let revision_delta = candidate.revision.checked_sub(prefix.revision);
+    let phase_delta = phase_rank(prefix.phase)
+        .zip(phase_rank(candidate.phase))
+        .and_then(|(prior, next)| next.checked_sub(prior))
+        .map(u64::from);
+    if immutable
+        && boundary
+        && targets
+        && revision_delta
+            .zip(phase_delta)
+            .is_some_and(|(revisions, phases)| revisions > 0 && revisions >= phases)
+    {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "checkpointed activation receipt is not a monotone extension",
+        ))
+    }
+}
+
+fn phase_rank(phase: TopologyActivationPhase) -> Option<u8> {
+    match phase {
+        TopologyActivationPhase::Prepared => Some(0),
+        TopologyActivationPhase::SourceCheckpoint => Some(1),
+        TopologyActivationPhase::MustActivate => Some(2),
+        TopologyActivationPhase::WriterActivated => Some(3),
+        TopologyActivationPhase::CheckpointDurable => Some(4),
+        TopologyActivationPhase::TopologyCommitted => Some(5),
+        TopologyActivationPhase::Aborted => None,
+    }
+}
+
+fn rolls_forward(phase: TopologyActivationPhase) -> bool {
+    matches!(
+        phase,
+        TopologyActivationPhase::MustActivate
+            | TopologyActivationPhase::WriterActivated
+            | TopologyActivationPhase::CheckpointDurable
+            | TopologyActivationPhase::TopologyCommitted
+    )
+}
+
+fn next_replacement_generation<'a>(
+    current_generation: u64,
+    receipts: impl IntoIterator<Item = &'a TopologyActivationReceipt>,
+) -> std::io::Result<Option<u64>> {
+    let mut edge = None;
+    for receipt in receipts {
+        validate_receipt_shape(receipt)?;
+        if !rolls_forward(receipt.phase) {
+            continue;
+        }
+        let target = receipt.targets.get(&RangeId::COORDINATOR).ok_or_else(|| {
+            std::io::Error::other("activation receipt has no replacement range zero")
+        })?;
+        if target.wal_generation <= current_generation {
+            if receipt.split.predecessor_generation == current_generation {
+                return Err(std::io::Error::other(
+                    "activation receipt replacement generation does not increase",
+                ));
+            }
+            continue;
+        }
+        if edge.is_some() {
+            return Err(std::io::Error::other(
+                "activation receipt graph forks from one range-zero generation",
+            ));
+        }
+        edge = Some(target.wal_generation);
+    }
+    Ok(edge)
+}
+
+fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Result<()> {
+    let source = receipt.source_checkpoint.is_some();
+    let boundary = receipt.barrier_offset.is_some() && receipt.tail_sha256.is_some();
+    let no_partial_boundary = receipt.barrier_offset.is_some() == receipt.tail_sha256.is_some();
+    let all_seeds = receipt
+        .targets
+        .values()
+        .all(|target| target.replay_journal_seq.is_some());
+    let any_writer = receipt.targets.values().any(|target| target.writer_activated);
+    let all_writers = receipt.targets.values().all(|target| target.writer_activated);
+    let any_checkpoint = receipt
+        .targets
+        .values()
+        .any(|target| target.bootstrap_checkpoint.is_some());
+    let all_checkpoints = receipt
+        .targets
+        .values()
+        .all(|target| target.bootstrap_checkpoint.is_some());
+    let valid = no_partial_boundary
+        && match receipt.phase {
+            TopologyActivationPhase::Prepared => {
+                !source && !boundary && !all_seeds && !any_writer && !any_checkpoint
+            }
+            TopologyActivationPhase::SourceCheckpoint => {
+                source && !boundary && !all_seeds && !any_writer && !any_checkpoint
+            }
+            TopologyActivationPhase::MustActivate => {
+                source && boundary && all_seeds && !any_writer && !any_checkpoint
+            }
+            TopologyActivationPhase::WriterActivated => {
+                source && boundary && all_seeds && any_writer
+            }
+            TopologyActivationPhase::CheckpointDurable
+            | TopologyActivationPhase::TopologyCommitted => {
+                source && boundary && all_seeds && all_writers && all_checkpoints
+            }
+            TopologyActivationPhase::Aborted => !any_writer && !any_checkpoint && !boundary,
+        };
+    if valid {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "activation receipt phase is inconsistent with its durable fields",
+        ))
+    }
+}
+
+fn validate_receipt_history(receipts: &[TopologyActivationReceipt]) -> std::io::Result<()> {
+    for receipt in receipts {
+        validate_receipt_shape(receipt)?;
+    }
+    for pair in receipts.windows(2) {
+        let prior = &pair[0];
+        let next = &pair[1];
+        if next.revision != prior.revision.checked_add(1).ok_or_else(|| {
+            std::io::Error::other("activation receipt revision overflow")
+        })? {
+            return Err(std::io::Error::other(format!(
+                "activation receipt revision is not contiguous: {} {:?} -> {} {:?}",
+                prior.revision, prior.phase, next.revision, next.phase
+            )));
+        }
+        let valid_phase = if next.phase == TopologyActivationPhase::Aborted {
+            matches!(
+                prior.phase,
+                TopologyActivationPhase::Prepared | TopologyActivationPhase::SourceCheckpoint
+            )
+        } else if prior.phase == next.phase {
+            !matches!(
+                prior.phase,
+                TopologyActivationPhase::Prepared
+                    | TopologyActivationPhase::SourceCheckpoint
+                    | TopologyActivationPhase::MustActivate
+                    | TopologyActivationPhase::CheckpointDurable
+                    | TopologyActivationPhase::TopologyCommitted
+                    | TopologyActivationPhase::Aborted
+            )
+        } else {
+            phase_rank(prior.phase)
+                .zip(phase_rank(next.phase))
+                .is_some_and(|(prior, next)| next == prior + 1)
+        };
+        if !valid_phase {
+            return Err(std::io::Error::other(
+                "activation receipt phase transition is not monotone",
+            ));
+        }
+    }
+    Ok(())
 }
 
 async fn read_only_receipts(
@@ -461,8 +1012,10 @@ pub(super) async fn reconcile_before_readiness(
             .iter_mut()
             .find(|receipt| receipt.operation_id == discovered.operation_id)
         {
-            validate_receipt_extension(&discovered, existing)?;
-            *existing = discovered;
+            if *existing != discovered {
+                validate_compacted_receipt_extension(&discovered, existing)?;
+                *existing = discovered;
+            }
         } else {
             receipts.push(discovered);
         }
@@ -473,10 +1026,11 @@ pub(super) async fn reconcile_before_readiness(
     for receipt in receipts {
         match receipt.phase {
             TopologyActivationPhase::Aborted => {}
-            TopologyActivationPhase::Prepared => {
+            TopologyActivationPhase::Prepared | TopologyActivationPhase::SourceCheckpoint => {
                 abort_pre_activation(&source_store, receipt).await?
             }
-            TopologyActivationPhase::WriterActivated
+            TopologyActivationPhase::MustActivate
+            | TopologyActivationPhase::WriterActivated
             | TopologyActivationPhase::CheckpointDurable
             | TopologyActivationPhase::TopologyCommitted => {
                 activation = Some(receipt);
@@ -674,6 +1228,7 @@ async fn complete_post_activation(
         receipt.tenant.clone(),
         receipt_range0.engine.clone_handle(),
     );
+    ensure_must_activate_receipt(&store, &receipt).await?;
     complete_target_receipts(&store, &receipt.operation_id, &successors).await?;
 
     engines.engines.remove(&receipt.split.predecessor);
@@ -684,6 +1239,41 @@ async fn complete_post_activation(
         .and_then(|engine| engine.tso_horizon.clone());
     mark_topology_committed(&store, &receipt.operation_id).await?;
     Ok(receipt.split.target_map)
+}
+
+async fn ensure_must_activate_receipt(
+    store: &RangeZeroTopologyActivationStore,
+    predecessor_receipt: &TopologyActivationReceipt,
+) -> std::io::Result<()> {
+    let current = load_receipt(store, &predecessor_receipt.operation_id).await?;
+    if current.revision >= predecessor_receipt.revision {
+        validate_receipt_shape(&current)?;
+        return Ok(());
+    }
+    if current.phase != TopologyActivationPhase::SourceCheckpoint
+        || predecessor_receipt.phase != TopologyActivationPhase::MustActivate
+    {
+        return Err(std::io::Error::other(
+            "replacement range zero is missing the MustActivate predecessor transition",
+        ));
+    }
+    validate_receipt_extension(predecessor_receipt, &current)?;
+    if !store
+        .compare_and_swap(
+            &predecessor_receipt.operation_id,
+            Some(current.revision),
+            predecessor_receipt.clone(),
+        )
+        .await
+        .map_err(|error| {
+            std::io::Error::other(format!("copy MustActivate receipt to replacement r0: {error}"))
+        })?
+    {
+        return Err(std::io::Error::other(
+            "replacement MustActivate receipt CAS raced",
+        ));
+    }
+    Ok(())
 }
 
 async fn complete_target_receipts(
@@ -870,7 +1460,10 @@ fn routing_table_id(table: &str) -> TableId {
 mod tests {
     use std::collections::BTreeMap;
 
-    use super::{routing_table_id, validate_receipt_extension};
+    use super::{
+        next_replacement_generation, routing_table_id, validate_receipt_extension,
+        validate_receipt_history,
+    };
     use crabka_gres_ranges::{
         MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
         SuccessorDescriptor, TableId, TenantName,
@@ -885,14 +1478,19 @@ mod tests {
 
     #[test]
     fn forged_activation_receipt_extensions_fail_closed() {
-        let prefix = receipt();
+        let mut prefix = receipt();
+        prefix.phase = TopologyActivationPhase::SourceCheckpoint;
+        prefix.source_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+            range_id: prefix.split.predecessor,
+            covered_offset: 3,
+            manifest_key: "checkpoint".into(),
+        });
         let mut valid = prefix.clone();
         valid.revision += 1;
-        valid.phase = TopologyActivationPhase::WriterActivated;
+        valid.phase = TopologyActivationPhase::MustActivate;
         valid.barrier_offset = Some(7);
         valid.tail_sha256 = Some("tail".into());
         for target in valid.targets.values_mut() {
-            target.writer_activated = true;
             target.replay_journal_seq = Some(11);
         }
         validate_receipt_extension(&valid, &prefix).expect("monotone extension");
@@ -927,6 +1525,89 @@ mod tests {
         for forged in forgeries {
             assert!(validate_receipt_extension(&forged, &prefix).is_err());
         }
+    }
+
+    #[test]
+    fn receipt_history_rejects_phase_regression_jump_and_inconsistent_fields() {
+        let mut prepared = receipt();
+        validate_receipt_history(&[prepared.clone()]).expect("prepared receipt");
+
+        let mut source = prepared.clone();
+        source.revision += 1;
+        source.phase = TopologyActivationPhase::SourceCheckpoint;
+        source.source_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+            range_id: source.split.predecessor,
+            covered_offset: 3,
+            manifest_key: "checkpoint".into(),
+        });
+        validate_receipt_history(&[prepared.clone(), source.clone()])
+            .expect("source-checkpoint transition");
+
+        let mut must_activate = source.clone();
+        must_activate.revision += 1;
+        must_activate.phase = TopologyActivationPhase::MustActivate;
+        must_activate.barrier_offset = Some(7);
+        must_activate.tail_sha256 = Some("tail".into());
+        for target in must_activate.targets.values_mut() {
+            target.replay_journal_seq = Some(11);
+        }
+        validate_receipt_history(&[prepared.clone(), source.clone(), must_activate.clone()])
+            .expect("must-activate transition");
+
+        let mut regression = must_activate.clone();
+        regression.revision += 1;
+        regression.phase = TopologyActivationPhase::SourceCheckpoint;
+        assert!(validate_receipt_history(&[must_activate.clone(), regression]).is_err());
+
+        let mut jump = prepared.clone();
+        jump.revision += 1;
+        jump.phase = TopologyActivationPhase::WriterActivated;
+        jump.source_checkpoint = source.source_checkpoint.clone();
+        jump.barrier_offset = Some(7);
+        jump.tail_sha256 = Some("tail".into());
+        for target in jump.targets.values_mut() {
+            target.replay_journal_seq = Some(11);
+            target.writer_activated = true;
+        }
+        assert!(validate_receipt_history(&[prepared.clone(), jump]).is_err());
+
+        prepared.barrier_offset = Some(7);
+        assert!(validate_receipt_history(&[prepared]).is_err());
+
+        let mut inconsistent = must_activate;
+        inconsistent.tail_sha256 = None;
+        assert!(validate_receipt_history(&[source, inconsistent]).is_err());
+    }
+
+    #[test]
+    fn replacement_generation_selection_supports_distinct_operation_chain_and_rejects_forks() {
+        let mut first = receipt();
+        first.phase = TopologyActivationPhase::MustActivate;
+        first.source_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+            range_id: first.split.predecessor,
+            covered_offset: 3,
+            manifest_key: "g0".into(),
+        });
+        first.barrier_offset = Some(7);
+        first.tail_sha256 = Some("g0-tail".into());
+        for target in first.targets.values_mut() {
+            target.replay_journal_seq = Some(11);
+        }
+        assert_eq!(next_replacement_generation(0, [&first]).unwrap(), Some(1));
+
+        let mut second = first.clone();
+        second.operation_id = "activation-op-2".into();
+        second.split.operation_id = second.operation_id.clone();
+        second.split.predecessor_generation = 1;
+        second.source_checkpoint.as_mut().unwrap().manifest_key = "g1".into();
+        second.targets.get_mut(&RangeId::COORDINATOR).unwrap().wal_generation = 2;
+        assert_eq!(next_replacement_generation(1, [&first, &second]).unwrap(), Some(2));
+
+        let mut fork = second.clone();
+        fork.operation_id = "activation-op-fork".into();
+        fork.split.operation_id = fork.operation_id.clone();
+        fork.targets.get_mut(&RangeId::COORDINATOR).unwrap().wal_generation = 3;
+        assert!(next_replacement_generation(1, [&first, &second, &fork]).is_err());
     }
 
     fn receipt() -> TopologyActivationReceipt {
