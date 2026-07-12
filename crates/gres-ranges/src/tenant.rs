@@ -705,8 +705,12 @@ impl MultiRangeTenant {
         Self::validate_successor_interval(&serving, &state, table_id)?;
         let plan = Self::validated_transfer_plan(&serving, state.clone())?;
         transfer.validate_successors(&plan)?;
+        transfer.record_topology_activation_intent(&state).await?;
         let checkpoint = transfer
             .force_checkpoint(transfer_table.predecessor)
+            .await?;
+        transfer
+            .record_topology_activation_checkpoint(&state.operation_id, &checkpoint)
             .await?;
         let barrier = transfer.pause_at_checkpoint(&checkpoint).await?;
         let pause = TransferPauseGuard::new(transfer, barrier);
@@ -738,9 +742,10 @@ impl MultiRangeTenant {
             .await?;
         let claimed = transfer.claim_successors(&staged, barrier).await?;
         self.publish_claimed_successors(serving, state, claimed, Some(transfer))
+            .await
     }
 
-    fn publish_claimed_successors(
+    async fn publish_claimed_successors(
         &self,
         serving: &ServingSnapshot,
         state: &SplitState,
@@ -820,6 +825,9 @@ impl MultiRangeTenant {
         keepalives.insert(state.left.range_id, left.keepalive);
         keepalives.insert(right_descriptor.range_id, right.keepalive);
         if let Some(transfer) = transfer {
+            transfer.publish_serving_topology(&engines)?;
+            transfer.begin_serving_topology_publication();
+            transfer.activate_serving_topology().await?;
             self.inner
                 .serving
                 .store(Arc::new(ServingSnapshot::publishing_with_keepalives(
@@ -830,7 +838,8 @@ impl MultiRangeTenant {
                         .collect(),
                     keepalives.clone(),
                 )));
-            transfer.publish_serving_topology(&engines)?;
+            transfer.commit_serving_topology();
+            transfer.finish_topology_activation().await?;
         }
         self.inner
             .serving
@@ -846,7 +855,7 @@ impl MultiRangeTenant {
     }
 
     /// Publish a fully restored, fenced control-plane successor as one atomic serving snapshot.
-    pub fn publish_control_successors(
+    pub async fn publish_control_successors(
         &self,
         command: SplitCommand,
         claimed: crate::ClaimedStagedSuccessors,
@@ -866,6 +875,7 @@ impl MultiRangeTenant {
             )));
         }
         self.publish_claimed_successors(&serving, &state, claimed, None)
+            .await
     }
 
     fn validate_populated_table_split(

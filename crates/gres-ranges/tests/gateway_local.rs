@@ -432,11 +432,6 @@ impl InProcessTransfer {
             range_id: request.target_range,
             endpoint: request.endpoint,
             wal_generation: request.wal_generation,
-            bootstrap_checkpoint: CheckpointManifest {
-                range_id: request.target_range,
-                covered_offset: 1,
-                manifest_key: "in-process-target".to_owned(),
-            },
         })
     }
 }

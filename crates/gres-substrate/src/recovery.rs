@@ -69,6 +69,7 @@ pub struct LiveRecoveryConfig {
     pub advertised_endpoint: Option<String>,
     /// Noncanonical identity used while a recovered range is staged and must not fence serving.
     staging_identity: Option<String>,
+    replay_seed: Option<(i64, u64)>,
 }
 
 /// Checkpoint inputs for live recovery.
@@ -103,6 +104,7 @@ impl LiveRecoveryConfig {
             wal_generation: 0,
             advertised_endpoint: None,
             staging_identity: None,
+            replay_seed: None,
         }
     }
 
@@ -138,6 +140,16 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub fn with_staging_identity(mut self, operation_id: impl Into<String>) -> Self {
         self.staging_identity = Some(operation_id.into());
+        self
+    }
+
+    /// Continue a generation WAL from an already materialized checkpoint/tail fold.
+    ///
+    /// `offset` is the first offset in the selected generation topic and `journal_seq`
+    /// is the sequence expected in its first non-barrier frame.
+    #[must_use]
+    pub const fn with_replay_seed(mut self, offset: i64, journal_seq: u64) -> Self {
+        self.replay_seed = Some((offset, journal_seq));
         self
     }
 
@@ -240,6 +252,28 @@ pub async fn read_live_committed_tail(
         config.security.clone(),
     );
     bounded_committed_tail(&reader, after_offset, barrier_offset).await
+}
+
+/// Read all committed frames still retained in the selected generation topic.
+pub async fn read_live_retained_committed(
+    config: &LiveRecoveryConfig,
+    barrier_offset: i64,
+) -> Result<Vec<ReplayItem>, SubstrateError> {
+    let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
+    let topic = config.wal_topic();
+    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
+    let reader = KafkaCommittedWalReader::new(
+        bootstrap_addrs,
+        topic,
+        topic_uuid,
+        barrier_offset,
+        config.security.clone(),
+    );
+    let start = reader.log_start_offset().await?.unwrap_or(0);
+    bounded_committed_tail(&reader, start.saturating_sub(1), barrier_offset).await
 }
 
 /// Return the last offset visible under broker `READ_COMMITTED` isolation.
@@ -373,13 +407,14 @@ async fn recover_live_for_range_inner(
         generation: WriterGeneration(config.wal_generation),
         offset: barrier.offset,
     };
-    let outcome = recover_store_after_barrier(
+    let outcome = recover_store_after_barrier_with_seed(
         store,
         restore_store,
         config.checkpoints.as_ref(),
         &checkpoint_namespace,
         &reader,
         &recovery_barrier,
+        config.replay_seed,
     )
     .await?;
 
@@ -391,14 +426,24 @@ async fn recover_live_for_range_inner(
     })
 }
 
-async fn recover_store_after_barrier(
+async fn recover_store_after_barrier_with_seed(
     kv: &dyn Kv,
     restore_kv: Option<&dyn RestoreKv>,
     checkpoints: Option<&LiveRecoveryCheckpoints>,
     tenant: &str,
     reader: &dyn CommittedWalReader,
     barrier: &RecoveryBarrier,
+    replay_seed: Option<(i64, u64)>,
 ) -> Result<ReplayOutcome, SubstrateError> {
+    if let Some((replay_start, expected)) = replay_seed {
+        return replay_committed_frames_from(
+            kv,
+            reader.committed_from(replay_start).await?,
+            barrier.offset,
+            replay_start,
+            expected,
+        );
+    }
     let Some(checkpoints) = checkpoints else {
         return replay_committed_frames(kv, reader.committed_from_start().await?, barrier.offset);
     };
@@ -438,6 +483,27 @@ async fn recover_store_after_barrier(
         replay_start,
         expected,
     )
+}
+
+#[cfg(test)]
+async fn recover_store_after_barrier(
+    kv: &dyn Kv,
+    restore_kv: Option<&dyn RestoreKv>,
+    checkpoints: Option<&LiveRecoveryCheckpoints>,
+    tenant: &str,
+    reader: &dyn CommittedWalReader,
+    barrier: &RecoveryBarrier,
+) -> Result<ReplayOutcome, SubstrateError> {
+    recover_store_after_barrier_with_seed(
+        kv,
+        restore_kv,
+        checkpoints,
+        tenant,
+        reader,
+        barrier,
+        None,
+    )
+    .await
 }
 
 fn parse_bootstrap_addrs(bootstrap: &str) -> Result<Vec<String>, SubstrateError> {

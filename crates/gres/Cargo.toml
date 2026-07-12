@@ -27,6 +27,7 @@ crabka-pgkv = { version = "0.3.9", path = "../pgkv" }
 crabka-pgwire = { version = "0.3.9", path = "../pgwire" }
 crabka-gres-fdw = { path = "../gres-fdw" }
 crabka-gres-control = { path = "../gres-control" }
+crabka-pgcatalog = { path = "../pgcatalog" }
 crabka-gres-ranges = { path = "../gres-ranges" }
 crabka-gres-substrate = { path = "../gres-substrate" }
 crabka-object-store = { version = "0.3.8", path = "../object-store" }
@@ -45,6 +46,7 @@ rustls-pemfile = { workspace = true }
 rustls-rustcrypto = { workspace = true }
 rand = { workspace = true }
 sha2 = { workspace = true }
+serde_json = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
@@ -54,7 +56,6 @@ bytes = { workspace = true }
 crabka-broker = { path = "../broker" }
 crabka-client-producer = { path = "../client-producer" }
 crabka-gres-control = { path = "../gres-control" }
-crabka-pgcatalog = { path = "../pgcatalog" }
 crabka-pgmvcc = { path = "../pgmvcc" }
 crabka-security = { path = "../security" }
 tempfile = { workspace = true }
