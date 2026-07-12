@@ -77,3 +77,7 @@ Second-review hardening removes the remaining recovery trust edge: participant r
 The fresh live artifact at `target/gres-scaling-auth-recovery-final2/range-scaling.json` reports range-local `3.2778x`, sharded `3.4144x`, range-4 envelope efficiency `0.8536`, exact per-range counts of 110, and every gate true.
 
 Final broad verification after these changes passed 341 pgexec library tests, 36 pgexec transaction tests, 116 gres-ranges library tests, 21 crossrange tests, 33 multirange tests, formatting/diff checks, the targeted CLI parser, and the static skew/mutation suite. Gateway-local remains 10/11 only for the known invalid-socket fixture at its shifted line 1136.
+
+Third-review hardening separates read-only primary inspection from startup recovery. Normal local and remote secondary resolution now inspect the full primary descriptor without choosing a decision, require a terminal effective outcome and exact participant operations, and reject opposite or Pending-primary assertions without changing either primary or secondary state. `TimestampPrimaryRecover` remains exclusive to explicit startup orphan recovery.
+
+The fresh artifact at `target/gres-scaling-readonly-inspect-final/range-scaling.json` passes every gate with range-local `3.2407x`, sharded `3.4701x`, envelope efficiency `0.8675`, and exact observed distributions of 110 transactions per range.
