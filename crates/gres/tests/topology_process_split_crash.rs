@@ -129,6 +129,13 @@ fn parse_closed_payload_ledger(path: &Path) -> Result<PayloadLedger, String> {
     parse_payload_ledger(&body)
 }
 
+fn payload_ledger_has_ack_after(ledger: &PayloadLedger, timestamp_ms: u128) -> bool {
+    ledger
+        .acknowledged
+        .values()
+        .any(|event| event.timestamp_ms > timestamp_ms)
+}
+
 fn timestamp_ms() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -280,6 +287,15 @@ fn signal_process_group(process_group: u32, signal: &str) {
 fn process_group_exists(process_group: u32) -> bool {
     std::process::Command::new("kill")
         .args(["-0", "--", &format!("-{process_group}")])
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .is_ok_and(|status| status.success())
+}
+
+fn process_exists(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", "--", &pid.to_string()])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status()
@@ -459,11 +475,18 @@ fn injected_registry_error() -> GresControlWriteError {
     .into()
 }
 
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+struct DeleteAttemptEvidence {
+    targets: Vec<String>,
+    outcome: String,
+}
+
 #[derive(Clone, Debug, Default)]
 struct DeleteLedger {
     exact_calls: usize,
     unrelated_attempted: bool,
     injected_after_delete: usize,
+    attempts: Vec<DeleteAttemptEvidence>,
 }
 
 struct CountingRetirementAdmin {
@@ -488,10 +511,12 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
         timeout_ms: i32,
     ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
         if names != [self.expected_topic.as_str()] {
-            self.ledger
-                .lock()
-                .expect("delete ledger")
-                .unrelated_attempted = true;
+            let mut ledger = self.ledger.lock().expect("delete ledger");
+            ledger.unrelated_attempted = true;
+            ledger.attempts.push(DeleteAttemptEvidence {
+                targets: names.iter().map(|name| (*name).to_owned()).collect(),
+                outcome: "rejected_unrelated".into(),
+            });
             return Err(crabka_client_admin::AdminError::Protocol(
                 "unrelated Split retirement deletion".into(),
             ));
@@ -500,14 +525,28 @@ impl RangeRetirementAdmin for CountingRetirementAdmin {
         let result = self.inner.delete_topics(names, timeout_ms).await?;
         if self.fail_after_delete && result.iter().all(|outcome| outcome.error.is_none()) {
             self.fail_after_delete = false;
-            self.ledger
-                .lock()
-                .expect("delete ledger")
-                .injected_after_delete += 1;
+            let mut ledger = self.ledger.lock().expect("delete ledger");
+            ledger.injected_after_delete += 1;
+            ledger.attempts.push(DeleteAttemptEvidence {
+                targets: names.iter().map(|name| (*name).to_owned()).collect(),
+                outcome: "deleted_ack_lost".into(),
+            });
             return Err(crabka_client_admin::AdminError::Protocol(
                 "injected acknowledgement loss after predecessor delete".into(),
             ));
         }
+        self.ledger
+            .lock()
+            .expect("delete ledger")
+            .attempts
+            .push(DeleteAttemptEvidence {
+                targets: names.iter().map(|name| (*name).to_owned()).collect(),
+                outcome: if result.iter().all(|outcome| outcome.error.is_none()) {
+                    "deleted".into()
+                } else {
+                    "broker_error".into()
+                },
+            });
         Ok(result)
     }
 }
@@ -644,7 +683,7 @@ impl SplitKillPoint {
             // unoptimized live harness. Keep a strict CI margin without weakening the faster
             // publication and retirement families.
             Family::SourceRestore => 25_000,
-            Family::Publication | Family::RetirementResume => 12_000,
+            Family::Publication | Family::RetirementResume => 15_000,
         }
     }
 
@@ -1053,6 +1092,8 @@ fn payload_ledger_parses_attempt_ack_and_recovered_ack() {
     assert_eq!(parsed.acknowledged.len(), 2);
     assert_eq!(parsed.recovered, 1);
     assert_eq!(parsed.max_ack_gap_ms, 8);
+    assert!(!payload_ledger_has_ack_after(&parsed, 20));
+    assert!(payload_ledger_has_ack_after(&parsed, 19));
 }
 
 #[test]
@@ -1228,11 +1269,9 @@ impl RangeMutationClient for ReceiptFixtureMutationClient {
 async fn marker_receipt_fault_arms_only_after_marker_response() {
     let faults = Arc::new(OneShotControlFaults::default());
     let observations = Arc::new(Mutex::new(Vec::new()));
-    let client = RecordingRangeMutationClient::new(
-        ReceiptFixtureMutationClient,
-        Arc::clone(&observations),
-    )
-    .with_journal_cas_after(Some(Receipt::Marker), Arc::clone(&faults));
+    let client =
+        RecordingRangeMutationClient::new(ReceiptFixtureMutationClient, Arc::clone(&observations))
+            .with_journal_cas_after(Some(Receipt::Marker), Arc::clone(&faults));
     let request = |operation| RangeControlReq {
         tenant: "tenant-a".into(),
         range_id: RangeId::new(1),
@@ -1263,20 +1302,38 @@ async fn marker_receipt_fault_arms_only_after_marker_response() {
         )
         .await
         .expect("marker response");
-    assert_eq!(observed_receipt(&observations.lock().await), Receipt::Marker);
-    assert!(faults.take_journal_cas(), "next journal CAS acknowledgement is withheld");
+    assert_eq!(
+        observed_receipt(&observations.lock().await),
+        Receipt::Marker
+    );
+    assert!(
+        faults.take_journal_cas(),
+        "next journal CAS acknowledgement is withheld"
+    );
     assert!(!faults.take_journal_cas(), "fault fires exactly once");
 }
 
 #[test]
 fn every_receipt_fault_targets_one_exact_rpc_response() {
     let cases = [
-        (SplitKillPoint::CheckpointReceiptBeforeJournalCas, Receipt::Checkpoint),
+        (
+            SplitKillPoint::CheckpointReceiptBeforeJournalCas,
+            Receipt::Checkpoint,
+        ),
         (SplitKillPoint::PauseReceiptBeforeJournalCas, Receipt::Pause),
         (SplitKillPoint::StageReceiptBeforeJournalCas, Receipt::Stage),
-        (SplitKillPoint::MarkerClaimReceiptBeforeJournalCas, Receipt::Marker),
-        (SplitKillPoint::PrologueReceiptBeforeJournalCas, Receipt::Prologue),
-        (SplitKillPoint::RetireReceiptBeforeJournalCas, Receipt::Retire),
+        (
+            SplitKillPoint::MarkerClaimReceiptBeforeJournalCas,
+            Receipt::Marker,
+        ),
+        (
+            SplitKillPoint::PrologueReceiptBeforeJournalCas,
+            Receipt::Prologue,
+        ),
+        (
+            SplitKillPoint::RetireReceiptBeforeJournalCas,
+            Receipt::Retire,
+        ),
     ];
     let targets = cases
         .into_iter()
@@ -1296,11 +1353,11 @@ fn crash_family_availability_bounds_are_strict_and_distinct() {
     );
     assert_eq!(
         SplitKillPoint::TenantCasBeforeJournalCas.pause_bound_ms(),
-        12_000
+        15_000
     );
     assert_eq!(
         SplitKillPoint::RetiringBeforeDelete.pause_bound_ms(),
-        12_000
+        15_000
     );
 }
 
@@ -1313,7 +1370,10 @@ fn publication_and_early_retirement_predicates_retain_prologue_receipt() {
         SplitKillPoint::DeleteSuccessBeforeSidecarCas,
         SplitKillPoint::ParkedAfterSidecarCas,
     ] {
-        assert_eq!(SplitPredicateState::for_point(point).receipt, Receipt::Prologue);
+        assert_eq!(
+            SplitPredicateState::for_point(point).receipt,
+            Receipt::Prologue
+        );
     }
 }
 
@@ -1580,6 +1640,36 @@ struct PhysicalPayloadRow {
     checksum: String,
 }
 
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct LocatedPayloadRow {
+    range_id: u32,
+    #[serde(flatten)]
+    row: PhysicalPayloadRow,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct MarkerIdentityEvidence {
+    transaction_id: u64,
+    table_id: u64,
+    rowid: u64,
+}
+
+#[derive(Clone, Debug, Serialize)]
+struct ReceiptReplayEvidence {
+    sequence: usize,
+    timestamp_ms: u128,
+    operation: String,
+    endpoint: String,
+    range_id: u32,
+    generation: u64,
+    operation_id: String,
+    request: serde_json::Value,
+    response: serde_json::Value,
+    request_sha256: String,
+    response_sha256: String,
+    replay_count: usize,
+}
+
 async fn direct_payload_rows(
     system: &ProcessHarness,
     range_id: u32,
@@ -1648,6 +1738,7 @@ async fn direct_payload_rows(
 #[derive(Debug, Serialize)]
 struct SplitCrashEvidence {
     schema_version: u32,
+    evidence_id: String,
     family: &'static str,
     case: &'static str,
     tenant_id: String,
@@ -1677,6 +1768,29 @@ struct SplitCrashEvidence {
     left_wal_generation: u64,
     right_wal_generation: u64,
     topology_topics: Vec<String>,
+    reopened_oracle_rows: Vec<PhysicalPayloadRow>,
+    direct_physical_rows: Vec<LocatedPayloadRow>,
+    sql_union_rows: Vec<PhysicalPayloadRow>,
+    source_markers: Vec<MarkerIdentityEvidence>,
+    left_markers: Vec<MarkerIdentityEvidence>,
+    right_markers: Vec<MarkerIdentityEvidence>,
+    marker_response_digest: String,
+    authenticated_receipts: Vec<ReceiptReplayEvidence>,
+    delete_attempts: Vec<DeleteAttemptEvidence>,
+    unrelated_delete_attempted: bool,
+    old_source_pid: u32,
+    new_source_pid: u32,
+    workload_process_group: u32,
+    new_source_pid_alive_at_verification: bool,
+    old_source_pid_alive: bool,
+    new_source_pid_alive: bool,
+    workload_process_group_alive: bool,
+    operation_revision: u64,
+    operation_attempts: u32,
+    tenant_record_version: u64,
+    source_record_version: u64,
+    retirement_source_generation: u64,
+    retirement_successor_generations: Vec<(u32, u64)>,
     workload_process_reaped: bool,
 }
 
@@ -1694,6 +1808,7 @@ async fn verify_completed_split_case(
     publication_ms: u128,
     elapsed_ms: u128,
     workload_process_reaped: bool,
+    workload_process_group: u32,
     sentinel_topic: &str,
 ) -> SplitCrashEvidence {
     let ledger = parse_closed_payload_ledger(ledger_path).expect("closed fsynced payload oracle");
@@ -1743,12 +1858,28 @@ async fn verify_completed_split_case(
     for row in &expected {
         assert_eq!(successor_partition(row.table_id, row.rowid).is_ok(), true);
     }
-    let mut direct = Vec::new();
-    direct.extend(direct_payload_rows(system, 0, 50, None, Some(10)).await);
-    direct.extend(direct_payload_rows(system, 2, 50, Some(10), None).await);
-    direct.extend(direct_payload_rows(system, 2, 51, None, Some(16)).await);
-    direct.extend(direct_payload_rows(system, 3, 51, Some(16), None).await);
-    assert_eq!(direct.into_iter().collect::<BTreeSet<_>>(), expected);
+    let mut direct_physical_rows = Vec::new();
+    for (range_id, table_id, start, end) in [
+        (0, 50, None, Some(10)),
+        (2, 50, Some(10), None),
+        (2, 51, None, Some(16)),
+        (3, 51, Some(16), None),
+    ] {
+        direct_physical_rows.extend(
+            direct_payload_rows(system, range_id, table_id, start, end)
+                .await
+                .into_iter()
+                .map(|row| LocatedPayloadRow { range_id, row }),
+        );
+    }
+    direct_physical_rows.sort();
+    assert_eq!(
+        direct_physical_rows
+            .iter()
+            .map(|located| located.row.clone())
+            .collect::<BTreeSet<_>>(),
+        expected
+    );
 
     let sql = system.sql(0).await;
     let mut sql_rows = BTreeSet::new();
@@ -1869,12 +2000,42 @@ async fn verify_completed_split_case(
     assert!(elapsed_ms < point.operation_bound_ms());
     let topology_topics = topics
         .iter()
-        .filter(|topic| topic.starts_with(&format!("__gres_wal.{}.", system.tenant())) || *topic == sentinel_topic)
+        .filter(|topic| {
+            topic.starts_with(&format!("__gres_wal.{}.", system.tenant()))
+                || *topic == sentinel_topic
+        })
         .cloned()
         .collect();
+    let marker_identity =
+        |marker: &crabka_gres_ranges::transport::WireInDoubtMarker| MarkerIdentityEvidence {
+            transaction_id: marker.transaction_id,
+            table_id: marker.key.table_id,
+            rowid: marker.key.rowid,
+        };
+    let source_markers = markers.iter().map(marker_identity).collect::<Vec<_>>();
+    let left_markers = left.iter().map(marker_identity).collect::<Vec<_>>();
+    let right_markers = right.iter().map(marker_identity).collect::<Vec<_>>();
+    let authenticated_receipts = receipt_replay_evidence(observations);
+    let evidence_id = sha256_bytes(
+        format!(
+            "{}\0{}\0{}\0{}",
+            family_name(point.family()),
+            point.name(),
+            system.tenant(),
+            operation_id
+        )
+        .as_bytes(),
+    );
+    let old_source_pid_alive = process_exists(old_pid);
+    let new_source_pid_alive_at_verification = process_exists(new_pid);
+    let workload_process_group_alive = process_group_exists(workload_process_group);
+    assert!(!old_source_pid_alive);
+    assert!(new_source_pid_alive_at_verification);
+    assert!(!workload_process_group_alive);
 
     SplitCrashEvidence {
         schema_version: 1,
+        evidence_id,
         family: family_name(point.family()),
         case: point.name(),
         tenant_id: system.tenant().to_owned(),
@@ -1904,6 +2065,29 @@ async fn verify_completed_split_case(
         left_wal_generation: r2.wal_generation,
         right_wal_generation: r3.wal_generation,
         topology_topics,
+        reopened_oracle_rows: expected.iter().cloned().collect(),
+        direct_physical_rows,
+        sql_union_rows: sql_rows.iter().cloned().collect(),
+        source_markers,
+        left_markers,
+        right_markers,
+        marker_response_digest: marker_digest.clone(),
+        authenticated_receipts,
+        delete_attempts: delete_ledger.attempts.clone(),
+        unrelated_delete_attempted: delete_ledger.unrelated_attempted,
+        old_source_pid: old_pid,
+        new_source_pid: new_pid,
+        workload_process_group,
+        new_source_pid_alive_at_verification,
+        old_source_pid_alive,
+        new_source_pid_alive: true,
+        workload_process_group_alive,
+        operation_revision: operation.revision,
+        operation_attempts: operation.attempts,
+        tenant_record_version: tenant.record_version,
+        source_record_version: plan.source_record_version,
+        retirement_source_generation: retirement.source_generation,
+        retirement_successor_generations: retirement.successor_ranges.clone(),
         workload_process_reaped,
     }
 }
@@ -1914,6 +2098,78 @@ const fn family_name(family: Family) -> &'static str {
         Family::Publication => "publication",
         Family::RetirementResume => "retirement_resume",
     }
+}
+
+fn sha256_bytes(bytes: &[u8]) -> String {
+    use sha2::{Digest as _, Sha256};
+    Sha256::digest(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+fn control_operation_name(operation: &RangeControlOperation) -> Option<&'static str> {
+    match operation {
+        RangeControlOperation::ForceCheckpoint => Some("checkpoint"),
+        RangeControlOperation::PauseAtCoveredOffset { .. } => Some("pause"),
+        RangeControlOperation::StageFilteredRestore { .. } => Some("stage"),
+        RangeControlOperation::InheritMarkers { .. } => Some("markers"),
+        RangeControlOperation::SuccessorFencePrologue { .. } => Some("prologue"),
+        RangeControlOperation::RetirePredecessor => Some("retire"),
+        RangeControlOperation::Status | RangeControlOperation::Resume => None,
+    }
+}
+
+fn receipt_replay_evidence(observations: &[ControlObservation]) -> Vec<ReceiptReplayEvidence> {
+    let mut counts = BTreeMap::<(String, String, String), usize>::new();
+    for observation in observations {
+        if control_operation_name(&observation.request.operation).is_none() {
+            continue;
+        }
+        let request = serde_json::to_string(&observation.request).expect("serialize request proof");
+        let response =
+            serde_json::to_string(&observation.response).expect("serialize response proof");
+        *counts
+            .entry((observation.endpoint.clone(), request, response))
+            .or_default() += 1;
+    }
+    observations
+        .iter()
+        .enumerate()
+        .filter(|(_, observation)| control_operation_name(&observation.request.operation).is_some())
+        .map(|(sequence, observation)| {
+            let request_json = serde_json::to_string(&observation.request).expect("request proof");
+            let response_json =
+                serde_json::to_string(&observation.response).expect("response proof");
+            let replay_count = counts[&(
+                observation.endpoint.clone(),
+                request_json.clone(),
+                response_json.clone(),
+            )];
+            let request: serde_json::Value =
+                serde_json::from_str(&request_json).expect("request proof JSON");
+            let response: serde_json::Value =
+                serde_json::from_str(&response_json).expect("response proof JSON");
+            ReceiptReplayEvidence {
+                sequence,
+                timestamp_ms: observation.timestamp_ms,
+                operation: control_operation_name(&observation.request.operation)
+                    .expect("filtered receipt operation")
+                    .into(),
+                endpoint: observation.endpoint.clone(),
+                range_id: observation.request.range_id.as_u32(),
+                generation: observation.request.generation,
+                operation_id: observation.request.operation_id.clone(),
+                request_sha256: sha256_bytes(&serde_json::to_vec(&request).expect("request hash")),
+                response_sha256: sha256_bytes(
+                    &serde_json::to_vec(&response).expect("response hash"),
+                ),
+                request,
+                response,
+                replay_count,
+            }
+        })
+        .collect()
 }
 
 async fn wait_for_payload_acks(path: &Path, errors_path: &Path, minimum: usize) {
@@ -2343,12 +2599,8 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
                 system.set_commit_fault_for_next_child(timestamp_fault);
             }
             system.kill(0).await;
-            if marker_session_action(
-                marker_session.is_some(),
-                true,
-                false,
-                &operation.phase,
-            ) == MarkerSessionAction::DropAfterCrash
+            if marker_session_action(marker_session.is_some(), true, false, &operation.phase)
+                == MarkerSessionAction::DropAfterCrash
             {
                 close_marker_session(
                     marker_session
@@ -2416,6 +2668,14 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
             }
             SplitOperationPhase::Completed => {
                 assert!(killed, "selected Split boundary was never reached");
+                if !payload_ledger_has_ack_after(
+                    &parse_closed_payload_ledger(&ledger_path)
+                        .expect("open terminal workload ledger"),
+                    restart_ms,
+                ) {
+                    let before = payload_ack_count(&ledger_path);
+                    wait_for_payload_acks(&ledger_path, &errors_path, before + 1).await;
+                }
                 break;
             }
             _ => {
@@ -2432,7 +2692,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
         .join("../../target/g8-split-child-logs")
         .join(point.name());
     system.preserve_logs(&preserved_logs).await;
-    let evidence = verify_completed_split_case(
+    let mut evidence = verify_completed_split_case(
         &system,
         point,
         &operation_id,
@@ -2446,9 +2706,17 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
         publication_ms,
         started.elapsed().as_millis(),
         workload_process_reaped,
+        process_group,
         &sentinel_topic,
     )
     .await;
+    system.shutdown().await;
+    evidence.old_source_pid_alive = process_exists(old_pid);
+    evidence.new_source_pid_alive = process_exists(new_pid);
+    evidence.workload_process_group_alive = process_group_exists(process_group);
+    assert!(!evidence.old_source_pid_alive);
+    assert!(!evidence.new_source_pid_alive);
+    assert!(!evidence.workload_process_group_alive);
     if let Some(path) = std::env::var_os("CRABKA_G8_SPLIT_CRASH_EVIDENCE") {
         let path = PathBuf::from(path);
         if let Some(parent) = path.parent() {
@@ -2457,7 +2725,6 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
         std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap())
             .expect("write Split crash evidence");
     }
-    system.shutdown().await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

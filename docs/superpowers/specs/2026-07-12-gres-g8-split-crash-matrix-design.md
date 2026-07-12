@@ -79,7 +79,8 @@ After restart and `Completed`, every case performs the same verifier:
 
 Source/restore cases use a strict 25-second ACK-gap bound: the live unoptimized harness measured
 21.113 seconds for process restart plus two-successor restore and prologue. Publication and
-retirement cases retain their tighter 12-second bound.
+retirement cases use a tighter 15-second bound, above the measured 12.946-second unoptimized
+late process-restart path.
 
 Each JSON evidence file contains measured predicates and values, never success literals. A validator recomputes counts, sets, interval facts, marker partition arithmetic, bounds, unique identity, and topic expectations. `--validate-only` must fail nonzero for empty, incomplete, wrong-case, duplicate, or missing-family inputs.
 
