@@ -298,6 +298,15 @@ async fn reconcile_inner(
             &tenant_ranges,
         )?;
 
+        let range_parking_progress = park_retiring_ranges(
+            &control,
+            &mut admin,
+            &tenant_name,
+            &mut record,
+            current_record.as_ref(),
+        )
+        .await?;
+
         let parking_progress = if matches!(
             lifecycle_state,
             TenantState::Parking | TenantState::Suspended
@@ -316,7 +325,9 @@ async fn reconcile_inner(
         } else {
             ParkingProgress::NotNeeded
         };
-        if parking_progress == ParkingProgress::DeletionPending {
+        if parking_progress == ParkingProgress::DeletionPending
+            || range_parking_progress == ParkingProgress::DeletionPending
+        {
             drop(admin);
             let _ready = reconcile_compute_deployments(
                 &ctx,
@@ -342,7 +353,9 @@ async fn reconcile_inner(
         }
         drop(admin);
 
-        if parking_progress == ParkingProgress::Complete {
+        if parking_progress == ParkingProgress::Complete
+            || range_parking_progress == ParkingProgress::Complete
+        {
             // The fenced parking intent was committed before deleting any WAL.
             // Do not issue a second replacement against the stale pre-park view.
         } else if tenant_record_changed(current_record.as_ref(), &record) {
@@ -587,6 +600,64 @@ async fn park_suspended_tenant_wal(
     Ok(ParkingProgress::Complete)
 }
 
+async fn park_retiring_ranges(
+    control: &crate::context::GresControlHandle,
+    admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
+    tenant: &TenantName,
+    record: &mut TenantRecord,
+    current: Option<&TenantRecord>,
+) -> Result<ParkingProgress, ReconcileError> {
+    if let Some(current) = current.filter(|current| {
+        current
+            .ranges
+            .iter()
+            .any(|range| range.lifecycle == crabka_gres_control::RangeLifecycle::Parking)
+    }) {
+        *record = current.clone();
+    }
+    let retiring = record
+        .ranges
+        .iter()
+        .filter(|range| range.lifecycle == crabka_gres_control::RangeLifecycle::Parking)
+        .map(|range| {
+            let retirement = range
+                .retirement
+                .as_ref()
+                .expect("validated parking metadata");
+            (
+                range.range_id,
+                retirement.operation_id.clone(),
+                retirement.retiring_generation,
+            )
+        })
+        .collect::<Vec<_>>();
+    if retiring.is_empty() {
+        return Ok(ParkingProgress::NotNeeded);
+    }
+    if record.state != TenantState::Active {
+        return Err(ReconcileError::Malformed(
+            "range-scoped parking requires an active tenant".into(),
+        ));
+    }
+    for (range_id, operation_id, generation) in retiring {
+        let topic = wal_topic_for_generation(tenant, range_id, generation);
+        if topic_exists(admin, &topic).await? {
+            delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+        }
+        if topic_exists(admin, &topic).await? {
+            return Ok(ParkingProgress::DeletionPending);
+        }
+        let expected = record.record_version;
+        let parked = record
+            .clone()
+            .confirm_range_parked(range_id, &operation_id, generation)?;
+        *record = control
+            .replace_tenant_if_version(&parked, Some(expected))
+            .await?;
+    }
+    Ok(ParkingProgress::Complete)
+}
+
 async fn wal_topics_remain(
     admin: &mut tokio::sync::MutexGuard<'_, dyn crabka_client_admin::AdminClientLike + Send>,
     tenant: &TenantName,
@@ -812,6 +883,8 @@ fn build_tenant_record(
                 .find(|item| item.range_id == range.range_id)
             {
                 range.wal_generation = current_range.wal_generation;
+                range.lifecycle = current_range.lifecycle;
+                range.retirement.clone_from(&current_range.retirement);
             }
         }
     }
@@ -1257,6 +1330,8 @@ fn range_layout_for_ranges(
                 obj.namespace().unwrap_or_else(|| "default".into())
             ),
             wal_generation: 0,
+            lifecycle: Default::default(),
+            retirement: None,
         })
         .collect()
 }

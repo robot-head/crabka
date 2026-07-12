@@ -1013,6 +1013,8 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-gres.default.svc:5432".into(),
             wal_generation: 0,
+            lifecycle: Default::default(),
+            retirement: None,
         }])
         .unwrap();
 

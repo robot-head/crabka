@@ -267,6 +267,16 @@ fn system_prefix(tag: &str) -> Vec<u8> {
     k
 }
 
+/// Durable range-control receipt key under system table zero.
+#[must_use]
+pub fn range_control_receipt_key(tenant: &str, receipt: &str) -> Vec<u8> {
+    let mut key = system_prefix("range_control_receipt");
+    key.extend_from_slice(tenant.as_bytes());
+    key.push(b'/');
+    key.extend_from_slice(receipt.as_bytes());
+    key
+}
+
 /// Key for a table's stored schema: `/0/catalog/<name>`.
 #[must_use]
 pub fn catalog_key(table_name: &str) -> Vec<u8> {

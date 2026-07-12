@@ -1059,6 +1059,8 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                 wal_generation: 7,
+                lifecycle: Default::default(),
+                retirement: None,
             }])
             .unwrap()
     }
@@ -1150,6 +1152,8 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
             wal_generation: 9,
+            lifecycle: Default::default(),
+            retirement: None,
         }];
         let mut newer_version = record("tenant-a", 5, TenantState::Active);
         newer_version.ranges = vec![crate::record::RangeLayoutEntry {
@@ -1157,6 +1161,8 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r1-new.gres.svc:7432".to_string(),
             wal_generation: 3,
+            lifecycle: Default::default(),
+            retirement: None,
         }];
 
         let folded = fold(vec![encoded(&older_generation), encoded(&newer_version)].into_iter());

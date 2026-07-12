@@ -1,6 +1,7 @@
 //! Typed range-map and routing primitives for Chapter Gres multi-range tenants.
 
 pub mod barrier;
+pub mod control;
 pub mod coordinator;
 pub mod forward;
 mod ids;

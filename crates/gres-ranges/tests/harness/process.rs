@@ -522,12 +522,16 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
             end_key: Some(RangeBoundary::new(50, 10)),
             endpoint: format!("127.0.0.1:{r0_port}"),
             wal_generation: 0,
+            lifecycle: Default::default(),
+            retirement: None,
         },
         RangeLayoutEntry {
             range_id: 1,
             end_key: None,
             endpoint: format!("127.0.0.1:{r1_port}"),
             wal_generation: 0,
+            lifecycle: Default::default(),
+            retirement: None,
         },
     ])
     .expect("range layout");

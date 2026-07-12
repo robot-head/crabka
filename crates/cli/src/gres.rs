@@ -747,6 +747,8 @@ fn parse_range_layout(
                 end_key: boundaries.get(index + 1).copied(),
                 endpoint: range_endpoint(tenant, range_id),
                 wal_generation: 0,
+                lifecycle: Default::default(),
+                retirement: None,
             })
         })
         .collect()
@@ -1060,12 +1062,16 @@ mod tests {
                 end_key: Some(RangeBoundary::new(10, 50)),
                 endpoint: "tenant-a-gres-r0.gres.svc:5432".into(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
             RangeLayoutEntry {
                 range_id: 1,
                 end_key: None,
                 endpoint: "tenant-a-gres-r1.gres.svc:5432".into(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
         ];
 

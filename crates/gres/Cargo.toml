@@ -44,6 +44,7 @@ tokio-rustls = { workspace = true }
 rustls-pemfile = { workspace = true }
 rustls-rustcrypto = { workspace = true }
 rand = { workspace = true }
+sha2 = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]

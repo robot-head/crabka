@@ -764,6 +764,49 @@ impl MultiRangeTenant {
         Ok(())
     }
 
+    /// Publish a fully restored, fenced control-plane successor as one atomic serving snapshot.
+    pub fn publish_control_successor(
+        &self,
+        successor: RangeId,
+        target_map: RangeMap,
+        claimed: crate::ClaimedStagedSuccessor,
+    ) -> Result<(), LocalSqlSplitError> {
+        let serving = self.inner.serving.load_full();
+        let next_epoch = u64::from(serving.range_map.epoch())
+            .checked_add(1)
+            .map(MapEpoch::new)
+            .ok_or(SplitError::MapEpochOverflow)?;
+        if target_map.epoch() != next_epoch {
+            return Err(LocalSqlSplitError::Orchestration(SplitError::Hook(
+                "control successor target map is not the next epoch".into(),
+            )));
+        }
+        let state = SplitState::for_split(
+            "control-publication",
+            SplitCommand {
+                current_map: serving.range_map.clone(),
+                predecessor: target_map
+                    .ranges()
+                    .iter()
+                    .find(|range| range.range_id != successor)
+                    .map_or(RangeId::COORDINATOR, |range| range.range_id),
+                successor,
+                split_at: target_map
+                    .ranges()
+                    .iter()
+                    .find(|range| range.range_id == successor)
+                    .ok_or(LocalSqlSplitError::RemoteRange)?
+                    .start,
+            },
+        )?;
+        if state.target_map != target_map {
+            return Err(LocalSqlSplitError::Orchestration(SplitError::Hook(
+                "control successor target map does not match split plan".into(),
+            )));
+        }
+        self.publish_claimed_successor(&serving, &state, claimed)
+    }
+
     fn validate_populated_table_split(
         &self,
         serving: &ServingSnapshot,
@@ -6108,6 +6151,8 @@ mod tests {
             end_key: None,
             endpoint: address.to_string(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         }])
         .expect("layout");
         let registry = RangeRegistry::from_tenant_record(&record).expect("registry");

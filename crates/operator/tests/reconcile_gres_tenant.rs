@@ -2,7 +2,7 @@ use std::{sync::Arc, time::Duration};
 
 use assert2::assert;
 use crabka_gres_control::{
-    RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord, TenantState,
+    RangeBoundary, RangeLayoutEntry, SqlUser, TenantId, TenantName, TenantRecord, TenantState,
 };
 use crabka_operator::{
     context::{GresControlLike, GresControlWriteError},
@@ -278,6 +278,8 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
         end_key: None,
         endpoint: "tenant-a-gres.ns.svc.cluster.local:7432".into(),
         wal_generation: generation,
+        lifecycle: Default::default(),
+        retirement: None,
     }];
     record
 }
@@ -408,7 +410,9 @@ async fn fake_gres_control_matches_canonical_replace_and_retry_semantics() {
 
 #[tokio::test]
 async fn multi_range_tenant_publishes_range_services_and_becomes_ready_after_all_deployments() {
-    let state = MockState::new(multi_range_reconcile_rules());
+    let mut rules = multi_range_reconcile_rules();
+    rules.extend(multi_range_reconcile_rules());
+    let state = MockState::new(rules);
     let client = mock_client(&state, "ns");
     let ctx = fixture_ctx(client, "ns");
     let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
@@ -807,6 +811,87 @@ async fn suspended_registry_state_parks_wal_and_scales_compute_to_zero() {
         .expect("status patch captured");
     let body: serde_json::Value = serde_json::from_slice(status.body()).unwrap();
     assert!(body["status"]["lifecyclePhase"] == "suspended");
+}
+
+#[tokio::test]
+async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_active() {
+    let mut rules = multi_range_reconcile_rules();
+    rules.extend(multi_range_reconcile_rules());
+    let state = MockState::new(rules);
+    let client = mock_client(&state, "ns");
+    let ctx = fixture_ctx(client, "ns");
+    let admin = Arc::new(tokio::sync::Mutex::new(FakeAdminClient::new()));
+    for range_id in 0..=2 {
+        admin.lock().await.add_topic(
+            &format!("__gres_wal.tenant-a.r{range_id}.g0000000004"),
+            TopicState {
+                partitions: 1,
+                replicas: 1,
+                ..Default::default()
+            },
+        );
+    }
+    let mut current = tenant_record(TenantState::Active, 4);
+    current.ranges = vec![
+        RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(RangeBoundary::table_start(10)),
+            endpoint: "tenant-a-gres.ns.svc.cluster.local:7432".into(),
+            wal_generation: 4,
+            lifecycle: Default::default(),
+            retirement: None,
+        },
+        RangeLayoutEntry {
+            range_id: 1,
+            end_key: Some(RangeBoundary::table_start(20)),
+            endpoint: "tenant-a-gres-r1.ns.svc.cluster.local:7432".into(),
+            wal_generation: 4,
+            lifecycle: Default::default(),
+            retirement: None,
+        },
+        RangeLayoutEntry {
+            range_id: 2,
+            end_key: None,
+            endpoint: "tenant-a-gres-r2.ns.svc.cluster.local:7432".into(),
+            wal_generation: 4,
+            lifecycle: Default::default(),
+            retirement: None,
+        },
+    ];
+    current = current
+        .begin_range_parking(0, "split-7", 4, final_checkpoint(4))
+        .expect("parking intent");
+    let control = Arc::new(FakeGresControl {
+        current: Mutex::new(Some(current)),
+        ..Default::default()
+    });
+    ctx.insert_admin_client_for_test("demo", admin.clone())
+        .await;
+    ctx.insert_gres_control_for_test("demo", control.clone())
+        .await;
+
+    reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx.clone()))
+        .await
+        .expect("range parking reconcile");
+    reconcile(Arc::new(multi_range_tenant()), Arc::new(ctx))
+        .await
+        .expect("parked range restart convergence");
+
+    let calls = admin.lock().await.calls();
+    assert!(calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])));
+    assert!(!calls.iter().any(|call| matches!(call, RecordedCall::DeleteTopics(names) if names.iter().any(|name| name.contains(".r1.") || name.contains(".r2.")))));
+    assert_eq!(calls.iter().filter(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])).count(), 1);
+    let stored = control.current.lock().await.clone().expect("stored record");
+    assert_eq!(stored.state, TenantState::Active);
+    assert_eq!(
+        stored.ranges[0].lifecycle,
+        crabka_gres_control::RangeLifecycle::Parked
+    );
+    assert!(
+        stored.ranges[1..]
+            .iter()
+            .all(|range| range.lifecycle == crabka_gres_control::RangeLifecycle::Serving)
+    );
 }
 
 #[tokio::test]
