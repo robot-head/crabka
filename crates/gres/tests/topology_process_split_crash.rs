@@ -9,6 +9,7 @@ use crabka_gres_control::{
     TenantRecord,
 };
 use crabka_gres_ranges::{RangeControlOperation, RangeControlReq, RangeControlResp, RangeId};
+use crabka_gres_ranges::AuthorizedSplitIntent;
 use crabka_operator::context::{GresControlHandle, GresControlLike, GresControlWriteError};
 use crabka_operator::controller::gres_split_operation::{
     MtlsRangeMutationClient, RangeMutationClient, SplitReconcileError, reconcile_activated_cutover,
@@ -1683,6 +1684,19 @@ struct ReceiptReplayEvidence {
     replay_count: usize,
 }
 
+#[derive(Clone, Debug, Serialize)]
+struct JournalReceiptExpectation {
+    operation: String,
+    tenant: String,
+    endpoint: String,
+    range_id: u32,
+    generation: u64,
+    operation_id: String,
+    request: serde_json::Value,
+    request_sha256: String,
+    expected_response_kind: String,
+}
+
 async fn direct_payload_rows(
     system: &ProcessHarness,
     range_id: u32,
@@ -1796,7 +1810,7 @@ struct SplitCrashEvidence {
     operation_marker_digest: String,
     retirement_marker_digest: String,
     authenticated_receipts: Vec<ReceiptReplayEvidence>,
-    sealed_receipts: Vec<ReceiptReplayEvidence>,
+    journal_receipt_expectations: Vec<JournalReceiptExpectation>,
     delete_attempts: Vec<DeleteAttemptEvidence>,
     unrelated_delete_attempted: bool,
     old_source_pid: u32,
@@ -1838,6 +1852,7 @@ async fn verify_completed_split_case(
     workload_process_group: u32,
     sentinel_topic: &str,
     pre_kill_predicate: SplitPredicateState,
+    journal_receipt_expectations: Vec<JournalReceiptExpectation>,
 ) -> SplitCrashEvidence {
     let payload_events = std::fs::read_to_string(ledger_path)
         .expect("read reopened payload ledger")
@@ -2067,16 +2082,6 @@ async fn verify_completed_split_case(
     let left_markers = left.iter().map(marker_identity).collect::<Vec<_>>();
     let right_markers = right.iter().map(marker_identity).collect::<Vec<_>>();
     let authenticated_receipts = receipt_replay_evidence(observations);
-    let sealed_receipts = authenticated_receipts
-        .iter()
-        .fold(BTreeMap::new(), |mut sealed, receipt| {
-            sealed
-                .entry(receipt.operation.clone())
-                .or_insert_with(|| receipt.clone());
-            sealed
-        })
-        .into_values()
-        .collect();
     let evidence_id = sha256_bytes(
         format!(
             "{}\0{}\0{}\0{}",
@@ -2147,7 +2152,7 @@ async fn verify_completed_split_case(
             .expect("operation marker digest"),
         retirement_marker_digest: retirement.checkpoint.marker_digest.clone(),
         authenticated_receipts,
-        sealed_receipts,
+        journal_receipt_expectations,
         delete_attempts: delete_ledger.attempts.clone(),
         unrelated_delete_attempted: delete_ledger.unrelated_attempted,
         old_source_pid: old_pid,
@@ -2197,6 +2202,83 @@ fn control_operation_name(operation: &RangeControlOperation) -> Option<&'static 
         RangeControlOperation::RetirePredecessor => Some("retire"),
         RangeControlOperation::Status | RangeControlOperation::Resume => None,
     }
+}
+
+fn journal_receipt_expectation(
+    record: &SplitOperationRecord,
+) -> Option<JournalReceiptExpectation> {
+    let plan = record.plan.as_ref()?;
+    let predecessor = plan
+        .current_layout
+        .iter()
+        .find(|range| range.range_id == record.source_range_id())?;
+    let (operation, expected_response_kind) = match record.phase {
+        SplitOperationPhase::Running => (RangeControlOperation::ForceCheckpoint, "checkpoint"),
+        SplitOperationPhase::Checkpointed => (
+            RangeControlOperation::PauseAtCoveredOffset {
+                manifest_key: record.evidence.manifest_key.clone()?,
+                covered_offset: record.evidence.covered_offset?,
+            },
+            "paused",
+        ),
+        SplitOperationPhase::Paused => {
+            let intent = AuthorizedSplitIntent::from_record(record.clone()).ok()?;
+            let journal_revision = record.revision;
+            let journal_digest = intent.digest().to_owned();
+            if record.evidence.tail_sha256.is_none() {
+                (
+                    RangeControlOperation::StageFilteredRestore {
+                        journal_revision,
+                        journal_digest,
+                    },
+                    "staged",
+                )
+            } else {
+                (
+                    RangeControlOperation::InheritMarkers {
+                        journal_revision,
+                        journal_digest,
+                    },
+                    "markers",
+                )
+            }
+        }
+        SplitOperationPhase::Restored => {
+            let intent = AuthorizedSplitIntent::from_record(record.clone()).ok()?;
+            (
+                RangeControlOperation::SuccessorFencePrologue {
+                    journal_revision: record.revision,
+                    journal_digest: intent.digest().to_owned(),
+                },
+                "applied_or_already_applied",
+            )
+        }
+        SplitOperationPhase::Activated | SplitOperationPhase::Retiring => (
+            RangeControlOperation::RetirePredecessor,
+            "applied_or_already_applied",
+        ),
+        _ => return None,
+    };
+    let operation_name = control_operation_name(&operation)?.to_owned();
+    let request = RangeControlReq {
+        tenant: record.tenant.as_str().to_owned(),
+        range_id: RangeId::new(record.source_range_id()),
+        generation: record.predecessor_generation(),
+        operation_id: record.operation_id.clone(),
+        operation,
+    };
+    let request = serde_json::to_value(request).expect("serialize journal expectation");
+    Some(JournalReceiptExpectation {
+        operation: operation_name,
+        tenant: record.tenant.as_str().to_owned(),
+        endpoint: predecessor.endpoint.clone(),
+        range_id: record.source_range_id(),
+        generation: record.predecessor_generation(),
+        operation_id: record.operation_id.clone(),
+        request_sha256: sha256_bytes(&serde_json::to_vec(&request).expect("expectation hash")),
+        request,
+        expected_response_kind: expected_response_kind.into(),
+    })
 }
 
 fn receipt_replay_evidence(observations: &[ControlObservation]) -> Vec<ReceiptReplayEvidence> {
@@ -2587,10 +2669,22 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
     let mut marker_session_released = false;
     let mut last_reported_phase = None;
     let mut pre_kill_predicate = None;
+    let mut journal_receipt_expectations = BTreeMap::new();
 
     loop {
         assert!(started.elapsed().as_millis() < point.operation_bound_ms());
         let operation = load_operation(&system, &operation_id).await;
+        if let Some(expectation) = journal_receipt_expectation(&operation) {
+            if let Some(previous) = journal_receipt_expectations
+                .insert(expectation.operation.clone(), expectation.clone())
+            {
+                assert_eq!(
+                    serde_json::to_value(previous).unwrap(),
+                    serde_json::to_value(&expectation).unwrap(),
+                    "durable receipt expectation changed before replay"
+                );
+            }
+        }
         if last_reported_phase.as_ref() != Some(&operation.phase) {
             eprintln!(
                 "G8_MILESTONE timestamp_ms={} phase={:?}",
@@ -2796,6 +2890,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
         process_group,
         &sentinel_topic,
         pre_kill_predicate.expect("selected pre-kill predicate"),
+        journal_receipt_expectations.into_values().collect(),
     )
     .await;
     system.shutdown().await;
