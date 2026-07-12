@@ -423,6 +423,8 @@ fn spawn_node(
         "crabka-dev",
         "--range-allowed-principal",
         "CN=process-range",
+        "--operator-control-principal",
+        "CN=process-range",
     ]);
     if let Some(fault) = commit_fault {
         command.env("CRABKA_GRES_TEST_COMMIT_FAULT", fault);

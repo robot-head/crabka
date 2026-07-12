@@ -119,6 +119,9 @@ pub struct ServeArgs {
     /// Client certificate subject DN authorized to execute range RPCs for this tenant.
     #[arg(long = "range-allowed-principal")]
     pub range_allowed_principals: Vec<String>,
+    /// Client certificate subject DN authorized to execute destructive range control RPCs.
+    #[arg(long = "operator-control-principal")]
+    pub operator_control_principals: Vec<String>,
 
     /// Substrate checkpoint object-store backend: s3, gcs, local, or in-memory.
     #[arg(long = "checkpoint-store", value_enum)]
@@ -226,7 +229,8 @@ pub struct SubstrateRuntimeConfig {
 pub struct RangeRpcRuntimeConfig {
     tls: TlsConfig,
     server_name: String,
-    allowed_principals: std::collections::BTreeSet<String>,
+    range_rpc_principals: std::collections::BTreeSet<String>,
+    operator_control_principals: std::collections::BTreeSet<String>,
 }
 
 /// Validated substrate checkpointing settings.
@@ -351,7 +355,8 @@ impl RangeRpcRuntimeConfig {
             || args.range_tls_key.is_some()
             || args.range_tls_ca.is_some()
             || args.range_tls_server_name.is_some()
-            || !args.range_allowed_principals.is_empty();
+            || !args.range_allowed_principals.is_empty()
+            || !args.operator_control_principals.is_empty();
         if !configured {
             return Ok(None);
         }
@@ -381,8 +386,15 @@ impl RangeRpcRuntimeConfig {
         if server_name.is_empty() {
             return invalid_input("--range-tls-server-name must not be empty");
         }
-        let allowed_principals = args
+        let range_rpc_principals = args
             .range_allowed_principals
+            .iter()
+            .map(|principal| principal.trim())
+            .filter(|principal| !principal.is_empty())
+            .map(ToOwned::to_owned)
+            .collect();
+        let operator_control_principals = args
+            .operator_control_principals
             .iter()
             .map(|principal| principal.trim())
             .filter(|principal| !principal.is_empty())
@@ -397,7 +409,8 @@ impl RangeRpcRuntimeConfig {
                 client_auth: ClientAuthMode::Required,
             },
             server_name: server_name.to_owned(),
-            allowed_principals,
+            range_rpc_principals,
+            operator_control_principals,
         }))
     }
 
@@ -413,7 +426,8 @@ impl RangeRpcRuntimeConfig {
         crabka_gres_ranges::RangeTlsServerConfig {
             tenant,
             tls: self.tls.clone(),
-            allowed_principals: self.allowed_principals.clone(),
+            range_rpc_principals: self.range_rpc_principals.clone(),
+            operator_control_principals: self.operator_control_principals.clone(),
         }
     }
 }
@@ -3570,8 +3584,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             .as_ref()
             .and_then(|pending| pending.as_ref())
             .filter(|pending| {
-                pending.predecessor == barrier.range_id
-                    && pending.barrier_offset == barrier.offset
+                pending.predecessor == barrier.range_id && pending.barrier_offset == barrier.offset
             })
             .map(|pending| pending.operation_id.clone())
             .is_some_and(|operation_id| self.activation_is_irreversible(&operation_id));
@@ -4524,6 +4537,7 @@ mod tests {
             range_tls_ca: None,
             range_tls_server_name: None,
             range_allowed_principals: Vec::new(),
+            operator_control_principals: Vec::new(),
             checkpoint_store: None,
             checkpoint_bucket: None,
             checkpoint_prefix: None,

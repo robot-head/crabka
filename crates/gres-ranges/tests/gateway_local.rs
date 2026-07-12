@@ -118,8 +118,11 @@ impl MtlsFixture {
                     client_ca_path: Some(client_ca),
                     client_auth: crabka_security::ClientAuthMode::Required,
                 },
-                allowed_principals: BTreeSet::from([
+                range_rpc_principals: BTreeSet::from([
                     "CN=test-client,OU=integration,O=crabka".to_string()
+                ]),
+                operator_control_principals: BTreeSet::from([
+                    "CN=test-client,OU=integration,O=crabka".to_string(),
                 ]),
             },
             client: RangeTlsClientConfig {

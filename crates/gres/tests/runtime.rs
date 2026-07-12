@@ -40,7 +40,10 @@ fn range_mtls_fixture() -> RangeMtlsFixture {
                 client_ca_path: Some(client_ca),
                 client_auth: crabka_security::ClientAuthMode::Required,
             },
-            allowed_principals: BTreeSet::from([
+            range_rpc_principals: BTreeSet::from([
+                "CN=test-client,OU=integration,O=crabka".to_string()
+            ]),
+            operator_control_principals: BTreeSet::from([
                 "CN=test-client,OU=integration,O=crabka".to_string()
             ]),
         },
@@ -170,6 +173,7 @@ fn test_args(listen: String, data_dir: Option<std::path::PathBuf>) -> crabka_gre
         range_tls_ca: None,
         range_tls_server_name: None,
         range_allowed_principals: Vec::new(),
+        operator_control_principals: Vec::new(),
         checkpoint_store: None,
         checkpoint_bucket: None,
         checkpoint_prefix: None,

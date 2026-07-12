@@ -827,8 +827,10 @@ pub struct RangeTlsServerConfig {
     pub tenant: String,
     /// TLS server identity, client CA, and required client authentication.
     pub tls: crabka_security::TlsConfig,
-    /// Subject DNs allowed to execute RPCs for `tenant`.
-    pub allowed_principals: BTreeSet<String>,
+    /// Subject DNs allowed to execute ordinary range-to-range RPCs for `tenant`.
+    pub range_rpc_principals: BTreeSet<String>,
+    /// Subject DNs allowed to execute destructive operator control RPCs.
+    pub operator_control_principals: BTreeSet<String>,
 }
 
 impl RangeTlsServerConfig {
@@ -849,7 +851,7 @@ impl RangeTlsServerConfig {
                 "range TLS requires a client CA".to_string(),
             ));
         }
-        if self.allowed_principals.is_empty() {
+        if self.range_rpc_principals.is_empty() {
             return Err(TransportError::Tls(
                 "range TLS requires at least one tenant-authorized principal".to_string(),
             ));
@@ -1090,11 +1092,12 @@ pub async fn serve_tls(
         let (stream, _) = listener.accept().await?;
         let service = Arc::clone(&service);
         let acceptor = acceptor.clone();
-        let allowed_principals = config.allowed_principals.clone();
+        let range_rpc_principals = config.range_rpc_principals.clone();
+        let operator_control_principals = config.operator_control_principals.clone();
         let tenant = config.tenant.clone();
         tokio::spawn(async move {
             let result = async {
-                let stream = acceptor
+                let mut stream = acceptor
                     .accept(stream)
                     .await
                     .map_err(|error| TransportError::Tls(error.to_string()))?;
@@ -1113,16 +1116,34 @@ pub async fn serve_tls(
                     .ok_or_else(|| TransportError::UnauthorizedPeer {
                         tenant: tenant.clone(),
                     })?;
-                if !allowed_principals.contains(&principal) {
+                let request = read_frame(&mut stream).await?;
+                if !principal_authorized_for_request(
+                    &principal,
+                    &request,
+                    &range_rpc_principals,
+                    &operator_control_principals,
+                ) {
                     return Err(TransportError::UnauthorizedPeer { tenant });
                 }
-                handle_stream(stream, service).await
+                handle_request_on_stream(&mut stream, service, request).await
             }
             .await;
             if let Err(error) = result {
                 tracing::warn!(%error, "range TLS transport connection rejected");
             }
         });
+    }
+}
+
+fn principal_authorized_for_request(
+    principal: &str,
+    request: &RangeRequest,
+    range_rpc_principals: &BTreeSet<String>,
+    operator_control_principals: &BTreeSet<String>,
+) -> bool {
+    match request {
+        RangeRequest::Control(_) => operator_control_principals.contains(principal),
+        _ => range_rpc_principals.contains(principal),
     }
 }
 
@@ -1230,6 +1251,7 @@ fn consume_sql_chunk(
     Ok(())
 }
 
+#[cfg(test)]
 async fn handle_stream<S>(
     mut stream: S,
     service: Arc<dyn RangeService>,
@@ -1238,11 +1260,22 @@ where
     S: AsyncRead + AsyncWrite + Unpin + Send,
 {
     let request = read_frame(&mut stream).await?;
-    if let Some(response) = service.handle_connection(request, &mut stream).await? {
+    handle_request_on_stream(&mut stream, service, request).await
+}
+
+async fn handle_request_on_stream<S>(
+    stream: &mut S,
+    service: Arc<dyn RangeService>,
+    request: RangeRequest,
+) -> Result<(), TransportError>
+where
+    S: AsyncRead + AsyncWrite + Unpin + Send,
+{
+    if let Some(response) = service.handle_connection(request, stream).await? {
         if let RangeResponse::SqlResults { results } = response {
-            write_sql_results(&mut stream, results).await?;
+            write_sql_results(stream, results).await?;
         } else {
-            write_frame(&mut stream, &response).await?;
+            write_frame(stream, &response).await?;
         }
     }
     stream.flush().await?;
@@ -1507,6 +1540,35 @@ mod tests {
     use super::*;
 
     #[test]
+    fn range_peer_principal_cannot_execute_destructive_control() {
+        let peers = BTreeSet::from(["range-peer".to_string()]);
+        let operators = BTreeSet::from(["operator".to_string()]);
+        let control = RangeRequest::Control(RangeControlReq {
+            tenant: "tenant-a".into(),
+            range_id: RangeId::COORDINATOR,
+            generation: 1,
+            operation_id: "split-a".into(),
+            operation: RangeControlOperation::RetirePredecessor,
+        });
+
+        assert!(!principal_authorized_for_request(
+            "range-peer",
+            &control,
+            &peers,
+            &operators
+        ));
+        assert!(principal_authorized_for_request(
+            "operator", &control, &peers, &operators
+        ));
+        assert!(principal_authorized_for_request(
+            "range-peer",
+            &RangeRequest::Tso(TsoReq::Grant { count: 1 }),
+            &peers,
+            &operators
+        ));
+    }
+
+    #[test]
     fn range_control_protocol_roundtrips_every_operation_and_explicit_outcome() {
         let operations = [
             RangeControlOperation::ForceCheckpoint,
@@ -1751,7 +1813,8 @@ mod tests {
                 server: RangeTlsServerConfig {
                     tenant: "tenant-a".to_string(),
                     tls: server_tls,
-                    allowed_principals,
+                    range_rpc_principals: allowed_principals.clone(),
+                    operator_control_principals: allowed_principals,
                 },
                 client: RangeTlsClientConfig {
                     tls: client_tls,
