@@ -1518,12 +1518,13 @@ mod tests {
             lease_trait,
             WriterGeneration(0),
         );
-        let oracle = TsoOracle::recover(
+        let oracle = TsoOracle::recover_with_heartbeat_interval(
             horizon.clone(),
             horizon.clone(),
             horizon.epoch(),
             NonZeroU64::new(4).expect("stride"),
             0,
+            Duration::ZERO,
         )
         .expect("recover");
         oracle
@@ -1570,12 +1571,13 @@ mod tests {
             lease_trait,
             WriterGeneration(0),
         );
-        let oracle = TsoOracle::recover(
+        let oracle = TsoOracle::recover_with_heartbeat_interval(
             horizon.clone(),
             horizon.clone(),
             horizon.epoch(),
             NonZeroU64::new(4).expect("stride"),
             0,
+            Duration::ZERO,
         )
         .expect("recover");
         oracle
