@@ -58,7 +58,7 @@ pub struct ExtendedCase {
     pub teardown: Vec<String>,
 }
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ExtendedParam {
     #[serde(rename = "type")]
     pub ty: ExtendedParamType,
@@ -85,6 +85,84 @@ pub enum ExtendedParamValue {
 pub struct ExtendedCaseFile {
     pub file: String,
     pub cases: Vec<ExtendedCase>,
+}
+
+#[derive(Debug, Error)]
+#[error("cannot transform subject CREATE TABLE `{sql}`: {message}")]
+pub struct SubjectDdlTransformError {
+    sql: String,
+    message: String,
+}
+
+pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransformError> {
+    if !is_create_table_candidate(sql) {
+        return Ok(sql.to_string());
+    }
+    let statements = crabka_pgparser::parse(sql).map_err(|error| SubjectDdlTransformError {
+        sql: sql.to_string(),
+        message: error.to_string(),
+    })?;
+    let [crabka_pgparser::ast::Statement::CreateTable { sharded, .. }] = statements.as_slice()
+    else {
+        return Err(SubjectDdlTransformError {
+            sql: sql.to_string(),
+            message: "expected exactly one parsed CREATE TABLE statement".into(),
+        });
+    };
+    if *sharded {
+        return Ok(sql.to_string());
+    }
+    let trailing_ws_len = sql.len() - sql.trim_end().len();
+    let (body, trailing_ws) = sql.split_at(sql.len() - trailing_ws_len);
+    let (body, semicolon) = body
+        .strip_suffix(';')
+        .map_or((body, ""), |without| (without.trim_end(), ";"));
+    let transformed = format!("{body} SHARDED{semicolon}{trailing_ws}");
+    let reparsed =
+        crabka_pgparser::parse(&transformed).map_err(|error| SubjectDdlTransformError {
+            sql: sql.to_string(),
+            message: format!("rewritten statement does not parse: {error}"),
+        })?;
+    if !matches!(
+        reparsed.as_slice(),
+        [crabka_pgparser::ast::Statement::CreateTable { sharded: true, .. }]
+    ) {
+        return Err(SubjectDdlTransformError {
+            sql: sql.to_string(),
+            message: "rewritten statement is not one sharded CREATE TABLE".into(),
+        });
+    }
+    Ok(transformed)
+}
+
+pub fn subject_sharded_extended_case(
+    case: &ExtendedCase,
+) -> Result<ExtendedCase, SubjectDdlTransformError> {
+    Ok(ExtendedCase {
+        name: case.name.clone(),
+        sql: case.sql.clone(),
+        params: case.params.clone(),
+        setup: case
+            .setup
+            .iter()
+            .map(|statement| subject_sharded_statement(statement))
+            .collect::<Result<_, _>>()?,
+        teardown: case.teardown.clone(),
+    })
+}
+
+fn is_create_table_candidate(sql: &str) -> bool {
+    let mut words = sql.split_whitespace();
+    if !words
+        .next()
+        .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
+    {
+        return false;
+    }
+    words.take(3).any(|word| {
+        word.trim_matches(|character: char| !character.is_ascii_alphabetic())
+            .eq_ignore_ascii_case("TABLE")
+    })
 }
 
 #[derive(Debug, Error)]
@@ -1102,6 +1180,91 @@ mod tests {
         );
         assert_eq!(first.name, case.name);
         assert_eq!(first.params.len(), case.params.len());
+    }
+
+    #[test]
+    fn sharded_subject_transform_preserves_oracle_and_rewrites_only_create_table() {
+        let oracle = "CREATE TABLE t (id int4, label text)";
+        let subject = subject_sharded_statement(oracle).expect("subject transform");
+
+        assert_eq!(oracle, "CREATE TABLE t (id int4, label text)");
+        assert_eq!(subject, "CREATE TABLE t (id int4, label text) SHARDED");
+        assert_eq!(
+            subject_sharded_statement("CREATE INDEX i ON t (id)").expect("index unchanged"),
+            "CREATE INDEX i ON t (id)"
+        );
+        assert_eq!(
+            subject_sharded_statement("CREATE TABLESPACE ts LOCATION '/tmp/ts'")
+                .expect("tablespace unchanged"),
+            "CREATE TABLESPACE ts LOCATION '/tmp/ts'"
+        );
+    }
+
+    #[test]
+    fn sharded_subject_transform_handles_nested_defaults_constraints_and_quotes() {
+        let cases = [
+            "CREATE TABLE nested (id int4, amount numeric(10, 2), label text DEFAULT 'a)b')",
+            "CREATE TABLE constrained (id int4 NOT NULL, label text, UNIQUE (id, label))",
+            "CREATE TABLE \"Odd Table\" (\"Odd Column\" int4, note text DEFAULT '(x)')",
+        ];
+        for sql in cases {
+            let transformed = subject_sharded_statement(sql).expect("valid CREATE TABLE");
+            assert_eq!(transformed, format!("{sql} SHARDED"));
+            let statements = crabka_pgparser::parse(&transformed).expect("rewritten SQL reparses");
+            assert!(matches!(
+                statements.as_slice(),
+                [crabka_pgparser::ast::Statement::CreateTable { sharded: true, .. }]
+            ));
+        }
+        assert_eq!(
+            subject_sharded_statement("CREATE TABLE t (id int4) SHARDED").expect("already sharded"),
+            "CREATE TABLE t (id int4) SHARDED"
+        );
+        assert_eq!(
+            subject_sharded_statement("CREATE TABLE semi (id int4);  ")
+                .expect("semicolon and whitespace are preserved"),
+            "CREATE TABLE semi (id int4) SHARDED;  "
+        );
+    }
+
+    #[test]
+    fn sharded_subject_transform_fails_closed_for_malformed_create_table() {
+        let error = subject_sharded_statement("CREATE TABLE broken (id int4")
+            .expect_err("malformed table DDL must not pass through");
+        assert!(error.to_string().contains("CREATE TABLE"));
+
+        subject_sharded_statement("CREATE TABLE copied AS SELECT 1")
+            .expect_err("unsupported table DDL must not pass through unchanged");
+    }
+
+    #[test]
+    fn sharded_extended_transform_changes_setup_only() {
+        let case = ExtendedCase {
+            name: "parameterized".into(),
+            sql: "SELECT label FROM ext WHERE id = $1".into(),
+            params: vec![ExtendedParam {
+                ty: ExtendedParamType::Int4,
+                value: Some(ExtendedParamValue::Int4(7)),
+            }],
+            setup: vec![
+                "CREATE TABLE ext (id int4, label text)".into(),
+                "INSERT INTO ext VALUES (7, 'seven')".into(),
+            ],
+            teardown: vec!["DROP TABLE ext".into()],
+        };
+        let transformed = subject_sharded_extended_case(&case).expect("extended transform");
+
+        assert_eq!(transformed.name, case.name);
+        assert_eq!(transformed.sql, case.sql);
+        assert_eq!(transformed.params, case.params);
+        assert_eq!(
+            transformed.setup,
+            vec![
+                "CREATE TABLE ext (id int4, label text) SHARDED",
+                "INSERT INTO ext VALUES (7, 'seven')",
+            ]
+        );
+        assert_eq!(transformed.teardown, case.teardown);
     }
 
     /// Report with the given counts and no per-case detail.
