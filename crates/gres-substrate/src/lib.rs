@@ -64,8 +64,8 @@ pub use self::{
         TableTransferStats,
     },
     writer::{
-        CheckpointSnapshotSource, DEFAULT_MAX_FRAME_BYTES, FenceLease, GroupCommitAck,
-        GroupCommitRequest, PausedWalWriter, ProducerWalWriter, SubstrateCommitter,
+        CheckpointSnapshotSource, DEFAULT_MAX_FRAME_BYTES, DeferredWalWriter, FenceLease,
+        GroupCommitAck, GroupCommitRequest, PausedWalWriter, ProducerWalWriter, SubstrateCommitter,
         SubstrateLinearizer, SubstrateTsoHorizon, TransactionalWalWriter, WalAppendAck,
         WalWriterFaultInjector, WalWriterFaultStage, WriterGeneration, chunk_wal_batch,
     },
