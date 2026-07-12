@@ -2734,6 +2734,7 @@ dependencies = [
  "crabka-pgexec",
  "crabka-pgkv",
  "crabka-pgmvcc",
+ "crabka-pgtypes",
  "crabka-pgwire",
  "crabka-protocol",
  "crabka-security",
