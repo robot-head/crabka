@@ -1,0 +1,997 @@
+//! Crash-safe completion of live split activation before SQL readiness.
+
+use std::{collections::BTreeMap, sync::Arc};
+
+use super::{
+    LiveMultiRangeTransfer, LiveMultirangeEngines, LiveRangeEngine, LiveRangeResources,
+    PrepareTopologyFault, SubstrateRuntimeConfig, TopologyActivationFault, committed_tail_sha256,
+    open_live_range_substrate_engine, open_substrate_range_cache, range_pause_lock_error,
+};
+use crabka_gres_ranges::{
+    RangeId, RangeMap, TableId,
+    control::{
+        RangeZeroTopologyActivationStore, TopologyActivationPhase, TopologyActivationReceipt,
+        TopologyActivationReceiptStore,
+    },
+};
+use crabka_pgexec::SqlEngine;
+
+static RECOVERY_CACHE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+#[derive(Clone)]
+pub(super) struct PendingLiveTopology {
+    pub(super) operation_id: String,
+    pub(super) source_checkpoint: crabka_gres_ranges::CheckpointManifest,
+    pub(super) barrier_offset: i64,
+    pub(super) tail_sha256: String,
+    pub(super) predecessor: RangeId,
+    pub(super) left_id: RangeId,
+    pub(super) left_replay_journal_seq: u64,
+    pub(super) left: LiveRangeResources,
+    pub(super) right_id: RangeId,
+    pub(super) right_replay_journal_seq: u64,
+    pub(super) right: LiveRangeResources,
+}
+
+impl PendingLiveTopology {
+    pub(super) fn abort_staged_checkpoint_workers(&self) {
+        for resources in [&self.left, &self.right] {
+            if let Some(checkpoint) = &resources.checkpoint {
+                checkpoint.handle.abort();
+            }
+        }
+    }
+}
+
+pub(super) struct PreparedLiveTopology {
+    pub(super) predecessor: RangeId,
+    pub(super) ranges: BTreeMap<RangeId, LiveRangeResources>,
+    pub(super) engines: BTreeMap<RangeId, SqlEngine>,
+    pub(super) service: crabka_gres_ranges::HostedRangeService,
+    pub(super) tso_rpc: Option<Arc<dyn crabka_gres_ranges::TsoRpc>>,
+}
+
+/// Runtime-owned successor kept outside the serving snapshot until publication.
+pub(super) struct StagedLiveRangeSuccessor {
+    pub(super) operation_id: String,
+    pub(super) source_checkpoint: crabka_gres_ranges::CheckpointManifest,
+    pub(super) barrier_offset: i64,
+    pub(super) tail_sha256: String,
+    pub(super) replay_journal_seq: u64,
+    pub(super) engine: SqlEngine,
+    pub(super) resources: LiveRangeResources,
+}
+
+impl LiveMultiRangeTransfer {
+    pub(super) fn activation_fault(
+        &self,
+        fault: TopologyActivationFault,
+        range_id: RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        if self
+            .activation_fault
+            .compare_exchange(
+                fault as u8,
+                TopologyActivationFault::None as u8,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_err()
+        {
+            return Ok(());
+        }
+        Err(crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: format!("injected topology activation crash: {fault:?}"),
+        })
+    }
+
+    fn take_prepare_fault(&self, fault: PrepareTopologyFault) -> bool {
+        self.prepare_fault
+            .compare_exchange(
+                fault as u8,
+                PrepareTopologyFault::None as u8,
+                std::sync::atomic::Ordering::AcqRel,
+                std::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+    }
+
+    fn injected_prepare_failure(
+        &self,
+        fault: PrepareTopologyFault,
+        range_id: RangeId,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        if !self.take_prepare_fault(fault) {
+            return Ok(());
+        }
+        if let Some(pending) = self.pending.lock().expect("pending topology lock").take() {
+            pending.abort_staged_checkpoint_workers();
+        }
+        Err(crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: format!("injected topology preparation fault: {fault:?}"),
+        })
+    }
+
+    pub(super) fn publish_topology(
+        &self,
+        serving_engines: &BTreeMap<RangeId, SqlEngine>,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        self.injected_prepare_failure(PrepareTopologyFault::LockAcquisition, RangeId::COORDINATOR)?;
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+            .clone()
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: RangeId::COORDINATOR,
+                reason: "claimed successor topology is missing".into(),
+            })?;
+        let mut ranges = self
+            .ranges
+            .read()
+            .map_err(|_| range_pause_lock_error(pending.predecessor))?
+            .clone();
+        ranges.remove(&pending.predecessor);
+        ranges.insert(pending.left_id, pending.left);
+        ranges.insert(pending.right_id, pending.right);
+        let engines = serving_engines
+            .iter()
+            .map(|(id, engine)| (*id, engine.clone_handle()))
+            .collect::<BTreeMap<_, _>>();
+        let coordinator_resources = ranges.get(&RangeId::COORDINATOR).cloned();
+        let mut tso_rpc = self
+            .tso_rpc
+            .read()
+            .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+            .clone();
+        if let Some(horizon) = coordinator_resources.and_then(|resources| resources.tso_horizon) {
+            self.injected_prepare_failure(PrepareTopologyFault::HorizonLoad, pending.predecessor)?;
+            let persisted_max_ts = horizon.load_max_ts().map_err(|error| {
+                crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id: RangeId::COORDINATOR,
+                    reason: format!("load replacement TSO horizon: {error}"),
+                }
+            })?;
+            self.injected_prepare_failure(
+                PrepareTopologyFault::TsoConstruction,
+                pending.predecessor,
+            )?;
+            tso_rpc = Some(
+                crabka_gres_ranges::tso_rpc_from_horizon(
+                    horizon.clone(),
+                    horizon.clone(),
+                    horizon.epoch(),
+                    persisted_max_ts,
+                )
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id: RangeId::COORDINATOR,
+                        reason: format!("open replacement TSO RPC: {error}"),
+                    }
+                })?,
+            );
+        }
+        self.injected_prepare_failure(PrepareTopologyFault::ServiceAssembly, pending.predecessor)?;
+        let mut service = crabka_gres_ranges::HostedRangeService::new(
+            engines
+                .iter()
+                .map(|(id, engine)| (*id, engine.clone_handle()))
+                .collect(),
+        );
+        if let Some(tso) = tso_rpc.clone() {
+            service = service.with_tso(tso);
+        }
+        *self
+            .prepared
+            .lock()
+            .map_err(|_| range_pause_lock_error(pending.predecessor))? =
+            Some(PreparedLiveTopology {
+                predecessor: pending.predecessor,
+                ranges,
+                engines,
+                service,
+                tso_rpc,
+            });
+        Ok(())
+    }
+
+    pub(super) fn commit_prepared_topology(&self) {
+        let prepared = self
+            .prepared
+            .lock()
+            .expect("prepared topology lock")
+            .take()
+            .expect("topology prepared before commit");
+        let operation_id = self
+            .pending
+            .lock()
+            .expect("pending topology lock")
+            .take()
+            .map(|pending| pending.operation_id);
+        let retired = self
+            .ranges
+            .read()
+            .expect("live ranges lock")
+            .get(&prepared.predecessor)
+            .cloned();
+        *self.ranges.write().expect("live ranges lock") = prepared.ranges;
+        *self.engines.write().expect("live engines lock") = prepared.engines;
+        *self.tso_rpc.write().expect("live tso lock") = prepared.tso_rpc;
+        if let Some(retired) = retired {
+            self.retired
+                .lock()
+                .expect("retired ranges lock")
+                .insert(prepared.predecessor, retired);
+        }
+        self.range_service.replace(prepared.service);
+        *self
+            .committed_activation
+            .lock()
+            .expect("committed activation lock") = operation_id;
+    }
+}
+
+/// Read range zero without constructing a producer so startup can select the already
+/// activated writer generation instead of attempting to resurrect a fenced predecessor.
+pub(super) async fn discover_activation_receipt(
+    config: &SubstrateRuntimeConfig,
+    checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+) -> std::io::Result<Option<TopologyActivationReceipt>> {
+    let tenant = crabka_gres_ranges::TenantName::parse(config.tenant.clone()).map_err(|error| {
+        std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("tenant: {error}"))
+    })?;
+    let recovery = crabka_gres_substrate::LiveRecoveryConfig::new(
+        config.bootstrap.clone(),
+        tenant,
+        RangeId::COORDINATOR,
+        config.kafka_security.clone(),
+    );
+    crabka_gres_substrate::ensure_live_wal_topic(&recovery)
+        .await
+        .map_err(|error| std::io::Error::other(format!("activation discovery topic: {error}")))?;
+    if crabka_gres_substrate::live_committed_end(&recovery)
+        .await
+        .map_err(|error| std::io::Error::other(format!("activation discovery end: {error}")))?
+        < 0
+    {
+        return Ok(None);
+    }
+    let base_receipts = read_only_receipts(&recovery, checkpoint_store).await?;
+    let mut receipts = BTreeMap::new();
+    for receipt in base_receipts {
+        receipts.insert(receipt.operation_id.clone(), receipt);
+    }
+    // A replacement r0 writes irreversible progress to its generation-scoped WAL.
+    // The old generation can therefore contain a stale Prepared prefix. Follow its
+    // authenticated descriptor and prefer only a structurally identical, monotone receipt.
+    let prefixes = receipts.values().cloned().collect::<Vec<_>>();
+    for prefix in prefixes {
+        let Some(target) = prefix.targets.get(&RangeId::COORDINATOR) else {
+            continue;
+        };
+        if target.wal_generation == 0 {
+            continue;
+        }
+        let candidate_recovery = recovery.clone().with_wal_generation(target.wal_generation);
+        let candidate_end =
+            match crabka_gres_substrate::live_committed_end(&candidate_recovery).await {
+                Ok(end) => end,
+                Err(_) => continue,
+            };
+        if candidate_end < 0 {
+            continue;
+        }
+        // The replacement generation starts its journal sequence at the source fold's next
+        // sequence, so it cannot be replayed in isolation. Read only the self-contained receipt
+        // values from its committed frames; full state reconstruction happens below.
+        for candidate in
+            receipt_values_from_wal(&candidate_recovery, candidate_end, &prefix.operation_id)
+                .await?
+        {
+            validate_receipt_extension(&candidate, &prefix)?;
+            if receipts
+                .get(&candidate.operation_id)
+                .is_none_or(|current| candidate.revision > current.revision)
+            {
+                receipts.insert(candidate.operation_id.clone(), candidate);
+            }
+        }
+    }
+    let receipts = receipts.into_values().collect::<Vec<_>>();
+    let latest = receipts
+        .into_iter()
+        .filter(|receipt| {
+            matches!(
+                receipt.phase,
+                TopologyActivationPhase::WriterActivated
+                    | TopologyActivationPhase::CheckpointDurable
+                    | TopologyActivationPhase::TopologyCommitted
+            )
+        })
+        .max_by_key(|receipt| receipt.split.target_map.epoch());
+    Ok(latest)
+}
+
+async fn receipt_values_from_wal(
+    recovery: &crabka_gres_substrate::LiveRecoveryConfig,
+    end: i64,
+    operation_id: &str,
+) -> std::io::Result<Vec<TopologyActivationReceipt>> {
+    let key = crabka_pgkv::key::topology_activation_receipt_key(
+        &recovery.tenant.to_string(),
+        operation_id,
+    );
+    let items = crabka_gres_substrate::read_live_retained_committed(recovery, end)
+        .await
+        .map_err(|error| std::io::Error::other(format!("read replacement receipt WAL: {error}")))?;
+    let mut receipts = Vec::new();
+    for item in items {
+        let frame = crabka_gres_substrate::WalFrame::decode(&item.bytes).map_err(|error| {
+            std::io::Error::other(format!("decode replacement receipt WAL: {error}"))
+        })?;
+        for operation in frame.ops {
+            let value = match operation {
+                crabka_pgkv::WriteOp::Put {
+                    key: candidate,
+                    value,
+                }
+                | crabka_pgkv::WriteOp::ConditionalPut {
+                    key: candidate,
+                    value,
+                    ..
+                } if candidate == key => Some(value),
+                _ => None,
+            };
+            if let Some(value) = value {
+                receipts.push(serde_json::from_slice(&value).map_err(|error| {
+                    std::io::Error::other(format!("decode replacement activation receipt: {error}"))
+                })?);
+            }
+        }
+    }
+    Ok(receipts)
+}
+
+fn same_target_intent(
+    candidate: &TopologyActivationReceipt,
+    prefix: &TopologyActivationReceipt,
+) -> bool {
+    candidate.targets.len() == prefix.targets.len()
+        && candidate.targets.iter().all(|(range_id, target)| {
+            prefix.targets.get(range_id).is_some_and(|original| {
+                target.range_id == original.range_id
+                    && target.wal_generation == original.wal_generation
+                    && target.endpoint == original.endpoint
+                    && target.interval == original.interval
+            })
+        })
+}
+
+fn validate_receipt_extension(
+    candidate: &TopologyActivationReceipt,
+    prefix: &TopologyActivationReceipt,
+) -> std::io::Result<()> {
+    let immutable_matches = candidate.operation_id == prefix.operation_id
+        && candidate.tenant == prefix.tenant
+        && candidate.split == prefix.split
+        && same_target_intent(candidate, prefix)
+        && candidate.revision >= prefix.revision;
+    let boundary_is_monotone = prefix
+        .source_checkpoint
+        .as_ref()
+        .is_none_or(|value| candidate.source_checkpoint.as_ref() == Some(value))
+        && prefix
+            .barrier_offset
+            .is_none_or(|value| candidate.barrier_offset == Some(value))
+        && prefix
+            .tail_sha256
+            .as_ref()
+            .is_none_or(|value| candidate.tail_sha256.as_ref() == Some(value));
+    let targets_are_monotone = prefix.targets.iter().all(|(range_id, prior)| {
+        candidate.targets.get(range_id).is_some_and(|next| {
+            (!prior.writer_activated || next.writer_activated)
+                && prior
+                    .replay_journal_seq
+                    .is_none_or(|value| next.replay_journal_seq == Some(value))
+                && prior
+                    .bootstrap_checkpoint
+                    .as_ref()
+                    .is_none_or(|value| next.bootstrap_checkpoint.as_ref() == Some(value))
+        })
+    });
+    if immutable_matches && boundary_is_monotone && targets_are_monotone {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "replacement range-zero receipt does not monotonically extend its prepared intent",
+        ))
+    }
+}
+
+async fn read_only_receipts(
+    recovery: &crabka_gres_substrate::LiveRecoveryConfig,
+    checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
+) -> std::io::Result<Vec<TopologyActivationReceipt>> {
+    let follower_kv = Arc::new(crabka_pgkv::MemKv::default());
+    crabka_gres_substrate::bootstrap_live_range0_follower(
+        recovery,
+        follower_kv.clone(),
+        checkpoint_store,
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("activation discovery: {error}")))?;
+    let engine = SqlEngine::with_kv(follower_kv as Arc<dyn crabka_pgkv::Kv>).map_err(|error| {
+        std::io::Error::other(format!("activation discovery engine: {error:?}"))
+    })?;
+    RangeZeroTopologyActivationStore::new(recovery.tenant.to_string(), engine)
+        .list()
+        .await
+        .map_err(|error| std::io::Error::other(format!("discover activation receipts: {error}")))
+}
+
+/// Resolve every durable activation receipt before a listener can advertise readiness.
+///
+/// Before writer activation, aborting is safe.  Once either successor writer has been
+/// activated, the only safe direction is forward: reconstruct both successors from the
+/// recorded source checkpoint and bounded tail, recover their canonical WALs, checkpoint
+/// them, and publish the target map entirely in the not-yet-visible startup graph.
+pub(super) async fn reconcile_before_readiness(
+    config: &SubstrateRuntimeConfig,
+    engines: &mut LiveMultirangeEngines,
+    checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
+    discovered: Option<TopologyActivationReceipt>,
+) -> std::io::Result<Option<RangeMap>> {
+    if discovered.is_none() && !engines.engines.contains_key(&RangeId::COORDINATOR) {
+        return Ok(None);
+    }
+    let range0 = engines.engines.get(&RangeId::COORDINATOR).ok_or_else(|| {
+        std::io::Error::other("range zero missing during activation reconciliation")
+    })?;
+    let tenant = range0.resources.recovery_config.tenant.to_string();
+    let source_store =
+        RangeZeroTopologyActivationStore::new(tenant.clone(), range0.engine.clone_handle());
+    let mut receipts = source_store
+        .list()
+        .await
+        .map_err(|error| std::io::Error::other(format!("list activation receipts: {error}")))?;
+    if let Some(discovered) = discovered {
+        if let Some(existing) = receipts
+            .iter_mut()
+            .find(|receipt| receipt.operation_id == discovered.operation_id)
+        {
+            validate_receipt_extension(&discovered, existing)?;
+            *existing = discovered;
+        } else {
+            receipts.push(discovered);
+        }
+    }
+    receipts.sort_by_key(|receipt| receipt.split.target_map.epoch());
+
+    let mut activation = None;
+    for receipt in receipts {
+        match receipt.phase {
+            TopologyActivationPhase::Aborted => {}
+            TopologyActivationPhase::Prepared => {
+                abort_pre_activation(&source_store, receipt).await?
+            }
+            TopologyActivationPhase::WriterActivated
+            | TopologyActivationPhase::CheckpointDurable
+            | TopologyActivationPhase::TopologyCommitted => {
+                activation = Some(receipt);
+            }
+        }
+    }
+    let Some(receipt) = activation else {
+        return Ok(None);
+    };
+    if topology_is_recovered(engines, &receipt) {
+        return Ok(Some(receipt.split.target_map));
+    }
+    complete_post_activation(config, engines, checkpoint_store, receipt)
+        .await
+        .map(Some)
+}
+
+fn topology_is_recovered(
+    engines: &LiveMultirangeEngines,
+    receipt: &TopologyActivationReceipt,
+) -> bool {
+    receipt.targets.iter().all(|(range_id, target)| {
+        engines
+            .engines
+            .get(range_id)
+            .is_some_and(|engine| engine.resources.generation.0 == target.wal_generation)
+    }) && (receipt.targets.contains_key(&receipt.split.predecessor)
+        || !engines.engines.contains_key(&receipt.split.predecessor))
+}
+
+async fn abort_pre_activation(
+    store: &RangeZeroTopologyActivationStore,
+    mut receipt: TopologyActivationReceipt,
+) -> std::io::Result<()> {
+    let operation_id = receipt.operation_id.clone();
+    let expected = receipt.revision;
+    receipt.revision = receipt.revision.saturating_add(1);
+    receipt.phase = TopologyActivationPhase::Aborted;
+    if !store
+        .compare_and_swap(&operation_id, Some(expected), receipt)
+        .await
+        .map_err(|error| std::io::Error::other(format!("abort prepared activation: {error}")))?
+    {
+        return Err(std::io::Error::other(
+            "prepared activation receipt changed during startup",
+        ));
+    }
+    Ok(())
+}
+
+async fn complete_post_activation(
+    config: &SubstrateRuntimeConfig,
+    engines: &mut LiveMultirangeEngines,
+    checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
+    receipt: TopologyActivationReceipt,
+) -> std::io::Result<RangeMap> {
+    let checkpoint = receipt.source_checkpoint.clone().ok_or_else(|| {
+        std::io::Error::other("activated topology receipt is missing its source checkpoint")
+    })?;
+    let barrier_offset = receipt.barrier_offset.ok_or_else(|| {
+        std::io::Error::other("activated topology receipt is missing its barrier offset")
+    })?;
+    let expected_tail_sha = receipt.tail_sha256.as_deref().ok_or_else(|| {
+        std::io::Error::other("activated topology receipt is missing its bounded-tail digest")
+    })?;
+    if checkpoint.range_id != receipt.split.predecessor
+        || barrier_offset <= checkpoint.covered_offset
+    {
+        return Err(std::io::Error::other(
+            "activated topology receipt has an invalid checkpoint boundary",
+        ));
+    }
+    let predecessor = engines
+        .engines
+        .get(&receipt.split.predecessor)
+        .ok_or_else(|| std::io::Error::other("activation predecessor is not recovered"))?;
+    let source_checkpoint_runtime =
+        predecessor.resources.checkpoint.as_ref().ok_or_else(|| {
+            std::io::Error::other("activation predecessor has no checkpoint store")
+        })?;
+    let tail = crabka_gres_substrate::read_live_committed_tail(
+        &predecessor.resources.recovery_config,
+        checkpoint.covered_offset,
+        barrier_offset,
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("read activation tail: {error}")))?
+    .into_iter()
+    .map(|record| crabka_gres_ranges::CommittedTailRecord {
+        offset: record.offset,
+        bytes: record.bytes,
+    })
+    .collect::<Vec<_>>();
+    if committed_tail_sha256(&tail) != expected_tail_sha {
+        return Err(std::io::Error::other(
+            "activation bounded-tail digest differs from its durable receipt",
+        ));
+    }
+    let physical_to_logical = physical_to_logical(engines, &receipt)?;
+
+    let mut successors = BTreeMap::new();
+    for target in receipt.targets.values() {
+        let cache_nonce = RECOVERY_CACHE_NONCE.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let cache = config.cache_dir.as_ref().map(|base| {
+            base.join(format!(
+                "activation-recovery-{}-r{}-g{}-p{}-n{}",
+                receipt.operation_id,
+                target.range_id.as_u32(),
+                target.wal_generation,
+                std::process::id(),
+                cache_nonce,
+            ))
+        });
+        let target_store = open_substrate_range_cache(cache.as_deref(), target.range_id)?;
+        let mut recovery = crabka_gres_substrate::LiveRecoveryConfig::new(
+            config.bootstrap.clone(),
+            predecessor.resources.recovery_config.tenant.clone(),
+            target.range_id,
+            config.kafka_security.clone(),
+        )
+        .with_wal_generation(target.wal_generation)
+        .with_optional_advertised_endpoint(config.advertised_endpoint.clone());
+        let recovery_checkpoints = if target.bootstrap_checkpoint.is_some() {
+            checkpoint_store.clone()
+        } else {
+            let filter = crabka_gres_substrate::CheckpointFilter::new(
+                target.interval.start,
+                target.interval.end,
+            )
+            .map_err(|error| std::io::Error::other(format!("successor interval: {error}")))?
+            .with_physical_to_logical(physical_to_logical.clone())
+            .with_structural_ownership(target.range_id == receipt.split.left.range_id);
+            let restored = crabka_gres_substrate::restore_filtered_from_manifest_and_replay_tail(
+                source_checkpoint_runtime.store.as_ref(),
+                &checkpoint.manifest_key,
+                &source_checkpoint_runtime.tenant,
+                checkpoint.covered_offset,
+                target_store.as_ref(),
+                crabka_gres_substrate::RestoreTail {
+                    current_generation: receipt.split.predecessor_generation,
+                    log_start: None,
+                    committed_frames: tail
+                        .iter()
+                        .map(|record| crabka_gres_substrate::ReplayItem {
+                            offset: record.offset,
+                            bytes: record.bytes.clone(),
+                        })
+                        .collect(),
+                    barrier_offset,
+                },
+                filter,
+            )
+            .await
+            .map_err(|error| {
+                std::io::Error::other(format!(
+                    "reconstruct successor r{}: {error}",
+                    target.range_id.as_u32()
+                ))
+            })?;
+            let replay_journal_seq = target.replay_journal_seq.ok_or_else(|| {
+                std::io::Error::other(format!(
+                    "successor r{} receipt is missing its replay journal seed",
+                    target.range_id.as_u32()
+                ))
+            })?;
+            if replay_journal_seq != restored.replay.next_journal_seq {
+                return Err(std::io::Error::other(format!(
+                    "successor r{} replay seed {} differs from reconstructed {}",
+                    target.range_id.as_u32(),
+                    replay_journal_seq,
+                    restored.replay.next_journal_seq
+                )));
+            }
+            recovery = recovery.with_replay_seed(0, replay_journal_seq);
+            None
+        };
+        let recovered =
+            open_live_range_substrate_engine(config, recovery, target_store, recovery_checkpoints)
+                .await?;
+        if recovered.resources.generation.0 != target.wal_generation {
+            return Err(std::io::Error::other(format!(
+                "successor r{} recovered generation {} instead of {}",
+                target.range_id.as_u32(),
+                recovered.resources.generation.0,
+                target.wal_generation
+            )));
+        }
+        successors.insert(target.range_id, recovered);
+    }
+
+    let receipt_range0 = successors.get(&RangeId::COORDINATOR).ok_or_else(|| {
+        std::io::Error::other("recovered topology does not contain replacement range zero")
+    })?;
+    let store = RangeZeroTopologyActivationStore::new(
+        receipt.tenant.clone(),
+        receipt_range0.engine.clone_handle(),
+    );
+    complete_target_receipts(&store, &receipt.operation_id, &successors).await?;
+
+    engines.engines.remove(&receipt.split.predecessor);
+    engines.engines.extend(successors);
+    engines.range0_tso_horizon = engines
+        .engines
+        .get(&RangeId::COORDINATOR)
+        .and_then(|engine| engine.tso_horizon.clone());
+    mark_topology_committed(&store, &receipt.operation_id).await?;
+    Ok(receipt.split.target_map)
+}
+
+async fn complete_target_receipts(
+    store: &RangeZeroTopologyActivationStore,
+    operation_id: &str,
+    successors: &BTreeMap<RangeId, LiveRangeEngine>,
+) -> std::io::Result<()> {
+    for (range_id, successor) in successors {
+        let mut receipt = load_receipt(store, operation_id).await?;
+        let target = receipt.targets.get(range_id).ok_or_else(|| {
+            std::io::Error::other("recovered successor is absent from activation receipt")
+        })?;
+        if !target.writer_activated {
+            let expected = receipt.revision;
+            receipt.revision = receipt.revision.saturating_add(1);
+            receipt.phase = TopologyActivationPhase::WriterActivated;
+            receipt
+                .targets
+                .get_mut(range_id)
+                .expect("target existence checked")
+                .writer_activated = true;
+            cas_receipt(store, operation_id, expected, receipt, "writer activation").await?;
+        }
+
+        let mut receipt = load_receipt(store, operation_id).await?;
+        if receipt.targets[range_id].bootstrap_checkpoint.is_none() {
+            let checkpoint = successor.resources.checkpoint.as_ref().ok_or_else(|| {
+                std::io::Error::other("recovered successor has no checkpoint runtime")
+            })?;
+            let run = checkpoint
+                .handle
+                .checkpoint_from_source(
+                    Arc::clone(&successor.resources.snapshot_source),
+                    crabka_gres_substrate::CheckpointTrigger::Manual,
+                )
+                .await
+                .map_err(|error| {
+                    std::io::Error::other(format!("checkpoint recovered successor: {error}"))
+                })?;
+            let expected = receipt.revision;
+            receipt.revision = receipt.revision.saturating_add(1);
+            receipt
+                .targets
+                .get_mut(range_id)
+                .expect("target existence checked")
+                .bootstrap_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+                range_id: *range_id,
+                covered_offset: run.metadata.covered_offset,
+                manifest_key: run.metadata.manifest_key,
+            });
+            cas_receipt(
+                store,
+                operation_id,
+                expected,
+                receipt,
+                "bootstrap checkpoint",
+            )
+            .await?;
+        }
+    }
+    let mut receipt = load_receipt(store, operation_id).await?;
+    if !receipt
+        .targets
+        .values()
+        .all(|target| target.bootstrap_checkpoint.is_some())
+    {
+        return Err(std::io::Error::other(
+            "activation recovery did not durably checkpoint every successor",
+        ));
+    }
+    if !matches!(
+        receipt.phase,
+        TopologyActivationPhase::CheckpointDurable | TopologyActivationPhase::TopologyCommitted
+    ) {
+        let expected = receipt.revision;
+        receipt.revision = receipt.revision.saturating_add(1);
+        receipt.phase = TopologyActivationPhase::CheckpointDurable;
+        cas_receipt(
+            store,
+            operation_id,
+            expected,
+            receipt,
+            "durable checkpoint phase",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn mark_topology_committed(
+    store: &RangeZeroTopologyActivationStore,
+    operation_id: &str,
+) -> std::io::Result<()> {
+    let mut receipt = load_receipt(store, operation_id).await?;
+    if receipt.phase == TopologyActivationPhase::TopologyCommitted {
+        return Ok(());
+    }
+    if receipt.phase != TopologyActivationPhase::CheckpointDurable {
+        return Err(std::io::Error::other(
+            "topology commit attempted before durable successor checkpoints",
+        ));
+    }
+    let expected = receipt.revision;
+    receipt.revision = receipt.revision.saturating_add(1);
+    receipt.phase = TopologyActivationPhase::TopologyCommitted;
+    cas_receipt(store, operation_id, expected, receipt, "topology commit").await
+}
+
+async fn load_receipt(
+    store: &RangeZeroTopologyActivationStore,
+    operation_id: &str,
+) -> std::io::Result<TopologyActivationReceipt> {
+    store
+        .load(operation_id)
+        .await
+        .map_err(|error| std::io::Error::other(format!("load activation receipt: {error}")))?
+        .ok_or_else(|| std::io::Error::other("activation receipt disappeared during recovery"))
+}
+
+async fn cas_receipt(
+    store: &RangeZeroTopologyActivationStore,
+    operation_id: &str,
+    expected: u64,
+    receipt: TopologyActivationReceipt,
+    transition: &str,
+) -> std::io::Result<()> {
+    if !store
+        .compare_and_swap(operation_id, Some(expected), receipt)
+        .await
+        .map_err(|error| std::io::Error::other(format!("persist {transition} receipt: {error}")))?
+    {
+        return Err(std::io::Error::other(format!(
+            "{transition} receipt changed during startup"
+        )));
+    }
+    Ok(())
+}
+
+fn physical_to_logical(
+    engines: &LiveMultirangeEngines,
+    receipt: &TopologyActivationReceipt,
+) -> std::io::Result<BTreeMap<TableId, TableId>> {
+    let coordinator = engines.engines.get(&RangeId::COORDINATOR).ok_or_else(|| {
+        std::io::Error::other("range zero missing while reconstructing activation mapping")
+    })?;
+    let mut mapping = BTreeMap::new();
+    for table in crabka_pgcatalog::list_tables(coordinator.engine.catalog_kv())
+        .map_err(|error| std::io::Error::other(format!("list activation tables: {error:?}")))?
+    {
+        let logical = routing_table_id(&table.name);
+        if receipt
+            .split
+            .current_map
+            .route_table(logical)
+            .map_err(|error| std::io::Error::other(format!("route activation table: {error}")))?
+            .range_id
+            == receipt.split.predecessor
+        {
+            mapping.insert(TableId::new(u64::from(table.id)), logical);
+        }
+    }
+    Ok(mapping)
+}
+
+fn routing_table_id(table: &str) -> TableId {
+    let digits = table
+        .chars()
+        .rev()
+        .take_while(char::is_ascii_digit)
+        .collect::<Vec<_>>();
+    if digits.is_empty() {
+        return TableId::ZERO;
+    }
+    digits
+        .into_iter()
+        .rev()
+        .collect::<String>()
+        .parse::<u64>()
+        .ok()
+        .map_or(TableId::ZERO, TableId::new)
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use super::{routing_table_id, validate_receipt_extension};
+    use crabka_gres_ranges::{
+        MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
+        SuccessorDescriptor, TableId, TenantName,
+        control::{ActivationTargetProgress, TopologyActivationPhase, TopologyActivationReceipt},
+    };
+
+    #[test]
+    fn routing_id_matches_split_catalog_contract() {
+        assert_eq!(routing_table_id("accounts42"), TableId::new(42));
+        assert_eq!(routing_table_id("accounts"), TableId::ZERO);
+    }
+
+    #[test]
+    fn forged_activation_receipt_extensions_fail_closed() {
+        let prefix = receipt();
+        let mut valid = prefix.clone();
+        valid.revision += 1;
+        valid.phase = TopologyActivationPhase::WriterActivated;
+        valid.barrier_offset = Some(7);
+        valid.tail_sha256 = Some("tail".into());
+        for target in valid.targets.values_mut() {
+            target.writer_activated = true;
+            target.replay_journal_seq = Some(11);
+        }
+        validate_receipt_extension(&valid, &prefix).expect("monotone extension");
+
+        let mut forgeries = Vec::new();
+        let mut forged = valid.clone();
+        forged.tenant = "other".into();
+        forgeries.push(forged);
+        let mut forged = valid.clone();
+        forged.operation_id = "other-op".into();
+        forgeries.push(forged);
+        let mut forged = valid.clone();
+        forged.split.operation_id = "other-split".into();
+        forgeries.push(forged);
+        let mut forged = valid.clone();
+        forged
+            .targets
+            .get_mut(&RangeId::COORDINATOR)
+            .unwrap()
+            .wal_generation += 1;
+        forgeries.push(forged);
+        let mut forged = valid.clone();
+        forged.revision = 0;
+        forgeries.push(forged);
+        let mut boundary_prefix = valid.clone();
+        boundary_prefix.revision += 1;
+        let mut forged = boundary_prefix.clone();
+        forged.revision += 1;
+        forged.tail_sha256 = Some("forged".into());
+        assert!(validate_receipt_extension(&forged, &boundary_prefix).is_err());
+
+        for forged in forgeries {
+            assert!(validate_receipt_extension(&forged, &prefix).is_err());
+        }
+    }
+
+    fn receipt() -> TopologyActivationReceipt {
+        let tenant = TenantName::parse("activation-test").expect("tenant");
+        let current_map = RangeMap::new(
+            tenant,
+            MapEpoch::ZERO,
+            vec![RangeSpec::for_interval(
+                RangeId::COORDINATOR,
+                RangeKey::MIN,
+                None,
+            )],
+        )
+        .expect("map");
+        let split_at = RangeKey::table_start(TableId::new(1));
+        let left = SuccessorDescriptor {
+            range_id: RangeId::COORDINATOR,
+            endpoint: "local".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::COORDINATOR, RangeKey::MIN, Some(split_at)),
+        };
+        let right = SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            endpoint: "local".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::new(2), split_at, None),
+        };
+        let split = SplitState::for_split(
+            "activation-op",
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 0,
+                left: left.clone(),
+                right: right.clone(),
+            },
+        )
+        .expect("split");
+        let targets = [left, right]
+            .into_iter()
+            .map(|target| {
+                (
+                    target.range_id,
+                    ActivationTargetProgress {
+                        range_id: target.range_id,
+                        wal_generation: target.wal_generation,
+                        endpoint: target.endpoint,
+                        interval: target.interval,
+                        replay_journal_seq: None,
+                        writer_activated: false,
+                        bootstrap_checkpoint: None,
+                    },
+                )
+            })
+            .collect::<BTreeMap<_, _>>();
+        TopologyActivationReceipt {
+            tenant: "activation-test".into(),
+            operation_id: "activation-op".into(),
+            revision: 1,
+            phase: TopologyActivationPhase::Prepared,
+            split,
+            source_checkpoint: None,
+            barrier_offset: None,
+            tail_sha256: None,
+            targets,
+        }
+    }
+}

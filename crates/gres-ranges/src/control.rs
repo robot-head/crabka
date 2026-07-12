@@ -11,6 +11,7 @@ use crate::transport::{RangeControlReq, RangeControlResp};
 #[serde(rename_all = "snake_case")]
 pub enum TopologyActivationPhase {
     Prepared,
+    Aborted,
     WriterActivated,
     CheckpointDurable,
     TopologyCommitted,
@@ -23,6 +24,8 @@ pub struct ActivationTargetProgress {
     pub wal_generation: u64,
     pub endpoint: String,
     pub interval: crate::RangeSpec,
+    #[serde(default)]
+    pub replay_journal_seq: Option<u64>,
     pub writer_activated: bool,
     pub bootstrap_checkpoint: Option<crate::CheckpointManifest>,
 }

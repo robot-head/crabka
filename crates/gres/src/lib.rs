@@ -27,6 +27,9 @@ use rand::RngExt as _;
 use tokio::net::TcpListener;
 use tokio_util::sync::CancellationToken;
 
+mod split_activation;
+use split_activation::{PendingLiveTopology, PreparedLiveTopology, StagedLiveRangeSuccessor};
+
 const DEFAULT_CHECKPOINT_FRAMES_THRESHOLD: u64 = 10_000;
 const DEFAULT_CHECKPOINT_BYTES_THRESHOLD: u64 = 64 * 1024 * 1024;
 const DEFAULT_CHECKPOINT_RETAIN_NEWEST: usize = 2;
@@ -617,6 +620,35 @@ pub struct GresRuntime {
     staged_transfer: Option<Arc<LiveMultiRangeTransfer>>,
 }
 
+/// Test-only fault points for live-topology preparation.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum PrepareTopologyFault {
+    None = 0,
+    LockAcquisition = 1,
+    HorizonLoad = 2,
+    TsoConstruction = 3,
+    ServiceAssembly = 4,
+}
+
+/// Test-only one-shot crash points in the durable topology-activation protocol.
+#[doc(hidden)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+pub enum TopologyActivationFault {
+    None = 0,
+    Prepared = 1,
+    SourceCheckpoint = 2,
+    FirstWriterActivated = 3,
+    SecondWriterActivated = 4,
+    FirstCheckpointDurable = 5,
+    SecondCheckpointDurable = 6,
+    CheckpointDurable = 7,
+    TopologySwap = 8,
+    TopologyCommitted = 9,
+}
+
 impl GresRuntime {
     fn new(engine: SqlEngine) -> Self {
         Self {
@@ -742,6 +774,26 @@ impl GresRuntime {
         (loaded == Some(receipt))
             .then_some(())
             .ok_or_else(|| "replacement r0 receipt did not replay".into())
+    }
+
+    /// Inject one fail-before-mutation topology preparation fault.
+    #[doc(hidden)]
+    pub fn inject_prepare_topology_fault(&self, fault: PrepareTopologyFault) {
+        if let Some(transfer) = &self.staged_transfer {
+            transfer
+                .prepare_fault
+                .store(fault as u8, std::sync::atomic::Ordering::Release);
+        }
+    }
+
+    /// Inject one fail-after-durable-transition activation crash.
+    #[doc(hidden)]
+    pub fn inject_topology_activation_fault(&self, fault: TopologyActivationFault) {
+        if let Some(transfer) = &self.staged_transfer {
+            transfer
+                .activation_fault
+                .store(fault as u8, std::sync::atomic::Ordering::Release);
+        }
     }
 
     /// Return the hosted-range transfer foundation when this is a live multi-range runtime.
@@ -2037,7 +2089,32 @@ async fn open_multirange_runtime(
             }
         });
     }
-    let engines = recover_live_multirange_engines(config, &tenant_config, checkpoint_store).await?;
+    let activation_receipt =
+        split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
+            .await
+            .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
+    let mut engines =
+        recover_live_multirange_engines(config, &tenant_config, checkpoint_store.clone()).await?;
+    if let Some(recovered_map) = split_activation::reconcile_before_readiness(
+        config,
+        &mut engines,
+        checkpoint_store,
+        activation_receipt,
+    )
+    .await?
+    {
+        tenant_config.range_map = recovered_map;
+        if let Some(hosted) = &mut tenant_config.hosted_ranges {
+            hosted.clear();
+            hosted.extend(
+                tenant_config
+                    .range_map
+                    .ranges()
+                    .iter()
+                    .map(|spec| spec.range_id),
+            );
+        }
+    }
     open_live_multirange_tenant(tenant_config, engines, config).await
 }
 
@@ -2168,10 +2245,14 @@ async fn open_live_range_substrate_engine(
     )
     .await
     .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
-    let writer = Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
+    let producer_writer = Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
         recovered.producer,
         topic.clone(),
     ));
+    let writer = Arc::new(crabka_gres_substrate::DeferredWalWriter::staged());
+    writer
+        .activate(producer_writer)
+        .map_err(|error| std::io::Error::other(format!("activate recovered writer: {error}")))?;
     let snapshot_source = Arc::new(crabka_gres_substrate::CheckpointSnapshotSource::new(
         recovered.barrier_offset,
         recovered.next_journal_seq,
@@ -2233,7 +2314,7 @@ struct LiveRangeEngine {
 
 struct LiveRangeResources {
     store: Arc<dyn SubstrateKv>,
-    writer: Arc<crabka_gres_substrate::ProducerWalWriter>,
+    writer: Arc<crabka_gres_substrate::DeferredWalWriter<crabka_gres_substrate::ProducerWalWriter>>,
     snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint: Option<Arc<StartedCheckpointRuntime>>,
     recovery_config: crabka_gres_substrate::LiveRecoveryConfig,
@@ -2256,9 +2337,12 @@ impl DynamicLiveRangeService {
     }
 
     fn replace(&self, service: crabka_gres_ranges::HostedRangeService) {
+        *self.current.write().expect("live range service lock") = Arc::new(service);
+    }
+
+    fn begin_publication(&self) {
         self.publishing
             .store(true, std::sync::atomic::Ordering::Release);
-        *self.current.write().expect("live range service lock") = Arc::new(service);
     }
 
     fn finish_publication(&self) {
@@ -2518,21 +2602,12 @@ struct LiveMultiRangeTransfer {
     tso_rpc: std::sync::RwLock<Option<Arc<dyn crabka_gres_ranges::TsoRpc>>>,
     range_service: Arc<DynamicLiveRangeService>,
     retired: std::sync::Mutex<BTreeMap<crabka_gres_ranges::RangeId, LiveRangeResources>>,
-}
-
-/// Runtime-owned successor kept outside the serving snapshot until its caller
-/// completes the map publication protocol.
-struct StagedLiveRangeSuccessor {
-    #[allow(
-        dead_code,
-        reason = "retained for the later atomic serving-map publication seam"
-    )]
-    engine: SqlEngine,
-    #[allow(
-        dead_code,
-        reason = "keeps the target cache, producer, and checkpoint task alive"
-    )]
-    resources: LiveRangeResources,
+    pending: std::sync::Mutex<Option<PendingLiveTopology>>,
+    prepared: std::sync::Mutex<Option<PreparedLiveTopology>>,
+    committed_activation: std::sync::Mutex<Option<String>>,
+    prepare_fault: std::sync::atomic::AtomicU8,
+    activation_fault: std::sync::atomic::AtomicU8,
+    activation_irreversible: std::sync::atomic::AtomicBool,
 }
 
 impl LiveMultiRangeTransfer {
@@ -2551,66 +2626,13 @@ impl LiveMultiRangeTransfer {
             tso_rpc: std::sync::RwLock::new(tso_rpc),
             range_service,
             retired: std::sync::Mutex::new(BTreeMap::new()),
+            pending: std::sync::Mutex::new(None),
+            prepared: std::sync::Mutex::new(None),
+            committed_activation: std::sync::Mutex::new(None),
+            prepare_fault: std::sync::atomic::AtomicU8::new(PrepareTopologyFault::None as u8),
+            activation_fault: std::sync::atomic::AtomicU8::new(TopologyActivationFault::None as u8),
+            activation_irreversible: std::sync::atomic::AtomicBool::new(false),
         }
-    }
-
-    fn publish_topology(
-        &self,
-        serving_engines: &BTreeMap<crabka_gres_ranges::RangeId, SqlEngine>,
-    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
-        let mut engines = self
-            .engines
-            .write()
-            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?;
-        *engines = serving_engines
-            .iter()
-            .map(|(id, engine)| (*id, engine.clone_handle()))
-            .collect();
-        let coordinator_resources = self
-            .ranges
-            .read()
-            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
-            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
-            .cloned();
-        if let Some(horizon) = coordinator_resources.and_then(|resources| resources.tso_horizon) {
-            let persisted_max_ts = horizon.load_max_ts().map_err(|error| {
-                crabka_gres_ranges::RangeTransferError::Runtime {
-                    range_id: crabka_gres_ranges::RangeId::COORDINATOR,
-                    reason: format!("load replacement TSO horizon: {error}"),
-                }
-            })?;
-            let rpc = crabka_gres_ranges::tso_rpc_from_horizon(
-                horizon.clone(),
-                horizon.clone(),
-                horizon.epoch(),
-                persisted_max_ts,
-            )
-            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
-                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
-                reason: format!("open replacement TSO RPC: {error}"),
-            })?;
-            *self
-                .tso_rpc
-                .write()
-                .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))? =
-                Some(rpc);
-        }
-        let mut service = crabka_gres_ranges::HostedRangeService::new(
-            engines
-                .iter()
-                .map(|(id, engine)| (*id, engine.clone_handle()))
-                .collect(),
-        );
-        if let Some(tso) = self
-            .tso_rpc
-            .read()
-            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
-            .clone()
-        {
-            service = service.with_tso(tso);
-        }
-        self.range_service.replace(service);
-        Ok(())
     }
 
     fn range(
@@ -2697,11 +2719,566 @@ impl LiveMultiRangeTransfer {
 )]
 #[async_trait::async_trait]
 impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
+    async fn record_topology_activation_intent(
+        &self,
+        state: &crabka_gres_ranges::SplitState,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        use crabka_gres_ranges::control::{
+            ActivationTargetProgress, RangeZeroTopologyActivationStore, TopologyActivationPhase,
+            TopologyActivationReceipt, TopologyActivationReceiptStore,
+        };
+
+        let engine = self
+            .engines
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(SqlEngine::clone_handle)
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "range-zero engine is unavailable for activation receipt".into(),
+            })?;
+        let tenant = self
+            .ranges
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(|resources| resources.recovery_config.tenant.to_string())
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "range-zero resources are unavailable for activation receipt".into(),
+            })?;
+        let store = RangeZeroTopologyActivationStore::new(tenant.clone(), engine);
+        if let Some(existing) = store.load(&state.operation_id).await.map_err(|reason| {
+            crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("load topology activation receipt: {reason}"),
+            }
+        })? {
+            if existing.split == *state {
+                return Ok(());
+            }
+            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id: state.predecessor,
+                reason: "operation id already names a different topology activation".into(),
+            });
+        }
+        let mut targets = BTreeMap::new();
+        for descriptor in std::iter::once(&state.left).chain(state.right.iter()) {
+            targets.insert(
+                descriptor.range_id,
+                ActivationTargetProgress {
+                    range_id: descriptor.range_id,
+                    wal_generation: descriptor.wal_generation,
+                    endpoint: descriptor.endpoint.clone(),
+                    interval: descriptor.interval.clone(),
+                    replay_journal_seq: None,
+                    writer_activated: false,
+                    bootstrap_checkpoint: None,
+                },
+            );
+        }
+        let receipt = TopologyActivationReceipt {
+            tenant,
+            operation_id: state.operation_id.clone(),
+            revision: 0,
+            phase: TopologyActivationPhase::Prepared,
+            split: state.clone(),
+            source_checkpoint: None,
+            barrier_offset: None,
+            tail_sha256: None,
+            targets,
+        };
+        match store
+            .compare_and_swap(&state.operation_id, None, receipt)
+            .await
+        {
+            Ok(true) => self.activation_fault(
+                TopologyActivationFault::Prepared,
+                crabka_gres_ranges::RangeId::COORDINATOR,
+            ),
+            Ok(false) => Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "topology activation receipt raced another writer".into(),
+            }),
+            Err(reason) => Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("persist topology activation receipt: {reason}"),
+            }),
+        }
+    }
+
+    async fn record_topology_activation_checkpoint(
+        &self,
+        operation_id: &str,
+        checkpoint: &crabka_gres_ranges::CheckpointManifest,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        use crabka_gres_ranges::control::{
+            RangeZeroTopologyActivationStore, TopologyActivationReceiptStore,
+        };
+        let engine = self
+            .engines
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(SqlEngine::clone_handle)
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "range-zero engine unavailable for checkpoint receipt".into(),
+            })?;
+        let tenant = self
+            .ranges
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(|resources| resources.recovery_config.tenant.to_string())
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "range-zero resources unavailable for checkpoint receipt".into(),
+            })?;
+        let store = RangeZeroTopologyActivationStore::new(tenant, engine);
+        let mut receipt = store
+            .load(operation_id)
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("load checkpoint receipt: {reason}"),
+            })?
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "activation intent missing before checkpoint".into(),
+            })?;
+        if let Some(existing) = &receipt.source_checkpoint {
+            return if existing == checkpoint {
+                Ok(())
+            } else {
+                Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id: receipt.split.predecessor,
+                    reason: "source checkpoint differs from activation receipt".into(),
+                })
+            };
+        }
+        let expected = receipt.revision;
+        receipt.revision = receipt.revision.saturating_add(1);
+        receipt.source_checkpoint = Some(checkpoint.clone());
+        if !store
+            .compare_and_swap(operation_id, Some(expected), receipt)
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("persist checkpoint receipt: {reason}"),
+            })?
+        {
+            return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "checkpoint receipt CAS raced".into(),
+            });
+        }
+        self.activation_fault(
+            TopologyActivationFault::SourceCheckpoint,
+            crabka_gres_ranges::RangeId::COORDINATOR,
+        )
+    }
+
     fn publish_serving_topology(
         &self,
         engines: &BTreeMap<crabka_gres_ranges::RangeId, SqlEngine>,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
         self.publish_topology(engines)
+    }
+
+    fn commit_serving_topology(&self) {
+        self.commit_prepared_topology();
+    }
+
+    async fn finish_topology_activation(
+        &self,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        use crabka_gres_ranges::control::{
+            RangeZeroTopologyActivationStore, TopologyActivationPhase,
+            TopologyActivationReceiptStore,
+        };
+        let operation_id = self
+            .committed_activation
+            .lock()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .clone()
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "committed topology is missing its activation id".into(),
+            })?;
+        self.activation_fault(
+            TopologyActivationFault::TopologySwap,
+            crabka_gres_ranges::RangeId::COORDINATOR,
+        )?;
+        let engine = self
+            .engines
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(SqlEngine::clone_handle)
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "serving range-zero engine missing after topology commit".into(),
+            })?;
+        let tenant = self
+            .ranges
+            .read()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+            .map(|resources| resources.recovery_config.tenant.to_string())
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Unavailable {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "serving range-zero resources missing after topology commit".into(),
+            })?;
+        let store = RangeZeroTopologyActivationStore::new(tenant, engine);
+        let mut receipt = store
+            .load(&operation_id)
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("load committed activation receipt: {reason}"),
+            })?
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "committed activation receipt is missing".into(),
+            })?;
+        if receipt.phase == TopologyActivationPhase::TopologyCommitted {
+            return Ok(());
+        }
+        let expected = receipt.revision;
+        receipt.revision = receipt.revision.saturating_add(1);
+        receipt.phase = TopologyActivationPhase::TopologyCommitted;
+        if !store
+            .compare_and_swap(&operation_id, Some(expected), receipt)
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: format!("persist committed topology receipt: {reason}"),
+            })?
+        {
+            return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "committed topology receipt CAS raced".into(),
+            });
+        }
+        self.activation_fault(
+            TopologyActivationFault::TopologyCommitted,
+            crabka_gres_ranges::RangeId::COORDINATOR,
+        )?;
+        *self
+            .committed_activation
+            .lock()
+            .expect("committed activation lock") = None;
+        Ok(())
+    }
+
+    fn begin_serving_topology_publication(&self) {
+        self.range_service.begin_publication();
+    }
+
+    async fn activate_serving_topology(
+        &self,
+    ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+        use crabka_gres_ranges::control::{
+            RangeZeroTopologyActivationStore, TopologyActivationPhase,
+            TopologyActivationReceiptStore,
+        };
+        let pending = self
+            .pending
+            .lock()
+            .map_err(|_| range_pause_lock_error(crabka_gres_ranges::RangeId::COORDINATOR))?
+            .clone()
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                reason: "activate without pending topology".into(),
+            })?;
+        let activation_tenant = pending.left.recovery_config.tenant.to_string();
+        self.activation_irreversible
+            .store(true, std::sync::atomic::Ordering::Release);
+        for (index, (range_id, resources)) in [
+            (pending.left_id, pending.left),
+            (pending.right_id, pending.right),
+        ]
+        .into_iter()
+        .enumerate()
+        {
+            if resources.writer.is_activated() {
+                // A retry after the irreversible bind continues with durable checkpointing.
+            } else {
+                let recovered = crabka_gres_substrate::recover_live_for_range_with_restore(
+                    resources.recovery_config.clone(),
+                    resources.store.as_ref(),
+                )
+                .await
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: format!("activate canonical successor writer: {error}"),
+                    }
+                })?;
+                if recovered.generation != resources.generation {
+                    return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                        range_id,
+                        reason: format!(
+                            "activated generation {} differs from staged generation {}",
+                            recovered.generation.0, resources.generation.0
+                        ),
+                    });
+                }
+                resources
+                    .writer
+                    .activate(Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
+                        recovered.producer,
+                        resources.recovery_config.wal_topic(),
+                    )))
+                    .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: format!("bind canonical successor writer: {error}"),
+                    })?;
+            }
+
+            let receipt_engine = self
+                .prepared
+                .lock()
+                .map_err(|_| range_pause_lock_error(range_id))?
+                .as_ref()
+                .and_then(|prepared| {
+                    prepared
+                        .engines
+                        .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+                        .map(SqlEngine::clone_handle)
+                })
+                .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: "prepared range-zero engine missing during activation".into(),
+                })?;
+            use crabka_gres_ranges::control::{
+                RangeZeroTopologyActivationStore, TopologyActivationPhase,
+                TopologyActivationReceiptStore,
+            };
+            let store = RangeZeroTopologyActivationStore::new(
+                resources.recovery_config.tenant.to_string(),
+                receipt_engine,
+            );
+            let mut receipt = store
+                .load(&pending.operation_id)
+                .await
+                .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: format!("load writer activation receipt: {reason}"),
+                })?
+                .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: "writer activation receipt missing from replacement range zero".into(),
+                })?;
+            if receipt.barrier_offset.is_none() {
+                let expected = receipt.revision;
+                receipt.revision = receipt.revision.saturating_add(1);
+                receipt.phase = TopologyActivationPhase::WriterActivated;
+                receipt.source_checkpoint = Some(pending.source_checkpoint.clone());
+                receipt.barrier_offset = Some(pending.barrier_offset);
+                receipt.tail_sha256 = Some(pending.tail_sha256.clone());
+                receipt
+                    .targets
+                    .get_mut(&pending.left_id)
+                    .expect("validated left target")
+                    .replay_journal_seq = Some(pending.left_replay_journal_seq);
+                receipt
+                    .targets
+                    .get_mut(&pending.right_id)
+                    .expect("validated right target")
+                    .replay_journal_seq = Some(pending.right_replay_journal_seq);
+                if !store
+                    .compare_and_swap(&pending.operation_id, Some(expected), receipt.clone())
+                    .await
+                    .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: format!("persist activation boundary: {reason}"),
+                    })?
+                {
+                    return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: "activation boundary receipt CAS raced".into(),
+                    });
+                }
+                self.activation_fault(
+                    if index == 0 {
+                        TopologyActivationFault::FirstWriterActivated
+                    } else {
+                        TopologyActivationFault::SecondWriterActivated
+                    },
+                    range_id,
+                )?;
+            } else if receipt.barrier_offset != Some(pending.barrier_offset)
+                || receipt.tail_sha256.as_deref() != Some(pending.tail_sha256.as_str())
+            {
+                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id,
+                    reason: "staged activation boundary differs from durable receipt".into(),
+                });
+            }
+            if !receipt
+                .targets
+                .get(&range_id)
+                .is_some_and(|target| target.writer_activated)
+            {
+                let expected = receipt.revision;
+                receipt.revision = receipt.revision.saturating_add(1);
+                receipt.phase = TopologyActivationPhase::WriterActivated;
+                receipt
+                    .targets
+                    .get_mut(&range_id)
+                    .expect("validated target receipt")
+                    .writer_activated = true;
+                if !store
+                    .compare_and_swap(&pending.operation_id, Some(expected), receipt)
+                    .await
+                    .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: format!("persist writer activation: {reason}"),
+                    })?
+                {
+                    return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: "writer activation receipt CAS raced".into(),
+                    });
+                }
+                self.activation_fault(
+                    if index == 0 {
+                        TopologyActivationFault::FirstWriterActivated
+                    } else {
+                        TopologyActivationFault::SecondWriterActivated
+                    },
+                    range_id,
+                )?;
+            }
+
+            let mut receipt = store
+                .load(&pending.operation_id)
+                .await
+                .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: format!("reload activation receipt: {reason}"),
+                })?
+                .expect("activation receipt persisted");
+            if receipt
+                .targets
+                .get(&range_id)
+                .and_then(|target| target.bootstrap_checkpoint.as_ref())
+                .is_none()
+            {
+                let checkpoint = resources.checkpoint.as_ref().ok_or_else(|| {
+                    crabka_gres_ranges::RangeTransferError::Unavailable {
+                        range_id,
+                        reason: "activated successor checkpoint runtime missing".into(),
+                    }
+                })?;
+                let run = checkpoint
+                    .handle
+                    .checkpoint_from_source(
+                        Arc::clone(&resources.snapshot_source),
+                        crabka_gres_substrate::CheckpointTrigger::Manual,
+                    )
+                    .await
+                    .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: format!("write activated successor checkpoint: {error}"),
+                    })?;
+                let expected = receipt.revision;
+                receipt.revision = receipt.revision.saturating_add(1);
+                receipt
+                    .targets
+                    .get_mut(&range_id)
+                    .expect("validated target receipt")
+                    .bootstrap_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+                    range_id,
+                    covered_offset: run.metadata.covered_offset,
+                    manifest_key: run.metadata.manifest_key,
+                });
+                if !store
+                    .compare_and_swap(&pending.operation_id, Some(expected), receipt)
+                    .await
+                    .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: format!("persist successor checkpoint: {reason}"),
+                    })?
+                {
+                    return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id,
+                        reason: "successor checkpoint receipt CAS raced".into(),
+                    });
+                }
+                self.activation_fault(
+                    if index == 0 {
+                        TopologyActivationFault::FirstCheckpointDurable
+                    } else {
+                        TopologyActivationFault::SecondCheckpointDurable
+                    },
+                    range_id,
+                )?;
+            }
+        }
+        let receipt_engine = self
+            .prepared
+            .lock()
+            .map_err(|_| range_pause_lock_error(pending.predecessor))?
+            .as_ref()
+            .and_then(|prepared| {
+                prepared
+                    .engines
+                    .get(&crabka_gres_ranges::RangeId::COORDINATOR)
+                    .map(SqlEngine::clone_handle)
+            })
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: "prepared range-zero engine missing after activation".into(),
+            })?;
+        let store = RangeZeroTopologyActivationStore::new(activation_tenant, receipt_engine);
+        let mut receipt = store
+            .load(&pending.operation_id)
+            .await
+            .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: format!("load durable checkpoint phase: {reason}"),
+            })?
+            .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: "activation receipt missing after successor checkpoints".into(),
+            })?;
+        if receipt.phase != TopologyActivationPhase::CheckpointDurable {
+            if !receipt
+                .targets
+                .values()
+                .all(|target| target.bootstrap_checkpoint.is_some())
+            {
+                return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id: pending.predecessor,
+                    reason: "successor checkpoint phase advanced before every target".into(),
+                });
+            }
+            let expected = receipt.revision;
+            receipt.revision = receipt.revision.saturating_add(1);
+            receipt.phase = TopologyActivationPhase::CheckpointDurable;
+            if !store
+                .compare_and_swap(&pending.operation_id, Some(expected), receipt)
+                .await
+                .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id: pending.predecessor,
+                    reason: format!("persist durable checkpoint phase: {reason}"),
+                })?
+            {
+                return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id: pending.predecessor,
+                    reason: "durable checkpoint phase CAS raced".into(),
+                });
+            }
+            self.activation_fault(
+                TopologyActivationFault::CheckpointDurable,
+                pending.predecessor,
+            )?;
+        }
+        Ok(())
     }
 
     fn finish_serving_topology_publication(&self) {
@@ -2856,6 +3433,16 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
     }
 
     fn resume_after_drop(&self, barrier: crabka_gres_ranges::RangeTransferBarrier) {
+        if self
+            .activation_irreversible
+            .load(std::sync::atomic::Ordering::Acquire)
+        {
+            tracing::error!(
+                range_id = barrier.range_id.as_u32(),
+                "topology activation crossed writer binding; predecessor remains fail-closed for startup completion"
+            );
+            return;
+        }
         if let Err(error) = self.release_pause(barrier) {
             tracing::error!(%error, range_id = barrier.range_id.as_u32(), "resume dropped range transfer pause");
         }
@@ -2878,6 +3465,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             }
         })?;
         let stage_range = |request: crabka_gres_ranges::TableTransferRequest| async move {
+            let source_manifest = checkpoint.clone();
             let source = self.range(checkpoint.range_id)?;
             validate_staged_transfer_boundary(&request, checkpoint, tail, barrier)?;
             if source.generation.0 != request.predecessor_generation {
@@ -2967,24 +3555,13 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             )
             .with_wal_generation(request.wal_generation)
             .with_optional_advertised_endpoint(self.config.advertised_endpoint.clone());
-            let recovered = crabka_gres_substrate::recover_live_for_range_with_restore(
-                target_recovery.clone(),
-                target_store.as_ref(),
-            )
-            .await
-            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
-                range_id: request.target_range,
-                reason: format!("create successor WAL producer: {error}"),
-            })?;
-            if recovered.generation.0 != request.wal_generation {
-                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+            crabka_gres_substrate::ensure_live_wal_topic(&target_recovery)
+                .await
+                .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
                     range_id: request.target_range,
-                    reason: format!(
-                        "successor generation {} differs from descriptor generation {}",
-                        recovered.generation.0, request.wal_generation
-                    ),
-                });
-            }
+                    reason: format!("ensure staged successor WAL topic: {error}"),
+                })?;
+            let generation = crabka_gres_substrate::WriterGeneration(request.wal_generation);
             let filter = crabka_gres_substrate::CheckpointFilter::new(
                 request.interval.start,
                 request.interval.end,
@@ -2995,39 +3572,39 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             })?
             .with_physical_to_logical(plan.physical_to_logical().clone())
             .with_structural_ownership(request.target_range == state.left.range_id);
-            let _restore = crabka_gres_substrate::restore_filtered_from_manifest_and_replay_tail(
-                source_checkpoint.store.as_ref(),
-                &checkpoint.manifest_key,
-                &source_checkpoint.tenant,
-                checkpoint.covered_offset,
-                target_store.as_ref(),
-                crabka_gres_substrate::RestoreTail {
-                    current_generation: source.generation.0,
-                    log_start: None,
-                    committed_frames: tail
-                        .iter()
-                        .map(|record| crabka_gres_substrate::ReplayItem {
-                            offset: record.offset,
-                            bytes: record.bytes.clone(),
-                        })
-                        .collect(),
-                    barrier_offset: barrier.offset,
-                },
-                filter,
-            )
-            .await
-            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
-                range_id: request.target_range,
-                reason: format!("restore interval checkpoint and bounded tail: {error}"),
-            })?;
-            let writer = Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
-                recovered.producer,
-                target_recovery.wal_topic(),
-            ));
+            let restore_plan =
+                crabka_gres_substrate::restore_filtered_from_manifest_and_replay_tail(
+                    source_checkpoint.store.as_ref(),
+                    &checkpoint.manifest_key,
+                    &source_checkpoint.tenant,
+                    checkpoint.covered_offset,
+                    target_store.as_ref(),
+                    crabka_gres_substrate::RestoreTail {
+                        current_generation: source.generation.0,
+                        log_start: None,
+                        committed_frames: tail
+                            .iter()
+                            .map(|record| crabka_gres_substrate::ReplayItem {
+                                offset: record.offset,
+                                bytes: record.bytes.clone(),
+                            })
+                            .collect(),
+                        barrier_offset: barrier.offset,
+                    },
+                    filter,
+                )
+                .await
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id: request.target_range,
+                        reason: format!("restore interval checkpoint and bounded tail: {error}"),
+                    }
+                })?;
+            let writer = Arc::new(crabka_gres_substrate::DeferredWalWriter::staged());
             let snapshot_source = Arc::new(crabka_gres_substrate::CheckpointSnapshotSource::new(
-                recovered.barrier_offset,
-                recovered.next_journal_seq,
-                recovered.generation,
+                0,
+                restore_plan.replay.next_journal_seq,
+                generation,
             ));
             let checkpoint = build_range_checkpoint_runtime(
                 &self.config,
@@ -3046,22 +3623,11 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 range_id: request.target_range,
                 reason: "successor staging requires checkpoint configuration".to_owned(),
             })?;
-            let run = checkpoint
-                .handle
-                .checkpoint_from_source(
-                    Arc::clone(&snapshot_source),
-                    crabka_gres_substrate::CheckpointTrigger::Manual,
-                )
-                .await
-                .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
-                    range_id: request.target_range,
-                    reason: format!("write successor bootstrap checkpoint: {error}"),
-                })?;
             let (mut engine, committer) = build_replicated_substrate_engine_with_committer(
                 &target_store,
                 Arc::clone(&writer),
-                recovered.generation,
-                recovered.next_journal_seq,
+                generation,
+                restore_plan.replay.next_journal_seq,
                 &snapshot_source,
                 Some(Arc::clone(&checkpoint.stats)),
             )
@@ -3077,7 +3643,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     tso_store,
                     tso_committer,
                     tso_lease,
-                    recovered.generation,
+                    generation,
                 )
             });
             if let Some(horizon) = &tso_horizon {
@@ -3109,7 +3675,7 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 snapshot_source,
                 checkpoint: Some(checkpoint),
                 recovery_config: target_recovery,
-                generation: recovered.generation,
+                generation,
                 pause: Arc::new(std::sync::Mutex::new(RangePauseState::Idle)),
                 tso_horizon,
             };
@@ -3118,17 +3684,20 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 .map_err(|_| range_pause_lock_error(request.target_range))?
                 .insert(
                     request.target_range,
-                    StagedLiveRangeSuccessor { engine, resources },
+                    StagedLiveRangeSuccessor {
+                        operation_id: state.operation_id.clone(),
+                        source_checkpoint: source_manifest,
+                        barrier_offset: barrier.offset,
+                        tail_sha256: committed_tail_sha256(tail),
+                        replay_journal_seq: restore_plan.replay.next_journal_seq,
+                        engine,
+                        resources,
+                    },
                 );
             Ok(crabka_gres_ranges::StagedRangeSuccessor {
                 range_id: request.target_range,
                 endpoint: request.endpoint,
                 wal_generation: request.wal_generation,
-                bootstrap_checkpoint: crabka_gres_ranges::CheckpointManifest {
-                    range_id: request.target_range,
-                    covered_offset: run.metadata.covered_offset,
-                    manifest_key: run.metadata.manifest_key,
-                },
             })
         };
         let [left_request, right_request] = requests;
@@ -3196,20 +3765,22 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "right successor disappeared during atomic claim".to_owned(),
             }
         })?;
-        {
-            let mut ranges = self
-                .ranges
-                .write()
-                .map_err(|_| range_pause_lock_error(barrier.range_id))?;
-            if let Some(retired) = ranges.remove(&barrier.range_id) {
-                self.retired
-                    .lock()
-                    .map_err(|_| range_pause_lock_error(barrier.range_id))?
-                    .insert(barrier.range_id, retired);
-            }
-            ranges.insert(staged.left.range_id, left.resources.clone());
-            ranges.insert(staged.right.range_id, right.resources.clone());
-        }
+        *self
+            .pending
+            .lock()
+            .map_err(|_| range_pause_lock_error(barrier.range_id))? = Some(PendingLiveTopology {
+            operation_id: left.operation_id.clone(),
+            source_checkpoint: left.source_checkpoint.clone(),
+            barrier_offset: left.barrier_offset,
+            tail_sha256: left.tail_sha256.clone(),
+            predecessor: barrier.range_id,
+            left_id: staged.left.range_id,
+            left_replay_journal_seq: left.replay_journal_seq,
+            left: left.resources.clone(),
+            right_id: staged.right.range_id,
+            right_replay_journal_seq: right.replay_journal_seq,
+            right: right.resources.clone(),
+        });
         Ok(crabka_gres_ranges::ClaimedStagedSuccessors {
             left: crabka_gres_ranges::ClaimedStagedSuccessor {
                 range_id: staged.left.range_id,
@@ -3275,6 +3846,25 @@ fn validate_staged_transfer_boundary(
         });
     }
     Ok(())
+}
+
+fn committed_tail_sha256(tail: &[crabka_gres_ranges::CommittedTailRecord]) -> String {
+    use sha2::Digest;
+    let mut digest = sha2::Sha256::new();
+    for record in tail {
+        digest.update(record.offset.to_be_bytes());
+        digest.update(
+            u64::try_from(record.bytes.len())
+                .unwrap_or(u64::MAX)
+                .to_be_bytes(),
+        );
+        digest.update(&record.bytes);
+    }
+    digest
+        .finalize()
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
 }
 
 #[async_trait::async_trait]
@@ -4775,6 +5365,7 @@ mod tests {
         let dynamic = DynamicLiveRangeService::new(crabka_gres_ranges::HostedRangeService::new(
             BTreeMap::new(),
         ));
+        dynamic.begin_publication();
         dynamic.replace(crabka_gres_ranges::HostedRangeService::new(BTreeMap::from(
             [(crabka_gres_ranges::RangeId::COORDINATOR, SqlEngine::new())],
         )));

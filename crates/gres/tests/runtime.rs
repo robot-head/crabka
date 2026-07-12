@@ -587,10 +587,44 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .simple_query("INSERT INTO t1 VALUES (10)")
         .await
         .expect("write after resume");
+    let original_map = runtime.published_range_map().expect("original serving map");
+    for (index, fault) in [
+        crabka_gres::PrepareTopologyFault::LockAcquisition,
+        crabka_gres::PrepareTopologyFault::HorizonLoad,
+        crabka_gres::PrepareTopologyFault::TsoConstruction,
+        crabka_gres::PrepareTopologyFault::ServiceAssembly,
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        runtime.inject_prepare_topology_fault(fault);
+        runtime
+            .split_successors(format!("r0-prepare-fault-{index}"), command.clone())
+            .await
+            .expect_err("precommit preparation fault must abort publication");
+        assert_eq!(runtime.published_range_map(), Some(original_map.clone()));
+        let resumed_write = format!("INSERT INTO t1 VALUES ({})", 100 + index);
+        session
+            .simple_query(&resumed_write)
+            .await
+            .expect("predecessor writer resumes after preparation failure");
+        assert!(matches!(
+            runtime
+                .handle_range_request(crabka_gres_ranges::RangeRequest::Tso(
+                    crabka_gres_ranges::TsoReq::Grant { count: 1 },
+                ))
+                .await,
+            Some(crabka_gres_ranges::RangeResponse::Tso(_))
+        ));
+    }
     runtime
         .split_successors("r0-live-transfer", command)
         .await
         .expect("publish replacement r0 and right successor");
+    session
+        .simple_query("INSERT INTO t1 VALUES (11)")
+        .await
+        .expect_err("pre-split session remains fenced on the retired r0 writer");
     let after_tso = match runtime
         .handle_range_request(crabka_gres_ranges::RangeRequest::Tso(
             crabka_gres_ranges::TsoReq::Grant { count: 2 },
@@ -722,6 +756,237 @@ fn kv_from_pairs(pairs: crabka_pgkv::KvScan) -> crabka_pgkv::MemKv {
         kv.put(key, value).expect("copy raw KV pair");
     }
     kv
+}
+
+fn activation_crash_config(
+    bootstrap: String,
+    tenant: String,
+    checkpoint_root: PathBuf,
+) -> crabka_gres::SubstrateRuntimeConfig {
+    crabka_gres::SubstrateRuntimeConfig {
+        bootstrap,
+        tenant,
+        cache_dir: None,
+        checkpoints: Some(crabka_gres::CheckpointRuntimeConfig {
+            object_store: crabka_gres::CheckpointObjectStoreConfig::Local {
+                root: checkpoint_root,
+            },
+            frames_threshold: 1,
+            bytes_threshold: 1,
+            part_max_bytes: crabka_gres_substrate::DEFAULT_PART_MAX_BYTES,
+            retain_newest: 16,
+        }),
+        kafka_security: None,
+        ranges: Some("0,5".to_owned()),
+        host_ranges: None,
+        range_rpc: None,
+        advertised_endpoint: Some("127.0.0.1:7443".into()),
+    }
+}
+
+fn activation_fault_from_env(value: &str) -> crabka_gres::TopologyActivationFault {
+    match value {
+        "prepared" => crabka_gres::TopologyActivationFault::Prepared,
+        "source_checkpoint" => crabka_gres::TopologyActivationFault::SourceCheckpoint,
+        "first_writer" => crabka_gres::TopologyActivationFault::FirstWriterActivated,
+        "second_writer" => crabka_gres::TopologyActivationFault::SecondWriterActivated,
+        "first_checkpoint" => crabka_gres::TopologyActivationFault::FirstCheckpointDurable,
+        "second_checkpoint" => crabka_gres::TopologyActivationFault::SecondCheckpointDurable,
+        "checkpoint_phase" => crabka_gres::TopologyActivationFault::CheckpointDurable,
+        "topology_swap" => crabka_gres::TopologyActivationFault::TopologySwap,
+        "topology_committed" => crabka_gres::TopologyActivationFault::TopologyCommitted,
+        other => panic!("unknown activation fault {other}"),
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activation_crash_child() {
+    let Ok(fault_name) = std::env::var("CRABKA_GRES_ACTIVATION_CRASH_CHILD") else {
+        return;
+    };
+    let bootstrap = std::env::var("CRABKA_GRES_ACTIVATION_BOOTSTRAP").expect("bootstrap env");
+    let tenant = std::env::var("CRABKA_GRES_ACTIVATION_TENANT").expect("tenant env");
+    let checkpoint_root = PathBuf::from(
+        std::env::var("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT").expect("checkpoint env"),
+    );
+    let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
+        bootstrap,
+        tenant,
+        checkpoint_root,
+    ))
+    .await
+    .expect("open crash child runtime");
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("CREATE TABLE t1 (id int4)")
+        .await
+        .expect("create crash ledger");
+    for value in [7, 8, 9] {
+        session
+            .simple_query(&format!("INSERT INTO t1 VALUES ({value})"))
+            .await
+            .expect("append acknowledged crash ledger value");
+    }
+    let current_map = runtime.published_range_map().expect("crash source map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|spec| spec.range_id == RangeId::COORDINATOR)
+        .expect("crash predecessor")
+        .clone();
+    let split_at = RangeKey::table_start(TableId::new(1));
+    runtime.inject_topology_activation_fault(activation_fault_from_env(&fault_name));
+    runtime
+        .split_successors(
+            "activation-crash",
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 0,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::COORDINATOR,
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        RangeKey::MIN,
+                        Some(split_at),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(2),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(RangeId::new(2), split_at, predecessor.end),
+                },
+            },
+        )
+        .await
+        .expect_err("fault must terminate activation before normal return");
+    std::process::exit(86);
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn activation_crash_matrix_reopens_before_readiness() {
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    for (index, fault) in [
+        "prepared",
+        "source_checkpoint",
+        "first_writer",
+        "second_writer",
+        "first_checkpoint",
+        "second_checkpoint",
+        "checkpoint_phase",
+        "topology_swap",
+        "topology_committed",
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
+        let tenant = format!("activation-crash-{index}");
+        let executable = std::env::current_exe().expect("current test executable");
+        let bootstrap = broker.listen_addr().to_string();
+        let checkpoint_root = checkpoint_dir.path().to_path_buf();
+        let child_status = tokio::task::spawn_blocking({
+            let tenant = tenant.clone();
+            let bootstrap = bootstrap.clone();
+            let checkpoint_root = checkpoint_root.clone();
+            move || {
+                std::process::Command::new(executable)
+                    .args(["--exact", "activation_crash_child", "--nocapture"])
+                    .env("CRABKA_GRES_ACTIVATION_CRASH_CHILD", fault)
+                    .env("CRABKA_GRES_ACTIVATION_BOOTSTRAP", bootstrap)
+                    .env("CRABKA_GRES_ACTIVATION_TENANT", tenant)
+                    .env("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT", checkpoint_root)
+                    .status()
+                    .expect("run crash child")
+            }
+        })
+        .await
+        .expect("join crash child");
+        assert_eq!(child_status.code(), Some(86), "fault {fault}");
+
+        let config = activation_crash_config(bootstrap, tenant, checkpoint_root);
+        let runtime = crabka_gres::open_substrate_runtime(&config)
+            .await
+            .unwrap_or_else(|error| panic!("reopen after {fault}: {error}"));
+        let post_activation = index >= 2;
+        assert_eq!(
+            runtime
+                .published_range_map()
+                .expect("recovered range map")
+                .ranges()
+                .iter()
+                .any(|spec| spec.range_id == RangeId::new(2)),
+            post_activation,
+            "fault {fault} recovered the wrong ownership side"
+        );
+        let mut recovered = runtime.engine.connect();
+        let rows = recovered
+            .simple_query("SELECT id FROM t1")
+            .await
+            .unwrap_or_else(|error| panic!("query recovered ledger after {fault}: {error:?}"));
+        let mut values = rows
+            .iter()
+            .flat_map(|result| match result {
+                crabka_pgwire::engine::QueryResult::Rows { rows, .. } => rows.as_slice(),
+                _ => &[],
+            })
+            .filter_map(|row| {
+                row.first()
+                    .and_then(Option::as_ref)
+                    .map(|cell| String::from_utf8_lossy(&cell.text).into_owned())
+            })
+            .collect::<Vec<_>>();
+        values.sort();
+        assert_eq!(values, ["7", "8", "9"], "fault {fault} exact ledger");
+
+        if post_activation {
+            let repeated = crabka_gres::open_substrate_runtime(&config)
+                .await
+                .unwrap_or_else(|error| panic!("repeat reopen after {fault}: {error}"));
+            recovered
+                .simple_query("INSERT INTO t1 VALUES (99)")
+                .await
+                .expect_err("repeat recovery fences a session from the prior writer epoch");
+            assert!(
+                repeated
+                    .published_range_map()
+                    .expect("repeat recovered map")
+                    .ranges()
+                    .iter()
+                    .any(|spec| spec.range_id == RangeId::new(2)),
+                "repeat recovery after {fault} preserves successor ownership"
+            );
+            let mut repeated_session = repeated.engine.connect();
+            let repeated_rows = repeated_session
+                .simple_query("SELECT id FROM t1")
+                .await
+                .expect("query repeat recovered ledger");
+            let mut repeated_values = repeated_rows
+                .iter()
+                .flat_map(|result| match result {
+                    crabka_pgwire::engine::QueryResult::Rows { rows, .. } => rows.as_slice(),
+                    _ => &[],
+                })
+                .filter_map(|row| {
+                    row.first()
+                        .and_then(Option::as_ref)
+                        .map(|cell| String::from_utf8_lossy(&cell.text).into_owned())
+                })
+                .collect::<Vec<_>>();
+            repeated_values.sort();
+            assert_eq!(
+                repeated_values,
+                ["7", "8", "9"],
+                "repeat recovery after {fault} is idempotent"
+            );
+        }
+    }
 }
 
 #[allow(dead_code)]

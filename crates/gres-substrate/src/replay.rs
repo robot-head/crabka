@@ -288,6 +288,49 @@ mod tests {
     }
 
     #[test]
+    fn seeded_replay_decouples_generation_offsets_from_journal_sequence() {
+        let frames = |journal_seq| {
+            vec![
+                item(
+                    0,
+                    &WalFrame {
+                        journal_seq,
+                        ops: vec![WriteOp::Put {
+                            key: b"continued".to_vec(),
+                            value: b"yes".to_vec(),
+                        }],
+                    },
+                ),
+                item(
+                    1,
+                    &WalFrame {
+                        journal_seq: BARRIER_SEQ,
+                        ops: Vec::new(),
+                    },
+                ),
+            ]
+        };
+        let kv = MemKv::default();
+        let outcome = replay_committed_frames_from(&kv, frames(42), 1, 0, 42)
+            .expect("generation offset zero continues journal sequence 42");
+        assert_eq!(outcome.next_journal_seq, 43);
+        assert_eq!(kv.get(b"continued").expect("get"), Some(b"yes".to_vec()));
+
+        for found in [41, 43] {
+            let error = replay_committed_frames_from(&MemKv::default(), frames(found), 1, 0, 42)
+                .expect_err("non-exact replay seed must fail");
+            assert!(matches!(
+                error,
+                SubstrateError::SequenceGap {
+                    expected: 42,
+                    found: actual,
+                    offset: 0,
+                } if actual == found
+            ));
+        }
+    }
+
+    #[test]
     fn replay_reports_missing_own_barrier() {
         let kv = MemKv::default();
 

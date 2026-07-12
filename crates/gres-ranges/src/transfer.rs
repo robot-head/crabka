@@ -110,8 +110,6 @@ pub struct StagedRangeSuccessor {
     pub endpoint: String,
     /// Fenced WAL generation of the staged runtime.
     pub wal_generation: u64,
-    /// A checkpoint written by the successor under its own namespace.
-    pub bootstrap_checkpoint: CheckpointManifest,
 }
 
 /// Both staged halves produced from one checkpoint and one bounded tail.
@@ -209,6 +207,23 @@ pub enum RangeTransferError {
 /// foundation seam.
 #[async_trait]
 pub trait RangeTransferCapability: Send + Sync {
+    /// Durably record the complete activation intent before checkpointing or pausing.
+    async fn record_topology_activation_intent(
+        &self,
+        _state: &crate::SplitState,
+    ) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
+    /// Attach the durable source checkpoint while the predecessor can still commit receipts.
+    async fn record_topology_activation_checkpoint(
+        &self,
+        _operation_id: &str,
+        _checkpoint: &CheckpointManifest,
+    ) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
     /// Validate placement descriptors before the source writer is paused.
     fn validate_successors(
         &self,
@@ -222,6 +237,22 @@ pub trait RangeTransferCapability: Send + Sync {
         &self,
         _engines: &BTreeMap<RangeId, SqlEngine>,
     ) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
+    /// Enter the fail-closed publication guard after preparation succeeds.
+    fn begin_serving_topology_publication(&self) {}
+
+    /// Cross the irreversible writer-activation point after preparation is complete.
+    async fn activate_serving_topology(&self) -> Result<(), RangeTransferError> {
+        Ok(())
+    }
+
+    /// Commit a previously prepared topology using infallible in-memory swaps only.
+    fn commit_serving_topology(&self) {}
+
+    /// Durably mark the infallible topology swap complete through the serving range zero.
+    async fn finish_topology_activation(&self) -> Result<(), RangeTransferError> {
         Ok(())
     }
 
