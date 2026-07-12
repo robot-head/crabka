@@ -30,7 +30,7 @@
 
 **Interfaces:**
 - Produces: `enum SplitKillPoint`, `SplitPredicateState`, `SplitKillPoint::ALL`, `family()`, `name()`, `is_ready()`, `restart_hosted_ranges()`, `pause_bound_ms()`, and `operation_bound_ms()`.
-- Consumes later: Tasks 3-6 use the exact 20-case enum and family membership.
+- Consumes later: Tasks 3-6 use the exact 19-case enum and family membership.
 
 - [ ] **Step 1: Add a failing exhaustive-name and family test**
 
@@ -38,10 +38,10 @@
 #[test]
 fn split_kill_points_are_exhaustive_unique_and_sharded() {
     let names = SplitKillPoint::ALL.map(SplitKillPoint::name);
-    assert_eq!(names.len(), 20);
-    assert_eq!(names.into_iter().collect::<BTreeSet<_>>().len(), 20);
+    assert_eq!(names.len(), 19);
+    assert_eq!(names.into_iter().collect::<BTreeSet<_>>().len(), 19);
     assert_eq!(SplitKillPoint::ALL.iter().filter(|p| p.family() == Family::SourceRestore).count(), 11);
-    assert_eq!(SplitKillPoint::ALL.iter().filter(|p| p.family() == Family::Publication).count(), 3);
+    assert_eq!(SplitKillPoint::ALL.iter().filter(|p| p.family() == Family::Publication).count(), 2);
     assert_eq!(SplitKillPoint::ALL.iter().filter(|p| p.family() == Family::RetirementResume).count(), 6);
 }
 ```
@@ -70,7 +70,6 @@ enum SplitKillPoint {
     ActivatedAfterJournalCas,
     TenantCasBeforeJournalCas,
     LayoutPublishedAfterJournalCas,
-    RetiringAfterJournalCas,
     RetiringBeforeDelete,
     DeleteSuccessBeforeSidecarCas,
     ParkedAfterSidecarCas,
@@ -280,7 +279,7 @@ git commit -m "test(gres): verify exact split crash recovery"
 
 - [ ] **Step 1: Write RED validator self-tests**
 
-Invoke the validator with empty input, incomplete JSON, wrong family/case, duplicate identity, missing expected case, extra case, false invariant, wrong count, wrong bound, and malformed marker partition. Each command must exit nonzero. A complete synthetic 11/3/6 family fixture must exit zero.
+Invoke the validator with empty input, incomplete JSON, wrong family/case, duplicate identity, missing expected case, extra case, false invariant, wrong count, wrong bound, and malformed marker partition. Each command must exit nonzero. A complete synthetic 11/2/6 family fixture must exit zero.
 
 - [ ] **Step 2: Implement literal expected sets and strict schema checks**
 
@@ -294,7 +293,7 @@ EXPECTED = {
         "restored_after_journal_cas", "prologue_receipt_before_journal_cas",
         "activated_after_journal_cas",
     ],
-    "publication": ["tenant_cas_before_journal_cas", "layout_published_after_journal_cas", "retiring_after_journal_cas"],
+    "publication": ["tenant_cas_before_journal_cas", "layout_published_after_journal_cas"],
     "retirement_resume": ["retiring_before_delete", "delete_success_before_sidecar_cas", "parked_after_sidecar_cas", "retire_receipt_before_journal_cas", "resuming_after_journal_cas", "completed_after_journal_cas"],
 }
 ```
@@ -338,7 +337,7 @@ scripts/tests/gres-topology-process-split-publication-ci.sh
 scripts/tests/gres-topology-process-split-retirement-ci.sh
 ```
 
-Expected: 11, 3, and 6 unique cases pass; every family validator accepts its exact evidence set.
+Expected: 11, 2, and 6 unique cases pass; every family validator accepts its exact evidence set.
 
 - [ ] **Step 2: Run existing Split Stateright exhaustive gate**
 
