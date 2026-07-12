@@ -743,6 +743,25 @@ pub trait GresControlLike: Send + Sync {
         &self,
         record: &crabka_gres_control::TenantRecord,
     ) -> Result<(), GresControlWriteError>;
+    async fn list_split_operations(
+        &self,
+        _tenant: &crabka_gres_control::TenantName,
+    ) -> Result<Vec<crabka_gres_control::SplitOperationRecord>, GresControlWriteError> {
+        Ok(Vec::new())
+    }
+    async fn compare_and_swap_split_operation(
+        &self,
+        _expected_revision: u64,
+        _operation: &crabka_gres_control::SplitOperationRecord,
+    ) -> Result<crabka_gres_control::SplitOperationRecord, GresControlWriteError> {
+        Err(
+            crabka_gres_control::ControlError::UnsupportedRegistryMutation {
+                mutation: "compare_and_swap_split_operation",
+                reason: "control backend does not expose the split journal",
+            }
+            .into(),
+        )
+    }
 }
 
 struct KafkaGresControl {
@@ -791,6 +810,31 @@ impl GresControlLike for KafkaGresControl {
             .validate(record)
             .await
             .map_err(GresControlWriteError::CheckpointManifest)
+    }
+
+    async fn list_split_operations(
+        &self,
+        tenant: &crabka_gres_control::TenantName,
+    ) -> Result<Vec<crabka_gres_control::SplitOperationRecord>, GresControlWriteError> {
+        Ok(self
+            .registry
+            .lock()
+            .await
+            .list_split_operations(tenant.as_str())
+            .await?)
+    }
+
+    async fn compare_and_swap_split_operation(
+        &self,
+        expected_revision: u64,
+        operation: &crabka_gres_control::SplitOperationRecord,
+    ) -> Result<crabka_gres_control::SplitOperationRecord, GresControlWriteError> {
+        Ok(self
+            .registry
+            .lock()
+            .await
+            .compare_and_swap_split_operation(Some(expected_revision), operation)
+            .await?)
     }
 }
 
