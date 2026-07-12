@@ -477,6 +477,266 @@ pub(super) async fn copy_must_activate_before_bind(
     Ok(())
 }
 
+/// Execute the post-MustActivate state machine. `lib.rs` deliberately delegates the complete
+/// protocol here so producer ownership and receipt transitions have one implementation home.
+pub(super) async fn activate_serving_topology(
+    transfer: &LiveMultiRangeTransfer,
+) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+    let pending = transfer
+        .pending
+        .lock()
+        .map_err(|_| range_pause_lock_error(RangeId::COORDINATOR))?
+        .clone()
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id: RangeId::COORDINATOR,
+            reason: "activate without pending topology".into(),
+        })?;
+    for (index, (range_id, resources)) in [
+        (pending.left_id, pending.left.clone()),
+        (pending.right_id, pending.right.clone()),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        if !resources.writer.is_activated() {
+            transfer.activation_fault(TopologyActivationFault::BeforeProducerInit, range_id)?;
+            let recovered = crabka_gres_substrate::recover_live_for_range_with_restore(
+                resources.recovery_config.clone(),
+                resources.store.as_ref(),
+            )
+            .await
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id,
+                reason: format!("activate canonical successor writer: {error}"),
+            })?;
+            if recovered.generation != resources.generation {
+                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id,
+                    reason: format!(
+                        "activated generation {} differs from staged generation {}",
+                        recovered.generation.0, resources.generation.0
+                    ),
+                });
+            }
+            transfer.activation_fault(TopologyActivationFault::AfterProducerInit, range_id)?;
+            let canonical = Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
+                recovered.producer,
+                resources.recovery_config.wal_topic(),
+            ));
+            if range_id == RangeId::COORDINATOR {
+                copy_must_activate_before_bind(transfer, &pending, Arc::clone(&canonical)).await?;
+            }
+            transfer.activation_fault(TopologyActivationFault::BeforeDeferredBind, range_id)?;
+            resources.writer.activate(canonical).map_err(|error| {
+                crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: format!("bind canonical successor writer: {error}"),
+                }
+            })?;
+            transfer.activation_fault(TopologyActivationFault::AfterDeferredBind, range_id)?;
+        }
+
+        let store = prepared_receipt_store(transfer, &pending, range_id)?;
+        let mut receipt = load_transfer_receipt(&store, &pending.operation_id, range_id).await?;
+        if receipt.barrier_offset != Some(pending.barrier_offset)
+            || receipt.tail_sha256.as_deref() != Some(pending.tail_sha256.as_str())
+        {
+            return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id,
+                reason: "staged activation boundary differs from durable receipt".into(),
+            });
+        }
+        if !receipt.targets[&range_id].writer_activated {
+            let expected = receipt.revision;
+            receipt.revision = receipt.revision.checked_add(1).ok_or_else(|| {
+                crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: "activation receipt revision overflow".into(),
+                }
+            })?;
+            receipt.phase = TopologyActivationPhase::WriterActivated;
+            receipt
+                .targets
+                .get_mut(&range_id)
+                .expect("target")
+                .writer_activated = true;
+            cas_transfer_receipt(
+                &store,
+                &pending.operation_id,
+                expected,
+                receipt,
+                range_id,
+                "writer activation",
+            )
+            .await?;
+            transfer.activation_fault(
+                if index == 0 {
+                    TopologyActivationFault::FirstWriterActivated
+                } else {
+                    TopologyActivationFault::SecondWriterActivated
+                },
+                range_id,
+            )?;
+        }
+
+        let mut receipt = load_transfer_receipt(&store, &pending.operation_id, range_id).await?;
+        if receipt.targets[&range_id].bootstrap_checkpoint.is_none() {
+            let checkpoint = resources.checkpoint.as_ref().ok_or_else(|| {
+                crabka_gres_ranges::RangeTransferError::Unavailable {
+                    range_id,
+                    reason: "activated successor checkpoint runtime missing".into(),
+                }
+            })?;
+            let run = checkpoint
+                .handle
+                .checkpoint_from_source(
+                    Arc::clone(&resources.snapshot_source),
+                    crabka_gres_substrate::CheckpointTrigger::Manual,
+                )
+                .await
+                .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: format!("write activated successor checkpoint: {error}"),
+                })?;
+            let expected = receipt.revision;
+            receipt.revision = receipt.revision.checked_add(1).ok_or_else(|| {
+                crabka_gres_ranges::RangeTransferError::Runtime {
+                    range_id,
+                    reason: "activation receipt revision overflow".into(),
+                }
+            })?;
+            receipt
+                .targets
+                .get_mut(&range_id)
+                .expect("target")
+                .bootstrap_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+                range_id,
+                covered_offset: run.metadata.covered_offset,
+                manifest_key: run.metadata.manifest_key,
+            });
+            cas_transfer_receipt(
+                &store,
+                &pending.operation_id,
+                expected,
+                receipt,
+                range_id,
+                "successor checkpoint",
+            )
+            .await?;
+            transfer.activation_fault(
+                if index == 0 {
+                    TopologyActivationFault::FirstCheckpointDurable
+                } else {
+                    TopologyActivationFault::SecondCheckpointDurable
+                },
+                range_id,
+            )?;
+        }
+    }
+
+    let store = prepared_receipt_store(transfer, &pending, pending.predecessor)?;
+    let mut receipt =
+        load_transfer_receipt(&store, &pending.operation_id, pending.predecessor).await?;
+    if receipt.phase != TopologyActivationPhase::CheckpointDurable {
+        if !receipt
+            .targets
+            .values()
+            .all(|target| target.writer_activated && target.bootstrap_checkpoint.is_some())
+        {
+            return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: "successor checkpoint phase advanced before every target".into(),
+            });
+        }
+        let expected = receipt.revision;
+        receipt.revision = receipt.revision.checked_add(1).ok_or_else(|| {
+            crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: pending.predecessor,
+                reason: "activation receipt revision overflow".into(),
+            }
+        })?;
+        receipt.phase = TopologyActivationPhase::CheckpointDurable;
+        cas_transfer_receipt(
+            &store,
+            &pending.operation_id,
+            expected,
+            receipt,
+            pending.predecessor,
+            "durable checkpoint phase",
+        )
+        .await?;
+        transfer.activation_fault(
+            TopologyActivationFault::CheckpointDurable,
+            pending.predecessor,
+        )?;
+    }
+    Ok(())
+}
+
+fn prepared_receipt_store(
+    transfer: &LiveMultiRangeTransfer,
+    pending: &PendingLiveTopology,
+    range_id: RangeId,
+) -> Result<RangeZeroTopologyActivationStore, crabka_gres_ranges::RangeTransferError> {
+    let engine = transfer
+        .prepared
+        .lock()
+        .map_err(|_| range_pause_lock_error(range_id))?
+        .as_ref()
+        .and_then(|prepared| prepared.engines.get(&RangeId::COORDINATOR))
+        .map(SqlEngine::clone_handle)
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: "prepared range-zero engine missing during activation".into(),
+        })?;
+    Ok(RangeZeroTopologyActivationStore::new(
+        pending.left.recovery_config.tenant.to_string(),
+        engine,
+    ))
+}
+
+async fn load_transfer_receipt(
+    store: &RangeZeroTopologyActivationStore,
+    operation_id: &str,
+    range_id: RangeId,
+) -> Result<TopologyActivationReceipt, crabka_gres_ranges::RangeTransferError> {
+    store
+        .load(operation_id)
+        .await
+        .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: format!("load activation receipt: {reason}"),
+        })?
+        .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: "activation receipt is missing".into(),
+        })
+}
+
+async fn cas_transfer_receipt(
+    store: &RangeZeroTopologyActivationStore,
+    operation_id: &str,
+    expected: u64,
+    receipt: TopologyActivationReceipt,
+    range_id: RangeId,
+    transition: &str,
+) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+    if !store
+        .compare_and_swap(operation_id, Some(expected), receipt)
+        .await
+        .map_err(|reason| crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: format!("persist {transition}: {reason}"),
+        })?
+    {
+        return Err(crabka_gres_ranges::RangeTransferError::Runtime {
+            range_id,
+            reason: format!("{transition} receipt CAS raced"),
+        });
+    }
+    Ok(())
+}
+
 /// Read range zero without constructing a producer so startup can select the already
 /// activated writer generation instead of attempting to resurrect a fenced predecessor.
 pub(super) async fn discover_activation_receipt(
