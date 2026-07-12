@@ -160,8 +160,9 @@ pub fn subject_sharded_extended_case(
 fn is_create_table_candidate(sql: &str) -> bool {
     use crabka_pgparser::token::{Keyword, Token};
 
-    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
-        return has_unmistakable_create_table_prefix(sql);
+    let tokens = match crabka_pgparser::lexer::lex(sql) {
+        Ok(tokens) => tokens,
+        Err(error) => lex_valid_prefix(sql, error.position),
     };
     matches!(tokens.first(), Some((Token::Keyword(Keyword::Create), _)))
         && tokens.iter().take(8).any(|(token, _)| {
@@ -169,28 +170,18 @@ fn is_create_table_candidate(sql: &str) -> bool {
         })
 }
 
-fn has_unmistakable_create_table_prefix(mut sql: &str) -> bool {
+fn lex_valid_prefix(sql: &str, mut end: usize) -> Vec<(crabka_pgparser::token::Token, usize)> {
     loop {
-        sql = sql.trim_start();
-        if let Some(comment) = sql.strip_prefix("--") {
-            let Some((_, rest)) = comment.split_once('\n') else {
-                return false;
-            };
-            sql = rest;
-        } else if let Some(comment) = sql.strip_prefix("/*") {
-            let Some((_, rest)) = comment.split_once("*/") else {
-                return false;
-            };
-            sql = rest;
-        } else {
-            break;
+        while !sql.is_char_boundary(end) {
+            end -= 1;
+        }
+        match crabka_pgparser::lexer::lex(&sql[..end]) {
+            Ok(tokens) => return tokens,
+            Err(error) if error.position < end => end = error.position,
+            Err(_) if end > 0 => end -= 1,
+            Err(_) => return Vec::new(),
         }
     }
-    let mut words = sql.split_whitespace();
-    words
-        .next()
-        .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
-        && words.take(7).any(|word| word.eq_ignore_ascii_case("TABLE"))
 }
 
 #[derive(Debug, Error)]
@@ -1275,6 +1266,10 @@ mod tests {
             .expect_err("unsupported table DDL must not pass through unchanged");
         subject_sharded_statement("CREATE TABLE lexical (label text DEFAULT 'unterminated)")
             .expect_err("lexer-level malformed table DDL must not pass through unchanged");
+        subject_sharded_statement(
+            "CREATE/* gap */TABLE lexical_comment (label text DEFAULT 'unterminated)",
+        )
+        .expect_err("comments must not hide lexer-level malformed table DDL");
     }
 
     #[test]
