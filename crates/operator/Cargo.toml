@@ -30,6 +30,7 @@ clap = { workspace = true, features = ["env"] }
 crabka-client-admin = { version = "0.3.9", path = "../client-admin" }
 crabka-client-producer = { version = "0.3.9", path = "../client-producer" }
 crabka-gres-control = { version = "0.3.9", path = "../gres-control" }
+crabka-gres-ranges = { version = "0.3.9", path = "../gres-ranges" }
 crabka-gres-substrate = { version = "0.3.9", path = "../gres-substrate" }
 crabka-logfmt = { version = "0.3.8", path = "../logfmt" }
 crabka-metadata = { version = "0.3.8", path = "../metadata" }

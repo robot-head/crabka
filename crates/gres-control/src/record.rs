@@ -488,6 +488,9 @@ pub struct TenantRecord {
     pub wal_generation: u64,
     /// Ordered row-range placement discovered by range computes.
     pub ranges: Vec<RangeLayoutEntry>,
+    /// Split predecessors whose old WAL generations are being retired after cutover.
+    #[serde(default)]
+    pub range_retirements: Vec<RangeRetirementRecord>,
     /// Hash-sharding placement metadata and co-location constraints.
     pub hash_placements: Vec<HashPlacement>,
     /// Optional maximum checkpoint size that remains eligible for suspension.
@@ -531,6 +534,33 @@ pub struct RangeRetirement {
     pub operation_id: String,
     pub retiring_generation: u64,
     pub checkpoint: FinalCheckpoint,
+}
+
+/// Durable sidecar for retiring a predecessor without changing successor serving state.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeRetirementRecord {
+    pub operation_id: String,
+    pub source_range_id: u32,
+    pub source_generation: u64,
+    pub checkpoint: RangeRetirementCheckpoint,
+    pub successor_ranges: Vec<(u32, u64)>,
+    pub phase: RangeRetirementPhase,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeRetirementCheckpoint {
+    pub manifest_key: String,
+    pub covered_offset: i64,
+    pub barrier_offset: i64,
+    pub tail_sha256: String,
+    pub marker_digest: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeRetirementPhase {
+    Parking,
+    Parked,
 }
 
 impl RangeLayoutEntry {
@@ -747,6 +777,7 @@ impl TenantRecord {
             idle_seconds: None,
             wal_generation: 0,
             ranges: Vec::new(),
+            range_retirements: Vec::new(),
             hash_placements: Vec::new(),
             suspend_max_checkpoint_bytes: None,
             final_checkpoint: None,
@@ -791,6 +822,35 @@ impl TenantRecord {
             ));
         }
         ensure_range_layout_valid(&self.ranges)?;
+        let mut retirement_keys = std::collections::BTreeSet::new();
+        for retirement in &self.range_retirements {
+            if retirement.operation_id.is_empty()
+                || retirement.checkpoint.manifest_key.is_empty()
+                || retirement.checkpoint.covered_offset < 0
+                || retirement.checkpoint.barrier_offset < retirement.checkpoint.covered_offset
+                || retirement.checkpoint.tail_sha256.is_empty()
+                || retirement.checkpoint.marker_digest.is_empty()
+                || retirement.successor_ranges.is_empty()
+                || !retirement_keys.insert((
+                    retirement.operation_id.as_str(),
+                    retirement.source_range_id,
+                    retirement.source_generation,
+                ))
+                || retirement
+                    .successor_ranges
+                    .iter()
+                    .any(|(range_id, generation)| {
+                        !self.ranges.iter().any(|range| {
+                            range.range_id == *range_id && range.wal_generation == *generation
+                        })
+                    })
+            {
+                return Err(ControlError::invalid_field(
+                    "range_retirements",
+                    "retirement identity, evidence, or successor topology is invalid",
+                ));
+            }
+        }
         ensure_hash_placements_valid(&self.hash_placements)?;
         if let Some(checkpoint) = &self.final_checkpoint {
             checkpoint.ensure_valid()?;
@@ -894,6 +954,87 @@ impl TenantRecord {
             return Ok(self);
         }
         self.ranges = ranges;
+        self.record_version = self.next_record_version()?;
+        self.ensure_valid()?;
+        Ok(self)
+    }
+
+    /// Atomically publish an exact successor layout and a predecessor-retirement intent.
+    pub fn publish_split_target_with_retirement(
+        mut self,
+        operation_id: impl Into<String>,
+        source_range_id: u32,
+        source_generation: u64,
+        checkpoint: RangeRetirementCheckpoint,
+        target_layout: Vec<RangeLayoutEntry>,
+    ) -> Result<Self, ControlError> {
+        let operation_id = operation_id.into();
+        ensure_range_layout_valid(&target_layout)?;
+        if operation_id.is_empty()
+            || checkpoint.manifest_key.is_empty()
+            || checkpoint.covered_offset < 0
+            || checkpoint.barrier_offset < checkpoint.covered_offset
+            || checkpoint.tail_sha256.is_empty()
+            || checkpoint.marker_digest.is_empty()
+        {
+            return Err(ControlError::invalid_field(
+                "range_retirements",
+                "operation id and complete receipt evidence must identify the predecessor",
+            ));
+        }
+        if let Some(existing) = self.range_retirements.iter().find(|retirement| {
+            retirement.operation_id == operation_id
+                && retirement.source_range_id == source_range_id
+                && retirement.source_generation == source_generation
+        }) {
+            if self.ranges == target_layout && existing.phase == RangeRetirementPhase::Parking {
+                return Ok(self);
+            }
+            return Err(ControlError::invalid_field(
+                "range_retirements",
+                "operation identity was reused with different cutover state",
+            ));
+        }
+        let successor_ranges = target_layout
+            .iter()
+            .map(|range| (range.range_id, range.wal_generation))
+            .collect();
+        self.ranges = target_layout;
+        self.range_retirements.push(RangeRetirementRecord {
+            operation_id,
+            source_range_id,
+            source_generation,
+            checkpoint,
+            successor_ranges,
+            phase: RangeRetirementPhase::Parking,
+        });
+        self.record_version = self.next_record_version()?;
+        self.ensure_valid()?;
+        Ok(self)
+    }
+
+    /// Confirm that one exact predecessor WAL generation is absent.
+    pub fn confirm_split_predecessor_parked(
+        mut self,
+        operation_id: &str,
+        source_range_id: u32,
+        source_generation: u64,
+    ) -> Result<Self, ControlError> {
+        let retirement = self
+            .range_retirements
+            .iter_mut()
+            .find(|retirement| {
+                retirement.operation_id == operation_id
+                    && retirement.source_range_id == source_range_id
+                    && retirement.source_generation == source_generation
+            })
+            .ok_or_else(|| {
+                ControlError::invalid_field("range_retirements", "retirement is missing")
+            })?;
+        if retirement.phase == RangeRetirementPhase::Parked {
+            return Ok(self);
+        }
+        retirement.phase = RangeRetirementPhase::Parked;
         self.record_version = self.next_record_version()?;
         self.ensure_valid()?;
         Ok(self)
@@ -2130,5 +2271,77 @@ mod tests {
         let mut record = record(1);
         record.ranges = vec![malformed];
         assert!(record.ensure_valid().is_err());
+    }
+
+    #[test]
+    fn split_cutover_keeps_reused_successor_serving_while_old_generation_parks() {
+        let source = RangeLayoutEntry {
+            range_id: 0,
+            end_key: None,
+            endpoint: "old-r0:7432".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let left = RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(RangeBoundary::new(7, 50)),
+            endpoint: "new-r0:7432".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let right = RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: "new-r1:7432".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let current = record(9).with_range_layout(vec![source]).unwrap();
+        let checkpoint = RangeRetirementCheckpoint {
+            covered_offset: 33,
+            barrier_offset: 35,
+            manifest_key: "tenant-a/r0/g4/manifest".into(),
+            tail_sha256: "tail".into(),
+            marker_digest: "markers".into(),
+        };
+
+        let cutover = current
+            .publish_split_target_with_retirement(
+                "split-1",
+                0,
+                4,
+                checkpoint,
+                vec![left.clone(), right.clone()],
+            )
+            .unwrap();
+
+        assert_eq!(cutover.ranges, vec![left, right]);
+        assert!(
+            cutover
+                .ranges
+                .iter()
+                .all(|range| range.lifecycle == RangeLifecycle::Serving)
+        );
+        assert_eq!(cutover.range_retirements.len(), 1);
+        assert_eq!(
+            cutover.range_retirements[0].phase,
+            RangeRetirementPhase::Parking
+        );
+        let parked = cutover
+            .confirm_split_predecessor_parked("split-1", 0, 4)
+            .unwrap();
+        assert_eq!(
+            parked.range_retirements[0].phase,
+            RangeRetirementPhase::Parked
+        );
+        assert!(
+            parked
+                .ranges
+                .iter()
+                .all(|range| range.lifecycle == RangeLifecycle::Serving)
+        );
     }
 }

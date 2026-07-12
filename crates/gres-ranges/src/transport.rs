@@ -881,6 +881,10 @@ pub struct FramedTcpClient {
 #[derive(Debug, Clone)]
 enum RangeClientMode {
     Tls(RangeTlsClientConfig),
+    PreparedTls {
+        config: Arc<rustls::ClientConfig>,
+        server_name: String,
+    },
     #[cfg(test)]
     Plaintext,
 }
@@ -900,6 +904,32 @@ impl Default for FramedTcpClient {
 }
 
 impl FramedTcpClient {
+    pub fn with_tls_pem(
+        cert_chain_pem: &[u8],
+        private_key_pem: &[u8],
+        trust_roots_pem: &[u8],
+        server_name: String,
+    ) -> Result<Self, TransportError> {
+        if server_name.trim().is_empty() {
+            return Err(TransportError::Tls(
+                "range TLS requires a non-empty server name".into(),
+            ));
+        }
+        let config = crabka_security::TlsConfig::build_client_config_from_pem(
+            cert_chain_pem,
+            private_key_pem,
+            trust_roots_pem,
+        )
+        .map_err(|error| TransportError::Tls(error.to_string()))?;
+        Ok(Self {
+            timeout: DEFAULT_RPC_TIMEOUT,
+            mode: RangeClientMode::PreparedTls {
+                config,
+                server_name,
+            },
+        })
+    }
+
     /// Build a plaintext client with an explicit wire-silence timeout for unit tests.
     #[cfg(test)]
     #[must_use]
@@ -942,6 +972,22 @@ impl FramedTcpClient {
                     .map_err(|error| TransportError::Tls(error.to_string()))?;
                 call_stream(stream, request, self.timeout).await
             }
+            RangeClientMode::PreparedTls {
+                config,
+                server_name,
+            } => {
+                let connector = TlsConnector::from(Arc::clone(config));
+                let server_name = rustls::pki_types::ServerName::try_from(server_name.as_str())
+                    .map_err(|error| {
+                        TransportError::Tls(format!("invalid range server name: {error}"))
+                    })?
+                    .to_owned();
+                let stream = timeout(self.timeout, connector.connect(server_name, stream))
+                    .await
+                    .map_err(|_| TransportError::Timeout(self.timeout))?
+                    .map_err(|error| TransportError::Tls(error.to_string()))?;
+                call_stream(stream, request, self.timeout).await
+            }
             #[cfg(test)]
             RangeClientMode::Plaintext => call_stream(stream, request, self.timeout).await,
         }
@@ -964,6 +1010,22 @@ impl FramedTcpClient {
                             TransportError::Tls(format!("invalid range server name: {error}"))
                         })?
                         .to_owned();
+                let stream = timeout(self.timeout, connector.connect(server_name, stream))
+                    .await
+                    .map_err(|_| TransportError::Timeout(self.timeout))?
+                    .map_err(|error| TransportError::Tls(error.to_string()))?;
+                call_sql_stream_into(stream, request, self.timeout, sink).await
+            }
+            RangeClientMode::PreparedTls {
+                config,
+                server_name,
+            } => {
+                let connector = TlsConnector::from(Arc::clone(config));
+                let server_name = rustls::pki_types::ServerName::try_from(server_name.as_str())
+                    .map_err(|error| {
+                        TransportError::Tls(format!("invalid range server name: {error}"))
+                    })?
+                    .to_owned();
                 let stream = timeout(self.timeout, connector.connect(server_name, stream))
                     .await
                     .map_err(|_| TransportError::Timeout(self.timeout))?

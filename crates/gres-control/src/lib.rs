@@ -12,7 +12,8 @@ pub use pgdog::{
 };
 pub use record::{
     FinalCheckpoint, HashPlacement, RangeBoundary, RangeLayoutEntry, RangeLayoutMerge,
-    RangeLayoutMutation, RangeLayoutSplit, RangeLifecycle, RangeRetirement, RegistryKey,
+    RangeLayoutMutation, RangeLayoutSplit, RangeLifecycle, RangeRetirement,
+    RangeRetirementCheckpoint, RangeRetirementPhase, RangeRetirementRecord, RegistryKey,
     SplitOperationEvidence, SplitOperationPhase, SplitOperationPlan, SplitOperationRecord,
     SplitState, SqlUser, TENANT_CONFIG_TOPIC_PREFIX, TENANT_REGISTRY_TOPIC, TenantId, TenantName,
     TenantRecord, TenantState, decode_registry_record, decode_tenant_config_record,

@@ -24,6 +24,7 @@ pub use transport::{serve_tcp, spawn_loopback};
 
 pub use self::{
     barrier::{BarrierError, Range0Barrier, Range0EndSampler},
+    control::AuthorizedSplitIntent,
     coordinator::{
         LocalCoordinator, LocalCoordinatorError, LocalTransactionRecord, NetCoordinator,
         NetDecision, PreparedParticipant, TransactionDecision, TransactionPhase, TxnRpc,
@@ -71,9 +72,9 @@ pub use self::{
         TableTransferRequest, ValidatedSplitTransferPlan,
     },
     transport::{
-        FramedTcpClient, RangeRequest, RangeResponse, RangeService, RangeTlsClientConfig,
-        RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError, TsoReq, TsoResp,
-        TxnReq, TxnResp, WireErrorKind, serve_tls,
+        FramedTcpClient, RangeControlOperation, RangeControlReq, RangeControlResp, RangeRequest,
+        RangeResponse, RangeService, RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq,
+        ScanCursorResp, TransportError, TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, serve_tls,
     },
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon, TsoError,

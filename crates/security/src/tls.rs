@@ -66,6 +66,30 @@ pub enum TlsError {
 }
 
 impl TlsConfig {
+    /// Build an mTLS client directly from Kubernetes Secret PEM bytes.
+    pub fn build_client_config_from_pem(
+        cert_chain_pem: &[u8],
+        private_key_pem: &[u8],
+        trust_roots_pem: &[u8],
+    ) -> Result<Arc<rustls::ClientConfig>, TlsError> {
+        let mut roots = rustls::RootCertStore::empty();
+        for cert in rustls_pemfile::certs(&mut std::io::Cursor::new(trust_roots_pem)) {
+            roots.add(cert.map_err(TlsError::Io)?)?;
+        }
+        let certs = rustls_pemfile::certs(&mut std::io::Cursor::new(cert_chain_pem))
+            .collect::<Result<Vec<_>, _>>()?;
+        if certs.is_empty() {
+            return Err(TlsError::NoCerts(PathBuf::from("<memory>")));
+        }
+        let key = rustls_pemfile::private_key(&mut std::io::Cursor::new(private_key_pem))?
+            .ok_or_else(|| TlsError::NoPrivateKey(PathBuf::from("<memory>")))?;
+        Ok(Arc::new(
+            rustls::ClientConfig::builder()
+                .with_root_certificates(roots)
+                .with_client_auth_cert(certs, key)?,
+        ))
+    }
+
     // TLS server-config setup. skip_all keeps the loaded certs/key material out
     // of span fields; only the non-sensitive client-auth mode is recorded.
     // `err` surfaces cert/key loading + verifier-build failures (Debug).

@@ -37,6 +37,10 @@ use kube::{
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
+use crate::controller::gres_split_operation::{
+    MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
+    reconcile_one_rpc_phase,
+};
 use crate::{
     context::Context,
     controller::{
@@ -178,7 +182,24 @@ async fn reconcile_inner(
     let cfg_topic = tenant_config_topic(&tenant_name);
     let control = ctx.gres_control_for(&cluster, &bootstrap).await?;
     let current_record = control.get_tenant(&tenant_name).await?;
-    let tenant_ranges = reconcile_ranges(current_record.as_ref(), &spec_ranges);
+    let split_operations = active_operations(control.list_split_operations(&tenant_name).await?);
+    let active_split = split_operations.first().cloned();
+    let tenant_ranges = active_split
+        .as_ref()
+        .filter(|operation| operation.phase >= crabka_gres_control::SplitOperationPhase::Paused)
+        .and_then(|operation| operation.plan.as_ref())
+        .map_or_else(
+            || reconcile_ranges(current_record.as_ref(), &spec_ranges),
+            |plan| {
+                plan.target_layout
+                    .iter()
+                    .map(|range| GresTenantRangeSpec {
+                        range_id: range.range_id,
+                        end_key: range.end_key.map(range_key_from_boundary),
+                    })
+                    .collect()
+            },
+        );
     let lifecycle_state = current_record
         .as_ref()
         .map_or_else(|| requested_state(&obj), |record| record.state);
@@ -358,6 +379,10 @@ async fn reconcile_inner(
         {
             // The fenced parking intent was committed before deleting any WAL.
             // Do not issue a second replacement against the stale pre-park view.
+        } else if active_split.is_some() {
+            if let Some(current) = current_record.as_ref() {
+                record = current.clone();
+            }
         } else if tenant_record_changed(current_record.as_ref(), &record) {
             record = control
                 .replace_tenant_if_version(
@@ -385,6 +410,19 @@ async fn reconcile_inner(
             range_tls_hash.as_deref(),
         )
         .await?;
+        if deployments_ready && let Some(operation) = active_split.as_ref() {
+            let mutation_client = operator_control_mutation_client(&ctx, &ns, &obj).await?;
+            if operation.phase == crabka_gres_control::SplitOperationPhase::Activated {
+                reconcile_activated_cutover(&control, operation)
+                    .await
+                    .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+            } else {
+                reconcile_one_rpc_phase(&control, &mutation_client, operation)
+                    .await
+                    .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+            }
+            return Ok(Action::requeue(LIFECYCLE_REQUEUE));
+        }
         apply_object(
             &policy_api,
             &network_policy_name(&name),
@@ -456,6 +494,37 @@ async fn reconcile_range_tls_secret(
     let (secret, hash) = render_range_tls_secret(obj, existing.as_ref())?;
     apply_object(&api, &name, &secret).await?;
     Ok(hash)
+}
+
+async fn operator_control_mutation_client(
+    ctx: &Context,
+    namespace: &str,
+    obj: &GresTenant,
+) -> Result<MtlsRangeMutationClient, ReconcileError> {
+    let api: Api<Secret> = Api::namespaced(ctx.client.clone(), namespace);
+    let range_secret = api.get(&range_tls_secret_name(&obj.name_any())).await?;
+    let operator_name = operator_control_tls_secret_name(&obj.name_any());
+    let existing = api.get_opt(&operator_name).await?;
+    let secret = render_operator_control_tls_secret(obj, &range_secret, existing.as_ref())?;
+    apply_object(&api, &operator_name, &secret).await?;
+    let data = secret.data.as_ref().ok_or_else(|| {
+        ReconcileError::Malformed("operator control TLS secret has no data".into())
+    })?;
+    let bytes = |key: &str| {
+        data.get(key)
+            .map(|value| value.0.as_slice())
+            .ok_or_else(|| {
+                ReconcileError::Malformed(format!("operator control TLS secret is missing {key}"))
+            })
+    };
+    let client = crabka_gres_ranges::FramedTcpClient::with_tls_pem(
+        bytes("tls.crt")?,
+        bytes("tls.key")?,
+        bytes("ca.crt")?,
+        format!("{}.range.internal", obj.name_any()),
+    )
+    .map_err(|error| ReconcileError::Malformed(format!("operator control TLS: {error}")))?;
+    Ok(MtlsRangeMutationClient::new(client))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -607,6 +676,47 @@ async fn park_retiring_ranges(
     record: &mut TenantRecord,
     current: Option<&TenantRecord>,
 ) -> Result<ParkingProgress, ReconcileError> {
+    if let Some(current) = current.filter(|current| {
+        current.range_retirements.iter().any(|retirement| {
+            retirement.phase == crabka_gres_control::RangeRetirementPhase::Parking
+        })
+    }) {
+        *record = current.clone();
+    }
+    let split_retirements = record
+        .range_retirements
+        .iter()
+        .filter(|retirement| retirement.phase == crabka_gres_control::RangeRetirementPhase::Parking)
+        .map(|retirement| {
+            (
+                retirement.operation_id.clone(),
+                retirement.source_range_id,
+                retirement.source_generation,
+            )
+        })
+        .collect::<Vec<_>>();
+    for (operation_id, range_id, generation) in split_retirements {
+        if record.state != TenantState::Active {
+            return Err(ReconcileError::Malformed(
+                "split predecessor retirement requires an active tenant".into(),
+            ));
+        }
+        let topic = wal_topic_for_generation(tenant, range_id, generation);
+        if topic_exists(admin, &topic).await? {
+            delete_wal_topics(admin, tenant, &[range_id], generation).await?;
+        }
+        if topic_exists(admin, &topic).await? {
+            return Ok(ParkingProgress::DeletionPending);
+        }
+        let expected = record.record_version;
+        let parked =
+            record
+                .clone()
+                .confirm_split_predecessor_parked(&operation_id, range_id, generation)?;
+        *record = control
+            .replace_tenant_if_version(&parked, Some(expected))
+            .await?;
+    }
     if let Some(current) = current.filter(|current| {
         current
             .ranges
@@ -870,6 +980,9 @@ fn build_tenant_record(
         record.endpoint.clone_from(&current.endpoint);
         record.bucket_prefix.clone_from(&current.bucket_prefix);
         record.hash_placements.clone_from(&current.hash_placements);
+        record
+            .range_retirements
+            .clone_from(&current.range_retirements);
         record
             .final_checkpoint
             .clone_from(&current.final_checkpoint);
@@ -1163,6 +1276,10 @@ fn range_tls_secret_name(name: &str) -> String {
     format!("{name}-gres-range-tls")
 }
 
+fn operator_control_tls_secret_name(name: &str) -> String {
+    format!("{name}-gres-operator-control-tls")
+}
+
 fn range_tls_identity(obj: &GresTenant) -> String {
     format!("{}|{}.range.internal", obj.name_any(), obj.name_any())
 }
@@ -1253,6 +1370,110 @@ fn render_range_tls_secret(
         ..Default::default()
     };
     Ok((secret, hash))
+}
+
+fn render_operator_control_tls_secret(
+    obj: &GresTenant,
+    range_secret: &Secret,
+    existing: Option<&Secret>,
+) -> Result<Secret, ReconcileError> {
+    let name = obj.name_any();
+    let range_data = range_secret.data.as_ref().ok_or_else(|| {
+        ReconcileError::Malformed("range TLS secret has no certificate data".into())
+    })?;
+    let bytes = |key: &str| {
+        range_data
+            .get(key)
+            .map(|value| value.0.as_slice())
+            .ok_or_else(|| ReconcileError::Malformed(format!("range TLS secret is missing {key}")))
+    };
+    let ca_cert = std::str::from_utf8(bytes("ca.crt")?)
+        .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+    let ca_key = std::str::from_utf8(bytes("ca.key")?)
+        .map_err(|error| ReconcileError::Malformed(error.to_string()))?;
+    let range_hash = range_secret
+        .metadata
+        .annotations
+        .as_ref()
+        .and_then(|annotations| annotations.get(RANGE_TLS_HASH_ANNOTATION))
+        .cloned()
+        .ok_or_else(|| {
+            ReconcileError::Malformed("range TLS secret has no CA identity hash".into())
+        })?;
+    let operator_identity = format!("CN={name}-operator");
+    if let Some(existing) = existing
+        .filter(|secret| operator_control_tls_is_current(secret, &range_hash, &operator_identity))
+    {
+        return Ok(existing.clone());
+    }
+    let leaf = issue_broker_cert(
+        ca_cert,
+        ca_key,
+        &format!("{name}-operator"),
+        &[SubjectAltName::Dns(format!(
+            "{name}-operator.range.internal"
+        ))],
+        &[],
+        90,
+    )
+    .map_err(|error| {
+        ReconcileError::Malformed(format!("operator control TLS issuance failed: {error}"))
+    })?;
+    Ok(Secret {
+        metadata: k8s_openapi::apimachinery::pkg::apis::meta::v1::ObjectMeta {
+            name: Some(operator_control_tls_secret_name(&name)),
+            namespace: obj.namespace(),
+            labels: Some(meta_labels(obj)),
+            annotations: Some(BTreeMap::from([
+                (RANGE_TLS_HASH_ANNOTATION.into(), range_hash),
+                (RANGE_TLS_IDENTITY_ANNOTATION.into(), operator_identity),
+            ])),
+            owner_references: Some(vec![owner_ref::<GresTenant>(obj)?]),
+            ..Default::default()
+        },
+        data: Some(BTreeMap::from([
+            ("ca.crt".into(), ByteString(bytes("ca.crt")?.to_vec())),
+            ("tls.crt".into(), ByteString(leaf.cert_pem.into_bytes())),
+            ("tls.key".into(), ByteString(leaf.key_pem.into_bytes())),
+        ])),
+        type_: Some("kubernetes.io/tls".into()),
+        ..Default::default()
+    })
+}
+
+fn operator_control_tls_is_current(secret: &Secret, range_hash: &str, identity: &str) -> bool {
+    let annotations = secret.metadata.annotations.as_ref();
+    if annotations
+        .and_then(|values| values.get(RANGE_TLS_HASH_ANNOTATION))
+        .map(String::as_str)
+        != Some(range_hash)
+        || annotations
+            .and_then(|values| values.get(RANGE_TLS_IDENTITY_ANNOTATION))
+            .map(String::as_str)
+            != Some(identity)
+    {
+        return false;
+    }
+    let Some(data) = secret.data.as_ref() else {
+        return false;
+    };
+    let Some(cert) = data.get("tls.crt") else {
+        return false;
+    };
+    if !data.contains_key("tls.key") || !data.contains_key("ca.crt") {
+        return false;
+    }
+    let Ok(cert_pem) = std::str::from_utf8(&cert.0) else {
+        return false;
+    };
+    let Ok((_, pem)) = x509_parser::pem::parse_x509_pem(cert_pem.as_bytes()) else {
+        return false;
+    };
+    crabka_security::extract_principal_from_cert(&pem.contents)
+        .is_some_and(|principal| principal == identity)
+        && crate::controller::cluster_ca::cert_not_after(cert_pem).is_ok_and(|not_after| {
+            not_after > time::OffsetDateTime::now_utc() + time::Duration::days(30)
+        })
 }
 
 fn selector_labels(obj: &GresTenant) -> BTreeMap<String, String> {
@@ -1434,9 +1655,14 @@ fn render_deployment(
         ports.push(json!({ "name": "range", "containerPort": RANGE_PORT, "protocol": "TCP" }));
         (
             vec![json!({ "name": "range-tls", "mountPath": RANGE_TLS_DIR, "readOnly": true })],
-            vec![
-                json!({ "name": "range-tls", "secret": { "secretName": format!("{name}-gres-range-tls") } }),
-            ],
+            vec![json!({ "name": "range-tls", "secret": {
+                    "secretName": format!("{name}-gres-range-tls"),
+                    "items": [
+                        { "key": "ca.crt", "path": "ca.crt" },
+                        { "key": "tls.crt", "path": "tls.crt" },
+                        { "key": "tls.key", "path": "tls.key" }
+                    ]
+                } })],
         )
     } else {
         (Vec::new(), Vec::new())
@@ -1975,6 +2201,32 @@ mod tests {
         let (_rotated, rotated_hash) =
             render_range_tls_secret(&obj, Some(&drifted)).expect("rotate drifted identity");
         assert_ne!(first_hash, rotated_hash);
+    }
+
+    #[test]
+    fn operator_control_identity_is_distinct_preserved_and_ca_fenced() {
+        let mut obj = tenant();
+        obj.metadata.namespace = Some("ns".into());
+        obj.metadata.uid = Some("uid".into());
+        let (range, _) = render_range_tls_secret(&obj, None).unwrap();
+        let first = render_operator_control_tls_secret(&obj, &range, None).unwrap();
+        assert!(operator_control_tls_is_current(
+            &first,
+            range.metadata.annotations.as_ref().unwrap()[RANGE_TLS_HASH_ANNOTATION].as_str(),
+            "CN=tenant-a-operator"
+        ));
+        assert!(!operator_control_tls_is_current(
+            &first,
+            range.metadata.annotations.as_ref().unwrap()[RANGE_TLS_HASH_ANNOTATION].as_str(),
+            "CN=tenant-a-range"
+        ));
+        let preserved = render_operator_control_tls_secret(&obj, &range, Some(&first)).unwrap();
+        assert_eq!(first.data, preserved.data);
+
+        let (rotated_range, _) = render_range_tls_secret(&obj, None).unwrap();
+        let rotated =
+            render_operator_control_tls_secret(&obj, &rotated_range, Some(&first)).unwrap();
+        assert_ne!(first.data, rotated.data);
     }
 
     #[test]
