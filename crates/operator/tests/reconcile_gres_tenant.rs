@@ -859,7 +859,20 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
         },
     ];
     current = current
-        .begin_range_parking(0, "split-7", 4, final_checkpoint(4))
+        .clone()
+        .publish_split_target_with_retirement(
+            "split-7",
+            0,
+            4,
+            crabka_gres_control::RangeRetirementCheckpoint {
+                manifest_key: "tenant-a/r0/g4/manifest".into(),
+                covered_offset: 10,
+                barrier_offset: 12,
+                tail_sha256: "tail".into(),
+                marker_digest: "markers".into(),
+            },
+            current.ranges.clone(),
+        )
         .expect("parking intent");
     let control = Arc::new(FakeGresControl {
         current: Mutex::new(Some(current)),
@@ -883,14 +896,16 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
     assert_eq!(calls.iter().filter(|call| matches!(call, RecordedCall::DeleteTopics(names) if names == &vec!["__gres_wal.tenant-a.r0.g0000000004".to_string()])).count(), 1);
     let stored = control.current.lock().await.clone().expect("stored record");
     assert_eq!(stored.state, TenantState::Active);
-    assert_eq!(
-        stored.ranges[0].lifecycle,
-        crabka_gres_control::RangeLifecycle::Parked
-    );
     assert!(
-        stored.ranges[1..]
+        stored
+            .ranges
             .iter()
             .all(|range| range.lifecycle == crabka_gres_control::RangeLifecycle::Serving)
+    );
+    assert_eq!(stored.range_retirements.len(), 1);
+    assert_eq!(
+        stored.range_retirements[0].phase,
+        crabka_gres_control::RangeRetirementPhase::Parked
     );
 }
 
