@@ -95,19 +95,25 @@ pub struct SubjectDdlTransformError {
 }
 
 pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransformError> {
-    if !is_create_table_candidate(sql) {
+    let statements = match crabka_pgparser::parse(sql) {
+        Ok(statements) => statements,
+        Err(error) if is_create_table_candidate(sql) => {
+            return Err(SubjectDdlTransformError {
+                sql: sql.to_string(),
+                message: error.to_string(),
+            });
+        }
+        Err(_) => return Ok(sql.to_string()),
+    };
+    if !matches!(
+        statements.as_slice(),
+        [crabka_pgparser::ast::Statement::CreateTable { .. }]
+    ) {
         return Ok(sql.to_string());
     }
-    let statements = crabka_pgparser::parse(sql).map_err(|error| SubjectDdlTransformError {
-        sql: sql.to_string(),
-        message: error.to_string(),
-    })?;
     let [crabka_pgparser::ast::Statement::CreateTable { sharded, .. }] = statements.as_slice()
     else {
-        return Err(SubjectDdlTransformError {
-            sql: sql.to_string(),
-            message: "expected exactly one parsed CREATE TABLE statement".into(),
-        });
+        unreachable!("CREATE TABLE shape checked above");
     };
     if *sharded {
         return Ok(sql.to_string());
@@ -152,17 +158,15 @@ pub fn subject_sharded_extended_case(
 }
 
 fn is_create_table_candidate(sql: &str) -> bool {
-    let mut words = sql.split_whitespace();
-    if !words
-        .next()
-        .is_some_and(|word| word.eq_ignore_ascii_case("CREATE"))
-    {
+    use crabka_pgparser::token::{Keyword, Token};
+
+    let Ok(tokens) = crabka_pgparser::lexer::lex(sql) else {
         return false;
-    }
-    words.take(3).any(|word| {
-        word.trim_matches(|character: char| !character.is_ascii_alphabetic())
-            .eq_ignore_ascii_case("TABLE")
-    })
+    };
+    matches!(tokens.first(), Some((Token::Keyword(Keyword::Create), _)))
+        && tokens.iter().take(8).any(|(token, _)| {
+            matches!(token, Token::Keyword(Keyword::Table))
+        })
 }
 
 #[derive(Debug, Error)]
@@ -1224,6 +1228,16 @@ mod tests {
             subject_sharded_statement("CREATE TABLE semi (id int4);  ")
                 .expect("semicolon and whitespace are preserved"),
             "CREATE TABLE semi (id int4) SHARDED;  "
+        );
+        assert_eq!(
+            subject_sharded_statement("/* setup */ CREATE TABLE commented (id int4)")
+                .expect("leading comments do not hide table DDL"),
+            "/* setup */ CREATE TABLE commented (id int4) SHARDED"
+        );
+        assert_eq!(
+            subject_sharded_statement("CREATE VIEW \"table\" AS SELECT 1")
+                .expect("non-table DDL remains unchanged"),
+            "CREATE VIEW \"table\" AS SELECT 1"
         );
     }
 
