@@ -49,13 +49,33 @@ impl CheckpointFilter {
     /// Return true when a KV key belongs to this row interval.
     #[must_use]
     pub fn contains_key(self, bytes: &[u8]) -> bool {
-        let Some((table_id, rowid)) = key::table_rowid_of(bytes) else {
-            return false;
+        let row_key = match key::classify_key(bytes) {
+            key::KeyClass::PrimaryRow { table_id, rowid }
+            | key::KeyClass::PrimaryVersion {
+                table_id, rowid, ..
+            } => RangeKey::new(TableId::new(u64::from(table_id)), rowid),
+            key::KeyClass::HashPrimaryRow {
+                table_id,
+                bucket,
+                rowid,
+            }
+            | key::KeyClass::HashPrimaryVersion {
+                table_id,
+                bucket,
+                rowid,
+                ..
+            } => RangeKey::hash(TableId::new(u64::from(table_id)), bucket, rowid),
+            key::KeyClass::Sequence { table_id } => {
+                RangeKey::table_start(TableId::new(u64::from(table_id)))
+            }
+            key::KeyClass::Clog { .. } => return true,
+            key::KeyClass::SecondaryIndex { .. }
+            | key::KeyClass::System
+            | key::KeyClass::Unknown => return false,
         };
-        let row_key = RangeKey::new(TableId::new(u64::from(table_id)), rowid);
         if row_key < self.start {
             return false;
-        }
+        };
 
         self.end.is_none_or(|end| row_key < end)
     }

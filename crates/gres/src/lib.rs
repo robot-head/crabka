@@ -676,6 +676,16 @@ impl GresRuntime {
         self.range_transfer.clone()
     }
 
+    /// Return the currently published range map for a multi-range runtime.
+    #[doc(hidden)]
+    #[must_use]
+    pub fn published_range_map(&self) -> Option<crabka_gres_ranges::RangeMap> {
+        match &self.engine {
+            RuntimeEngine::Multi(tenant) => Some(tenant.control_range_map()),
+            RuntimeEngine::Single(_) => None,
+        }
+    }
+
     /// Physically move one populated ordinary table in a local live multi-range runtime.
     ///
     /// This only publishes to the in-process serving map. It deliberately does not
@@ -2595,7 +2605,16 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
     {
         let stage_range = |request: crabka_gres_ranges::TableTransferRequest| async move {
             let source = self.range(checkpoint.range_id)?;
-            validate_staged_transfer_boundary(request, checkpoint, tail, barrier)?;
+            validate_staged_transfer_boundary(&request, checkpoint, tail, barrier)?;
+            if source.generation.0 != request.predecessor_generation {
+                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id: checkpoint.range_id,
+                    reason: format!(
+                        "source generation {} differs from requested predecessor generation {}",
+                        source.generation.0, request.predecessor_generation
+                    ),
+                });
+            }
             let source_holds_barrier = matches!(
                 &*source
                     .pause
@@ -2657,7 +2676,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 source.recovery_config.tenant.clone(),
                 request.target_range,
                 self.config.kafka_security.clone(),
-            );
+            )
+            .with_wal_generation(request.wal_generation);
             let recovered = crabka_gres_substrate::recover_live_for_range_with_restore(
                 target_recovery.clone(),
                 target_store.as_ref(),
@@ -2667,40 +2687,48 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 range_id: request.target_range,
                 reason: format!("create successor WAL producer: {error}"),
             })?;
-            let mut selector =
-                crabka_gres_substrate::TableTransferSelector::new(request.physical_table_id)
-                    .map_err(|error| crabka_gres_ranges::RangeTransferError::Boundary {
-                        range_id: request.target_range,
-                        reason: format!("table transfer selector: {error}"),
-                    })?;
-            let (_, _replay) =
-                crabka_gres_substrate::restore_table_transfer_from_manifest_and_replay_tail(
-                    source_checkpoint.store.as_ref(),
-                    &checkpoint.manifest_key,
-                    &source_checkpoint.tenant,
-                    checkpoint.covered_offset,
-                    target_store.as_ref(),
-                    crabka_gres_substrate::RestoreTail {
-                        current_generation: source.generation.0,
-                        log_start: None,
-                        committed_frames: tail
-                            .iter()
-                            .map(|record| crabka_gres_substrate::ReplayItem {
-                                offset: record.offset,
-                                bytes: record.bytes.clone(),
-                            })
-                            .collect(),
-                        barrier_offset: barrier.offset,
-                    },
-                    &mut selector,
-                )
-                .await
-                .map_err(|error| {
-                    crabka_gres_ranges::RangeTransferError::Runtime {
-                        range_id: request.target_range,
-                        reason: format!("restore table checkpoint and bounded tail: {error}"),
-                    }
-                })?;
+            if recovered.generation.0 != request.wal_generation {
+                return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id: request.target_range,
+                    reason: format!(
+                        "successor generation {} differs from descriptor generation {}",
+                        recovered.generation.0, request.wal_generation
+                    ),
+                });
+            }
+            let filter = crabka_gres_substrate::CheckpointFilter::new(
+                request.interval.start,
+                request.interval.end,
+            )
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Boundary {
+                range_id: request.target_range,
+                reason: format!("successor interval: {error}"),
+            })?;
+            let _restore = crabka_gres_substrate::restore_filtered_from_manifest_and_replay_tail(
+                source_checkpoint.store.as_ref(),
+                &checkpoint.manifest_key,
+                &source_checkpoint.tenant,
+                checkpoint.covered_offset,
+                target_store.as_ref(),
+                crabka_gres_substrate::RestoreTail {
+                    current_generation: source.generation.0,
+                    log_start: None,
+                    committed_frames: tail
+                        .iter()
+                        .map(|record| crabka_gres_substrate::ReplayItem {
+                            offset: record.offset,
+                            bytes: record.bytes.clone(),
+                        })
+                        .collect(),
+                    barrier_offset: barrier.offset,
+                },
+                filter,
+            )
+            .await
+            .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                range_id: request.target_range,
+                reason: format!("restore interval checkpoint and bounded tail: {error}"),
+            })?;
             let writer = Arc::new(crabka_gres_substrate::ProducerWalWriter::new(
                 recovered.producer,
                 target_recovery.wal_topic(),
@@ -2768,6 +2796,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 );
             Ok(crabka_gres_ranges::StagedRangeSuccessor {
                 range_id: request.target_range,
+                endpoint: request.endpoint,
+                wal_generation: request.wal_generation,
                 bootstrap_checkpoint: crabka_gres_ranges::CheckpointManifest {
                     range_id: request.target_range,
                     covered_offset: run.metadata.covered_offset,
@@ -2776,14 +2806,22 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             })
         };
         let [left_request, right_request] = requests;
-        let left = stage_range(left_request).await?;
+        let left = if left_request.target_range.is_coordinator()
+            && left_request.target_range == checkpoint.range_id
+        {
+            None
+        } else {
+            Some(stage_range(left_request).await?)
+        };
         let right = match stage_range(right_request).await {
             Ok(right) => right,
             Err(error) => {
-                self.staged
-                    .lock()
-                    .map_err(|_| range_pause_lock_error(left.range_id))?
-                    .remove(&left.range_id);
+                if let Some(left) = &left {
+                    self.staged
+                        .lock()
+                        .map_err(|_| range_pause_lock_error(left.range_id))?
+                        .remove(&left.range_id);
+                }
                 return Err(error);
             }
         };
@@ -2810,17 +2848,24 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "source writer does not hold the requested transfer barrier".to_owned(),
             });
         }
-        if staged.left.range_id == staged.right.range_id {
+        if staged
+            .left
+            .as_ref()
+            .is_some_and(|left| left.range_id == staged.right.range_id)
+        {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: staged.left.range_id,
+                range_id: staged.right.range_id,
                 reason: "successor identities must be distinct".to_owned(),
             });
         }
         let mut successors = self
             .staged
             .lock()
-            .map_err(|_| range_pause_lock_error(staged.left.range_id))?;
-        if !successors.contains_key(&staged.left.range_id)
+            .map_err(|_| range_pause_lock_error(staged.right.range_id))?;
+        if staged
+            .left
+            .as_ref()
+            .is_some_and(|left| !successors.contains_key(&left.range_id))
             || !successors.contains_key(&staged.right.range_id)
         {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
@@ -2828,12 +2873,18 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                 reason: "both successors must be staged before either is claimed".to_owned(),
             });
         }
-        let left = successors.remove(&staged.left.range_id).ok_or_else(|| {
-            crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: staged.left.range_id,
-                reason: "left successor disappeared during atomic claim".to_owned(),
-            }
-        })?;
+        let left = staged
+            .left
+            .as_ref()
+            .map(|left| {
+                successors.remove(&left.range_id).ok_or_else(|| {
+                    crabka_gres_ranges::RangeTransferError::Boundary {
+                        range_id: left.range_id,
+                        reason: "left successor disappeared during atomic claim".to_owned(),
+                    }
+                })
+            })
+            .transpose()?;
         let right = successors.remove(&staged.right.range_id).ok_or_else(|| {
             crabka_gres_ranges::RangeTransferError::Boundary {
                 range_id: staged.right.range_id,
@@ -2841,11 +2892,17 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             }
         })?;
         Ok(crabka_gres_ranges::ClaimedStagedSuccessors {
-            left: crabka_gres_ranges::ClaimedStagedSuccessor {
+            left: left.map(|left| crabka_gres_ranges::ClaimedStagedSuccessor {
+                range_id: staged.left.as_ref().expect("left staged").range_id,
+                endpoint: staged.left.as_ref().expect("left staged").endpoint.clone(),
+                wal_generation: staged.left.as_ref().expect("left staged").wal_generation,
                 engine: left.engine,
                 keepalive: Arc::new(left.resources),
-            },
+            }),
             right: crabka_gres_ranges::ClaimedStagedSuccessor {
+                range_id: staged.right.range_id,
+                endpoint: staged.right.endpoint.clone(),
+                wal_generation: staged.right.wal_generation,
                 engine: right.engine,
                 keepalive: Arc::new(right.resources),
             },
@@ -2854,11 +2911,17 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
 }
 
 fn validate_staged_transfer_boundary(
-    request: crabka_gres_ranges::TableTransferRequest,
+    request: &crabka_gres_ranges::TableTransferRequest,
     checkpoint: &crabka_gres_ranges::CheckpointManifest,
     tail: &[crabka_gres_ranges::CommittedTailRecord],
     barrier: crabka_gres_ranges::RangeTransferBarrier,
 ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
+    if request.interval.range_id != request.target_range {
+        return Err(crabka_gres_ranges::RangeTransferError::Boundary {
+            range_id: request.target_range,
+            reason: "successor interval range id differs from target range".to_owned(),
+        });
+    }
     if request.target_range == checkpoint.range_id {
         return Err(crabka_gres_ranges::RangeTransferError::Boundary {
             range_id: request.target_range,
