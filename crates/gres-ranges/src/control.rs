@@ -871,9 +871,10 @@ fn request_matches_split_operation(
             journal_digest,
         } => {
             source
-                && *journal_revision == operation.revision
-                && AuthorizedSplitIntent::from_record(operation.clone())
-                    .is_ok_and(|authorized| authorized.digest() == journal_digest)
+                && (context == IntentAuthorizationContext::CompletedReplay
+                    || (*journal_revision == operation.revision
+                        && AuthorizedSplitIntent::from_record(operation.clone())
+                            .is_ok_and(|authorized| authorized.digest() == journal_digest)))
         }
     }
 }
@@ -1184,6 +1185,62 @@ mod tests {
         record.phase = crabka_gres_control::SplitOperationPhase::Restored;
         record.revision = 4;
         record.attempts = 1;
+        let completed_stage_replay = RangeControlReq {
+            tenant: "tenant-a".into(),
+            range_id: RangeId::new(1),
+            generation: 4,
+            operation_id: "move-1".into(),
+            operation: RangeControlOperation::StageFilteredRestore {
+                journal_revision: 3,
+                journal_digest: "receipt-validated-historical-digest".into(),
+            },
+        };
+        assert!(request_matches_split_operation(
+            &completed_stage_replay,
+            &record,
+            IntentAuthorizationContext::CompletedReplay,
+        ));
+        assert!(!request_matches_split_operation(
+            &completed_stage_replay,
+            &record,
+            IntentAuthorizationContext::New,
+        ));
+        for forged in [
+            RangeControlReq {
+                range_id: RangeId::new(0),
+                ..completed_stage_replay.clone()
+            },
+            RangeControlReq {
+                generation: 5,
+                ..completed_stage_replay.clone()
+            },
+            RangeControlReq {
+                operation_id: "other-operation".into(),
+                ..completed_stage_replay.clone()
+            },
+            RangeControlReq {
+                tenant: "other-tenant".into(),
+                ..completed_stage_replay.clone()
+            },
+        ] {
+            assert!(!request_matches_split_operation(
+                &forged,
+                &record,
+                IntentAuthorizationContext::CompletedReplay,
+            ));
+        }
+        for phase in [
+            crabka_gres_control::SplitOperationPhase::Initiated,
+            crabka_gres_control::SplitOperationPhase::Failed,
+        ] {
+            let mut invalid_phase = record.clone();
+            invalid_phase.phase = phase;
+            assert!(!request_matches_split_operation(
+                &completed_stage_replay,
+                &invalid_phase,
+                IntentAuthorizationContext::CompletedReplay,
+            ));
+        }
         assert!(!request_matches_split_operation(
             &status(2, 5),
             &record,
