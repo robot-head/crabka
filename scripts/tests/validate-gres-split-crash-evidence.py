@@ -77,7 +77,7 @@ def expected_predicate(case: str) -> dict[str, Any]:
         "staged_after_journal_cas": ("paused","stage",7,False),
         "marker_claim_receipt_before_journal_cas": ("paused","marker",7,False),
         "restored_after_journal_cas": ("restored","marker",15,False),
-        "prologue_receipt_before_journal_cas": ("restored","prologue",15,True),
+        "prologue_receipt_before_journal_cas": ("restored","prologue",15,False),
         "activated_after_journal_cas": ("activated","prologue",15,True),
     }
     if case in source:

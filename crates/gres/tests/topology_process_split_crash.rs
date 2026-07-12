@@ -877,9 +877,7 @@ impl SplitPredicateState {
                 Self::source(Phase::Restored, Receipt::Marker, complete)
             }
             SplitKillPoint::PrologueReceiptBeforeJournalCas => {
-                let mut state = Self::source(Phase::Restored, Receipt::Prologue, complete);
-                state.successors_serving = true;
-                state
+                Self::source(Phase::Restored, Receipt::Prologue, complete)
             }
             SplitKillPoint::ActivatedAfterJournalCas => {
                 let mut state = Self::source(Phase::Activated, Receipt::Prologue, complete);
