@@ -155,25 +155,21 @@ EOF
         --summary "${ARTIFACT_DIR}/parity-sharded.md" \
         >"${ARTIFACT_DIR}/conformance.log" 2>&1
 
-    local range0 range1
-    range0=$(grep -c 'timestamp_primary_committed primary_range=0' "${ARTIFACT_DIR}/gres.log" || true)
-    range1=$(grep -c 'timestamp_primary_committed primary_range=1' "${ARTIFACT_DIR}/gres.log" || true)
-    if [ "$range0" -eq 0 ] || [ "$range1" -eq 0 ]; then
-        echo "FAIL: corpus writes did not prove both primary owners (r0=${range0}, r1=${range1})" >&2
-        return 1
-    fi
-    python3 - "$ARTIFACT_DIR" "$range0" "$range1" <<'PY'
+    python3 scripts/gres-sharded-evidence.py "${ARTIFACT_DIR}/gres.log" \
+        "${ARTIFACT_DIR}/corpus-through-sharding.json"
+    python3 - "$ARTIFACT_DIR" <<'PY'
 import json, pathlib, sys
 artifact = pathlib.Path(sys.argv[1])
-payload = {
+path = artifact / "corpus-through-sharding.json"
+payload = json.loads(path.read_text())
+payload.update({
     "mode": "live",
     "range_count": 2,
     "subject_ddl": "sharded",
     "baseline": "crates/gres-conformance/baseline.json",
-    "observed_primary_ownership": {"0": int(sys.argv[2]), "1": int(sys.argv[3])},
     "passed": True,
-}
-(artifact / "corpus-through-sharding.json").write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
+})
+path.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n")
 PY
 }
 
