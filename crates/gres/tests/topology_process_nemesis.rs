@@ -23,7 +23,7 @@ use crabka_operator::{
             MtlsRangeMutationClient, RangeMutationClient, SplitReconcileError,
             reconcile_activated_cutover, reconcile_one_rpc_phase, verify_target_topology_ready,
         },
-        gres_tenant::reconcile_one_retiring_range_wal,
+        gres_tenant::{RangeRetirementAdmin, reconcile_one_retiring_range_wal},
     },
 };
 use futures_util::FutureExt as _;
@@ -55,11 +55,112 @@ enum SourceKillPoint {
     ActivatedBeforeCutover,
     ActivatedAfterTenantCas,
     LayoutPublished,
+    RetiringBeforeDelete,
+    RetiringAfterDelete,
+    RetiringParked,
+    Resuming,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct RetirementPredicateState {
+    journal_phase: SplitOperationPhase,
+    target_layout: bool,
+    target_record_version: bool,
+    retirement_phase: Option<RangeRetirementPhase>,
+    predecessor_topic_present: bool,
+    retire_receipt_durable: bool,
+}
+
+#[derive(Debug, Default)]
+struct RetirementDeleteLedger {
+    exact_delete_calls: usize,
+    requested_topics: Vec<String>,
+    unrelated_delete_attempted: bool,
+    injected_after_delete_errors: usize,
+}
+
+struct CountingRetirementAdmin {
+    inner: crabka_client_admin::AdminClient,
+    expected_topic: String,
+    ledger: Arc<std::sync::Mutex<RetirementDeleteLedger>>,
+    error_after_delete: bool,
+}
+
+impl CountingRetirementAdmin {
+    fn new(
+        inner: crabka_client_admin::AdminClient,
+        expected_topic: String,
+        ledger: Arc<std::sync::Mutex<RetirementDeleteLedger>>,
+    ) -> Self {
+        Self {
+            inner,
+            expected_topic,
+            ledger,
+            error_after_delete: false,
+        }
+    }
+
+    fn arm_error_after_delete(&mut self) {
+        self.error_after_delete = true;
+    }
+}
+
+#[async_trait]
+impl RangeRetirementAdmin for CountingRetirementAdmin {
+    async fn metadata(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<crabka_client_admin::TopicMetadata, crabka_client_admin::AdminError> {
+        self.inner.metadata(topics).await
+    }
+
+    async fn delete_topics(
+        &mut self,
+        names: &[&str],
+        timeout_ms: i32,
+    ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
+        self.ledger
+            .lock()
+            .expect("retirement delete ledger")
+            .record_delete_request(&self.expected_topic, names)
+            .map_err(crabka_client_admin::AdminError::Protocol)?;
+        let outcomes = self.inner.delete_topics(names, timeout_ms).await?;
+        if self.error_after_delete && outcomes.iter().all(|outcome| outcome.error.is_none()) {
+            self.error_after_delete = false;
+            self.ledger
+                .lock()
+                .expect("retirement delete ledger")
+                .injected_after_delete_errors += 1;
+            return Err(crabka_client_admin::AdminError::Protocol(
+                "injected ambiguity after exact predecessor delete".into(),
+            ));
+        }
+        Ok(outcomes)
+    }
+}
+
+impl RetirementDeleteLedger {
+    fn record_delete_request(
+        &mut self,
+        expected_topic: &str,
+        names: &[&str],
+    ) -> Result<(), String> {
+        if names != [expected_topic] {
+            self.unrelated_delete_attempted = true;
+            return Err(format!(
+                "retirement attempted unrelated topic deletion: {names:?}"
+            ));
+        }
+        self.exact_delete_calls += 1;
+        self.requested_topics.push(expected_topic.to_owned());
+        Ok(())
+    }
 }
 
 impl SourceKillPoint {
     fn from_env() -> Self {
-        match std::env::var("CRABKA_G8_CUTOVER_KILL_POINT")
+        match std::env::var("CRABKA_G8_RETIREMENT_KILL_POINT")
+            .or_else(|_| std::env::var("CRABKA_G8_CUTOVER_KILL_POINT"))
             .or_else(|_| std::env::var("CRABKA_G8_SOURCE_KILL_POINT"))
             .as_deref()
             .unwrap_or("paused_after_stage")
@@ -72,6 +173,10 @@ impl SourceKillPoint {
             "activated_before_cutover" => Self::ActivatedBeforeCutover,
             "activated_after_tenant_cas" => Self::ActivatedAfterTenantCas,
             "layout_published" => Self::LayoutPublished,
+            "retiring_before_delete" => Self::RetiringBeforeDelete,
+            "retiring_after_delete" => Self::RetiringAfterDelete,
+            "retiring_parked" => Self::RetiringParked,
+            "resuming" => Self::Resuming,
             other => panic!("unknown source kill point {other}"),
         }
     }
@@ -86,6 +191,43 @@ impl SourceKillPoint {
             Self::ActivatedBeforeCutover => "activated_before_cutover",
             Self::ActivatedAfterTenantCas => "activated_after_tenant_cas",
             Self::LayoutPublished => "layout_published",
+            Self::RetiringBeforeDelete => "retiring_before_delete",
+            Self::RetiringAfterDelete => "retiring_after_delete",
+            Self::RetiringParked => "retiring_parked",
+            Self::Resuming => "resuming",
+        }
+    }
+
+    fn retirement_is_ready(self, state: RetirementPredicateState) -> bool {
+        if !state.target_layout || !state.target_record_version {
+            return false;
+        }
+        match self {
+            Self::RetiringBeforeDelete => {
+                state.journal_phase == SplitOperationPhase::Retiring
+                    && state.retirement_phase == Some(RangeRetirementPhase::Parking)
+                    && state.predecessor_topic_present
+                    && !state.retire_receipt_durable
+            }
+            Self::RetiringAfterDelete => {
+                state.journal_phase == SplitOperationPhase::Retiring
+                    && state.retirement_phase == Some(RangeRetirementPhase::Parking)
+                    && !state.predecessor_topic_present
+                    && !state.retire_receipt_durable
+            }
+            Self::RetiringParked => {
+                state.journal_phase == SplitOperationPhase::Retiring
+                    && state.retirement_phase == Some(RangeRetirementPhase::Parked)
+                    && !state.predecessor_topic_present
+                    && !state.retire_receipt_durable
+            }
+            Self::Resuming => {
+                state.journal_phase == SplitOperationPhase::Resuming
+                    && state.retirement_phase == Some(RangeRetirementPhase::Parked)
+                    && !state.predecessor_topic_present
+                    && state.retire_receipt_durable
+            }
+            _ => false,
         }
     }
 
@@ -151,7 +293,24 @@ impl SourceKillPoint {
                     && matching_retirement
                         .is_some_and(|retirement| retirement.phase == RangeRetirementPhase::Parking)
             }
+            Self::RetiringBeforeDelete
+            | Self::RetiringAfterDelete
+            | Self::RetiringParked
+            | Self::Resuming => false,
         }
+    }
+}
+
+const fn restart_hosted_ranges(point: SourceKillPoint) -> &'static str {
+    match point {
+        SourceKillPoint::ActivatedBeforeCutover
+        | SourceKillPoint::ActivatedAfterTenantCas
+        | SourceKillPoint::LayoutPublished
+        | SourceKillPoint::RetiringBeforeDelete
+        | SourceKillPoint::RetiringAfterDelete
+        | SourceKillPoint::RetiringParked
+        | SourceKillPoint::Resuming => "r0,r2",
+        _ => "r0,r1",
     }
 }
 
@@ -183,6 +342,9 @@ struct KillObservation {
     tenant_layout: &'static str,
     retirement_phase: Option<RangeRetirementPhase>,
     tenant_record_version: u64,
+    predecessor_topic_present: Option<bool>,
+    delete_ledger: Arc<std::sync::Mutex<RetirementDeleteLedger>>,
+    delete_calls_at_kill: usize,
 }
 
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
@@ -385,6 +547,126 @@ fn ack_ledger_rejects_noncontiguous_sequences() {
     assert!(parse_ack_ledger(ledger).is_err());
 }
 
+#[test]
+fn retirement_kill_predicates_require_exact_durable_state() {
+    let exact = [
+        (
+            SourceKillPoint::RetiringBeforeDelete,
+            RetirementPredicateState {
+                journal_phase: SplitOperationPhase::Retiring,
+                target_layout: true,
+                target_record_version: true,
+                retirement_phase: Some(RangeRetirementPhase::Parking),
+                predecessor_topic_present: true,
+                retire_receipt_durable: false,
+            },
+        ),
+        (
+            SourceKillPoint::RetiringAfterDelete,
+            RetirementPredicateState {
+                journal_phase: SplitOperationPhase::Retiring,
+                target_layout: true,
+                target_record_version: true,
+                retirement_phase: Some(RangeRetirementPhase::Parking),
+                predecessor_topic_present: false,
+                retire_receipt_durable: false,
+            },
+        ),
+        (
+            SourceKillPoint::RetiringParked,
+            RetirementPredicateState {
+                journal_phase: SplitOperationPhase::Retiring,
+                target_layout: true,
+                target_record_version: true,
+                retirement_phase: Some(RangeRetirementPhase::Parked),
+                predecessor_topic_present: false,
+                retire_receipt_durable: false,
+            },
+        ),
+        (
+            SourceKillPoint::Resuming,
+            RetirementPredicateState {
+                journal_phase: SplitOperationPhase::Resuming,
+                target_layout: true,
+                target_record_version: true,
+                retirement_phase: Some(RangeRetirementPhase::Parked),
+                predecessor_topic_present: false,
+                retire_receipt_durable: true,
+            },
+        ),
+    ];
+
+    for (point, state) in exact {
+        assert!(point.retirement_is_ready(state));
+        for near_miss in [
+            RetirementPredicateState {
+                target_layout: false,
+                ..state
+            },
+            RetirementPredicateState {
+                target_record_version: false,
+                ..state
+            },
+            RetirementPredicateState {
+                journal_phase: SplitOperationPhase::Completed,
+                ..state
+            },
+            RetirementPredicateState {
+                retirement_phase: None,
+                ..state
+            },
+            RetirementPredicateState {
+                predecessor_topic_present: !state.predecessor_topic_present,
+                ..state
+            },
+            RetirementPredicateState {
+                retire_receipt_durable: !state.retire_receipt_durable,
+                ..state
+            },
+        ] {
+            assert!(!point.retirement_is_ready(near_miss));
+        }
+    }
+}
+
+#[test]
+fn counting_retirement_admin_rejects_unrelated_delete_requests() {
+    let mut ledger = RetirementDeleteLedger::default();
+    ledger
+        .record_delete_request("__gres_wal.tenant.r1", &["__gres_wal.tenant.r1"])
+        .expect("exact predecessor delete");
+    assert_eq!(ledger.exact_delete_calls, 1);
+    assert_eq!(
+        ledger.requested_topics,
+        vec!["__gres_wal.tenant.r1".to_owned()]
+    );
+
+    assert!(
+        ledger
+            .record_delete_request("__gres_wal.tenant.r1", &["sentinel"])
+            .is_err()
+    );
+    assert!(ledger.unrelated_delete_attempted);
+    assert_eq!(ledger.exact_delete_calls, 1);
+}
+
+#[test]
+fn retirement_restart_uses_authoritative_target_ranges() {
+    for point in [
+        SourceKillPoint::RetiringBeforeDelete,
+        SourceKillPoint::RetiringAfterDelete,
+        SourceKillPoint::RetiringParked,
+        SourceKillPoint::Resuming,
+    ] {
+        assert_eq!(restart_hosted_ranges(point), "r0,r2");
+    }
+    assert_eq!(
+        restart_hosted_ranges(SourceKillPoint::ActivatedBeforeCutover),
+        "r0,r2"
+    );
+    assert_eq!(restart_hosted_ranges(SourceKillPoint::Restored), "r0,r1");
+}
+
 struct BrokerControl {
     registry: Mutex<Registry>,
 }
@@ -499,6 +781,17 @@ async fn load_tenant(bootstrap: &str, tenant: &str) -> TenantRecord {
         .expect("tenant present")
 }
 
+async fn retirement_topic_present(admin: &mut dyn RangeRetirementAdmin, topic: &str) -> bool {
+    admin
+        .metadata(&[topic])
+        .await
+        .expect("retirement topic metadata")
+        .topics
+        .iter()
+        .find(|entry| entry.name == topic)
+        .is_some_and(|entry| entry.error.is_none())
+}
+
 async fn drive_operation(
     system: &mut ProcessHarness,
     operation_id: &str,
@@ -514,21 +807,65 @@ async fn drive_operation(
         registry: Mutex::new(registry),
     });
     let mut mutation_client = MtlsRangeMutationClient::new(system.operator_control_client());
+    let predecessor_topic = format!("__gres_wal.{}.r1", system.tenant());
+    let delete_ledger = Arc::new(std::sync::Mutex::new(RetirementDeleteLedger::default()));
+    let admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+        .await
+        .expect("retirement admin");
+    let mut retirement_admin =
+        CountingRetirementAdmin::new(admin, predecessor_topic.clone(), Arc::clone(&delete_ledger));
     let started = Instant::now();
     let mut restarted_pids = None;
     loop {
         let current = load_operation(system.bootstrap(), system.tenant(), operation_id).await;
         let current_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
-        if kill_injection.as_ref().is_some_and(|injection| {
-            injection.point.is_ready(&current, &current_tenant) && restarted_pids.is_none()
-        }) {
+        let mut predecessor_topic_at_boundary = None;
+        let retirement_ready = if let Some(injection) = kill_injection.as_ref()
+            && matches!(
+                injection.point,
+                SourceKillPoint::RetiringBeforeDelete
+                    | SourceKillPoint::RetiringAfterDelete
+                    | SourceKillPoint::RetiringParked
+                    | SourceKillPoint::Resuming
+            ) {
+            let plan = current.plan.as_ref().expect("sealed plan");
+            let retirement_phase = current_tenant
+                .range_retirements
+                .iter()
+                .find(|retirement| retirement.operation_id == current.operation_id)
+                .map(|retirement| retirement.phase);
+            let predecessor_topic_present =
+                retirement_topic_present(&mut retirement_admin, &predecessor_topic).await;
+            predecessor_topic_at_boundary = Some(predecessor_topic_present);
+            injection
+                .point
+                .retirement_is_ready(RetirementPredicateState {
+                    journal_phase: current.phase,
+                    target_layout: current_tenant.ranges == plan.target_layout,
+                    target_record_version: plan
+                        .source_record_version
+                        .checked_add(1)
+                        .is_some_and(|minimum| current_tenant.record_version >= minimum),
+                    retirement_phase,
+                    predecessor_topic_present,
+                    retire_receipt_durable: current.phase == SplitOperationPhase::Resuming,
+                })
+        } else {
+            false
+        };
+        let source_or_cutover_ready = kill_injection
+            .as_ref()
+            .is_some_and(|injection| injection.point.is_ready(&current, &current_tenant));
+        if restarted_pids.is_none() && (retirement_ready || source_or_cutover_ready) {
             let injection = kill_injection.as_ref().expect("checked");
             wait_for_ack_count(injection.ledger_path, 8).await;
             let old_pid = system.pid(0);
             let pre_kill_ms = timestamp_ms();
             system.kill(0).await;
             tokio::time::sleep(Duration::from_millis(150)).await;
-            system.restart_with_hosted_ranges(0, "r0,r1").await;
+            system
+                .restart_with_hosted_ranges(0, restart_hosted_ranges(injection.point))
+                .await;
             let new_pid = system.pid(0);
             assert_ne!(
                 old_pid, new_pid,
@@ -545,6 +882,15 @@ async fn drive_operation(
                 registry: Mutex::new(fresh_registry),
             });
             mutation_client = MtlsRangeMutationClient::new(system.operator_control_client());
+            let fresh_admin =
+                crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+                    .await
+                    .expect("fresh retirement admin");
+            retirement_admin = CountingRetirementAdmin::new(
+                fresh_admin,
+                predecessor_topic.clone(),
+                Arc::clone(&delete_ledger),
+            );
             restarted_pids = Some(KillObservation {
                 old_pid,
                 new_pid,
@@ -574,6 +920,12 @@ async fn drive_operation(
                     .find(|retirement| retirement.operation_id == current.operation_id)
                     .map(|retirement| retirement.phase),
                 tenant_record_version: current_tenant.record_version,
+                predecessor_topic_present: predecessor_topic_at_boundary,
+                delete_ledger: Arc::clone(&delete_ledger),
+                delete_calls_at_kill: delete_ledger
+                    .lock()
+                    .expect("delete ledger at kill")
+                    .exact_delete_calls,
             });
             let restarted_tenant = load_tenant(system.bootstrap(), system.tenant()).await;
             assert_eq!(
@@ -597,7 +949,10 @@ async fn drive_operation(
         }
         if matches!(
             current.phase,
-            SplitOperationPhase::Activated | SplitOperationPhase::LayoutPublished
+            SplitOperationPhase::Activated
+                | SplitOperationPhase::LayoutPublished
+                | SplitOperationPhase::Retiring
+                | SplitOperationPhase::Resuming
         ) && current.plan.as_ref().is_some_and(|plan| {
             current_tenant.ranges == plan.target_layout
                 && plan
@@ -694,15 +1049,29 @@ async fn drive_operation(
                 }
             }
             SplitOperationPhase::Retiring => {
-                let mut admin =
-                    crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
-                        .await
-                        .expect("admin");
+                if kill_injection.as_ref().is_some_and(|injection| {
+                    injection.point == SourceKillPoint::RetiringAfterDelete
+                        && restarted_pids.is_none()
+                }) {
+                    retirement_admin.arm_error_after_delete();
+                    let error =
+                        reconcile_one_retiring_range_wal(&control, &mut retirement_admin, &tenant)
+                            .await
+                            .expect_err("AfterDelete must stop before sidecar CAS");
+                    assert!(error.to_string().contains("injected ambiguity"));
+                    continue;
+                }
                 assert!(
-                    reconcile_one_retiring_range_wal(&control, &mut admin, &tenant)
+                    reconcile_one_retiring_range_wal(&control, &mut retirement_admin, &tenant)
                         .await
                         .expect("WAL retirement")
                 );
+                if kill_injection.as_ref().is_some_and(|injection| {
+                    injection.point == SourceKillPoint::RetiringParked
+                        && restarted_pids.is_none()
+                }) {
+                    continue;
+                }
                 reconcile_one_rpc_phase(&control, &mutation_client, &current)
                     .await
                     .expect("retire predecessor RPC");
@@ -802,6 +1171,28 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
     let operation_id = format!("g8-source-kill-{}", kill_point.name().replace('_', "-"));
     let tenant_name = format!("tenant-{operation_id}");
     let mut system = ProcessHarness::start_all_on_zero(&tenant_name).await;
+    let sentinel_topic = format!("__gres_g8_retirement_sentinel.{}", system.tenant());
+    let mut sentinel_admin =
+        crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+            .await
+            .expect("sentinel admin");
+    let sentinel_outcomes = sentinel_admin
+        .create_topics(
+            &[crabka_client_admin::CreateTopicSpec {
+                name: sentinel_topic.clone(),
+                partitions: 1,
+                replicas: 1,
+                configs: Default::default(),
+            }],
+            30_000,
+        )
+        .await
+        .expect("create sentinel topic");
+    assert!(
+        sentinel_outcomes
+            .iter()
+            .all(|outcome| outcome.error.is_none())
+    );
     let mut ddl = String::new();
     for table in 1..50 {
         ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
@@ -912,10 +1303,15 @@ done
         .acknowledgements
         .len();
         wait_for_ack_count(&ledger_path, acknowledgements_at_completion + 1).await;
-        (completed, restart, operation_started.elapsed().as_millis())
+        (
+            completed,
+            restart,
+            operation_started.elapsed().as_millis(),
+            acknowledgements_at_completion,
+        )
     };
     let case = run_with_workload_cleanup(&mut workload, case).await;
-    let (completed, restart, operation_elapsed_ms) = match case {
+    let (completed, restart, operation_elapsed_ms, acknowledgements_at_completion) = match case {
         Ok(result) => result,
         Err(_) => panic!(
             "workload case failed; psql errors: {}",
@@ -941,6 +1337,10 @@ done
         &std::fs::read_to_string(&ledger_path).expect("read final acknowledgement ledger"),
     )
     .expect("valid final acknowledgement ledger");
+    assert!(
+        ledger.acknowledgements.len() > acknowledgements_at_completion,
+        "at least one write must be acknowledged after Completed is durable"
+    );
     let max_observed_safe_ack_gap_ms = match kill_point {
         SourceKillPoint::PausedBeforeStage => 15_000,
         SourceKillPoint::Running => 10_000,
@@ -950,6 +1350,10 @@ done
         SourceKillPoint::ActivatedBeforeCutover
         | SourceKillPoint::ActivatedAfterTenantCas
         | SourceKillPoint::LayoutPublished => 12_000,
+        SourceKillPoint::RetiringBeforeDelete
+        | SourceKillPoint::RetiringAfterDelete
+        | SourceKillPoint::RetiringParked
+        | SourceKillPoint::Resuming => 12_000,
     };
     assert!(
         ledger.recovered >= 1,
@@ -1050,6 +1454,40 @@ done
     assert!(!topic_names.contains(&format!("__gres_wal.{}.r1", system.tenant())));
     assert!(topic_names.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
     assert!(topic_names.contains(&format!("__gres_wal.{}.r0", system.tenant())));
+    assert!(topic_names.contains(&sentinel_topic));
+
+    let retirement_kill = matches!(
+        kill_point,
+        SourceKillPoint::RetiringBeforeDelete
+            | SourceKillPoint::RetiringAfterDelete
+            | SourceKillPoint::RetiringParked
+            | SourceKillPoint::Resuming
+    );
+    let delete_ledger = restart
+        .delete_ledger
+        .lock()
+        .expect("final retirement delete ledger");
+    if retirement_kill {
+        assert_eq!(delete_ledger.exact_delete_calls, 1);
+        assert!(!delete_ledger.unrelated_delete_attempted);
+        assert_eq!(
+            delete_ledger.requested_topics,
+            vec![format!("__gres_wal.{}.r1", system.tenant())]
+        );
+        assert_eq!(
+            delete_ledger.injected_after_delete_errors,
+            usize::from(kill_point == SourceKillPoint::RetiringAfterDelete)
+        );
+        assert_eq!(
+            restart.predecessor_topic_present,
+            Some(kill_point == SourceKillPoint::RetiringBeforeDelete)
+        );
+        assert_eq!(
+            delete_ledger.exact_delete_calls - restart.delete_calls_at_kill,
+            usize::from(kill_point == SourceKillPoint::RetiringBeforeDelete),
+            "only BeforeDelete may issue the exact delete during replay"
+        );
+    }
 
     if let Some(path) = std::env::var_os("CRABKA_G8_KILL_EVIDENCE") {
         std::fs::write(
@@ -1069,6 +1507,8 @@ done
                     "marker_digest": restart.evidence.marker_digest,
                 },
                 "acknowledged_rows": ledger.acknowledgements.len(),
+                "acknowledgements_at_completion": acknowledgements_at_completion,
+                "post_completed_ack": ledger.acknowledgements.len() > acknowledgements_at_completion,
                 "recovered_acknowledgements": ledger.recovered,
                 "max_ack_gap_ms": ledger.max_ack_gap_ms,
                 "max_ack_gap_bound_ms": max_observed_safe_ack_gap_ms,
@@ -1092,6 +1532,15 @@ done
             "durable_tenant_layout": restart.tenant_layout,
             "durable_retirement_phase": restart.retirement_phase.map(|phase| format!("{phase:?}")),
             "durable_tenant_record_version": restart.tenant_record_version,
+            "predecessor_topic_present_at_kill": restart.predecessor_topic_present,
+            "exact_predecessor_delete_calls": delete_ledger.exact_delete_calls,
+            "delete_calls_at_kill": restart.delete_calls_at_kill,
+            "replay_delete_calls": delete_ledger.exact_delete_calls - restart.delete_calls_at_kill,
+            "delete_requested_topics": delete_ledger.requested_topics,
+            "unrelated_delete_attempted": delete_ledger.unrelated_delete_attempted,
+            "injected_after_delete_errors": delete_ledger.injected_after_delete_errors,
+            "sentinel_topic": sentinel_topic,
+            "sentinel_topic_preserved": topic_names.contains(&sentinel_topic),
                 "replacement_owner": {"range_id": 2, "generation": 1},
                 "marker_digest": completed.evidence.marker_digest,
             }))
@@ -1099,6 +1548,7 @@ done
         )
         .expect("write kill evidence");
     }
+    drop(delete_ledger);
     system.shutdown().await;
 }
 

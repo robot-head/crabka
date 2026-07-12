@@ -780,9 +780,44 @@ async fn park_retiring_ranges(
 ///
 /// The registry sidecar is the authority: deletion is replay-safe, and the sidecar advances to
 /// `Parked` only after metadata confirms the exact generation topic is absent.
+#[async_trait::async_trait]
+pub trait RangeRetirementAdmin: Send {
+    async fn metadata(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<crabka_client_admin::TopicMetadata, crabka_client_admin::AdminError>;
+
+    async fn delete_topics(
+        &mut self,
+        names: &[&str],
+        timeout_ms: i32,
+    ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError>;
+}
+
+#[async_trait::async_trait]
+impl<T> RangeRetirementAdmin for T
+where
+    T: crabka_client_admin::AdminClientLike + Send + ?Sized,
+{
+    async fn metadata(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<crabka_client_admin::TopicMetadata, crabka_client_admin::AdminError> {
+        crabka_client_admin::AdminClientLike::metadata(self, topics).await
+    }
+
+    async fn delete_topics(
+        &mut self,
+        names: &[&str],
+        timeout_ms: i32,
+    ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
+        crabka_client_admin::AdminClientLike::delete_topics(self, names, timeout_ms).await
+    }
+}
+
 pub async fn reconcile_one_retiring_range_wal(
     control: &crate::context::GresControlHandle,
-    admin: &mut (dyn crabka_client_admin::AdminClientLike + Send),
+    admin: &mut (dyn RangeRetirementAdmin + Send),
     tenant: &TenantName,
 ) -> Result<bool, ReconcileError> {
     let Some(record) = control.get_tenant(tenant).await? else {
@@ -834,12 +869,15 @@ async fn wal_topics_remain(
     Ok(false)
 }
 
-async fn delete_wal_topics(
-    admin: &mut (dyn crabka_client_admin::AdminClientLike + Send),
+async fn delete_wal_topics<A>(
+    admin: &mut A,
     tenant: &TenantName,
     ranges: &[u32],
     generation: u64,
-) -> Result<(), ReconcileError> {
+) -> Result<(), ReconcileError>
+where
+    A: RangeRetirementAdmin + Send + ?Sized,
+{
     for range_id in ranges {
         let topic = wal_topic_for_generation(tenant, *range_id, generation);
         let outcomes = admin.delete_topics(&[topic.as_str()], 30_000).await?;
@@ -855,10 +893,10 @@ async fn delete_wal_topics(
     Ok(())
 }
 
-async fn topic_exists(
-    admin: &mut (dyn crabka_client_admin::AdminClientLike + Send),
-    topic: &str,
-) -> Result<bool, ReconcileError> {
+async fn topic_exists<A>(admin: &mut A, topic: &str) -> Result<bool, ReconcileError>
+where
+    A: RangeRetirementAdmin + Send + ?Sized,
+{
     let metadata = admin.metadata(&[topic]).await?;
     Ok(metadata
         .topics

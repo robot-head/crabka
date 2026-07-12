@@ -25,6 +25,40 @@ pub(super) struct ActivationDiscovery {
 }
 
 impl ActivationDiscovery {
+    pub(super) fn promote_authoritative_target_recovery(&mut self) -> std::io::Result<()> {
+        if self.receipt.split.predecessor == RangeId::COORDINATOR {
+            return Ok(());
+        }
+        for spec in self.receipt.split.target_map.ranges() {
+            if spec.range_id == self.receipt.split.predecessor
+                || (!self
+                    .receipt
+                    .split
+                    .current_map
+                    .ranges()
+                    .iter()
+                    .any(|current| {
+                        current.range_id == spec.range_id
+                            && current.range_id != self.receipt.split.predecessor
+                    })
+                    && !self.receipt.targets.contains_key(&spec.range_id))
+            {
+                return Err(std::io::Error::other(format!(
+                    "authoritative activation target r{} lacks a durable descriptor",
+                    spec.range_id.as_u32()
+                )));
+            }
+        }
+        self.recovery_generations
+            .remove(&self.receipt.split.predecessor);
+        for target in self.receipt.targets.values() {
+            self.recovery_generations
+                .insert(target.range_id, target.wal_generation);
+        }
+        self.recovery_map = self.receipt.split.target_map.clone();
+        Ok(())
+    }
+
     pub(super) fn timestamp_primary_aliases(&self) -> BTreeMap<RangeId, RangeId> {
         if self.receipt.split.predecessor == RangeId::COORDINATOR || self.receipt.targets.len() != 1
         {
@@ -1543,6 +1577,21 @@ pub(super) async fn reconcile_before_readiness(
     let range0 = engines.engines.get(&RangeId::COORDINATOR).ok_or_else(|| {
         std::io::Error::other("range zero missing during activation reconciliation")
     })?;
+    if let Some(discovered) = discovered.as_ref()
+        && discovered.receipt.split.predecessor != RangeId::COORDINATOR
+        && discovered.recovery_map == discovered.receipt.split.target_map
+        && !matches!(
+            discovered.receipt.phase,
+            TopologyActivationPhase::CheckpointDurable | TopologyActivationPhase::TopologyCommitted
+        )
+    {
+        if !topology_is_recovered(engines, &discovered.receipt) {
+            return Err(std::io::Error::other(
+                "authoritative target journal names an unrecovered activation target",
+            ));
+        }
+        return Ok(Some(discovered.recovery_map.clone()));
+    }
     let tenant = range0.resources.recovery_config.tenant.to_string();
     let source_store =
         RangeZeroTopologyActivationStore::new(tenant.clone(), range0.engine.clone_handle());
@@ -2276,6 +2325,53 @@ mod tests {
             receipt: split_receipt,
         };
         assert!(split_discovery.timestamp_primary_aliases().is_empty());
+    }
+
+    #[test]
+    fn target_phase_journal_promotes_non_range_zero_move_recovery() {
+        let mut move_authority = move_receipt();
+        move_authority.phase = TopologyActivationPhase::CheckpointDurable;
+        let mut discovery = ActivationDiscovery {
+            recovery_map: move_authority.split.current_map.clone(),
+            recovery_generations: BTreeMap::from([
+                (RangeId::COORDINATOR, 0),
+                (
+                    move_authority.split.predecessor,
+                    move_authority.split.predecessor_generation,
+                ),
+            ]),
+            receipt: move_authority,
+        };
+        discovery
+            .promote_authoritative_target_recovery()
+            .expect("target-phase journal is additional roll-forward authority");
+        assert_eq!(discovery.recovery_map, discovery.receipt.split.target_map);
+        assert!(
+            !discovery
+                .recovery_generations
+                .contains_key(&discovery.receipt.split.predecessor)
+        );
+
+        let mut missing = non_range_zero_split_receipt();
+        missing.phase = TopologyActivationPhase::TopologyCommitted;
+        missing.targets.remove(&RangeId::new(3));
+        let mut discovery = ActivationDiscovery {
+            recovery_map: missing.split.current_map.clone(),
+            recovery_generations: BTreeMap::new(),
+            receipt: missing,
+        };
+        assert!(discovery.promote_authoritative_target_recovery().is_err());
+
+        let range_zero = receipt();
+        let mut discovery = ActivationDiscovery {
+            recovery_map: range_zero.split.current_map.clone(),
+            recovery_generations: BTreeMap::from([(RangeId::COORDINATOR, 0)]),
+            receipt: range_zero,
+        };
+        discovery
+            .promote_authoritative_target_recovery()
+            .expect("range-zero recovery remains graph-owned");
+        assert_eq!(discovery.recovery_map, discovery.receipt.split.current_map);
     }
 
     #[test]
