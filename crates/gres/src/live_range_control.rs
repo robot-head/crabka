@@ -142,6 +142,22 @@ struct OperationRuntime {
     tail_sha256: Option<String>,
     published: bool,
     resumed: bool,
+    topology_fence: Option<tokio::sync::OwnedRwLockWriteGuard<()>>,
+}
+
+impl OperationRuntime {
+    fn store_topology_fence(&mut self, fence: tokio::sync::OwnedRwLockWriteGuard<()>) {
+        self.topology_fence = Some(fence);
+    }
+
+    fn mark_published_and_release_topology_fence(&mut self) {
+        self.published = true;
+        self.release_topology_fence();
+    }
+
+    fn release_topology_fence(&mut self) {
+        self.topology_fence = None;
+    }
 }
 
 /// Compute-local executor behind the mTLS range-control service.
@@ -239,6 +255,7 @@ impl LiveRangeControlExecutor {
                 self.gateway
                     .validated_control_transfer_plan(intent.split().clone())
                     .map_err(|error| rejected("stale_split", error.to_string()))?;
+                let topology_fence = self.gateway.acquire_control_topology_fence().await;
                 let barrier = transfer
                     .pause_at_checkpoint(&checkpoint)
                     .await
@@ -247,6 +264,7 @@ impl LiveRangeControlExecutor {
                 let runtime = operations.entry(request.operation_id.clone()).or_default();
                 runtime.checkpoint = Some(checkpoint);
                 runtime.barrier = Some(barrier);
+                runtime.store_topology_fence(topology_fence);
                 Ok(RangeControlResp::Paused {
                     barrier_offset: barrier.offset,
                 })
@@ -364,12 +382,11 @@ impl LiveRangeControlExecutor {
                     .publish_control_mutation_with_transfer(split, claimed, transfer.as_ref())
                     .await
                     .map_err(|error| rejected("publication_failed", error.to_string()))?;
-                self.operations
-                    .lock()
-                    .await
+                let mut operations = self.operations.lock().await;
+                let runtime = operations
                     .get_mut(&request.operation_id)
-                    .expect("operation remains present")
-                    .published = true;
+                    .expect("operation remains present");
+                runtime.mark_published_and_release_topology_fence();
                 Ok(RangeControlResp::Applied)
             }
             RangeControlOperation::InheritMarkers { .. } => {
@@ -479,6 +496,9 @@ impl LiveRangeControlExecutor {
                     )
                     .await
                     .map_err(transfer_error)?;
+                if let Some(runtime) = self.operations.lock().await.get_mut(&request.operation_id) {
+                    runtime.release_topology_fence();
+                }
                 Ok(RangeControlResp::Applied)
             }
             RangeControlOperation::Resume => {
@@ -496,12 +516,12 @@ impl LiveRangeControlExecutor {
                     .and_then(|runtime| runtime.barrier)
                     .ok_or_else(|| rejected("missing_pause", "operation has no pause barrier"))?;
                 transfer.resume(barrier).await.map_err(transfer_error)?;
-                self.operations
-                    .lock()
-                    .await
+                let mut operations = self.operations.lock().await;
+                let runtime = operations
                     .get_mut(&request.operation_id)
-                    .expect("operation remains present")
-                    .resumed = true;
+                    .expect("operation remains present");
+                runtime.resumed = true;
+                runtime.release_topology_fence();
                 Ok(RangeControlResp::Applied)
             }
         }
@@ -752,14 +772,90 @@ fn rejected(code: &str, message: impl Into<String>) -> RangeControlResp {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::Arc;
+
     use crabka_gres_ranges::{
         InDoubtMarker, RangeId, RangeKey, RangeSpec, TableId, transport::RangeControlResp,
     };
     use crabka_pgkv::WriteOp;
 
     use super::{
-        marker_digest, recovery_extension_is_structural, verify_marker_partition, wire_marker,
+        OperationRuntime, marker_digest, recovery_extension_is_structural, verify_marker_partition,
+        wire_marker,
     };
+
+    async fn assert_runtime_fence_blocks_topology(
+        runtime: &OperationRuntime,
+        gate: &Arc<tokio::sync::RwLock<()>>,
+    ) {
+        assert!(runtime.topology_fence.is_some());
+        let publication = tokio::spawn(Arc::clone(gate).read_owned());
+        tokio::task::yield_now().await;
+        assert!(!publication.is_finished());
+        publication.abort();
+    }
+
+    #[tokio::test]
+    async fn pause_stores_topology_fence() {
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let mut runtime = OperationRuntime::default();
+
+        runtime.store_topology_fence(Arc::clone(&gate).write_owned().await);
+
+        assert_runtime_fence_blocks_topology(&runtime, &gate).await;
+    }
+
+    #[tokio::test]
+    async fn completed_pause_replay_reacquires_topology_fence_after_restart() {
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let mut restarted_runtime = OperationRuntime::default();
+        assert!(restarted_runtime.topology_fence.is_none());
+
+        restarted_runtime.store_topology_fence(Arc::clone(&gate).write_owned().await);
+
+        assert_runtime_fence_blocks_topology(&restarted_runtime, &gate).await;
+    }
+
+    #[tokio::test]
+    async fn successor_prologue_releases_topology_fence_after_publication() {
+        let gate = Arc::new(tokio::sync::RwLock::new(()));
+        let mut runtime = OperationRuntime::default();
+        runtime.store_topology_fence(Arc::clone(&gate).write_owned().await);
+        let successor_transaction = tokio::spawn(Arc::clone(&gate).read_owned());
+        tokio::task::yield_now().await;
+        assert!(!successor_transaction.is_finished());
+
+        runtime.mark_published_and_release_topology_fence();
+
+        assert!(runtime.published);
+        assert!(runtime.topology_fence.is_none());
+        tokio::time::timeout(std::time::Duration::from_secs(1), successor_transaction)
+            .await
+            .expect("post-publication transaction enters before retirement")
+            .expect("successor transaction task");
+    }
+
+    #[tokio::test]
+    async fn resume_and_retire_release_topology_fence_safely() {
+        for terminal_step in ["resume", "retire"] {
+            let gate = Arc::new(tokio::sync::RwLock::new(()));
+            let mut runtime = OperationRuntime::default();
+            runtime.store_topology_fence(Arc::clone(&gate).write_owned().await);
+            let publication = tokio::spawn(Arc::clone(&gate).read_owned());
+            tokio::task::yield_now().await;
+            assert!(
+                !publication.is_finished(),
+                "{terminal_step} fence was not held"
+            );
+
+            runtime.release_topology_fence();
+
+            tokio::time::timeout(std::time::Duration::from_secs(1), publication)
+                .await
+                .unwrap_or_else(|_| panic!("{terminal_step} did not release fence"))
+                .expect("publication task");
+        }
+    }
 
     fn tail_record(offset: i64, ops: Vec<WriteOp>) -> crabka_gres_ranges::CommittedTailRecord {
         crabka_gres_ranges::CommittedTailRecord {

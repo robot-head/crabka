@@ -9,10 +9,13 @@ CRABKA_G8_PROCESS_NEMESIS=1 \
 CRABKA_G8_NEMESIS_EVIDENCE="$evidence_path" \
 timeout 180s cargo test --locked -p crabka-gres --test topology_process_nemesis \
   -- --exact real_process_move_cli_operator_and_wal_retirement --nocapture
-CRABKA_G8_PROCESS_NEMESIS=1 \
-CRABKA_G8_KILL_EVIDENCE="$PWD/target/g8-topology-process-nemesis/move-paused-stage-kill.json" \
-timeout 180s cargo test --locked -p crabka-gres --test topology_process_nemesis \
-  -- --exact real_process_move_recovers_after_paused_stage_sigkill_with_exact_ack_ledger --nocapture
+for kill_point in running checkpointed paused_before_stage paused_after_stage; do
+  CRABKA_G8_PROCESS_NEMESIS=1 \
+  CRABKA_G8_SOURCE_KILL_POINT="$kill_point" \
+  CRABKA_G8_KILL_EVIDENCE="$PWD/target/g8-topology-process-nemesis/move-${kill_point}-kill.json" \
+  timeout 180s cargo test --locked -p crabka-gres --test topology_process_nemesis \
+    -- --exact real_process_move_source_phase_sigkill_with_exact_ack_ledger --nocapture
+done
 
 python3 - <<'PY'
 import json
@@ -23,11 +26,34 @@ assert evidence["operation"] == "move"
 assert evidence["completed"] is True
 assert evidence["acknowledged_rows"] == evidence["target_rows"] == 32
 assert evidence["predecessor_wal_retired"] is True
-kill_evidence = json.loads(Path("target/g8-topology-process-nemesis/move-paused-stage-kill.json").read_text())
-assert kill_evidence["kill_point"] == "paused_after_stage"
-assert kill_evidence["completed"] is True
-assert kill_evidence["old_pid"] != kill_evidence["new_pid"]
-assert kill_evidence["recovered_acknowledgements"] >= 1
-assert kill_evidence["max_ack_gap_ms"] <= kill_evidence["max_ack_gap_bound_ms"] == 7000
-assert kill_evidence["predecessor_wal_retired"] is True
+for kill_point in ("running", "checkpointed", "paused_before_stage", "paused_after_stage"):
+    kill_evidence = json.loads(Path(f"target/g8-topology-process-nemesis/move-{kill_point}-kill.json").read_text())
+    assert kill_evidence["kill_point"] == kill_point
+    assert kill_evidence["completed"] is True
+    assert kill_evidence["old_pid"] != kill_evidence["new_pid"]
+    assert kill_evidence["recovered_acknowledgements"] >= 1
+    expected_gap_bound = {
+        "running": 10000,
+        "checkpointed": 10000,
+        "paused_before_stage": 15000,
+        "paused_after_stage": 15000,
+    }[kill_point]
+    assert kill_evidence["max_ack_gap_ms"] <= kill_evidence["max_ack_gap_bound_ms"] == expected_gap_bound
+    assert kill_evidence["predecessor_wal_retired"] is True
+    assert kill_evidence["post_publication_ack_before_retirement"] is True
+    durable = kill_evidence["durable_evidence"]
+    if kill_point == "running":
+        assert kill_evidence["durable_phase"] == "Running"
+        assert all(value is None for value in durable.values())
+    elif kill_point == "checkpointed":
+        assert kill_evidence["durable_phase"] == "Checkpointed"
+        assert durable["manifest_key"] and durable["covered_offset"] is not None
+        assert durable["barrier_offset"] is None
+    elif kill_point == "paused_before_stage":
+        assert kill_evidence["durable_phase"] == "Paused"
+        assert durable["barrier_offset"] is not None and durable["tail_sha256"] is None
+    else:
+        assert kill_evidence["durable_phase"] == "Paused"
+        assert durable["barrier_offset"] is not None and durable["tail_sha256"]
+        assert durable["marker_digest"] is None
 PY

@@ -39,6 +39,83 @@ struct AckLedger {
     acknowledgements: BTreeMap<i64, u128>,
     recovered: usize,
     max_ack_gap_ms: u128,
+    max_ack_gap_endpoints: Option<(i64, u128, i64, u128)>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SourceKillPoint {
+    Running,
+    Checkpointed,
+    PausedBeforeStage,
+    PausedAfterStage,
+}
+
+impl SourceKillPoint {
+    fn from_env() -> Self {
+        match std::env::var("CRABKA_G8_SOURCE_KILL_POINT")
+            .as_deref()
+            .unwrap_or("paused_after_stage")
+        {
+            "running" => Self::Running,
+            "checkpointed" => Self::Checkpointed,
+            "paused_before_stage" => Self::PausedBeforeStage,
+            "paused_after_stage" => Self::PausedAfterStage,
+            other => panic!("unknown source kill point {other}"),
+        }
+    }
+
+    const fn name(self) -> &'static str {
+        match self {
+            Self::Running => "running",
+            Self::Checkpointed => "checkpointed",
+            Self::PausedBeforeStage => "paused_before_stage",
+            Self::PausedAfterStage => "paused_after_stage",
+        }
+    }
+
+    fn is_ready(self, record: &SplitOperationRecord) -> bool {
+        match self {
+            Self::Running => {
+                record.phase == SplitOperationPhase::Running
+                    && record.evidence == Default::default()
+            }
+            Self::Checkpointed => {
+                record.phase == SplitOperationPhase::Checkpointed
+                    && record.evidence.manifest_key.is_some()
+                    && record.evidence.covered_offset.is_some()
+                    && record.evidence.barrier_offset.is_none()
+            }
+            Self::PausedBeforeStage => {
+                record.phase == SplitOperationPhase::Paused
+                    && record.evidence.barrier_offset.is_some()
+                    && record.evidence.tail_sha256.is_none()
+            }
+            Self::PausedAfterStage => {
+                record.phase == SplitOperationPhase::Paused
+                    && record.evidence.barrier_offset.is_some()
+                    && record.evidence.tail_sha256.is_some()
+                    && record.evidence.marker_digest.is_none()
+            }
+        }
+    }
+}
+
+struct KillInjection<'a> {
+    ledger_path: &'a Path,
+    point: SourceKillPoint,
+}
+
+struct KillObservation {
+    old_pid: u32,
+    new_pid: u32,
+    restart_ms: u128,
+    pre_kill_ms: u128,
+    stage_complete_ms: Option<u128>,
+    publication_ms: Option<u128>,
+    post_publication_ack_ms: Option<u128>,
+    phase: SplitOperationPhase,
+    evidence: crabka_gres_control::SplitOperationEvidence,
+    post_publication_ack_before_retirement: bool,
 }
 
 fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
@@ -81,16 +158,19 @@ fn parse_ack_ledger(contents: &str) -> Result<AckLedger, String> {
             ));
         }
     }
-    let max_ack_gap_ms = acknowledgements
-        .values()
-        .zip(acknowledgements.values().skip(1))
-        .map(|(left, right)| right.saturating_sub(*left))
-        .max()
+    let max_ack_gap_endpoints = acknowledgements
+        .iter()
+        .zip(acknowledgements.iter().skip(1))
+        .max_by_key(|((_, left), (_, right))| right.saturating_sub(**left))
+        .map(|((left_seq, left), (right_seq, right))| (*left_seq, *left, *right_seq, *right));
+    let max_ack_gap_ms = max_ack_gap_endpoints
+        .map(|(_, left, _, right)| right.saturating_sub(left))
         .unwrap_or_default();
     Ok(AckLedger {
         acknowledgements,
         recovered,
         max_ack_gap_ms,
+        max_ack_gap_endpoints,
     })
 }
 
@@ -347,8 +427,8 @@ async fn drive_operation(
     system: &mut ProcessHarness,
     operation_id: &str,
     max_operation_duration: std::time::Duration,
-    kill_after_stage: Option<&Path>,
-) -> (SplitOperationRecord, Option<(u32, u32, u128)>) {
+    kill_injection: Option<KillInjection<'_>>,
+) -> (SplitOperationRecord, Option<KillObservation>) {
     let tenant = TenantName::try_from(system.tenant()).expect("tenant");
     let mut registry = Registry::connect(system.bootstrap())
         .await
@@ -362,13 +442,14 @@ async fn drive_operation(
     let mut restarted_pids = None;
     loop {
         let current = load_operation(system.bootstrap(), system.tenant(), operation_id).await;
-        if kill_after_stage.is_some_and(|_| {
-            current.phase == SplitOperationPhase::Paused
-                && current.evidence.tail_sha256.is_some()
-                && restarted_pids.is_none()
-        }) {
-            wait_for_ack_count(kill_after_stage.expect("checked"), 8).await;
+        if kill_injection
+            .as_ref()
+            .is_some_and(|injection| injection.point.is_ready(&current) && restarted_pids.is_none())
+        {
+            let injection = kill_injection.as_ref().expect("checked");
+            wait_for_ack_count(injection.ledger_path, 8).await;
             let old_pid = system.pid(0);
+            let pre_kill_ms = timestamp_ms();
             system.kill(0).await;
             tokio::time::sleep(Duration::from_millis(150)).await;
             system.restart_with_hosted_ranges(0, "r0,r1").await;
@@ -388,10 +469,51 @@ async fn drive_operation(
                 registry: Mutex::new(fresh_registry),
             });
             mutation_client = MtlsRangeMutationClient::new(system.operator_control_client());
-            restarted_pids = Some((old_pid, new_pid, timestamp_ms()));
+            restarted_pids = Some(KillObservation {
+                old_pid,
+                new_pid,
+                restart_ms: timestamp_ms(),
+                pre_kill_ms,
+                stage_complete_ms: None,
+                publication_ms: None,
+                post_publication_ack_ms: None,
+                phase: current.phase,
+                evidence: current.evidence.clone(),
+                post_publication_ack_before_retirement: false,
+            });
+        }
+        if current.evidence.tail_sha256.is_some()
+            && let Some(observation) = restarted_pids.as_mut()
+            && observation.stage_complete_ms.is_none()
+        {
+            observation.stage_complete_ms = Some(timestamp_ms());
         }
         match current.phase {
             SplitOperationPhase::Activated => {
+                if let (Some(injection), Some(observation)) =
+                    (kill_injection.as_ref(), restarted_pids.as_mut())
+                    && !observation.post_publication_ack_before_retirement
+                {
+                    observation.publication_ms = Some(timestamp_ms());
+                    let acknowledged = parse_ack_ledger(
+                        &std::fs::read_to_string(injection.ledger_path)
+                            .expect("post-publication acknowledgement ledger"),
+                    )
+                    .expect("valid post-publication acknowledgement ledger")
+                    .acknowledgements
+                    .len();
+                    wait_for_ack_count(injection.ledger_path, acknowledged + 1).await;
+                    observation.post_publication_ack_before_retirement = true;
+                    observation.post_publication_ack_ms = parse_ack_ledger(
+                        &std::fs::read_to_string(injection.ledger_path)
+                            .expect("post-publication acknowledgement ledger"),
+                    )
+                    .expect("valid post-publication acknowledgement ledger")
+                    .acknowledgements
+                    .values()
+                    .next_back()
+                    .copied();
+                }
                 let readiness_deadline = Instant::now() + std::time::Duration::from_secs(5);
                 loop {
                     match verify_target_topology_ready(&mutation_client, &current).await {
@@ -534,11 +656,14 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-async fn real_process_move_recovers_after_paused_stage_sigkill_with_exact_ack_ledger() {
+async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
     if std::env::var_os("CRABKA_G8_PROCESS_NEMESIS").is_none() {
         return;
     }
-    let mut system = ProcessHarness::start_all_on_zero("tenant-g8-paused-stage-kill").await;
+    let kill_point = SourceKillPoint::from_env();
+    let operation_id = format!("g8-source-kill-{}", kill_point.name().replace('_', "-"));
+    let tenant_name = format!("tenant-{operation_id}");
+    let mut system = ProcessHarness::start_all_on_zero(&tenant_name).await;
     let mut ddl = String::new();
     for table in 1..50 {
         ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
@@ -619,19 +744,28 @@ done
     };
     let case = async {
         wait_for_ack_count(&ledger_path, 8).await;
-        initiate_move_with_cli(&system, "g8-paused-stage-kill").await;
+        initiate_move_with_cli(&system, &operation_id).await;
         let operation_started = Instant::now();
-        let (completed, restart) = tokio::time::timeout(
-            Duration::from_secs(45),
+        let drive_result = tokio::time::timeout(
+            Duration::from_secs(75),
             drive_operation(
                 &mut system,
-                "g8-paused-stage-kill",
-                Duration::from_secs(45),
-                Some(&ledger_path),
+                &operation_id,
+                Duration::from_secs(75),
+                Some(KillInjection {
+                    ledger_path: &ledger_path,
+                    point: kill_point,
+                }),
             ),
         )
-        .await
-        .expect("whole PausedAfterStage Move operation deadline");
+        .await;
+        let (completed, restart) = drive_result.unwrap_or_else(|_| {
+            panic!(
+                "whole {} Move operation deadline; source log: {}",
+                kill_point.name(),
+                system.log(0)
+            )
+        });
         assert_eq!(completed.phase, SplitOperationPhase::Completed);
         let acknowledgements_at_completion = parse_ack_ledger(
             &std::fs::read_to_string(&ledger_path).expect("live acknowledgement ledger"),
@@ -650,22 +784,34 @@ done
             std::fs::read_to_string(&workload_error_path).unwrap_or_default()
         ),
     };
-    let (old_pid, new_pid, restart_ms) = restart.expect("PausedAfterStage SIGKILL occurred");
+    let restart = restart.expect("configured source-phase SIGKILL occurred");
+    let old_pid = restart.old_pid;
+    let new_pid = restart.new_pid;
+    let restart_ms = restart.restart_ms;
+    assert!(
+        restart.post_publication_ack_before_retirement,
+        "a successor-bound write must commit after publication while retirement is pending"
+    );
 
     let ledger = parse_ack_ledger(
         &std::fs::read_to_string(&ledger_path).expect("read final acknowledgement ledger"),
     )
     .expect("valid final acknowledgement ledger");
-    const MAX_OBSERVED_SAFE_ACK_GAP_MS: u128 = 7_000;
+    let max_observed_safe_ack_gap_ms = match kill_point {
+        SourceKillPoint::PausedBeforeStage => 15_000,
+        SourceKillPoint::Running => 10_000,
+        SourceKillPoint::Checkpointed => 10_000,
+        SourceKillPoint::PausedAfterStage => 15_000,
+    };
     assert!(
         ledger.recovered >= 1,
         "deterministic response loss must recover an ACK"
     );
     assert!(
-        ledger.max_ack_gap_ms <= MAX_OBSERVED_SAFE_ACK_GAP_MS,
+        ledger.max_ack_gap_ms <= max_observed_safe_ack_gap_ms,
         "maximum acknowledged-write gap {}ms exceeded observed-safe {}ms bound",
         ledger.max_ack_gap_ms,
-        MAX_OBSERVED_SAFE_ACK_GAP_MS
+        max_observed_safe_ack_gap_ms
     );
     assert!(
         ledger
@@ -725,7 +871,7 @@ done
     let retirement = durable_tenant
         .range_retirements
         .iter()
-        .find(|retirement| retirement.operation_id == "g8-paused-stage-kill")
+        .find(|retirement| retirement.operation_id == operation_id)
         .expect("exact retirement sidecar");
     assert_eq!(
         retirement.phase,
@@ -757,16 +903,38 @@ done
             path,
             serde_json::to_vec_pretty(&serde_json::json!({
                 "operation": "move",
-                "kill_point": "paused_after_stage",
+                "kill_point": kill_point.name(),
                 "completed": true,
                 "old_pid": old_pid,
                 "new_pid": new_pid,
+                "durable_phase": format!("{:?}", restart.phase),
+                "durable_evidence": {
+                    "manifest_key": restart.evidence.manifest_key,
+                    "covered_offset": restart.evidence.covered_offset,
+                    "barrier_offset": restart.evidence.barrier_offset,
+                    "tail_sha256": restart.evidence.tail_sha256,
+                    "marker_digest": restart.evidence.marker_digest,
+                },
                 "acknowledged_rows": ledger.acknowledgements.len(),
                 "recovered_acknowledgements": ledger.recovered,
                 "max_ack_gap_ms": ledger.max_ack_gap_ms,
-                "max_ack_gap_bound_ms": MAX_OBSERVED_SAFE_ACK_GAP_MS,
+                "max_ack_gap_bound_ms": max_observed_safe_ack_gap_ms,
+                "max_ack_gap_endpoints": ledger.max_ack_gap_endpoints.map(|(before_seq, before_ms, after_seq, after_ms)| serde_json::json!({
+                    "before_seq": before_seq,
+                    "before_ms": before_ms,
+                    "after_seq": after_seq,
+                    "after_ms": after_ms,
+                })),
+                "phase_timestamps_ms": {
+                    "pre_kill": restart.pre_kill_ms,
+                    "restart_ready": restart.restart_ms,
+                    "stage_complete": restart.stage_complete_ms,
+                    "publication": restart.publication_ms,
+                    "post_publication_ack": restart.post_publication_ack_ms,
+                },
                 "operation_elapsed_ms": operation_elapsed_ms,
-                "predecessor_wal_retired": true,
+            "predecessor_wal_retired": true,
+            "post_publication_ack_before_retirement": restart.post_publication_ack_before_retirement,
                 "replacement_owner": {"range_id": 2, "generation": 1},
                 "marker_digest": completed.evidence.marker_digest,
             }))
