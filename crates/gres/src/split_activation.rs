@@ -1896,6 +1896,50 @@ mod tests {
         let mut inconsistent = must_activate;
         inconsistent.tail_sha256 = None;
         assert!(validate_receipt_history(&[source, inconsistent]).is_err());
+
+        let mut partial_seed = receipt();
+        partial_seed
+            .targets
+            .get_mut(&RangeId::COORDINATOR)
+            .unwrap()
+            .replay_journal_seq = Some(1);
+        assert!(validate_receipt_history(&[partial_seed]).is_err());
+
+        let mut checkpoint_before_writer = receipt();
+        checkpoint_before_writer.phase = TopologyActivationPhase::WriterActivated;
+        checkpoint_before_writer.source_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+            range_id: checkpoint_before_writer.split.predecessor,
+            covered_offset: 3,
+            manifest_key: "source".into(),
+        });
+        checkpoint_before_writer.barrier_offset = Some(7);
+        checkpoint_before_writer.tail_sha256 = Some("tail".into());
+        for target in checkpoint_before_writer.targets.values_mut() {
+            target.replay_journal_seq = Some(1);
+        }
+        checkpoint_before_writer
+            .targets
+            .get_mut(&RangeId::COORDINATOR)
+            .unwrap()
+            .writer_activated = true;
+        checkpoint_before_writer
+            .targets
+            .get_mut(&RangeId::new(2))
+            .unwrap()
+            .bootstrap_checkpoint = Some(crabka_gres_ranges::CheckpointManifest {
+            range_id: RangeId::new(2),
+            covered_offset: 1,
+            manifest_key: "impossible".into(),
+        });
+        assert!(validate_receipt_history(&[checkpoint_before_writer]).is_err());
+
+        let mut mismatched_identity = receipt();
+        mismatched_identity
+            .targets
+            .get_mut(&RangeId::new(2))
+            .unwrap()
+            .range_id = RangeId::new(9);
+        assert!(validate_receipt_history(&[mismatched_identity]).is_err());
     }
 
     #[test]
