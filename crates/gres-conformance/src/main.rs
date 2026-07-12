@@ -3,7 +3,8 @@ use std::path::Path;
 use clap::Parser;
 use crabka_gres_conformance::{
     Baseline, CaseResult, RegressBaseline, Report, corpus_file_name, diff, discover_sql_files,
-    load_extended_case_files, run_extended_one, run_one, split_statements, tls,
+    load_extended_case_files, run_extended_one, run_one, split_statements,
+    subject_sharded_extended_case, subject_sharded_statement, tls,
 };
 use tokio_postgres::NoTls;
 
@@ -19,6 +20,9 @@ struct Args {
     /// Reconnect the subject between SQL files to isolate pooler logical-session state.
     #[arg(long)]
     subject_reconnect_per_file: bool,
+    /// Rewrite only subject-side CREATE TABLE/setup statements as SHARDED.
+    #[arg(long)]
+    subject_sharded_ddl: bool,
     /// Directory of .sql corpus files.
     #[arg(long, default_value = "crates/gres-conformance/corpus")]
     corpus: std::path::PathBuf,
@@ -96,6 +100,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
             corpus_regress,
             true,
             args.subject_reconnect_per_file,
+            args.subject_sharded_ddl,
         )
         .await?;
         std::fs::write(
@@ -127,8 +132,13 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         }
     }
     if let Some(extended_corpus) = &args.extended_corpus {
-        let extended_report =
-            run_extended_corpus(&mut oracle, &mut subject, extended_corpus).await?;
+        let extended_report = run_extended_corpus(
+            &mut oracle,
+            &mut subject,
+            extended_corpus,
+            args.subject_sharded_ddl,
+        )
+        .await?;
         std::fs::write(
             &args.extended_out,
             serde_json::to_string_pretty(&extended_report)?,
@@ -180,6 +190,7 @@ async fn run_primary_corpus(
         &args.corpus,
         false,
         args.subject_reconnect_per_file,
+        args.subject_sharded_ddl,
     )
     .await
 }
@@ -191,6 +202,7 @@ async fn run_corpus(
     corpus: &Path,
     recursive: bool,
     reconnect_per_file: bool,
+    subject_sharded_ddl: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut cases = Vec::new();
     for path in discover_sql_files(corpus, recursive)? {
@@ -198,7 +210,12 @@ async fn run_corpus(
         let sql = std::fs::read_to_string(&path)?;
         for stmt in split_statements(&sql) {
             let o = run_one(oracle, &stmt).await;
-            let s = run_one(subject, &stmt).await;
+            let subject_stmt = if subject_sharded_ddl {
+                subject_sharded_statement(&stmt)?
+            } else {
+                stmt.clone()
+            };
+            let s = run_one(subject, &subject_stmt).await;
             let d = diff(&o, &s);
             cases.push(CaseResult {
                 file: name.clone(),
@@ -220,12 +237,18 @@ async fn run_extended_corpus(
     oracle: &mut tokio_postgres::Client,
     subject: &mut tokio_postgres::Client,
     corpus: &Path,
+    subject_sharded_ddl: bool,
 ) -> Result<Report, Box<dyn std::error::Error>> {
     let mut cases = Vec::new();
     for case_file in load_extended_case_files(corpus)? {
         for extended_case in case_file.cases {
             let o = run_extended_one(oracle, &extended_case).await;
-            let s = run_extended_one(subject, &extended_case).await;
+            let subject_case = if subject_sharded_ddl {
+                subject_sharded_extended_case(&extended_case)?
+            } else {
+                extended_case.clone()
+            };
+            let s = run_extended_one(subject, &subject_case).await;
             let d = diff(&o, &s);
             cases.push(CaseResult {
                 file: case_file.file.clone(),
