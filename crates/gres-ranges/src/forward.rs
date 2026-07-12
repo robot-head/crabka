@@ -34,6 +34,26 @@ use crate::{
     tso::{GrantLease, TsoError, TsoRpc},
 };
 
+pub(crate) fn canonicalize_timestamp_operations(
+    mut operations: Vec<crabka_pgexec::TimestampTxnOperation>,
+) -> Result<Vec<crabka_pgexec::TimestampTxnOperation>, PgError> {
+    operations.sort_unstable_by_key(|operation| {
+        (
+            operation.range_id,
+            operation.table_id,
+            operation.rowid,
+            operation.delete,
+        )
+    });
+    if operations.windows(2).any(|pair| pair[0] == pair[1]) {
+        return Err(PgError::error(
+            "40001",
+            "timestamp operation assertion contains duplicates",
+        ));
+    }
+    Ok(operations)
+}
+
 /// Production handler for ranges hosted by one compute process.
 ///
 /// Every request is checked against the hosted-engine map before execution;
@@ -695,10 +715,30 @@ impl RangeService for HostedRangeService {
                             delete: write.delete,
                         })
                         .collect::<Vec<_>>();
+                    let asserted_operations =
+                        match canonicalize_timestamp_operations(asserted_operations) {
+                            Ok(operations) => operations,
+                            Err(error) => {
+                                return RangeResponse::SqlError {
+                                    code: error.code,
+                                    message: error.message,
+                                };
+                            }
+                        };
                     let actual_operations = primary_operations
                         .into_iter()
                         .filter(|operation| operation.range_id == request.range_id.as_u32())
                         .collect::<Vec<_>>();
+                    let actual_operations =
+                        match canonicalize_timestamp_operations(actual_operations) {
+                            Ok(operations) => operations,
+                            Err(error) => {
+                                return RangeResponse::SqlError {
+                                    code: error.code,
+                                    message: error.message,
+                                };
+                            }
+                        };
                     if actual_operations != asserted_operations {
                         return RangeResponse::SqlError {
                             code: "40001".into(),
@@ -780,6 +820,25 @@ impl RangeService for HostedRangeService {
                     .into_iter()
                     .filter(|operation| operation.range_id == request.range_id.as_u32())
                     .collect::<Vec<_>>();
+                let asserted_operations =
+                    match canonicalize_timestamp_operations(asserted_operations) {
+                        Ok(operations) => operations,
+                        Err(error) => {
+                            return RangeResponse::SqlError {
+                                code: error.code,
+                                message: error.message,
+                            };
+                        }
+                    };
+                let operations = match canonicalize_timestamp_operations(operations) {
+                    Ok(operations) => operations,
+                    Err(error) => {
+                        return RangeResponse::SqlError {
+                            code: error.code,
+                            message: error.message,
+                        };
+                    }
+                };
                 if asserted_decision != decision || asserted_operations != operations {
                     return RangeResponse::SqlError {
                         code: "40001".into(),
@@ -4764,6 +4823,120 @@ mod tests {
         );
     }
 
+    #[tokio::test]
+    async fn remote_secondary_resolves_valid_operations_in_descending_row_order() {
+        let primary = crabka_pgexec::SqlEngine::new();
+        let secondary = crabka_pgexec::SqlEngine::new();
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(600).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 601,
+            primary_range: 1,
+        };
+        let low = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 2,
+            row: vec![crabka_pgtypes::Datum::Int4(2)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let high = crabka_pgexec::TimestampWrite {
+            rowid: 3,
+            row: vec![crabka_pgtypes::Datum::Int4(3)],
+            ..low.clone()
+        };
+        let operations = [&low, &high]
+            .into_iter()
+            .map(|write| crabka_pgexec::TimestampTxnOperation {
+                range_id: 2,
+                table_id: write.table_id,
+                rowid: write.rowid,
+                delete: write.delete,
+            })
+            .collect::<Vec<_>>();
+        primary
+            .begin_timestamp_transaction(&crabka_pgexec::TimestampTxnDescriptor::begun(
+                start_ts,
+                identity.global_xid,
+                vec![2],
+            ))
+            .await
+            .expect("descriptor");
+        secondary
+            .timestamp_txn_participant(2)
+            .prewrite_as_secondary(identity, &[low.clone(), high.clone()])
+            .await
+            .expect("prewrite");
+        primary
+            .acknowledge_timestamp_participant_operations(start_ts, 2, &operations)
+            .await
+            .expect("ack operations");
+        let commit_ts =
+            crabka_pgexec::CommitTimestamp::after_start(start_ts, 602).expect("commit timestamp");
+        primary
+            .decide_timestamp_transaction(
+                start_ts,
+                crabka_pgexec::PrimaryTxnDecision::Committed(commit_ts),
+            )
+            .await
+            .expect("commit primary");
+        let service = HostedRangeService::new(BTreeMap::from([
+            (RangeId::new(1), primary),
+            (RangeId::new(2), secondary.clone_handle()),
+        ]));
+        let duplicate_response = service
+            .handle(RangeRequest::TimestampResolve(
+                crate::transport::TimestampResolveReq {
+                    range_id: RangeId::new(2),
+                    identity: encode_timestamp_identity(identity),
+                    decision: crate::transport::WireTimestampDecision::Committed {
+                        commit_ts: commit_ts.get(),
+                    },
+                    writes: vec![
+                        encode_timestamp_write(&low).expect("first low write"),
+                        encode_timestamp_write(&low).expect("duplicate low write"),
+                        encode_timestamp_write(&high).expect("high write"),
+                    ],
+                },
+            ))
+            .await;
+        assert!(
+            matches!(duplicate_response, RangeResponse::SqlError { code, .. } if code == "40001")
+        );
+        assert_eq!(
+            timestamp_tuple_state(&secondary, &low, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Intent
+        );
+        assert_eq!(
+            timestamp_tuple_state(&secondary, &high, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Intent
+        );
+        let response = service
+            .handle(RangeRequest::TimestampResolve(
+                crate::transport::TimestampResolveReq {
+                    range_id: RangeId::new(2),
+                    identity: encode_timestamp_identity(identity),
+                    decision: crate::transport::WireTimestampDecision::Committed {
+                        commit_ts: commit_ts.get(),
+                    },
+                    writes: vec![
+                        encode_timestamp_write(&high).expect("high write"),
+                        encode_timestamp_write(&low).expect("low write"),
+                    ],
+                },
+            ))
+            .await;
+        assert_eq!(response, RangeResponse::TimestampParticipantDone);
+        assert!(matches!(
+            timestamp_tuple_state(&secondary, &low, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Committed { .. }
+        ));
+        assert!(matches!(
+            timestamp_tuple_state(&secondary, &high, start_ts),
+            crabka_pgmvcc::version::TsVersionState::Committed { .. }
+        ));
+    }
+
     fn timestamp_tuple_state(
         engine: &crabka_pgexec::SqlEngine,
         write: &crabka_pgexec::TimestampWrite,
@@ -4779,6 +4952,17 @@ mod tests {
         crabka_pgmvcc::version::decode_ts_tuple(&bytes)
             .expect("decode tuple")
             .state
+    }
+
+    #[test]
+    fn duplicate_timestamp_operation_assertion_is_rejected() {
+        let operation = crabka_pgexec::TimestampTxnOperation {
+            range_id: 2,
+            table_id: 10,
+            rowid: 3,
+            delete: false,
+        };
+        assert!(canonicalize_timestamp_operations(vec![operation, operation]).is_err());
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
