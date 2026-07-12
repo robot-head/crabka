@@ -1006,12 +1006,18 @@ fn recover_durable_timestamp_transactions(
                                     .into_iter().find(|descriptor| descriptor.start_ts == identity.start_ts)
                                     .ok_or_else(|| TenantError::TimestampRecovery("terminal primary descriptor disappeared".into()))?;
                                 for range_id in participants {
+                                    let participant = engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
+                                        format!("terminal participant r{range_id} is not hosted")
+                                    ))?;
+                                    if primary_decision == crabka_pgexec::PrimaryTxnDecision::Aborted {
+                                        participant.abort_timestamp_transaction_intents(identity.start_ts).await
+                                            .map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
+                                        continue;
+                                    }
                                     let operations = descriptor.operations.iter().copied()
                                         .filter(|operation| operation.range_id == range_id.as_u32())
                                         .collect::<Vec<_>>();
-                                    engines.get(&range_id).ok_or_else(|| TenantError::TimestampRecovery(
-                                        format!("terminal participant r{range_id} is not hosted")
-                                    ))?.resolve_timestamp_transaction_operations(
+                                    participant.resolve_timestamp_transaction_operations(
                                         range_id.as_u32(), identity, primary_decision, &operations,
                                     ).await.map_err(|error| TenantError::TimestampRecovery(format!("{error:?}")))?;
                                 }
@@ -5787,6 +5793,81 @@ mod tests {
             participant_kv
                 .scan_prefix(b"\0\0\0\0index/ts_intent/")
                 .expect("scan global-index intents after repeat recovery")
+                .is_empty()
+        );
+    }
+
+    #[test]
+    fn recovery_aborts_secondary_prewritten_before_primary_participant_ack() {
+        let primary_kv: Arc<dyn Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let secondary_kv: Arc<dyn Kv> = Arc::new(crabka_pgkv::MemKv::new());
+        let primary = SqlEngine::with_kv(Arc::clone(&primary_kv)).expect("primary");
+        let secondary = SqlEngine::with_kv(Arc::clone(&secondary_kv)).expect("secondary");
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(20).expect("start timestamp");
+        let identity = crabka_pgexec::TimestampTxnIdentity {
+            start_ts,
+            global_xid: 21,
+            primary_range: 1,
+        };
+        let primary_write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 11,
+            row: vec![Datum::Int4(1)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let secondary_write = crabka_pgexec::TimestampWrite {
+            table_id: 10,
+            rowid: 12,
+            row: vec![Datum::Int4(2)],
+            delete: false,
+            global_index_intents: Vec::new(),
+        };
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .expect("runtime");
+        runtime.block_on(async {
+            primary
+                .timestamp_txn_participant(1)
+                .prewrite_as_primary(identity, &[1], std::slice::from_ref(&primary_write))
+                .await
+                .expect("primary prewrite");
+            secondary
+                .timestamp_txn_participant(2)
+                .prewrite_as_secondary(identity, std::slice::from_ref(&secondary_write))
+                .await
+                .expect("secondary prewrite before primary participant add/ack");
+        });
+        drop(runtime);
+
+        let mut engines = BTreeMap::new();
+        engines.insert(RangeId::new(1), primary);
+        engines.insert(RangeId::new(2), secondary);
+        recover_durable_timestamp_transactions(&engines, None)
+            .expect("recovery aborts prewrite-before-ack orphan");
+
+        let tuple_key = crabka_pgmvcc::version::version_key_ts(
+            secondary_write.table_id,
+            secondary_write.rowid,
+            start_ts.get(),
+        );
+        let tuple = secondary_kv
+            .get(&tuple_key)
+            .expect("read secondary tuple")
+            .expect("secondary tuple retained as aborted version");
+        let tuple = crabka_pgmvcc::version::decode_ts_tuple(&tuple).expect("decode tuple");
+        assert_eq!(tuple.state, crabka_pgmvcc::version::TsVersionState::Aborted);
+        assert!(
+            secondary_kv
+                .scan_prefix(b"\0\0\0\0meta/ts_prewrite/")
+                .expect("scan reservations")
+                .is_empty()
+        );
+        assert!(
+            secondary_kv
+                .scan_prefix(b"\0\0\0\0meta/ts_intent/")
+                .expect("scan identity sidecars")
                 .is_empty()
         );
     }
