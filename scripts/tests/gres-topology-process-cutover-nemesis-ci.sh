@@ -17,12 +17,12 @@ import json
 from pathlib import Path
 
 expected = {
-    "restored": ("Restored", "current", None, 20000),
-    "activated_before_cutover": ("Activated", "current", None, 12000),
-    "activated_after_tenant_cas": ("Activated", "target", "Parking", 12000),
-    "layout_published": ("LayoutPublished", "target", "Parking", 12000),
+    "restored": ("Restored", "current", None, 2, 20000),
+    "activated_before_cutover": ("Activated", "current", None, 2, 12000),
+    "activated_after_tenant_cas": ("Activated", "target", "Parking", 3, 12000),
+    "layout_published": ("LayoutPublished", "target", "Parking", 3, 12000),
 }
-for kill_point, (phase, layout, retirement, gap_bound) in expected.items():
+for kill_point, (phase, layout, retirement, record_version, gap_bound) in expected.items():
     evidence = json.loads(Path(f"target/g8-topology-process-nemesis/cutover-{kill_point}-kill.json").read_text())
     assert evidence["operation"] == "move" and evidence["kill_point"] == kill_point
     assert evidence["completed"] is True and evidence["old_pid"] != evidence["new_pid"]
@@ -32,10 +32,13 @@ for kill_point, (phase, layout, retirement, gap_bound) in expected.items():
     assert durable["barrier_offset"] is not None and durable["tail_sha256"] and durable["marker_digest"]
     assert evidence["durable_tenant_layout"] == layout
     assert evidence["durable_retirement_phase"] == retirement
+    assert evidence["durable_tenant_record_version"] == record_version
     assert evidence["recovered_acknowledgements"] >= 1
     assert evidence["post_publication_ack_before_retirement"] is True
     assert evidence["max_ack_gap_ms"] <= evidence["max_ack_gap_bound_ms"] == gap_bound
     assert evidence["predecessor_wal_retired"] is True
+    assert evidence["replacement_owner"] == {"range_id": 2, "generation": 1}
+    assert evidence["marker_digest"] == durable["marker_digest"]
     if kill_point == "activated_after_tenant_cas":
         assert evidence["ambiguous_cutover_advanced_without_republish"] is True
 PY

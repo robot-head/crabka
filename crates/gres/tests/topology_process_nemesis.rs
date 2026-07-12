@@ -598,7 +598,13 @@ async fn drive_operation(
         if matches!(
             current.phase,
             SplitOperationPhase::Activated | SplitOperationPhase::LayoutPublished
-        ) && let (Some(injection), Some(observation)) =
+        ) && current.plan.as_ref().is_some_and(|plan| {
+            current_tenant.ranges == plan.target_layout
+                && plan
+                    .source_record_version
+                    .checked_add(1)
+                    .is_some_and(|minimum| current_tenant.record_version >= minimum)
+        }) && let (Some(injection), Some(observation)) =
             (kill_injection.as_ref(), restarted_pids.as_mut())
             && !observation.post_publication_ack_before_retirement
         {
