@@ -420,26 +420,30 @@ impl SplitOperationPlan {
         }
         ensure_range_layout_valid(&self.current_layout)?;
         ensure_range_layout_valid(&self.target_layout)?;
-        let source = self
+        let source_index = self
             .current_layout
             .iter()
-            .find(|range| range.range_id == source_range_id);
-        let target_matches = match &operation.mutation {
+            .position(|range| range.range_id == source_range_id);
+        let mut expected_target = self.current_layout.clone();
+        let target_matches = source_index.is_some_and(|source_index| match &operation.mutation {
             RangeMutationPlan::Split { split } => {
-                self.target_layout.iter().any(|range| range == &split.left)
-                    && self.target_layout.iter().any(|range| range == &split.right)
+                expected_target.splice(
+                    source_index..=source_index,
+                    [split.left.clone(), split.right.clone()],
+                );
+                self.target_layout == expected_target
             }
             RangeMutationPlan::Move { move_range } => {
                 let replacement = &move_range.replacement;
-                self.target_layout.len() == self.current_layout.len()
-                    && self.target_layout.iter().any(|range| range == replacement)
-                    && !self
-                        .target_layout
-                        .iter()
-                        .any(|range| range.range_id == source_range_id)
+                if replacement.end_key != self.current_layout[source_index].end_key {
+                    return false;
+                }
+                expected_target[source_index] = replacement.clone();
+                self.target_layout == expected_target
             }
-        };
-        if source.is_none_or(|range| range.wal_generation != predecessor_generation)
+        });
+        if source_index
+            .is_none_or(|index| self.current_layout[index].wal_generation != predecessor_generation)
             || !target_matches
         {
             return Err(crate::ControlError::invalid_field(
@@ -1953,6 +1957,133 @@ mod tests {
         let encoded = serde_json::to_value(decoded).unwrap();
         assert!(encoded.get("split").is_none());
         assert_eq!(encoded["mutation"]["kind"], "split");
+    }
+
+    #[test]
+    fn sealed_move_plan_rejects_unrelated_edits_boundary_changes_and_reordering() {
+        let coordinator = RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(RangeBoundary::new(7, 0)),
+            endpoint: "coordinator:7443".into(),
+            wal_generation: 3,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let source = RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: "source:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let replacement = RangeLayoutEntry {
+            range_id: 9,
+            end_key: source.end_key,
+            endpoint: "replacement:7443".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let operation = || {
+            SplitOperationRecord::new_move(
+                TenantName::try_from("tenant-a").unwrap(),
+                "move-exact",
+                source.range_id,
+                source.wal_generation,
+                replacement.clone(),
+            )
+            .unwrap()
+        };
+        let plan = SplitOperationPlan {
+            source_record_version: 9,
+            source_map_epoch: 9,
+            routing_table_id: 7,
+            current_layout: vec![coordinator.clone(), source.clone()],
+            target_layout: vec![coordinator.clone(), replacement.clone()],
+        };
+        operation().with_plan(plan.clone()).unwrap();
+
+        for mutate in [
+            |target: &mut Vec<RangeLayoutEntry>| target[0].endpoint.push_str("-forged"),
+            |target: &mut Vec<RangeLayoutEntry>| target[0].wal_generation += 1,
+            |target: &mut Vec<RangeLayoutEntry>| target[0].lifecycle = RangeLifecycle::Parking,
+            |target: &mut Vec<RangeLayoutEntry>| target.swap(0, 1),
+            |target: &mut Vec<RangeLayoutEntry>| {
+                target[1].end_key = Some(RangeBoundary::new(8, 0));
+            },
+        ] {
+            let mut forged = plan.clone();
+            mutate(&mut forged.target_layout);
+            assert!(operation().with_plan(forged).is_err());
+        }
+    }
+
+    #[test]
+    fn sealed_split_plan_rejects_any_unrelated_layout_edit() {
+        let coordinator = RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(RangeBoundary::new(7, 0)),
+            endpoint: "coordinator:7443".into(),
+            wal_generation: 3,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let source = RangeLayoutEntry {
+            range_id: 1,
+            end_key: None,
+            endpoint: "source:7443".into(),
+            wal_generation: 4,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let left = RangeLayoutEntry {
+            range_id: 2,
+            end_key: Some(RangeBoundary::new(7, 50)),
+            endpoint: "left:7443".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let right = RangeLayoutEntry {
+            range_id: 3,
+            end_key: None,
+            endpoint: "right:7443".into(),
+            wal_generation: 5,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        };
+        let operation = || {
+            SplitOperationRecord::new(
+                TenantName::try_from("tenant-a").unwrap(),
+                "split-exact",
+                RangeLayoutSplit {
+                    source_range_id: source.range_id,
+                    predecessor_generation: source.wal_generation,
+                    left: left.clone(),
+                    right: right.clone(),
+                },
+            )
+            .unwrap()
+        };
+        let plan = SplitOperationPlan {
+            source_record_version: 9,
+            source_map_epoch: 9,
+            routing_table_id: 7,
+            current_layout: vec![coordinator.clone(), source.clone()],
+            target_layout: vec![coordinator, left.clone(), right.clone()],
+        };
+        operation().with_plan(plan.clone()).unwrap();
+        for mutate in [
+            |target: &mut Vec<RangeLayoutEntry>| target[0].endpoint.push_str("-forged"),
+            |target: &mut Vec<RangeLayoutEntry>| target[0].wal_generation += 1,
+            |target: &mut Vec<RangeLayoutEntry>| target[0].lifecycle = RangeLifecycle::Parking,
+            |target: &mut Vec<RangeLayoutEntry>| target.swap(1, 2),
+        ] {
+            let mut forged = plan.clone();
+            mutate(&mut forged.target_layout);
+            assert!(operation().with_plan(forged).is_err());
+        }
     }
 
     #[test]

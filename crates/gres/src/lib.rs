@@ -3584,25 +3584,16 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
         plan: &crabka_gres_ranges::ValidatedSplitTransferPlan,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
         let state = plan.state();
-        let Some(expected) = self.config.advertised_endpoint.as_deref() else {
-            return Err(crabka_gres_ranges::RangeTransferError::Unavailable {
-                range_id: state.predecessor,
-                reason: "live successor staging requires an authenticated advertised endpoint"
-                    .to_owned(),
-            });
+        let cardinality_matches = match state.operation {
+            crabka_gres_ranges::SplitOperation::Split => state.right.is_some(),
+            crabka_gres_ranges::SplitOperation::Move => state.right.is_none(),
+            _ => false,
         };
-        let right = state.right.as_ref().ok_or_else(|| {
-            crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: state.predecessor,
-                reason: "split is missing its right successor".to_owned(),
-            }
-        })?;
-        if state.left.endpoint != expected || right.endpoint != expected {
+        if !cardinality_matches {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
                 range_id: state.predecessor,
-                reason: format!(
-                    "successor endpoint must match authenticated local endpoint {expected}"
-                ),
+                reason: "transfer plan must contain exactly one Move or two Split successors"
+                    .to_owned(),
             });
         }
         Ok(())

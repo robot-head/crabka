@@ -8,7 +8,7 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_gres_ranges::{
-    RangeId, RangeKey, RangeSpec, SplitCommand, SuccessorDescriptor, TableId,
+    MoveRangeCommand, RangeId, RangeKey, RangeSpec, SplitCommand, SuccessorDescriptor, TableId,
 };
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
@@ -470,12 +470,16 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             operation: crabka_gres_ranges::transport::RangeControlOperation::Status,
         });
     for _ in 0..2 {
-        assert!(matches!(
-            runtime.handle_range_request(control_status.clone()).await,
-            Some(crabka_gres_ranges::RangeResponse::Control(
-                crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
-            ))
-        ));
+        let response = runtime.handle_range_request(control_status.clone()).await;
+        assert!(
+            matches!(
+                response,
+                Some(crabka_gres_ranges::RangeResponse::Control(
+                    crabka_gres_ranges::transport::RangeControlResp::Rejected { ref code, .. }
+            )) if code == "intent_authority"
+            ),
+            "unexpected unjournaled status response: {response:?}"
+        );
     }
     let transfer = runtime
         .range_transfer_capability()
@@ -808,14 +812,15 @@ async fn control_request(
     runtime: &crabka_gres::GresRuntime,
     tenant: &str,
     operation_id: &str,
+    mutation: &crabka_gres_ranges::SplitState,
     operation: crabka_gres_ranges::transport::RangeControlOperation,
 ) -> crabka_gres_ranges::transport::RangeControlResp {
     match runtime
         .handle_range_request(crabka_gres_ranges::RangeRequest::Control(
             crabka_gres_ranges::transport::RangeControlReq {
                 tenant: tenant.into(),
-                range_id: RangeId::COORDINATOR,
-                generation: 0,
+                range_id: mutation.predecessor,
+                generation: mutation.predecessor_generation,
                 operation_id: operation_id.into(),
                 operation,
             },
@@ -886,31 +891,40 @@ async fn seed_control_operation(
         )
         .unwrap();
     record.record_version = 1;
-    let right = split
-        .right
-        .as_ref()
-        .expect("proper split has right successor");
-    let split_intent = crabka_gres_control::RangeLayoutSplit {
-        source_range_id: split.predecessor.as_u32(),
-        predecessor_generation: split.predecessor_generation,
-        left: control_layout_entry(&split.left),
-        right: control_layout_entry(right),
-    };
     let mut target_layout = record.ranges.clone();
     let source_index = target_layout
         .iter()
-        .position(|range| range.range_id == split_intent.source_range_id)
+        .position(|range| range.range_id == split.predecessor.as_u32())
         .unwrap();
-    target_layout.splice(
-        source_index..=source_index,
-        [split_intent.left.clone(), split_intent.right.clone()],
-    );
-    let operation = crabka_gres_control::SplitOperationRecord::new(
-        crabka_gres_control::TenantName::try_from(tenant).unwrap(),
-        &split.operation_id,
-        split_intent,
-    )
-    .unwrap()
+    let operation = if let Some(right) = &split.right {
+        let split_intent = crabka_gres_control::RangeLayoutSplit {
+            source_range_id: split.predecessor.as_u32(),
+            predecessor_generation: split.predecessor_generation,
+            left: control_layout_entry(&split.left),
+            right: control_layout_entry(right),
+        };
+        target_layout.splice(
+            source_index..=source_index,
+            [split_intent.left.clone(), split_intent.right.clone()],
+        );
+        crabka_gres_control::SplitOperationRecord::new(
+            crabka_gres_control::TenantName::try_from(tenant).unwrap(),
+            &split.operation_id,
+            split_intent,
+        )
+        .unwrap()
+    } else {
+        let replacement = control_layout_entry(&split.left);
+        target_layout[source_index] = replacement.clone();
+        crabka_gres_control::SplitOperationRecord::new_move(
+            crabka_gres_control::TenantName::try_from(tenant).unwrap(),
+            &split.operation_id,
+            split.predecessor.as_u32(),
+            split.predecessor_generation,
+            replacement,
+        )
+        .unwrap()
+    }
     .with_plan(crabka_gres_control::SplitOperationPlan {
         source_record_version: record.record_version,
         source_map_epoch: split.current_map.epoch().as_u64(),
@@ -1142,6 +1156,7 @@ async fn drive_live_control_split(
     tenant: &str,
     operation_id: &str,
     state_path: &std::path::Path,
+    initial_mutation: Option<crabka_gres_ranges::SplitState>,
 ) {
     use crabka_gres_ranges::transport::{RangeControlOperation as Operation, RangeControlResp};
     struct DriverState {
@@ -1169,31 +1184,37 @@ async fn drive_live_control_split(
             .cloned()
             .expect("source predecessor");
         let split_at = RangeKey::table_start(TableId::new(1));
-        let split = crabka_gres_ranges::SplitState::for_split(
-            operation_id,
-            SplitCommand {
-                current_map,
-                predecessor: RangeId::COORDINATOR,
-                predecessor_generation: 0,
-                left: SuccessorDescriptor {
-                    range_id: RangeId::COORDINATOR,
-                    endpoint: "127.0.0.1:7443".into(),
-                    wal_generation: 1,
-                    interval: RangeSpec::for_interval(
-                        RangeId::COORDINATOR,
-                        predecessor.start,
-                        Some(split_at),
-                    ),
+        let split = initial_mutation.unwrap_or_else(|| {
+            crabka_gres_ranges::SplitState::for_split(
+                operation_id,
+                SplitCommand {
+                    current_map,
+                    predecessor: RangeId::COORDINATOR,
+                    predecessor_generation: 0,
+                    left: SuccessorDescriptor {
+                        range_id: RangeId::COORDINATOR,
+                        endpoint: "127.0.0.1:7443".into(),
+                        wal_generation: 1,
+                        interval: RangeSpec::for_interval(
+                            RangeId::COORDINATOR,
+                            predecessor.start,
+                            Some(split_at),
+                        ),
+                    },
+                    right: SuccessorDescriptor {
+                        range_id: RangeId::new(2),
+                        endpoint: "127.0.0.1:7443".into(),
+                        wal_generation: 1,
+                        interval: RangeSpec::for_interval(
+                            RangeId::new(2),
+                            split_at,
+                            predecessor.end,
+                        ),
+                    },
                 },
-                right: SuccessorDescriptor {
-                    range_id: RangeId::new(2),
-                    endpoint: "127.0.0.1:7443".into(),
-                    wal_generation: 1,
-                    interval: RangeSpec::for_interval(RangeId::new(2), split_at, predecessor.end),
-                },
-            },
-        )
-        .expect("valid control split");
+            )
+            .expect("valid control split")
+        });
         let transfer = runtime
             .range_transfer_capability()
             .expect("live control transfer capability");
@@ -1202,8 +1223,14 @@ async fn drive_live_control_split(
             .await
             .expect("journal topology intent before checkpoint");
         seed_control_operation(bootstrap, tenant, &split).await;
-        let checkpoint =
-            control_request(runtime, tenant, operation_id, Operation::ForceCheckpoint).await;
+        let checkpoint = control_request(
+            runtime,
+            tenant,
+            operation_id,
+            &split,
+            Operation::ForceCheckpoint,
+        )
+        .await;
         let RangeControlResp::Checkpoint {
             covered_offset,
             manifest_key,
@@ -1228,7 +1255,7 @@ async fn drive_live_control_split(
             .record_topology_activation_checkpoint(
                 operation_id,
                 &crabka_gres_ranges::CheckpointManifest {
-                    range_id: RangeId::COORDINATOR,
+                    range_id: split.predecessor,
                     covered_offset,
                     manifest_key: manifest_key.clone(),
                 },
@@ -1239,6 +1266,7 @@ async fn drive_live_control_split(
             runtime,
             tenant,
             operation_id,
+            &split,
             Operation::PauseAtCoveredOffset {
                 manifest_key: manifest_key.clone(),
                 covered_offset,
@@ -1293,6 +1321,7 @@ async fn drive_live_control_split(
             runtime,
             tenant,
             operation_id,
+            &split,
             Operation::SuccessorFencePrologue {
                 journal_revision,
                 journal_digest,
@@ -1314,8 +1343,14 @@ async fn drive_live_control_split(
             None,
         )
         .await;
-        let retire =
-            control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
+        let retire = control_request(
+            runtime,
+            tenant,
+            operation_id,
+            &split,
+            Operation::RetirePredecessor,
+        )
+        .await;
         assert!(
             matches!(
                 retire,
@@ -1333,13 +1368,20 @@ async fn drive_live_control_split(
         .await;
         return;
     }
-    let checkpoint =
-        control_request(runtime, tenant, operation_id, Operation::ForceCheckpoint).await;
+    let checkpoint = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        &split,
+        Operation::ForceCheckpoint,
+    )
+    .await;
     assert!(matches!(checkpoint, RangeControlResp::Checkpoint { .. }));
     let pause = control_request(
         runtime,
         tenant,
         operation_id,
+        &split,
         Operation::PauseAtCoveredOffset {
             manifest_key: manifest_key.clone(),
             covered_offset,
@@ -1352,6 +1394,7 @@ async fn drive_live_control_split(
         runtime,
         tenant,
         operation_id,
+        &split,
         Operation::StageFilteredRestore {
             journal_revision,
             journal_digest,
@@ -1375,6 +1418,7 @@ async fn drive_live_control_split(
         runtime,
         tenant,
         operation_id,
+        &split,
         Operation::InheritMarkers {
             journal_revision,
             journal_digest,
@@ -1390,6 +1434,7 @@ async fn drive_live_control_split(
         runtime,
         tenant,
         operation_id,
+        &split,
         Operation::SuccessorFencePrologue {
             journal_revision,
             journal_digest,
@@ -1411,7 +1456,14 @@ async fn drive_live_control_split(
         None,
     )
     .await;
-    let retire = control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
+    let retire = control_request(
+        runtime,
+        tenant,
+        operation_id,
+        &split,
+        Operation::RetirePredecessor,
+    )
+    .await;
     assert!(
         matches!(
             retire,
@@ -1427,6 +1479,78 @@ async fn drive_live_control_split(
         None,
     )
     .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn live_control_move_stages_claims_and_publishes_one_distinct_endpoint_successor() {
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let checkpoint_root = tempfile::tempdir().expect("checkpoint root");
+    let tenant = "runtime-control-move";
+    let bootstrap = broker.listen_addr().to_string();
+    let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
+        bootstrap.clone(),
+        tenant.into(),
+        checkpoint_root.path().to_path_buf(),
+    ))
+    .await
+    .expect("open live runtime");
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query(
+            "CREATE TABLE m1 (id int4); CREATE TABLE m2 (id int4); \
+             CREATE TABLE m3 (id int4); CREATE TABLE m4 (id int4); \
+             CREATE TABLE moved (id int4); INSERT INTO moved VALUES (7)",
+        )
+        .await
+        .expect("seed table owned by r1");
+    let current_map = runtime.published_range_map().expect("source map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|range| range.range_id == RangeId::new(1))
+        .cloned()
+        .expect("ordinary source range");
+    let mutation = crabka_gres_ranges::SplitState::for_move(
+        "live-control-move",
+        MoveRangeCommand {
+            current_map,
+            range_id: predecessor.range_id,
+            predecessor_generation: 0,
+            replacement: SuccessorDescriptor {
+                range_id: RangeId::new(9),
+                endpoint: "replacement.service.internal:7443".into(),
+                wal_generation: 1,
+                interval: RangeSpec::for_interval(
+                    RangeId::new(9),
+                    predecessor.start,
+                    predecessor.end,
+                ),
+            },
+        },
+    )
+    .expect("sealed Move");
+    let target_map = mutation.target_map.clone();
+
+    drive_live_control_split(
+        &runtime,
+        &bootstrap,
+        tenant,
+        "live-control-move",
+        &checkpoint_root.path().join("move-driver.json"),
+        Some(mutation),
+    )
+    .await;
+
+    assert_eq!(runtime.published_range_map(), Some(target_map));
+    let mut post_move = runtime.engine.connect();
+    let rows = post_move
+        .simple_query("SELECT id FROM moved")
+        .await
+        .expect("replacement serves moved table");
+    assert!(!rows.is_empty());
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1457,6 +1581,7 @@ async fn control_executor_crash_child() {
         &tenant,
         "control-crash",
         &checkpoint_root.join("control-driver.json"),
+        None,
     )
     .await;
     panic!("control crash failpoint returned");
@@ -1515,6 +1640,7 @@ async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
             &tenant,
             "control-crash",
             &checkpoint_root.join("control-driver.json"),
+            None,
         )
         .await;
         let recovery_elapsed = started.elapsed();
