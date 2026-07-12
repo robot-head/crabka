@@ -549,25 +549,17 @@ pub(super) async fn discover_activation_receipt(
                 .or_default()
                 .push(candidate);
         }
-        if histories.is_empty() {
+        if histories.is_empty() && checkpoint_receipts.is_empty() {
             // Canonical producer initialization may create the target topic before the
             // predecessor MustActivate value has been copied into it. The predecessor marker
             // remains sufficient roll-forward authority for this exact crash window.
             break;
         }
+        for operation_id in checkpoint_receipts.keys() {
+            histories.entry(operation_id.clone()).or_default();
+        }
         for (operation_id, mut history) in histories {
-            let mut canonical = BTreeMap::new();
-            for candidate in history.drain(..) {
-                if let Some(prior) = canonical.insert(candidate.revision, candidate.clone())
-                    && prior != candidate
-                {
-                    return Err(std::io::Error::other(format!(
-                        "activation operation {operation_id} has divergent values at revision {}",
-                        candidate.revision
-                    )));
-                }
-            }
-            history = canonical.into_values().collect();
+            history = canonicalize_receipt_history(&operation_id, history)?;
             let mut chain = Vec::with_capacity(history.len() + 1);
             let mut compacted_edge = None;
             if let Some(prefix) = receipts.get(&operation_id) {
@@ -902,15 +894,17 @@ fn canonicalize_receipt_history(
             )));
         }
     }
-    let canonical = canonical.into_values().collect::<Vec<_>>();
-    validate_receipt_history(&canonical)?;
-    Ok(canonical)
+    Ok(canonical.into_values().collect())
 }
 
 fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Result<()> {
     let source = receipt.source_checkpoint.is_some();
     let boundary = receipt.barrier_offset.is_some() && receipt.tail_sha256.is_some();
     let no_partial_boundary = receipt.barrier_offset.is_some() == receipt.tail_sha256.is_some();
+    let no_seeds = receipt
+        .targets
+        .values()
+        .all(|target| target.replay_journal_seq.is_none());
     let all_seeds = receipt
         .targets
         .values()
@@ -931,13 +925,30 @@ fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Resul
         .targets
         .values()
         .all(|target| target.bootstrap_checkpoint.is_some());
+    let target_identity = !receipt.targets.is_empty()
+        && receipt.targets.iter().all(|(range_id, target)| {
+            *range_id == target.range_id
+                && target
+                    .bootstrap_checkpoint
+                    .as_ref()
+                    .is_none_or(|checkpoint| checkpoint.range_id == *range_id)
+                && (!target.bootstrap_checkpoint.is_some() || target.writer_activated)
+        });
+    let source_identity = receipt.source_checkpoint.as_ref().is_none_or(|checkpoint| {
+        checkpoint.range_id == receipt.split.predecessor
+            && receipt
+                .barrier_offset
+                .is_none_or(|barrier| barrier > checkpoint.covered_offset)
+    });
     let valid = no_partial_boundary
+        && target_identity
+        && source_identity
         && match receipt.phase {
             TopologyActivationPhase::Prepared => {
-                !source && !boundary && !all_seeds && !any_writer && !any_checkpoint
+                !source && !boundary && no_seeds && !any_writer && !any_checkpoint
             }
             TopologyActivationPhase::SourceCheckpoint => {
-                source && !boundary && !all_seeds && !any_writer && !any_checkpoint
+                source && !boundary && no_seeds && !any_writer && !any_checkpoint
             }
             TopologyActivationPhase::MustActivate => {
                 source && boundary && all_seeds && !any_writer && !any_checkpoint
@@ -1699,7 +1710,9 @@ mod tests {
         let mut missing = source;
         missing.revision += 1;
         let operation_id = prepared.operation_id.clone();
-        assert!(canonicalize_receipt_history(&operation_id, [prepared, missing]).is_err());
+        let missing = canonicalize_receipt_history(&operation_id, [prepared, missing])
+            .expect("canonical values retain the gap");
+        assert!(validate_receipt_history(&missing).is_err());
     }
 
     fn receipt() -> TopologyActivationReceipt {

@@ -290,7 +290,26 @@ pub struct PausedWalWriter {
 #[derive(Clone)]
 pub struct PausedWalAuthorization {
     state: Arc<Mutex<WriterPauseState>>,
+    nonce: u64,
     barrier_offset: i64,
+}
+
+impl PausedWalAuthorization {
+    fn matches_writer(
+        &self,
+        writer_state: &Arc<Mutex<WriterPauseState>>,
+        expected_barrier_offset: i64,
+    ) -> bool {
+        self.barrier_offset == expected_barrier_offset
+            && Arc::ptr_eq(&self.state, writer_state)
+            && self.state.lock().is_ok_and(|state| {
+                matches!(
+                    *state,
+                    WriterPauseState::Paused { nonce, barrier_offset }
+                        if nonce == self.nonce && barrier_offset == self.barrier_offset
+                )
+            })
+    }
 }
 
 impl PausedWalWriter {
@@ -299,6 +318,7 @@ impl PausedWalWriter {
     pub fn activation_authorization(&self) -> PausedWalAuthorization {
         PausedWalAuthorization {
             state: Arc::clone(&self.pause.state),
+            nonce: self.pause.nonce,
             barrier_offset: self.barrier_offset,
         }
     }
@@ -318,12 +338,15 @@ impl Drop for PausedWalWriter {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum WriterPauseState {
     Idle,
-    Pausing,
-    Paused,
+    Pausing { nonce: u64 },
+    Paused { nonce: u64, barrier_offset: i64 },
 }
+
+static NEXT_PAUSE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
 
 struct PauseReservation {
     state: Arc<Mutex<WriterPauseState>>,
+    nonce: u64,
     active: bool,
 }
 
@@ -333,25 +356,38 @@ impl PauseReservation {
         if *current != WriterPauseState::Idle {
             return Err(SubstrateError::AlreadyPaused);
         }
-        *current = WriterPauseState::Pausing;
+        let nonce = NEXT_PAUSE_NONCE.fetch_add(1, Ordering::Relaxed);
+        *current = WriterPauseState::Pausing { nonce };
         drop(current);
         Ok(Self {
             state,
+            nonce,
             active: true,
         })
     }
 
-    fn mark_paused(&self) {
+    fn mark_paused(&self, barrier_offset: i64) {
         let mut current = self.state.lock().expect("writer pause state lock poisoned");
-        debug_assert_eq!(*current, WriterPauseState::Pausing);
-        *current = WriterPauseState::Paused;
+        debug_assert_eq!(*current, WriterPauseState::Pausing { nonce: self.nonce });
+        *current = WriterPauseState::Paused {
+            nonce: self.nonce,
+            barrier_offset,
+        };
     }
 
     fn release(&mut self) {
         if !self.active {
             return;
         }
-        *self.state.lock().expect("writer pause state lock poisoned") = WriterPauseState::Idle;
+        let mut state = self.state.lock().expect("writer pause state lock poisoned");
+        if matches!(
+            *state,
+            WriterPauseState::Pausing { nonce }
+                | WriterPauseState::Paused { nonce, .. }
+                if nonce == self.nonce
+        ) {
+            *state = WriterPauseState::Idle;
+        }
         self.active = false;
     }
 }
@@ -420,14 +456,7 @@ impl ProducerWalWriter {
         expected_barrier_offset: i64,
         request: GroupCommitRequest,
     ) -> Result<GroupCommitAck, SubstrateError> {
-        if authorization.barrier_offset != expected_barrier_offset
-            || !Arc::ptr_eq(&authorization.state, &self.pause_state)
-            || *authorization
-                .state
-                .lock()
-                .map_err(|_| SubstrateError::Unavailable("writer pause state poisoned".into()))?
-                != WriterPauseState::Paused
-        {
+        if !authorization.matches_writer(&self.pause_state, expected_barrier_offset) {
             return Err(SubstrateError::Unavailable(
                 "activation receipt append lacks the matching pause barrier".into(),
             ));
@@ -625,7 +654,7 @@ where
         .await
         .map_err(|_| SubstrateError::Unavailable("WAL commit gate closed".into()))?;
     let barrier_offset = commit_barrier().await?;
-    pause.mark_paused();
+    pause.mark_paused(barrier_offset);
     Ok(PausedWalWriter {
         pause,
         permit: Some(permit),
@@ -1164,6 +1193,19 @@ fn validate_must_activate_transition(
         && prior.operation_id == operation_id
         && next.operation_id == operation_id
         && prior.split == next.split
+        && prior.targets.len() == next.targets.len()
+        && prior.targets.iter().all(|(range_id, prior_target)| {
+            prior_target.range_id == *range_id
+                && prior_target.replay_journal_seq.is_none()
+                && !prior_target.writer_activated
+                && prior_target.bootstrap_checkpoint.is_none()
+                && next.targets.get(range_id).is_some_and(|next_target| {
+                    next_target.range_id == prior_target.range_id
+                        && next_target.wal_generation == prior_target.wal_generation
+                        && next_target.endpoint == prior_target.endpoint
+                        && next_target.interval == prior_target.interval
+                })
+        })
         && prior.phase == TopologyActivationPhase::SourceCheckpoint
         && next.phase == TopologyActivationPhase::MustActivate
         && next.revision
@@ -1171,6 +1213,9 @@ fn validate_must_activate_transition(
                 SubstrateError::Frame("activation receipt revision overflow".into())
             })?
         && next.source_checkpoint == prior.source_checkpoint
+        && prior.source_checkpoint.is_some()
+        && prior.barrier_offset.is_none()
+        && prior.tail_sha256.is_none()
         && barrier_offset.is_none_or(|offset| next.barrier_offset == Some(offset))
         && next.barrier_offset.is_some()
         && next.tail_sha256.is_some()
@@ -1348,7 +1393,10 @@ mod tests {
 
         {
             let pause = PauseReservation::reserve(Arc::clone(&pause_state)).expect("reserve");
-            assert!(*pause_state.lock().expect("pause state") == WriterPauseState::Pausing);
+            assert!(matches!(
+                *pause_state.lock().expect("pause state"),
+                WriterPauseState::Pausing { .. }
+            ));
             let Err(error) = PauseReservation::reserve(Arc::clone(&pause_state)) else {
                 panic!("a second pause reservation must be rejected");
             };
@@ -1360,11 +1408,38 @@ mod tests {
 
         {
             let pause = PauseReservation::reserve(Arc::clone(&pause_state)).expect("reserve");
-            pause.mark_paused();
-            assert!(*pause_state.lock().expect("pause state") == WriterPauseState::Paused);
+            pause.mark_paused(7);
+            assert!(matches!(
+                *pause_state.lock().expect("pause state"),
+                WriterPauseState::Paused {
+                    barrier_offset: 7,
+                    ..
+                }
+            ));
         }
 
         assert!(*pause_state.lock().expect("pause state") == WriterPauseState::Idle);
+    }
+
+    #[test]
+    fn pause_authorization_is_invalid_after_release_and_during_a_later_pause() {
+        let state = Arc::new(Mutex::new(WriterPauseState::Idle));
+        let mut first = PauseReservation::reserve(Arc::clone(&state)).expect("first pause");
+        first.mark_paused(7);
+        let stale = PausedWalAuthorization {
+            state: Arc::clone(&state),
+            nonce: first.nonce,
+            barrier_offset: 7,
+        };
+        assert!(stale.matches_writer(&state, 7));
+        first.release();
+        assert!(!stale.matches_writer(&state, 7));
+
+        let mut second = PauseReservation::reserve(Arc::clone(&state)).expect("second pause");
+        second.mark_paused(7);
+        assert_ne!(first.nonce, second.nonce);
+        assert!(!stale.matches_writer(&state, 7));
+        second.release();
     }
 
     #[tokio::test]
