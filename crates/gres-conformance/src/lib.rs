@@ -165,9 +165,10 @@ fn is_create_table_candidate(sql: &str) -> bool {
         Err(error) => lex_valid_prefix(sql, error.position),
     };
     matches!(tokens.first(), Some((Token::Keyword(Keyword::Create), _)))
-        && tokens.iter().take(8).any(|(token, _)| {
-            matches!(token, Token::Keyword(Keyword::Table))
-        })
+        && tokens
+            .iter()
+            .take(8)
+            .any(|(token, _)| matches!(token, Token::Keyword(Keyword::Table)))
 }
 
 fn lex_valid_prefix(sql: &str, mut end: usize) -> Vec<(crabka_pgparser::token::Token, usize)> {

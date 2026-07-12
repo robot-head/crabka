@@ -979,7 +979,9 @@ impl SqlEngine {
     /// Enumerate topology activations that startup must reconcile before readiness.
     pub fn topology_activation_receipts(&self, tenant: &str) -> Result<Vec<Vec<u8>>, ExecError> {
         self.kv
-            .scan_prefix(&crabka_pgkv::key::topology_activation_receipt_prefix(tenant))
+            .scan_prefix(&crabka_pgkv::key::topology_activation_receipt_prefix(
+                tenant,
+            ))
             .map(|pairs| pairs.into_iter().map(|(_, value)| value).collect())
             .map_err(Into::into)
     }
