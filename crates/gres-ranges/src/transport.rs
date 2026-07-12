@@ -1915,7 +1915,11 @@ mod tests {
 
     #[async_trait]
     impl crate::control::SplitIntentAuthority for AllowControlIntent {
-        async fn authorize_request(&self, _request: &RangeControlReq) -> Result<bool, String> {
+        async fn authorize_request(
+            &self,
+            _request: &RangeControlReq,
+            _context: crate::control::IntentAuthorizationContext,
+        ) -> Result<bool, String> {
             Ok(true)
         }
     }

@@ -1756,6 +1756,7 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for AllowSplitIntentAutho
     async fn authorize_request(
         &self,
         _request: &crabka_gres_ranges::transport::RangeControlReq,
+        _context: crabka_gres_ranges::control::IntentAuthorizationContext,
     ) -> Result<bool, String> {
         Ok(true)
     }
@@ -1766,6 +1767,7 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
     async fn authorize_request(
         &self,
         request: &crabka_gres_ranges::transport::RangeControlReq,
+        context: crabka_gres_ranges::control::IntentAuthorizationContext,
     ) -> Result<bool, String> {
         if request.tenant != self.tenant.as_str() {
             return Ok(false);
@@ -1797,7 +1799,7 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
             return Ok(false);
         }
         crabka_gres_ranges::control::RegistrySplitIntentView::new([operation])
-            .authorize_request(request)
+            .authorize_request(request, context)
             .await
     }
 }
