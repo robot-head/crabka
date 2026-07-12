@@ -79,3 +79,5 @@ Post-remediation verification: formatting and diff checks passed; pgexec library
 - The gateway restart fixture now exposes the local primary through a real TLS range endpoint, so remote-secondary recovery exercises direct primary authentication rather than caller trust.
 - `scripts/check-gres-primary-distribution.py` requires the exact uniform count per range, exact range-id set, and exact total. A concrete `{437,1,1,1}` artifact fails with `expected 110 per range`.
 - Fresh robust artifact `target/gres-scaling-auth-recovery-final2/range-scaling.json` passes all gates: range-local `3.2778x`, sharded `3.4144x`, envelope efficiency `0.8536`, and observed distributions exactly 110 per range.
+
+Final second-review verification passed formatting/diff checks, pgexec library `341/341`, pgexec transactions `36/36`, gres-ranges library `116/116`, crossrange `21/21`, multirange `33/33`, the targeted CLI parser, and the static mutation/skew suite. Gateway-local remains `10/11` solely because of the existing invalid-socket fixture now at `gateway_local.rs:1136`.
