@@ -412,7 +412,14 @@ pub(crate) fn active_operations(
 /// Before this point, changing the source Deployment can destroy the only process holding staged
 /// successor state and able to publish that receipt.
 pub(crate) fn successors_may_be_deployed(record: &SplitOperationRecord) -> bool {
-    record.phase >= SplitOperationPhase::Activated
+    matches!(
+        record.phase,
+        SplitOperationPhase::Activated
+            | SplitOperationPhase::LayoutPublished
+            | SplitOperationPhase::Retiring
+            | SplitOperationPhase::Resuming
+            | SplitOperationPhase::Completed
+    )
 }
 
 #[cfg(test)]

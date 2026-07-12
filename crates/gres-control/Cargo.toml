@@ -32,6 +32,7 @@ tracing = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]
+static_assertions = "1"
 assert2 = { workspace = true }
 crabka-broker = { version = "0.3.9", path = "../broker", features = ["test-helpers"] }
 proptest = { workspace = true }
