@@ -2106,6 +2106,111 @@ async fn load_live_tenant_config(
     }
 }
 
+async fn load_live_split_operation(
+    bootstrap: &str,
+    tenant: &str,
+    operation_id: &str,
+    security: Option<ClientSecurity>,
+) -> std::io::Result<Option<crabka_gres_control::SplitOperationRecord>> {
+    const TOPIC: &str = crabka_gres_control::TENANT_REGISTRY_TOPIC;
+    const KEY_PREFIX: &[u8] = b"\0gres-split-operation\0";
+    let Some(addr) = resolve_bootstrap_addr(bootstrap) else {
+        return invalid_input("substrate bootstrap address list is empty");
+    };
+    let mut admin = crabka_client_admin::AdminClient::connect_secured(
+        &split_bootstrap(bootstrap),
+        security.clone(),
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("activation registry metadata: {error}")))?;
+    let metadata = admin
+        .metadata(&[TOPIC])
+        .await
+        .map_err(|error| std::io::Error::other(format!("activation registry metadata: {error}")))?;
+    let topic = metadata
+        .topics
+        .into_iter()
+        .find(|entry| entry.name == TOPIC)
+        .ok_or_else(|| std::io::Error::other("activation registry topic is absent"))?;
+    if let Some(error) = topic.error {
+        return Err(std::io::Error::other(format!(
+            "activation registry metadata: {} ({})",
+            error.name, error.code
+        )));
+    }
+    let topic_id = topic
+        .topic_id
+        .ok_or_else(|| std::io::Error::other("activation registry topic id is absent"))?;
+    let options = activation_registry_connection_options(tenant, security);
+    let conn = crabka_client_core::Connection::connect_with_options(addr, options)
+        .await
+        .map_err(|error| std::io::Error::other(format!("activation registry connect: {error}")))?;
+    let mut expected_key = KEY_PREFIX.to_vec();
+    expected_key.extend(
+        serde_json::to_vec(&(tenant, operation_id))
+            .map_err(|error| std::io::Error::other(format!("activation registry key: {error}")))?,
+    );
+    let topic_id = crabka_protocol::primitives::uuid::Uuid(*topic_id.as_bytes());
+    let mut next_offset = 0_i64;
+    let mut latest = None;
+    loop {
+        let result = crabka_client_core::fetch_partition_with_isolation_progress(
+            &conn,
+            TOPIC,
+            topic_id,
+            0,
+            next_offset,
+            TENANT_CONFIG_FETCH_MAX_WAIT_MS,
+            TENANT_CONFIG_FETCH_PARTITION_MAX_BYTES,
+            1,
+        )
+        .await
+        .map_err(|error| std::io::Error::other(format!("activation registry fetch: {error}")))?;
+        for record in result.records {
+            if record.key.as_deref() != Some(expected_key.as_slice()) {
+                continue;
+            }
+            latest = match record.value {
+                None => None,
+                Some(value) => {
+                    let operation =
+                        serde_json::from_slice::<crabka_gres_control::SplitOperationRecord>(&value)
+                            .map_err(|error| {
+                                std::io::Error::new(
+                                    std::io::ErrorKind::InvalidData,
+                                    format!("activation operation: {error}"),
+                                )
+                            })?;
+                    if operation.tenant.as_str() != tenant || operation.operation_id != operation_id
+                    {
+                        return Err(std::io::Error::new(
+                            std::io::ErrorKind::InvalidData,
+                            "activation operation record conflicts with its registry key",
+                        ));
+                    }
+                    Some(operation)
+                }
+            };
+        }
+        let Some(progress) = result.next_offset else {
+            conn.close();
+            return Ok(latest);
+        };
+        next_offset = progress;
+    }
+}
+
+fn activation_registry_connection_options(
+    tenant: &str,
+    security: Option<ClientSecurity>,
+) -> crabka_client_core::ConnectionOptions {
+    crabka_client_core::ConnectionOptions {
+        client_id: format!("crabka-gres-activation-reader-{tenant}"),
+        security: security.map(Box::new),
+        ..Default::default()
+    }
+}
+
 async fn open_runtime_with_tenant_record(
     args: &ServeArgs,
     tenant_record: Option<&TenantRecord>,
@@ -2348,14 +2453,14 @@ async fn open_multirange_runtime(
     let provisional_registry = if let Some((discovery, current)) =
         activation_receipt.as_ref().zip(tenant_record)
     {
-        let mut registry = crabka_gres_control::Registry::connect(&config.bootstrap)
-            .await
-            .map_err(|error| std::io::Error::other(format!("activation registry: {error}")))?;
-        let operation = registry
-            .load_split_operation(&discovery.receipt.tenant, &discovery.receipt.operation_id)
-            .await
-            .map_err(|error| std::io::Error::other(format!("activation operation: {error}")))?
-            .ok_or_else(|| std::io::Error::other("activation operation is absent"))?;
+        let operation = load_live_split_operation(
+            &config.bootstrap,
+            &discovery.receipt.tenant,
+            &discovery.receipt.operation_id,
+            config.kafka_security.clone(),
+        )
+        .await?
+        .ok_or_else(|| std::io::Error::other("activation operation is absent"))?;
         let plan = operation
             .plan
             .as_ref()
@@ -4842,6 +4947,32 @@ mod tests {
         assert!(
             select_must_activate_registry_record(conflict, &current.ranges, 1, &target).is_err()
         );
+    }
+
+    #[test]
+    fn activation_registry_reader_preserves_secured_bootstrap_policy() {
+        let options = activation_registry_connection_options(
+            "secured-tenant",
+            Some(ClientSecurity {
+                protocol: ListenerProtocol::SaslPlaintext,
+                tls: None,
+                sasl: Some(SaslCredentials::Scram {
+                    mechanism: SaslMechanism::ScramSha512,
+                    username: "reader".into(),
+                    password: "secret".into(),
+                }),
+                sasl_host: Some("broker.internal".into()),
+            }),
+        );
+
+        assert_eq!(
+            options.client_id,
+            "crabka-gres-activation-reader-secured-tenant"
+        );
+        let security = options.security.expect("security forwarded to reader");
+        assert_eq!(security.protocol, ListenerProtocol::SaslPlaintext);
+        assert!(matches!(security.sasl, Some(SaslCredentials::Scram { .. })));
+        assert_eq!(security.sasl_host.as_deref(), Some("broker.internal"));
     }
 
     #[test]
