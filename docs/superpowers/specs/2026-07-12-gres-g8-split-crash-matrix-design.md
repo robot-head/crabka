@@ -24,7 +24,7 @@ Retiring(Parked) --retire-source control receipt--> Retiring --journal CAS--> Re
 Resuming --journal CAS--> Completed
 ```
 
-Each side-effect/receipt edge and each following journal/tenant/sidecar edge yields a distinct pre/post crash boundary. The exact cases and external predicates are:
+Each side-effect/receipt edge and each following journal/tenant/sidecar edge yields a distinct pre/post crash boundary. The Retiring journal-CAS post-state is already the pre-delete state, so it is represented once as `retiring_before_delete`; inventing a second case would require a forbidden non-durable scheduling hook. The exact cases and external predicates are:
 
 | Family | Case | Required pre-kill external predicate |
 |---|---|---|
@@ -41,7 +41,6 @@ Each side-effect/receipt edge and each following journal/tenant/sidecar edge yie
 | source/restore | `activated_after_journal_cas` | journal `Activated`; r2/r3 status serving; tenant current layout; retirement sidecar absent |
 | publication | `tenant_cas_before_journal_cas` | journal `Activated`; tenant exact target `[r0,r2,r3]` at sealed version + 1; Parking sidecar exact; journal not LayoutPublished |
 | publication | `layout_published_after_journal_cas` | journal `LayoutPublished`; target tenant/sidecar exact; predecessor topic present |
-| publication | `retiring_after_journal_cas` | journal `Retiring`; sidecar `Parking`; predecessor topic present; delete count zero |
 | retirement/resume | `retiring_before_delete` | journal `Retiring`; target layout; sidecar `Parking`; predecessor topic present; no retire receipt |
 | retirement/resume | `delete_success_before_sidecar_cas` | journal `Retiring`; sidecar still `Parking`; predecessor topic absent; counting admin records exactly one successful predecessor-only delete |
 | retirement/resume | `parked_after_sidecar_cas` | journal `Retiring`; sidecar `Parked`; predecessor topic absent; no retire receipt |
@@ -85,7 +84,7 @@ Each JSON evidence file contains measured predicates and values, never success l
 Create three family scripts:
 
 - source/restore: 11 exact invocations;
-- publication: 3 exact invocations;
+- publication: 2 exact invocations;
 - retirement/resume: 6 exact invocations.
 
 Each invocation has its own timeout, unique evidence path, and exact kill-point environment value. Scripts build once, run cases serially within the family, then validate the complete family directory. Individual names remain filterable for local reproduction and CI diagnosis.
