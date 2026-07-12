@@ -45,6 +45,9 @@ pub enum SubstrateError {
     /// A checkpoint manifest or part could not be decoded or validated.
     #[error("checkpoint invalid: {0}")]
     Checkpoint(String),
+    /// A row-bearing key referenced a physical catalog id absent from the sealed mapping.
+    #[error("unmapped physical table id {0} during filtered restore")]
+    UnmappedPhysicalTable(u32),
     /// The WAL was truncated past the newest durable checkpoint.
     #[error("torn WAL truncation: log start {log_start} is past newest manifest {newest_manifest}")]
     TornTruncation {
@@ -75,6 +78,7 @@ impl From<SubstrateError> for crabka_pgexec::ExecError {
             | SubstrateError::OversizedOperation { .. }
             | SubstrateError::Topic(_)
             | SubstrateError::Checkpoint(_)
+            | SubstrateError::UnmappedPhysicalTable(_)
             | SubstrateError::TornTruncation { .. }
             | SubstrateError::ChecksumMismatch { .. } => Self::Unavailable,
         }

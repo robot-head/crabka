@@ -970,6 +970,9 @@ impl MultiRangeTenant {
         serving: &ServingSnapshot,
         state: SplitState,
     ) -> Result<ValidatedSplitTransferPlan, LocalSqlSplitError> {
+        if serving.range_map != state.current_map {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
         let coordinator = serving
             .engines
             .get(&RangeId::COORDINATOR)

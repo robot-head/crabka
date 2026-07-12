@@ -1,6 +1,9 @@
 //! Production execution of authenticated, generation-fenced range-control steps.
 
-use std::{collections::BTreeMap, sync::{Arc, Weak}};
+use std::{
+    collections::BTreeMap,
+    sync::{Arc, Weak},
+};
 
 use async_trait::async_trait;
 use crabka_gres_ranges::{
@@ -225,6 +228,9 @@ impl LiveRangeControlExecutor {
                     covered_offset: *covered_offset,
                     manifest_key: manifest_key.clone(),
                 };
+                self.gateway
+                    .validated_control_transfer_plan(intent.split().clone())
+                    .map_err(|error| rejected("stale_split", error.to_string()))?;
                 let barrier = transfer
                     .pause_at_checkpoint(&checkpoint)
                     .await
