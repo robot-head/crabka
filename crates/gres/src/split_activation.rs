@@ -24,6 +24,101 @@ pub(super) struct ActivationDiscovery {
     pub(super) recovery_generations: BTreeMap<RangeId, u64>,
 }
 
+impl ActivationDiscovery {
+    pub(super) fn timestamp_primary_aliases(&self) -> BTreeMap<RangeId, RangeId> {
+        if self.receipt.split.predecessor == RangeId::COORDINATOR || self.receipt.targets.len() != 1
+        {
+            return BTreeMap::new();
+        }
+        let Some(target) = self.receipt.targets.values().next() else {
+            return BTreeMap::new();
+        };
+        if target.interval.start != self.receipt.split.predecessor_before.start
+            || target.interval.end != self.receipt.split.predecessor_before.end
+        {
+            return BTreeMap::new();
+        }
+        BTreeMap::from([(self.receipt.split.predecessor, target.range_id)])
+    }
+
+    pub(super) fn provisional_tenant_record(
+        &self,
+        current: &crabka_gres_control::TenantRecord,
+    ) -> std::io::Result<crabka_gres_control::TenantRecord> {
+        let layout_matches = |map: &RangeMap| {
+            current.ranges.len() == map.ranges().len()
+                && map.ranges().iter().all(|spec| {
+                    current.ranges.iter().any(|entry| {
+                        entry.range_id == spec.range_id.as_u32()
+                            && entry.end_key
+                                == spec.end.map(|end| {
+                                    crabka_gres_control::RangeBoundary::new(
+                                        end.table_id.as_u64(),
+                                        end.rowid,
+                                    )
+                                })
+                    })
+                })
+        };
+        if layout_matches(&self.receipt.split.target_map) {
+            let exact_targets = self.receipt.targets.values().all(|target| {
+                current.ranges.iter().any(|entry| {
+                    entry.range_id == target.range_id.as_u32()
+                        && entry.endpoint == target.endpoint
+                        && entry.wal_generation == target.wal_generation
+                })
+            });
+            if exact_targets {
+                return Ok(current.clone());
+            }
+            return Err(std::io::Error::other(
+                "activation target tenant differs from sealed target descriptors",
+            ));
+        }
+        if !layout_matches(&self.receipt.split.current_map) {
+            return Err(std::io::Error::other(
+                "activation receipt current map conflicts with tenant registry",
+            ));
+        }
+        let predecessor = current
+            .ranges
+            .iter()
+            .find(|entry| entry.range_id == self.receipt.split.predecessor.as_u32())
+            .ok_or_else(|| std::io::Error::other("activation predecessor is absent from tenant"))?;
+        let mut target_layout = Vec::with_capacity(self.receipt.split.target_map.ranges().len());
+        for spec in self.receipt.split.target_map.ranges() {
+            let mut entry = if let Some(target) = self.receipt.targets.get(&spec.range_id) {
+                let mut entry = predecessor.clone();
+                entry.range_id = target.range_id.as_u32();
+                entry.endpoint = target.endpoint.clone();
+                entry.wal_generation = target.wal_generation;
+                entry.retirement = None;
+                entry
+            } else {
+                current
+                    .ranges
+                    .iter()
+                    .find(|entry| entry.range_id == spec.range_id.as_u32())
+                    .cloned()
+                    .ok_or_else(|| {
+                        std::io::Error::other(format!(
+                            "activation target retains unknown range r{}",
+                            spec.range_id.as_u32()
+                        ))
+                    })?
+            };
+            entry.end_key = spec.end.map(|end| {
+                crabka_gres_control::RangeBoundary::new(end.table_id.as_u64(), end.rowid)
+            });
+            target_layout.push(entry);
+        }
+        let mut target = current.clone();
+        target.record_version = u64::from(self.receipt.split.target_map.epoch());
+        target.ranges = target_layout;
+        Ok(target)
+    }
+}
+
 #[derive(Clone)]
 pub(super) struct PendingLiveTopology {
     pub(super) operation_id: String,
@@ -1195,6 +1290,9 @@ fn next_replacement_generation<'a>(
         if !rolls_forward(receipt.phase) {
             continue;
         }
+        if receipt.split.predecessor != RangeId::COORDINATOR {
+            continue;
+        }
         let target = receipt.targets.get(&RangeId::COORDINATOR).ok_or_else(|| {
             std::io::Error::other("activation receipt has no replacement range zero")
         })?;
@@ -1267,9 +1365,31 @@ fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Resul
         .targets
         .values()
         .all(|target| target.bootstrap_checkpoint.is_some());
-    let target_identity = !receipt.targets.is_empty()
+    let expected_target_ids = std::iter::once(receipt.split.left.range_id)
+        .chain(receipt.split.right.as_ref().map(|right| right.range_id))
+        .collect::<std::collections::BTreeSet<_>>();
+    let target_identity = receipt
+        .targets
+        .keys()
+        .copied()
+        .collect::<std::collections::BTreeSet<_>>()
+        == expected_target_ids
         && receipt.targets.iter().all(|(range_id, target)| {
+            let descriptor = if *range_id == receipt.split.left.range_id {
+                Some(&receipt.split.left)
+            } else {
+                receipt
+                    .split
+                    .right
+                    .as_ref()
+                    .filter(|right| right.range_id == *range_id)
+            };
             *range_id == target.range_id
+                && descriptor.is_some_and(|descriptor| {
+                    target.endpoint == descriptor.endpoint
+                        && target.wal_generation == descriptor.wal_generation
+                        && target.interval == descriptor.interval
+                })
                 && target
                     .bootstrap_checkpoint
                     .as_ref()
@@ -1639,13 +1759,19 @@ async fn complete_post_activation(
         successors.insert(target.range_id, recovered);
     }
 
-    let receipt_range0 = successors.get(&RangeId::COORDINATOR).ok_or_else(|| {
-        std::io::Error::other("recovered topology does not contain replacement range zero")
-    })?;
-    let store = RangeZeroTopologyActivationStore::new(
-        receipt.tenant.clone(),
-        receipt_range0.engine.clone_handle(),
-    );
+    let receipt_range0 = successors
+        .get(&RangeId::COORDINATOR)
+        .map(|recovered| recovered.engine.clone_handle())
+        .or_else(|| {
+            engines
+                .engines
+                .get(&RangeId::COORDINATOR)
+                .map(|engine| engine.engine.clone_handle())
+        })
+        .ok_or_else(|| {
+            std::io::Error::other("recovered topology has no retained or replacement range zero")
+        })?;
+    let store = RangeZeroTopologyActivationStore::new(receipt.tenant.clone(), receipt_range0);
     ensure_must_activate_receipt(&store, &receipt).await?;
     complete_target_receipts(&store, &receipt.operation_id, &successors).await?;
 
@@ -1881,12 +2007,13 @@ mod tests {
     use std::collections::BTreeMap;
 
     use super::{
-        canonicalize_receipt_history, next_replacement_generation, routing_table_id,
-        validate_receipt_extension, validate_receipt_history, validate_receipt_wal_identity,
+        ActivationDiscovery, canonicalize_receipt_history, next_replacement_generation,
+        routing_table_id, validate_receipt_extension, validate_receipt_history,
+        validate_receipt_wal_identity,
     };
     use crabka_gres_ranges::{
-        MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
-        SuccessorDescriptor, TableId, TenantName,
+        MapEpoch, MoveRangeCommand, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand,
+        SplitState, SuccessorDescriptor, TableId, TenantName,
         control::{ActivationTargetProgress, TopologyActivationPhase, TopologyActivationReceipt},
     };
 
@@ -2073,6 +2200,7 @@ mod tests {
             .get_mut(&RangeId::COORDINATOR)
             .unwrap()
             .wal_generation = 2;
+        second.split.left.wal_generation = 2;
         assert_eq!(
             next_replacement_generation(1, [&first, &second]).unwrap(),
             Some(2)
@@ -2085,7 +2213,114 @@ mod tests {
             .get_mut(&RangeId::COORDINATOR)
             .unwrap()
             .wal_generation = 3;
+        fork.split.left.wal_generation = 3;
         assert!(next_replacement_generation(1, [&first, &second, &fork]).is_err());
+    }
+
+    #[test]
+    fn non_range_zero_mutations_do_not_create_range_zero_generation_edges() {
+        let move_receipt = move_receipt();
+        let split_receipt = non_range_zero_split_receipt();
+
+        assert_eq!(
+            next_replacement_generation(0, [&move_receipt, &split_receipt]).unwrap(),
+            None
+        );
+    }
+
+    #[test]
+    fn non_range_zero_mutation_with_missing_target_fails_closed() {
+        let mut receipt = non_range_zero_split_receipt();
+        receipt.targets.remove(&RangeId::new(3));
+
+        assert!(next_replacement_generation(0, [&receipt]).is_err());
+    }
+
+    #[test]
+    fn timestamp_primary_alias_requires_one_exact_interval_replacement() {
+        let move_receipt = move_receipt();
+        let move_discovery = ActivationDiscovery {
+            recovery_map: move_receipt.split.current_map.clone(),
+            recovery_generations: BTreeMap::new(),
+            receipt: move_receipt,
+        };
+        assert_eq!(
+            move_discovery.timestamp_primary_aliases(),
+            BTreeMap::from([(RangeId::new(1), RangeId::new(2))])
+        );
+
+        let split_receipt = non_range_zero_split_receipt();
+        let split_discovery = ActivationDiscovery {
+            recovery_map: split_receipt.split.current_map.clone(),
+            recovery_generations: BTreeMap::new(),
+            receipt: split_receipt,
+        };
+        assert!(split_discovery.timestamp_primary_aliases().is_empty());
+    }
+
+    #[test]
+    fn provisional_registry_overlay_replaces_only_sealed_non_range_zero_targets() {
+        for receipt in [move_receipt(), non_range_zero_split_receipt()] {
+            let current = tenant_record_for_receipt(&receipt);
+            let expected_ids = receipt
+                .split
+                .target_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id.as_u32())
+                .collect::<Vec<_>>();
+            let discovery = ActivationDiscovery {
+                recovery_map: receipt.split.current_map.clone(),
+                recovery_generations: BTreeMap::new(),
+                receipt,
+            };
+
+            let provisional = discovery
+                .provisional_tenant_record(&current)
+                .expect("exact overlay");
+
+            assert_eq!(
+                provisional
+                    .ranges
+                    .iter()
+                    .map(|range| range.range_id)
+                    .collect::<Vec<_>>(),
+                expected_ids
+            );
+            assert_eq!(
+                provisional.record_version,
+                u64::from(discovery.receipt.split.target_map.epoch())
+            );
+            for target in discovery.receipt.targets.values() {
+                let overlaid = provisional
+                    .ranges
+                    .iter()
+                    .find(|range| range.range_id == target.range_id.as_u32())
+                    .expect("target range");
+                assert_eq!(overlaid.endpoint, target.endpoint);
+                assert_eq!(overlaid.wal_generation, target.wal_generation);
+            }
+            assert_eq!(
+                discovery
+                    .provisional_tenant_record(&provisional)
+                    .expect("already-target layout remains exact"),
+                provisional
+            );
+        }
+    }
+
+    #[test]
+    fn provisional_registry_overlay_rejects_conflicting_current_layout() {
+        let receipt = move_receipt();
+        let mut current = tenant_record_for_receipt(&receipt);
+        current.ranges[1].range_id = 9;
+        let discovery = ActivationDiscovery {
+            recovery_map: receipt.split.current_map.clone(),
+            recovery_generations: BTreeMap::new(),
+            receipt,
+        };
+
+        assert!(discovery.provisional_tenant_record(&current).is_err());
     }
 
     #[test]
@@ -2204,5 +2439,165 @@ mod tests {
             tail_sha256: None,
             targets,
         }
+    }
+
+    fn move_receipt() -> TopologyActivationReceipt {
+        let tenant = TenantName::parse("activation-move-test").expect("tenant");
+        let boundary = RangeKey::table_start(TableId::new(50));
+        let current_map = RangeMap::new(
+            tenant,
+            MapEpoch::ZERO,
+            vec![
+                RangeSpec::for_interval(RangeId::COORDINATOR, RangeKey::MIN, Some(boundary)),
+                RangeSpec::for_interval(RangeId::new(1), boundary, None),
+            ],
+        )
+        .expect("map");
+        let replacement = SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            endpoint: "local".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::new(2), boundary, None),
+        };
+        let split = SplitState::for_move(
+            "activation-move-op",
+            MoveRangeCommand {
+                current_map,
+                range_id: RangeId::new(1),
+                predecessor_generation: 0,
+                replacement: replacement.clone(),
+            },
+        )
+        .expect("move");
+        let targets = BTreeMap::from([(
+            replacement.range_id,
+            ActivationTargetProgress {
+                range_id: replacement.range_id,
+                wal_generation: replacement.wal_generation,
+                endpoint: replacement.endpoint,
+                interval: replacement.interval,
+                replay_journal_seq: Some(11),
+                writer_activated: false,
+                bootstrap_checkpoint: None,
+            },
+        )]);
+        TopologyActivationReceipt {
+            tenant: "activation-move-test".into(),
+            operation_id: "activation-move-op".into(),
+            revision: 3,
+            phase: TopologyActivationPhase::MustActivate,
+            source_checkpoint: Some(crabka_gres_ranges::CheckpointManifest {
+                range_id: RangeId::new(1),
+                covered_offset: 3,
+                manifest_key: "move-g0".into(),
+            }),
+            barrier_offset: Some(7),
+            tail_sha256: Some("move-tail".into()),
+            split,
+            targets,
+        }
+    }
+
+    fn non_range_zero_split_receipt() -> TopologyActivationReceipt {
+        let tenant = TenantName::parse("activation-split-test").expect("tenant");
+        let source_start = RangeKey::table_start(TableId::new(50));
+        let split_at = RangeKey::table_start(TableId::new(75));
+        let current_map = RangeMap::new(
+            tenant,
+            MapEpoch::ZERO,
+            vec![
+                RangeSpec::for_interval(RangeId::COORDINATOR, RangeKey::MIN, Some(source_start)),
+                RangeSpec::for_interval(RangeId::new(1), source_start, None),
+            ],
+        )
+        .expect("map");
+        let left = SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            endpoint: "left".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::new(2), source_start, Some(split_at)),
+        };
+        let right = SuccessorDescriptor {
+            range_id: RangeId::new(3),
+            endpoint: "right".into(),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(RangeId::new(3), split_at, None),
+        };
+        let split = SplitState::for_split(
+            "activation-split-op",
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::new(1),
+                predecessor_generation: 0,
+                left: left.clone(),
+                right: right.clone(),
+            },
+        )
+        .expect("split");
+        let targets = [left, right]
+            .into_iter()
+            .map(|target| {
+                (
+                    target.range_id,
+                    ActivationTargetProgress {
+                        range_id: target.range_id,
+                        wal_generation: target.wal_generation,
+                        endpoint: target.endpoint,
+                        interval: target.interval,
+                        replay_journal_seq: Some(11),
+                        writer_activated: false,
+                        bootstrap_checkpoint: None,
+                    },
+                )
+            })
+            .collect();
+        TopologyActivationReceipt {
+            tenant: "activation-split-test".into(),
+            operation_id: "activation-split-op".into(),
+            revision: 3,
+            phase: TopologyActivationPhase::MustActivate,
+            source_checkpoint: Some(crabka_gres_ranges::CheckpointManifest {
+                range_id: RangeId::new(1),
+                covered_offset: 3,
+                manifest_key: "split-g0".into(),
+            }),
+            barrier_offset: Some(7),
+            tail_sha256: Some("split-tail".into()),
+            split,
+            targets,
+        }
+    }
+
+    fn tenant_record_for_receipt(
+        receipt: &TopologyActivationReceipt,
+    ) -> crabka_gres_control::TenantRecord {
+        let ranges = receipt
+            .split
+            .current_map
+            .ranges()
+            .iter()
+            .map(|spec| crabka_gres_control::RangeLayoutEntry {
+                range_id: spec.range_id.as_u32(),
+                end_key: spec.end.map(|end| {
+                    crabka_gres_control::RangeBoundary::new(end.table_id.as_u64(), end.rowid)
+                }),
+                endpoint: format!("source-r{}", spec.range_id.as_u32()),
+                wal_generation: 0,
+                lifecycle: Default::default(),
+                retirement: None,
+            })
+            .collect();
+        crabka_gres_control::TenantRecord::new(
+            u64::from(receipt.split.current_map.epoch()).max(1),
+            crabka_gres_control::TenantId::try_from(receipt.tenant.as_str()).expect("id"),
+            crabka_gres_control::TenantName::try_from(receipt.tenant.as_str()).expect("name"),
+            crabka_gres_control::TenantState::Active,
+            crabka_gres_control::SqlUser::try_from("alice").expect("user"),
+            "SCRAM-SHA-256$4096:salt$stored:server".into(),
+            3,
+        )
+        .expect("record")
+        .with_range_layout(ranges)
+        .expect("layout")
     }
 }

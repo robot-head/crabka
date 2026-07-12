@@ -1748,6 +1748,12 @@ struct LiveRangeRegistrySource {
     security: Option<ClientSecurity>,
 }
 
+struct MustActivateRangeRegistrySource {
+    live: LiveRangeRegistrySource,
+    current_layout: Vec<crabka_gres_control::RangeLayoutEntry>,
+    provisional_target: TenantRecord,
+}
+
 struct LiveSplitIntentAuthority {
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
@@ -1911,6 +1917,31 @@ impl crabka_gres_ranges::registry::RangeRegistrySource for LiveRangeRegistrySour
                 ))
             })
     }
+}
+
+#[async_trait::async_trait]
+impl crabka_gres_ranges::registry::RangeRegistrySource for MustActivateRangeRegistrySource {
+    async fn load_current(&self) -> Result<TenantRecord, crabka_gres_ranges::RegistryError> {
+        let actual =
+            crabka_gres_ranges::registry::RangeRegistrySource::load_current(&self.live).await?;
+        select_must_activate_registry_record(actual, &self.current_layout, &self.provisional_target)
+    }
+}
+
+fn select_must_activate_registry_record(
+    actual: TenantRecord,
+    current_layout: &[crabka_gres_control::RangeLayoutEntry],
+    provisional_target: &TenantRecord,
+) -> Result<TenantRecord, crabka_gres_ranges::RegistryError> {
+    if actual.ranges == provisional_target.ranges {
+        return Ok(actual);
+    }
+    if actual.ranges == current_layout {
+        return Ok(provisional_target.clone());
+    }
+    Err(crabka_gres_ranges::RegistryError::Authoritative(
+        "must-activate tenant layout conflicts with both sealed current and target maps".into(),
+    ))
 }
 
 async fn load_substrate_tenant_record(
@@ -2293,6 +2324,19 @@ async fn open_multirange_runtime(
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
+    let timestamp_primary_aliases = activation_receipt
+        .as_ref()
+        .map(split_activation::ActivationDiscovery::timestamp_primary_aliases)
+        .unwrap_or_default();
+    let provisional_registry = activation_receipt
+        .as_ref()
+        .zip(tenant_record)
+        .map(|(discovery, current)| {
+            discovery
+                .provisional_tenant_record(current)
+                .map(|target| (current.ranges.clone(), target))
+        })
+        .transpose()?;
     let mut engines = recover_live_multirange_engines(
         config,
         &tenant_config,
@@ -2320,7 +2364,42 @@ async fn open_multirange_runtime(
             );
         }
     }
-    open_live_multirange_tenant(tenant_config, engines, config).await
+    if tenant_config.range_registry.is_some()
+        && let Some((current_layout, provisional_target)) = provisional_registry
+    {
+        tenant_config.range_registry = Some(
+            crabka_gres_ranges::RangeRegistry::from_tenant_record(&provisional_target)
+                .map_err(|error| std::io::Error::other(error.to_string()))?
+                .with_authoritative_source(Arc::new(MustActivateRangeRegistrySource {
+                    live: LiveRangeRegistrySource {
+                        bootstrap: config.bootstrap.clone(),
+                        tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
+                            .map_err(|error| {
+                            std::io::Error::new(std::io::ErrorKind::InvalidInput, error)
+                        })?,
+                        security: config.kafka_security.clone(),
+                    },
+                    current_layout,
+                    provisional_target,
+                })),
+        );
+    }
+    tracing::info!(
+        recovered_ranges = ?tenant_config
+            .range_map
+            .ranges()
+            .iter()
+            .map(|range| range.range_id.as_u32())
+            .collect::<Vec<_>>(),
+        hosted_ranges = ?tenant_config.hosted_ranges,
+        engine_ranges = ?engines
+            .engines
+            .keys()
+            .map(|range| range.as_u32())
+            .collect::<Vec<_>>(),
+        "activation recovery startup handoff"
+    );
+    open_live_multirange_tenant(tenant_config, engines, config, timestamp_primary_aliases).await
 }
 
 fn remote_ranges_are_configured(config: &SubstrateRuntimeConfig, record: &TenantRecord) -> bool {
@@ -2725,6 +2804,7 @@ async fn open_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     mut live_engines: LiveMultirangeEngines,
     config: &SubstrateRuntimeConfig,
+    timestamp_primary_aliases: BTreeMap<crabka_gres_ranges::RangeId, crabka_gres_ranges::RangeId>,
 ) -> std::io::Result<GresRuntime> {
     let live_resources = live_engines
         .engines
@@ -2787,7 +2867,8 @@ async fn open_live_multirange_tenant(
         .await
         .map_err(|error| std::io::Error::other(format!("ordinary 2PC recovery: {error:?}")))?;
     let mut range_service =
-        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines());
+        crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
+            .with_timestamp_primary_aliases(timestamp_primary_aliases.clone());
     if let Some((registry, client)) = gateway.timestamp_primary_remote() {
         range_service = range_service.with_timestamp_primary_remote(registry, client);
     }
@@ -2901,6 +2982,7 @@ async fn open_live_multirange_tenant(
     }
     let mut controlled_service =
         crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
+            .with_timestamp_primary_aliases(timestamp_primary_aliases)
             .with_range_control(control);
     if let Some((registry, client)) = gateway.timestamp_primary_remote() {
         controlled_service = controlled_service.with_timestamp_primary_remote(registry, client);
@@ -4644,6 +4726,57 @@ mod tests {
     use clap::{CommandFactory as _, Parser as _};
 
     use super::*;
+
+    fn registry_test_record(
+        version: u64,
+        ranges: Vec<crabka_gres_control::RangeLayoutEntry>,
+    ) -> TenantRecord {
+        TenantRecord::new(
+            version,
+            crabka_gres_control::TenantId::try_from("registry-overlay").expect("id"),
+            TenantName::try_from("registry-overlay").expect("name"),
+            crabka_gres_control::TenantState::Active,
+            crabka_gres_control::SqlUser::try_from("alice").expect("user"),
+            "SCRAM-SHA-256$4096:salt$stored:server".into(),
+            3,
+        )
+        .expect("record")
+        .with_range_layout(ranges)
+        .expect("ranges")
+    }
+
+    fn registry_test_range(range_id: u32, endpoint: &str) -> crabka_gres_control::RangeLayoutEntry {
+        crabka_gres_control::RangeLayoutEntry {
+            range_id,
+            end_key: None,
+            endpoint: endpoint.into(),
+            wal_generation: u64::from(range_id),
+            lifecycle: Default::default(),
+            retirement: None,
+        }
+    }
+
+    #[test]
+    fn must_activate_registry_overlay_never_regresses_and_converges_exactly() {
+        let current = registry_test_record(1, vec![registry_test_range(1, "source")]);
+        let target = registry_test_record(2, vec![registry_test_range(2, "target")]);
+
+        let overlaid =
+            select_must_activate_registry_record(current.clone(), &current.ranges, &target)
+                .expect("current overlays target");
+        assert_eq!(overlaid, target);
+
+        let mut converged = target.clone();
+        converged.record_version = 3;
+        assert_eq!(
+            select_must_activate_registry_record(converged.clone(), &current.ranges, &target)
+                .expect("target converges"),
+            converged
+        );
+
+        let conflict = registry_test_record(3, vec![registry_test_range(3, "conflict")]);
+        assert!(select_must_activate_registry_record(conflict, &current.ranges, &target).is_err());
+    }
 
     #[test]
     fn irreversible_activation_is_scoped_to_the_operation() {
