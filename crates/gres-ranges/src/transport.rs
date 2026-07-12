@@ -159,13 +159,6 @@ pub struct WireInDoubtMarker {
     pub key: WireRangeKey,
 }
 
-/// One committed WAL record in a bounded split-transfer tail.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
-pub struct WireCommittedTailRecord {
-    pub offset: i64,
-    pub bytes: Vec<u8>,
-}
-
 /// One authenticated, generation-fenced split control request.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RangeControlReq {
@@ -187,6 +180,7 @@ pub enum RangeControlOperation {
     },
     Status,
     StageFilteredRestore {
+        split: Box<crate::SplitState>,
         source_range: RangeId,
         source_generation: u64,
         manifest_key: String,
@@ -196,16 +190,16 @@ pub enum RangeControlOperation {
         physical_table_id: u32,
         interval_start: WireRangeKey,
         interval_end: Option<WireRangeKey>,
-        tail: Vec<WireCommittedTailRecord>,
-        tail_sha256: String,
         target_map: crate::RangeMap,
     },
-    SuccessorFencePrologue,
+    SuccessorFencePrologue {
+        split: Box<crate::SplitState>,
+    },
     InheritMarkers {
         interval_start: WireRangeKey,
         interval_end: Option<WireRangeKey>,
     },
-    Park,
+    RetirePredecessor,
     Resume,
 }
 
@@ -230,6 +224,9 @@ pub enum RangeControlResp {
     Paused {
         barrier_offset: i64,
     },
+    Staged {
+        tail_sha256: String,
+    },
     Status {
         paused: bool,
         serving: bool,
@@ -237,6 +234,7 @@ pub enum RangeControlResp {
     },
     Markers {
         markers: Vec<WireInDoubtMarker>,
+        digest: String,
     },
 }
 
@@ -1518,6 +1516,7 @@ mod tests {
             },
             RangeControlOperation::Status,
             RangeControlOperation::StageFilteredRestore {
+                split: Box::new(split_fixture()),
                 source_range: RangeId::COORDINATOR,
                 source_generation: 8,
                 manifest_key: "tenant/r1/checkpoint.json".into(),
@@ -1533,23 +1532,11 @@ mod tests {
                     table_id: 7,
                     rowid: 20,
                 }),
-                tail: vec![WireCommittedTailRecord {
-                    offset: 42,
-                    bytes: vec![1, 2],
-                }],
-                tail_sha256: "fixture-sha256".into(),
-                target_map: crate::RangeMap::new(
-                    crate::TenantName::parse("tenant-a").expect("wire tenant"),
-                    crate::MapEpoch::new(1),
-                    vec![crate::RangeSpec::new(
-                        RangeId::COORDINATOR,
-                        crate::TableId::ZERO,
-                        None,
-                    )],
-                )
-                .expect("wire target map"),
+                target_map: split_fixture().target_map,
             },
-            RangeControlOperation::SuccessorFencePrologue,
+            RangeControlOperation::SuccessorFencePrologue {
+                split: Box::new(split_fixture()),
+            },
             RangeControlOperation::InheritMarkers {
                 interval_start: WireRangeKey {
                     table_id: 7,
@@ -1557,7 +1544,7 @@ mod tests {
                 },
                 interval_end: None,
             },
-            RangeControlOperation::Park,
+            RangeControlOperation::RetirePredecessor,
             RangeControlOperation::Resume,
         ];
         for operation in operations {
@@ -1591,6 +1578,9 @@ mod tests {
                 manifest_key: "manifest".into(),
             },
             RangeControlResp::Paused { barrier_offset: 44 },
+            RangeControlResp::Staged {
+                tail_sha256: "fixture-sha256".into(),
+            },
             RangeControlResp::Status {
                 paused: true,
                 serving: false,
@@ -1604,6 +1594,7 @@ mod tests {
                         rowid: 12,
                     },
                 }],
+                digest: "fixture-digest".into(),
             },
         ];
         for outcome in outcomes {
@@ -1614,6 +1605,46 @@ mod tests {
                 response
             );
         }
+    }
+
+    fn split_fixture() -> crate::SplitState {
+        let tenant = crate::TenantName::parse("tenant-a").expect("wire tenant");
+        let current_map = crate::RangeMap::new(
+            tenant,
+            crate::MapEpoch::ZERO,
+            vec![crate::RangeSpec::for_interval(
+                RangeId::COORDINATOR,
+                crate::RangeKey::MIN,
+                None,
+            )],
+        )
+        .expect("wire current map");
+        let split_at = crate::RangeKey::new(crate::TableId::new(7), 10);
+        crate::SplitState::for_split(
+            "split-42",
+            crate::SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 8,
+                left: crate::SuccessorDescriptor {
+                    range_id: RangeId::COORDINATOR,
+                    endpoint: "left:7443".into(),
+                    wal_generation: 9,
+                    interval: crate::RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        crate::RangeKey::MIN,
+                        Some(split_at),
+                    ),
+                },
+                right: crate::SuccessorDescriptor {
+                    range_id: RangeId::new(1),
+                    endpoint: "right:7443".into(),
+                    wal_generation: 9,
+                    interval: crate::RangeSpec::for_interval(RangeId::new(1), split_at, None),
+                },
+            },
+        )
+        .expect("wire split")
     }
 
     #[derive(Default)]

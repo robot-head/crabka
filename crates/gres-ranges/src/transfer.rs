@@ -22,6 +22,20 @@ impl ValidatedSplitTransferPlan {
         }
     }
 
+    /// Build an authenticated control-plane plan after validating complete successor intent.
+    pub fn from_control(
+        state: SplitState,
+        physical_to_logical: BTreeMap<TableId, TableId>,
+    ) -> Result<Self, crate::SplitError> {
+        state.transfer_requests()?;
+        if physical_to_logical.is_empty() {
+            return Err(crate::SplitError::Hook(
+                "control transfer requires a physical-to-logical table mapping".into(),
+            ));
+        }
+        Ok(Self::new(state, physical_to_logical))
+    }
+
     /// Validated split state whose descriptors own the logical intervals.
     #[must_use]
     pub const fn state(&self) -> &SplitState {

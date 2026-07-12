@@ -351,37 +351,48 @@ impl MultiRangeTenant {
             .engines
             .get(&RangeId::COORDINATOR)
             .ok_or_else(|| SplitError::Hook("range zero is not hosted".into()))?;
-        let routing_by_physical = crabka_pgcatalog::list_tables(coordinator.catalog_kv())
-            .map_err(|error| SplitError::Hook(format!("list marker tables: {error}")))?
-            .into_iter()
-            .map(|table| (table.id, routing_table_id(&table.name)))
-            .collect::<BTreeMap<_, _>>();
-        let mut markers = Vec::new();
-        for descriptor in coordinator
-            .timestamp_transaction_descriptors()
-            .map_err(|error| SplitError::Hook(format!("read timestamp descriptors: {error:?}")))?
-        {
-            if descriptor.decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+        in_doubt_markers_for_engine(coordinator, interval_start, interval_end)
+    }
+}
+
+/// Snapshot pending timestamp descriptors from one non-serving staged engine.
+pub fn in_doubt_markers_for_engine(
+    engine: &SqlEngine,
+    interval_start: RangeKey,
+    interval_end: Option<RangeKey>,
+) -> Result<Vec<crate::InDoubtMarker>, SplitError> {
+    let routing_by_physical = crabka_pgcatalog::list_tables(engine.catalog_kv())
+        .map_err(|error| SplitError::Hook(format!("list marker tables: {error}")))?
+        .into_iter()
+        .map(|table| (table.id, routing_table_id(&table.name)))
+        .collect::<BTreeMap<_, _>>();
+    let mut markers = Vec::new();
+    for descriptor in engine
+        .timestamp_transaction_descriptors()
+        .map_err(|error| SplitError::Hook(format!("read timestamp descriptors: {error:?}")))?
+    {
+        if descriptor.decision != crabka_pgexec::PrimaryTxnDecision::Pending {
+            continue;
+        }
+        for operation in descriptor.operations {
+            let Some(table_id) = routing_by_physical.get(&operation.table_id).copied() else {
                 continue;
-            }
-            for operation in descriptor.operations {
-                let Some(table_id) = routing_by_physical.get(&operation.table_id).copied() else {
-                    continue;
-                };
-                let key = RangeKey::new(table_id, operation.rowid);
-                if key >= interval_start && interval_end.is_none_or(|end| key < end) {
-                    markers.push(crate::InDoubtMarker {
-                        transaction_id: descriptor.start_ts.get(),
-                        key,
-                    });
-                }
+            };
+            let key = RangeKey::new(table_id, operation.rowid);
+            if key >= interval_start && interval_end.is_none_or(|end| key < end) {
+                markers.push(crate::InDoubtMarker {
+                    transaction_id: descriptor.start_ts.get(),
+                    key,
+                });
             }
         }
-        markers.sort_unstable_by_key(|marker| (marker.transaction_id, marker.key));
-        markers.dedup();
-        Ok(markers)
     }
+    markers.sort_unstable_by_key(|marker| (marker.transaction_id, marker.key));
+    markers.dedup();
+    Ok(markers)
+}
 
+impl MultiRangeTenant {
     /// Settle durable ordinary 2PC participants before publishing SQL readiness.
     pub async fn recover_ordinary_globals_before_serving(&self) -> Result<(), ExecError> {
         let serving = self.inner.serving.load_full();
@@ -876,6 +887,24 @@ impl MultiRangeTenant {
             )));
         }
         self.publish_claimed_successors(&serving, &state, claimed, None)
+            .await
+    }
+
+    /// Publish control-plane successors through the same irreversible activation protocol used
+    /// by locally initiated splits.
+    pub async fn publish_control_successors_with_transfer(
+        &self,
+        operation_id: String,
+        command: SplitCommand,
+        claimed: crate::ClaimedStagedSuccessors,
+        transfer: &dyn RangeTransferCapability,
+    ) -> Result<(), LocalSqlSplitError> {
+        let serving = self.inner.serving.load_full();
+        if command.current_map != serving.range_map {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
+        let state = SplitState::for_split(operation_id, command)?;
+        self.publish_claimed_successors(&serving, &state, claimed, Some(transfer))
             .await
     }
 
