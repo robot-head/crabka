@@ -508,7 +508,7 @@ run_live_sharded_workload() {
     elapsed_ms=$((( $(date +%s%N) - started_ns ) / 1000000))
     stop_gres
 
-    python3 - "$range_count" "$sessions_per_range" "$txns_per_session" "$elapsed_ms" "$run_dir" "$SHARDED_TABLE_NAME" \
+    python3 - "$range_count" "$sessions_per_range" "$txns_per_session" "$warmup_txns" "$elapsed_ms" "$run_dir" "$SHARDED_TABLE_NAME" "${ARTIFACT_DIR}/gres-${tenant}.log" \
         >"${ARTIFACT_DIR}/result-sharded-${range_count}-trial-${trial}.json" <<'PY'
 import json
 import math
@@ -519,9 +519,11 @@ import sys
 range_count = int(sys.argv[1])
 sessions_per_range = int(sys.argv[2])
 txns_per_session = int(sys.argv[3])
-elapsed_ms = int(sys.argv[4])
-run_dir = pathlib.Path(sys.argv[5])
-table_name = sys.argv[6]
+warmup_txns = int(sys.argv[4])
+elapsed_ms = int(sys.argv[5])
+run_dir = pathlib.Path(sys.argv[6])
+table_name = sys.argv[7]
+gres_log = pathlib.Path(sys.argv[8])
 latencies = []
 for path in sorted(run_dir.glob("latencies-*.txt")):
     latencies.extend(int(line) for line in path.read_text().splitlines() if line.strip())
@@ -535,6 +537,24 @@ def percentile_nearest_rank(values, percentile):
 
 committed = len(latencies)
 elapsed_s = elapsed_ms / 1000
+primary_range_distribution = {}
+for line in gres_log.read_text().splitlines():
+    if "timestamp_primary_committed" not in line:
+        continue
+    marker = "primary_range="
+    if marker not in line:
+        raise SystemExit("timestamp primary observation omitted primary_range")
+    range_id = line.split(marker, 1)[1].split()[0].rstrip(",")
+    primary_range_distribution[range_id] = primary_range_distribution.get(range_id, 0) + 1
+expected_ranges = {str(range_id) for range_id in range(range_count)}
+if set(primary_range_distribution) != expected_ranges:
+    raise SystemExit(f"observed timestamp primaries {primary_range_distribution} do not cover {expected_ranges}")
+observed_primary_transactions = sum(primary_range_distribution.values())
+expected_primary_transactions = range_count * sessions_per_range * (txns_per_session + warmup_txns)
+if observed_primary_transactions != expected_primary_transactions:
+    raise SystemExit(
+        f"observed {observed_primary_transactions} timestamp primaries, expected {expected_primary_transactions}"
+    )
 print(json.dumps({
     "workload_kind": "sharded_table_ingest",
     "table_name": table_name,
@@ -543,11 +563,9 @@ print(json.dumps({
     "txns_per_session": txns_per_session,
     "concurrency_sessions": range_count * sessions_per_range,
     "committed_transactions": committed,
-    "primary_range_distribution": {
-        str(range_id): sessions_per_range * txns_per_session
-        for range_id in range(range_count)
-    },
-    "distribution_check": "all expected sharded ranges received writes",
+    "primary_range_distribution": primary_range_distribution,
+    "observed_primary_transactions": observed_primary_transactions,
+    "distribution_check": "runtime timestamp_primary_committed observations cover all expected ranges",
     "duration_ms": elapsed_ms,
     "throughput_tps": round(committed / elapsed_s, 4) if elapsed_s else 0,
     "latency_ms": {

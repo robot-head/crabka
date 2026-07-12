@@ -62,3 +62,11 @@ Static checks and dry-run compatibility pass. The required fresh robust live run
 - Replaced the per-table DML mutex with an RW lock: concurrent DML takes shared access while split/conversion retains exclusive fencing.
 
 Final robust live result at `target/gres-scaling-primary-range-final/range-scaling.json`: range-local `3.2930x`, sharded `3.4371x`, decision-envelope efficiency `0.8593`, G-9/G-8 range-4 contrast `1.7185`, and every gate true. The artifact records balanced primary distributions across all expected ranges.
+
+## Independent review hardening
+
+- `3f99f0a9` aborts durable secondary intents from the exact prewrite-before-primary-add/ack crash window by start timestamp, clearing reservations and identity/index sidecars even when descriptor operations are absent.
+- `0a9cae36` lets rN-only startup authenticate and settle through a registry-resolved remote primary; unknown, fenced, or unreachable primaries still fail readiness closed.
+- `6ecf7201` validates full primary identities for add/ack and makes secondary runtime resolution read the effective terminal outcome directly from the hosted or authenticated remote primary.
+- `b8be230c` rereads descriptor state after primary prewrite/resolve CAS batches and fences conditional no-op races.
+- Runtime `timestamp_primary_committed` observations now replace the benchmark's derived distribution formula. The final robust artifact reports balanced observed counts of 110, 220, and 440 transactions across 1/2/4 ranges and passes at `3.2110x` range-local and `3.3473x` sharded scaling.
