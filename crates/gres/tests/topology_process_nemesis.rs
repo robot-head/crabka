@@ -817,6 +817,45 @@ async fn initiate_move_with_cli(system: &ProcessHarness, operation_id: &str) {
     );
 }
 
+async fn initiate_split_with_cli(
+    system: &ProcessHarness,
+    operation_id: &str,
+    table: u64,
+    rowid: u64,
+) {
+    let [left_endpoint, right_endpoint] = system.split_successor_endpoints();
+    let output = tokio::process::Command::new(cli_binary())
+        .args([
+            "gres",
+            "split",
+            "--bootstrap",
+            system.bootstrap(),
+            system.tenant(),
+            &table.to_string(),
+            &rowid.to_string(),
+            "--operation-id",
+            operation_id,
+            "--left-range-id",
+            "2",
+            "--left-endpoint",
+            &left_endpoint,
+            "--successor-range-id",
+            "3",
+            "--successor-endpoint",
+            &right_endpoint,
+            "--successor-wal-generation",
+            "1",
+        ])
+        .output()
+        .await
+        .expect("run actual Split CLI");
+    assert!(
+        output.status.success(),
+        "Split CLI failed: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
 async fn load_operation(bootstrap: &str, tenant: &str, operation_id: &str) -> SplitOperationRecord {
     let mut registry = Registry::connect(bootstrap).await.expect("registry");
     registry
@@ -1244,6 +1283,58 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
         )
         .expect("write evidence");
     }
+    system.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_process_split_two_successor_foundation() {
+    if std::env::var_os("CRABKA_G8_SPLIT_FOUNDATION").is_none() {
+        return;
+    }
+    assert!(cli_binary().is_file(), "dedicated CI must build crabka CLI");
+    let identity = format!("{:x}-p{:x}", timestamp_ms(), std::process::id());
+    let operation_id = format!("g8-split-{identity}");
+    let mut system =
+        ProcessHarness::start_all_on_zero(&format!("tenant-g8-split-{identity}")).await;
+    let mut registry = Registry::connect(system.bootstrap()).await.expect("registry");
+    assert!(
+        registry
+            .load_split_operation(system.tenant(), &operation_id)
+            .await
+            .expect("unique split operation")
+            .is_none()
+    );
+    drop(registry);
+
+    let source = system.sql(0).await;
+    source
+        .simple_query("CREATE TABLE live_ledger (seq int4) SHARDED")
+        .await
+        .expect("create split ledger");
+    for seq in 0..32_i32 {
+        source
+            .execute("INSERT INTO live_ledger VALUES ($1)", &[&seq])
+            .await
+            .expect("acknowledged split source write");
+    }
+    initiate_split_with_cli(&system, &operation_id, 50, 16).await;
+    let completed = tokio::time::timeout(
+        Duration::from_secs(90),
+        drive_operation(&mut system, &operation_id, Duration::from_secs(90), None),
+    )
+    .await
+    .expect("whole Split operation deadline")
+    .0;
+    assert_eq!(completed.phase, SplitOperationPhase::Completed);
+    let tenant = load_tenant(system.bootstrap(), system.tenant()).await;
+    assert_eq!(
+        tenant
+            .ranges
+            .iter()
+            .map(|range| range.range_id)
+            .collect::<Vec<_>>(),
+        vec![0, 2, 3]
+    );
     system.shutdown().await;
 }
 
