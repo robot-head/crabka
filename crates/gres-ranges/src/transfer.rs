@@ -5,7 +5,109 @@ use std::{any::Any, collections::BTreeMap, sync::Arc};
 use async_trait::async_trait;
 use crabka_pgexec::SqlEngine;
 
-use crate::{CheckpointManifest, RangeId, RangeSpec, SplitState, TableId};
+use crate::{CheckpointManifest, RangeId, RangeMap, RangeSpec, RowInterval, SplitState, TableId};
+
+/// Select authoritative catalog identities whose logical row space intersects a predecessor.
+pub fn predecessor_table_mapping(
+    range_map: &RangeMap,
+    predecessor: RangeId,
+    tables: impl IntoIterator<Item = (TableId, TableId)>,
+) -> Result<BTreeMap<TableId, TableId>, crate::SplitError> {
+    let mut mapping = BTreeMap::new();
+    for (physical, logical) in tables {
+        let owns_rows = range_map
+            .scan_segments(
+                logical,
+                RowInterval {
+                    start: None,
+                    end: None,
+                },
+            )?
+            .iter()
+            .any(|segment| segment.range_id == predecessor);
+        if !owns_rows {
+            continue;
+        }
+        if let Some(existing) = mapping.insert(physical, logical)
+            && existing != logical
+        {
+            return Err(crate::SplitError::Hook(format!(
+                "physical table {physical} maps to conflicting logical tables {existing} and {logical}"
+            )));
+        }
+    }
+    Ok(mapping)
+}
+
+#[cfg(test)]
+mod mapping_tests {
+    use super::predecessor_table_mapping;
+    use crate::{MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, TableId, TenantName};
+
+    fn map() -> RangeMap {
+        RangeMap::new(
+            TenantName::parse("transfer_mapping").unwrap(),
+            MapEpoch::new(1),
+            vec![
+                RangeSpec::for_interval(
+                    RangeId::COORDINATOR,
+                    RangeKey::MIN,
+                    Some(RangeKey::new(TableId::new(50), 10)),
+                ),
+                RangeSpec::for_interval(
+                    RangeId::new(1),
+                    RangeKey::new(TableId::new(50), 10),
+                    Some(RangeKey::table_start(TableId::new(52))),
+                ),
+                RangeSpec::for_interval(
+                    RangeId::new(2),
+                    RangeKey::table_start(TableId::new(52)),
+                    None,
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    #[test]
+    fn selects_row_interval_overlap_not_row_zero_owner() {
+        let mapping = predecessor_table_mapping(
+            &map(),
+            RangeId::new(1),
+            [(TableId::new(1), TableId::new(50))],
+        )
+        .unwrap();
+        assert_eq!(mapping.get(&TableId::new(1)), Some(&TableId::new(50)));
+    }
+
+    #[test]
+    fn excludes_non_overlapping_tables() {
+        let mapping = predecessor_table_mapping(
+            &map(),
+            RangeId::new(1),
+            [
+                (TableId::new(1), TableId::new(49)),
+                (TableId::new(2), TableId::new(52)),
+            ],
+        )
+        .unwrap();
+        assert!(mapping.is_empty());
+    }
+
+    #[test]
+    fn rejects_conflicting_physical_identity() {
+        let error = predecessor_table_mapping(
+            &map(),
+            RangeId::new(1),
+            [
+                (TableId::new(1), TableId::new(50)),
+                (TableId::new(1), TableId::new(51)),
+            ],
+        )
+        .unwrap_err();
+        assert!(error.to_string().contains("conflicting logical tables"));
+    }
+}
 
 /// Catalog-validated physical-to-logical translation used by successor restore.
 #[derive(Debug, Clone)]

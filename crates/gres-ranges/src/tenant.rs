@@ -1038,23 +1038,22 @@ impl MultiRangeTenant {
             .engines
             .get(&RangeId::COORDINATOR)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
-        let mut mapping = BTreeMap::new();
-        for table in crabka_pgcatalog::list_tables(coordinator.catalog_kv())? {
-            let logical = routing_table_id(&table.name);
-            if serving
-                .range_map
-                .route_table(logical)
-                .map_err(SplitError::from)?
-                .range_id
-                == state.predecessor
-            {
-                mapping.insert(TableId::new(u64::from(table.id)), logical);
-            }
-        }
         let source = serving
             .engines
             .get(&state.predecessor)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
+        let mapping = crate::transfer::predecessor_table_mapping(
+            &serving.range_map,
+            state.predecessor,
+            crabka_pgcatalog::list_tables(coordinator.catalog_kv())?
+                .into_iter()
+                .map(|table| {
+                    (
+                        TableId::new(u64::from(table.id)),
+                        routing_table_id(&table.name),
+                    )
+                }),
+        )?;
         for (bytes, _) in source.kv_handle().scan_range(&[], &[u8::MAX])? {
             let physical = match crabka_pgkv::key::classify_key(&bytes) {
                 crabka_pgkv::key::KeyClass::PrimaryRow { table_id, .. }

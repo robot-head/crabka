@@ -856,6 +856,49 @@ async fn initiate_split_with_cli(
     );
 }
 
+async fn direct_successor_rows(
+    system: &ProcessHarness,
+    range_id: u32,
+    table_id: u64,
+    start: Option<u64>,
+    end: Option<u64>,
+) -> Vec<u64> {
+    let scan = crabka_gres_ranges::transport::ScanRangeReq {
+        range_id: crabka_gres_ranges::RangeId::new(range_id),
+        table_name: format!("live_ledger{table_id}"),
+        interval: crabka_gres_ranges::transport::WireRowInterval { start, end },
+        local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        global_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        own_xid: None,
+        read_ts: Some(u64::MAX),
+        own_start_ts: None,
+        predicate: crabka_gres_ranges::transport::WirePredicatePushdown::FullScan,
+        projection: crabka_gres_ranges::transport::WireProjectionPushdown::All,
+        partial_aggregate: None,
+        top_k: None,
+    };
+    eprintln!("direct r{range_id} ScanRange request: {scan:?}");
+    let request = crabka_gres_ranges::RangeRequest::ScanRange(scan);
+    let response = system
+        .operator_control_client()
+        .call(&system.range_endpoint(range_id), &request)
+        .await
+        .unwrap_or_else(|error| panic!("direct r{range_id} scan: {error}"));
+    eprintln!("direct r{range_id} ScanRange response: {response:?}");
+    let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
+        panic!("direct r{range_id} scan returned {response:?}");
+    };
+    response.rows.into_iter().map(|row| row.rowid).collect()
+}
+
 async fn load_operation(bootstrap: &str, tenant: &str, operation_id: &str) -> SplitOperationRecord {
     let mut registry = Registry::connect(bootstrap).await.expect("registry");
     registry
@@ -933,7 +976,8 @@ async fn drive_operation(
             let retire_receipt_durable = if injection.point == SourceKillPoint::Resuming
                 && current.phase == SplitOperationPhase::Resuming
             {
-                probe_durable_retire_receipt(system, &mutation_client, &current, "before kill").await
+                probe_durable_retire_receipt(system, &mutation_client, &current, "before kill")
+                    .await
             } else {
                 false
             };
@@ -1050,9 +1094,13 @@ async fn drive_operation(
                     SplitOperationPhase::Resuming,
                     "post-restart receipt probe must run before Completed"
                 );
-                let probed =
-                    probe_durable_retire_receipt(system, &mutation_client, &restarted_operation, "after restart")
-                        .await;
+                let probed = probe_durable_retire_receipt(
+                    system,
+                    &mutation_client,
+                    &restarted_operation,
+                    "after restart",
+                )
+                .await;
                 restarted_pids
                     .as_mut()
                     .expect("restart observation")
@@ -1185,8 +1233,7 @@ async fn drive_operation(
                         .expect("WAL retirement")
                 );
                 if kill_injection.as_ref().is_some_and(|injection| {
-                    injection.point == SourceKillPoint::RetiringParked
-                        && restarted_pids.is_none()
+                    injection.point == SourceKillPoint::RetiringParked && restarted_pids.is_none()
                 }) {
                     continue;
                 }
@@ -1296,7 +1343,9 @@ async fn real_process_split_two_successor_foundation() {
     let operation_id = format!("g8-split-{identity}");
     let mut system =
         ProcessHarness::start_all_on_zero(&format!("tenant-g8-split-{identity}")).await;
-    let mut registry = Registry::connect(system.bootstrap()).await.expect("registry");
+    let mut registry = Registry::connect(system.bootstrap())
+        .await
+        .expect("registry");
     assert!(
         registry
             .load_split_operation(system.tenant(), &operation_id)
@@ -1306,18 +1355,42 @@ async fn real_process_split_two_successor_foundation() {
     );
     drop(registry);
 
+    let sentinel_topic = format!("__gres_g8_split_sentinel.{}", system.tenant());
+    let mut sentinel_admin =
+        crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+            .await
+            .expect("split sentinel admin");
+    let outcomes = sentinel_admin
+        .create_topics(
+            &[crabka_client_admin::CreateTopicSpec {
+                name: sentinel_topic.clone(),
+                partitions: 1,
+                replicas: 1,
+                configs: Default::default(),
+            }],
+            30_000,
+        )
+        .await
+        .expect("create split sentinel");
+    assert!(outcomes.iter().all(|outcome| outcome.error.is_none()));
+
     let source = system.sql(0).await;
     source
-        .simple_query("CREATE TABLE live_ledger (seq int4) SHARDED")
+        .simple_query("CREATE TABLE live_ledger51 (seq int4) SHARDED")
         .await
         .expect("create split ledger");
     for seq in 0..32_i32 {
         source
-            .execute("INSERT INTO live_ledger VALUES ($1)", &[&seq])
+            .execute("INSERT INTO live_ledger51 VALUES ($1)", &[&seq])
             .await
             .expect("acknowledged split source write");
     }
-    initiate_split_with_cli(&system, &operation_id, 50, 16).await;
+    let pre_r0 = direct_successor_rows(&system, 0, 51, None, None).await;
+    let pre_r1 = direct_successor_rows(&system, 1, 51, None, None).await;
+    eprintln!("pre-split direct r0={pre_r0:?}, r1={pre_r1:?}");
+    assert!(pre_r0.is_empty());
+    assert_eq!(pre_r1, (1..33_u64).collect::<Vec<_>>());
+    initiate_split_with_cli(&system, &operation_id, 51, 16).await;
     let completed = tokio::time::timeout(
         Duration::from_secs(90),
         drive_operation(&mut system, &operation_id, Duration::from_secs(90), None),
@@ -1335,6 +1408,94 @@ async fn real_process_split_two_successor_foundation() {
             .collect::<Vec<_>>(),
         vec![0, 2, 3]
     );
+    let retirement = tenant
+        .range_retirements
+        .iter()
+        .find(|retirement| retirement.operation_id == operation_id)
+        .expect("split retirement sidecar");
+    assert_eq!(retirement.phase, RangeRetirementPhase::Parked);
+    assert_eq!(
+        completed.evidence.marker_digest.as_deref(),
+        Some(retirement.checkpoint.marker_digest.as_str())
+    );
+
+    system.restart_with_hosted_ranges(0, "r0,r2,r3").await;
+    let plan = completed
+        .plan
+        .as_ref()
+        .expect("sealed Split operation plan");
+    let successor_interval = |range_id| {
+        let index = plan
+            .target_layout
+            .iter()
+            .position(|range| range.range_id == range_id)
+            .unwrap_or_else(|| panic!("r{range_id} in sealed target layout"));
+        let start = index
+            .checked_sub(1)
+            .and_then(|previous| plan.target_layout[previous].end_key);
+        let end = plan.target_layout[index].end_key;
+        assert!(start.is_none_or(|key| key.table_id <= plan.routing_table_id));
+        assert!(end.is_none_or(|key| key.table_id >= plan.routing_table_id));
+        (
+            start.and_then(|key| (key.table_id == plan.routing_table_id).then_some(key.rowid)),
+            end.and_then(|key| (key.table_id == plan.routing_table_id).then_some(key.rowid)),
+        )
+    };
+    let r2_interval = successor_interval(2);
+    let r3_interval = successor_interval(3);
+
+    eprintln!(
+        "sealed routing_table_id={}, r2 interval={r2_interval:?}, r3 interval={r3_interval:?}",
+        plan.routing_table_id
+    );
+
+    let r2_rows = direct_successor_rows(
+        &system,
+        2,
+        plan.routing_table_id,
+        r2_interval.0,
+        r2_interval.1,
+    )
+    .await;
+    let r3_rows = direct_successor_rows(
+        &system,
+        3,
+        plan.routing_table_id,
+        r3_interval.0,
+        r3_interval.1,
+    )
+    .await;
+    assert!(!r2_rows.is_empty() && !r3_rows.is_empty());
+    assert!(r2_rows.iter().all(|rowid| {
+        r2_interval.0.is_none_or(|start| *rowid >= start)
+            && r2_interval.1.is_none_or(|end| *rowid < end)
+    }));
+    assert!(r3_rows.iter().all(|rowid| {
+        r3_interval.0.is_none_or(|start| *rowid >= start)
+            && r3_interval.1.is_none_or(|end| *rowid < end)
+    }));
+    let mut successor_rowids = r2_rows.iter().chain(&r3_rows).copied().collect::<Vec<_>>();
+    successor_rowids.sort_unstable();
+
+    assert_eq!(successor_rowids, (1..33_u64).collect::<Vec<_>>());
+
+    let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+        .await
+        .expect("split topic admin");
+    let topics = admin
+        .metadata(&[])
+        .await
+        .expect("split topic metadata")
+        .topics
+        .into_iter()
+        .filter(|topic| topic.error.is_none())
+        .map(|topic| topic.name)
+        .collect::<std::collections::BTreeSet<_>>();
+    assert!(!topics.contains(&format!("__gres_wal.{}.r1", system.tenant())));
+    assert!(topics.contains(&format!("__gres_wal.{}.r0", system.tenant())));
+    assert!(topics.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
+    assert!(topics.contains(&format!("__gres_wal.{}.r3.g0000000001", system.tenant())));
+    assert!(topics.contains(&sentinel_topic));
     system.shutdown().await;
 }
 
