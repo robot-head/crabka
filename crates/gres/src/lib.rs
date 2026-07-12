@@ -2099,8 +2099,13 @@ async fn open_multirange_runtime(
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
-    let mut engines =
-        recover_live_multirange_engines(config, &tenant_config, checkpoint_store.clone()).await?;
+    let mut engines = recover_live_multirange_engines(
+        config,
+        &tenant_config,
+        checkpoint_store.clone(),
+        activation_receipt.as_ref(),
+    )
+    .await?;
     if let Some(recovered_map) = split_activation::reconcile_before_readiness(
         config,
         &mut engines,
@@ -2138,8 +2143,9 @@ async fn recover_live_multirange_engines(
     config: &SubstrateRuntimeConfig,
     tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
+    activation: Option<&split_activation::ActivationDiscovery>,
 ) -> std::io::Result<LiveMultirangeEngines> {
-    let recovery_configs = live_multirange_recovery_configs(config, tenant_config);
+    let recovery_configs = live_multirange_recovery_configs(config, tenant_config, activation);
     let mut engines = BTreeMap::new();
     let mut range0_tso_horizon = None;
     for recovery_config in recovery_configs {
@@ -2171,16 +2177,20 @@ struct LiveMultirangeEngines {
 fn live_multirange_recovery_configs(
     config: &SubstrateRuntimeConfig,
     tenant_config: &crabka_gres_ranges::MultiRangeTenantConfig,
+    activation: Option<&split_activation::ActivationDiscovery>,
 ) -> Vec<crabka_gres_substrate::LiveRecoveryConfig> {
-    tenant_config
-        .range_map
+    activation
+        .map_or(&tenant_config.range_map, |discovery| {
+            &discovery.recovery_map
+        })
         .ranges()
         .iter()
         .filter(|spec| {
-            tenant_config
-                .hosted_ranges
-                .as_ref()
-                .is_none_or(|ranges| ranges.contains(&spec.range_id))
+            activation.is_some()
+                || tenant_config
+                    .hosted_ranges
+                    .as_ref()
+                    .is_none_or(|ranges| ranges.contains(&spec.range_id))
         })
         .map(|spec| {
             crabka_gres_substrate::LiveRecoveryConfig::new(
@@ -2188,6 +2198,13 @@ fn live_multirange_recovery_configs(
                 tenant_config.tenant.clone(),
                 spec.range_id,
                 config.kafka_security.clone(),
+            )
+            .with_wal_generation(
+                activation
+                    .and_then(|discovery| {
+                        discovery.recovery_generations.get(&spec.range_id).copied()
+                    })
+                    .unwrap_or(0),
             )
             .with_optional_advertised_endpoint(config.advertised_endpoint.clone())
         })
@@ -4897,7 +4914,7 @@ mod tests {
         .with_hosted_ranges(config.host_ranges.clone().expect("host ranges"))
         .expect("hosted ranges");
 
-        let recovery_configs = live_multirange_recovery_configs(&config, &tenant_config);
+        let recovery_configs = live_multirange_recovery_configs(&config, &tenant_config, None);
         let topics = recovery_configs
             .iter()
             .map(crabka_gres_substrate::LiveRecoveryConfig::wal_topic)

@@ -869,6 +869,180 @@ async fn activation_crash_child() {
     panic!("hard crash failpoint returned to the child: {result:?}");
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn activation_generation_chain_child() {
+    if std::env::var_os("CRABKA_GRES_ACTIVATION_CHAIN_CHILD").is_none() {
+        return;
+    }
+    let bootstrap = std::env::var("CRABKA_GRES_ACTIVATION_BOOTSTRAP").expect("bootstrap env");
+    let tenant = std::env::var("CRABKA_GRES_ACTIVATION_TENANT").expect("tenant env");
+    let checkpoint_root = PathBuf::from(
+        std::env::var("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT").expect("checkpoint env"),
+    );
+    let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
+        bootstrap,
+        tenant,
+        checkpoint_root,
+    ))
+    .await
+    .expect("open chain child runtime");
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("CREATE TABLE t1 (id int4); CREATE TABLE t2 (id int4)")
+        .await
+        .expect("create chain tables");
+    session
+        .simple_query("INSERT INTO t1 VALUES (11); INSERT INTO t2 VALUES (22)")
+        .await
+        .expect("seed chain tables");
+
+    let current_map = runtime.published_range_map().expect("g0 map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|spec| spec.range_id == RangeId::COORDINATOR)
+        .expect("g0 r0")
+        .clone();
+    let split_at_t2 = RangeKey::table_start(TableId::new(2));
+    runtime
+        .split_successors(
+            "activation-chain-g1",
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 0,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::COORDINATOR,
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        RangeKey::MIN,
+                        Some(split_at_t2),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(2),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 1,
+                    interval: RangeSpec::for_interval(
+                        RangeId::new(2),
+                        split_at_t2,
+                        predecessor.end,
+                    ),
+                },
+            },
+        )
+        .await
+        .expect("activate g1");
+
+    let current_map = runtime.published_range_map().expect("g1 map");
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|spec| spec.range_id == RangeId::COORDINATOR)
+        .expect("g1 r0")
+        .clone();
+    let split_at_t1 = RangeKey::table_start(TableId::new(1));
+    runtime
+        .inject_topology_activation_fault(crabka_gres::TopologyActivationFault::AfterMustActivate);
+    let result = runtime
+        .split_successors(
+            "activation-chain-g2",
+            SplitCommand {
+                current_map,
+                predecessor: RangeId::COORDINATOR,
+                predecessor_generation: 1,
+                left: SuccessorDescriptor {
+                    range_id: RangeId::COORDINATOR,
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 2,
+                    interval: RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        RangeKey::MIN,
+                        Some(split_at_t1),
+                    ),
+                },
+                right: SuccessorDescriptor {
+                    range_id: RangeId::new(3),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: 2,
+                    interval: RangeSpec::for_interval(
+                        RangeId::new(3),
+                        split_at_t1,
+                        predecessor.end,
+                    ),
+                },
+            },
+        )
+        .await;
+    panic!("chain hard-crash failpoint returned: {result:?}");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn activation_discovery_follows_g0_g1_g2_with_distinct_operation_ids() {
+    let broker_dir = tempfile::tempdir().expect("broker tempdir");
+    let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
+        .await
+        .expect("broker start");
+    let checkpoint_dir = tempfile::tempdir().expect("checkpoint tempdir");
+    let tenant = "activation-generation-chain".to_owned();
+    let bootstrap = broker.listen_addr().to_string();
+    let checkpoint_root = checkpoint_dir.path().to_path_buf();
+    let executable = std::env::current_exe().expect("test executable");
+    let status = tokio::task::spawn_blocking({
+        let bootstrap = bootstrap.clone();
+        let tenant = tenant.clone();
+        let checkpoint_root = checkpoint_root.clone();
+        move || {
+            std::process::Command::new(executable)
+                .args([
+                    "--exact",
+                    "activation_generation_chain_child",
+                    "--nocapture",
+                ])
+                .env("CRABKA_GRES_ACTIVATION_CHAIN_CHILD", "1")
+                .env("CRABKA_GRES_ACTIVATION_HARD_CRASH", "1")
+                .env("CRABKA_GRES_ACTIVATION_BOOTSTRAP", bootstrap)
+                .env("CRABKA_GRES_ACTIVATION_TENANT", tenant)
+                .env("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT", checkpoint_root)
+                .status()
+                .expect("run chain child")
+        }
+    })
+    .await
+    .expect("join chain child");
+    assert!(!status.success(), "g2 crash must kill the child");
+
+    let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
+        bootstrap,
+        tenant,
+        checkpoint_root,
+    ))
+    .await
+    .expect("reconcile chained activation before readiness");
+    let map = runtime.published_range_map().expect("g2 map");
+    assert!(
+        map.ranges()
+            .iter()
+            .any(|range| range.range_id == RangeId::new(2))
+    );
+    assert!(
+        map.ranges()
+            .iter()
+            .any(|range| range.range_id == RangeId::new(3))
+    );
+    let mut session = runtime.engine.connect();
+    session
+        .simple_query("SELECT * FROM t1")
+        .await
+        .expect("g2 t1");
+    session
+        .simple_query("SELECT * FROM t2")
+        .await
+        .expect("g2 t2");
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
 async fn activation_crash_matrix_reopens_before_readiness() {
     let broker_dir = tempfile::tempdir().expect("broker tempdir");

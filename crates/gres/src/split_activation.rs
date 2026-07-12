@@ -18,6 +18,12 @@ use crabka_pgexec::SqlEngine;
 
 static RECOVERY_CACHE_NONCE: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 
+pub(super) struct ActivationDiscovery {
+    pub(super) receipt: TopologyActivationReceipt,
+    pub(super) recovery_map: RangeMap,
+    pub(super) recovery_generations: BTreeMap<RangeId, u64>,
+}
+
 #[derive(Clone)]
 pub(super) struct PendingLiveTopology {
     pub(super) operation_id: String,
@@ -742,7 +748,7 @@ async fn cas_transfer_receipt(
 pub(super) async fn discover_activation_receipt(
     config: &SubstrateRuntimeConfig,
     checkpoint_store: Option<&dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
-) -> std::io::Result<Option<TopologyActivationReceipt>> {
+) -> std::io::Result<Option<ActivationDiscovery>> {
     let tenant = crabka_gres_ranges::TenantName::parse(config.tenant.clone()).map_err(|error| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, format!("tenant: {error}"))
     })?;
@@ -775,12 +781,36 @@ pub(super) async fn discover_activation_receipt(
         }
     }
     let mut generation = 0;
+    let mut recovery_map = receipts
+        .values()
+        .min_by_key(|receipt| receipt.split.current_map.epoch())
+        .map(|receipt| receipt.split.current_map.clone());
+    let mut recovery_generations = recovery_map
+        .as_ref()
+        .map(|map| {
+            map.ranges()
+                .iter()
+                .map(|range| (range.range_id, 0))
+                .collect::<BTreeMap<_, _>>()
+        })
+        .unwrap_or_default();
     let mut visited = std::collections::BTreeSet::from([generation]);
     loop {
         let Some(next_generation) = next_replacement_generation(generation, receipts.values())?
         else {
             break;
         };
+        let edge_operation = receipts
+            .values()
+            .find(|receipt| {
+                rolls_forward(receipt.phase)
+                    && receipt
+                        .targets
+                        .get(&RangeId::COORDINATOR)
+                        .is_some_and(|target| target.wal_generation == next_generation)
+            })
+            .map(|receipt| receipt.operation_id.clone())
+            .expect("replacement edge selected from receipt set");
         if next_generation <= generation || !visited.insert(next_generation) {
             return Err(std::io::Error::other(
                 "activation receipt graph contains a generation cycle or regression",
@@ -876,6 +906,19 @@ pub(super) async fn discover_activation_receipt(
                 .expect("validated activation history is non-empty");
             receipts.insert(operation_id, terminal);
         }
+        if let Some(completed) = receipts.get(&edge_operation)
+            && matches!(
+                completed.phase,
+                TopologyActivationPhase::CheckpointDurable
+                    | TopologyActivationPhase::TopologyCommitted
+            )
+        {
+            recovery_generations.remove(&completed.split.predecessor);
+            for (range_id, target) in &completed.targets {
+                recovery_generations.insert(*range_id, target.wal_generation);
+            }
+            recovery_map = Some(completed.split.target_map.clone());
+        }
         generation = next_generation;
     }
     let receipts = receipts.into_values().collect::<Vec<_>>();
@@ -891,7 +934,11 @@ pub(super) async fn discover_activation_receipt(
             )
         })
         .max_by_key(|receipt| receipt.split.target_map.epoch());
-    Ok(latest)
+    Ok(latest.map(|receipt| ActivationDiscovery {
+        recovery_map: recovery_map.unwrap_or_else(|| receipt.split.current_map.clone()),
+        receipt,
+        recovery_generations,
+    }))
 }
 
 async fn read_checkpoint_receipts(
@@ -950,7 +997,7 @@ async fn receipt_values_from_wal(
             std::io::Error::other(format!("decode replacement receipt WAL: {error}"))
         })?;
         for operation in frame.ops {
-            let value = match operation {
+            let keyed_value = match operation {
                 crabka_pgkv::WriteOp::Put {
                     key: candidate,
                     value,
@@ -959,17 +1006,38 @@ async fn receipt_values_from_wal(
                     key: candidate,
                     value,
                     ..
-                } if candidate.starts_with(&prefix) => Some(value),
+                } if candidate.starts_with(&prefix) => Some((candidate, value)),
                 _ => None,
             };
-            if let Some(value) = value {
-                receipts.push(serde_json::from_slice(&value).map_err(|error| {
-                    std::io::Error::other(format!("decode replacement activation receipt: {error}"))
-                })?);
+            if let Some((key, value)) = keyed_value {
+                let receipt: TopologyActivationReceipt =
+                    serde_json::from_slice(&value).map_err(|error| {
+                        std::io::Error::other(format!(
+                            "decode replacement activation receipt: {error}"
+                        ))
+                    })?;
+                validate_receipt_wal_identity(&recovery.tenant.to_string(), &key, &receipt)?;
+                receipts.push(receipt);
             }
         }
     }
     Ok(receipts)
+}
+
+fn validate_receipt_wal_identity(
+    recovery_tenant: &str,
+    key: &[u8],
+    receipt: &TopologyActivationReceipt,
+) -> std::io::Result<()> {
+    let expected_key =
+        crabka_pgkv::key::topology_activation_receipt_key(recovery_tenant, &receipt.operation_id);
+    if key == expected_key && receipt.tenant == recovery_tenant {
+        Ok(())
+    } else {
+        Err(std::io::Error::other(
+            "activation receipt WAL key and payload identity differ",
+        ))
+    }
 }
 
 fn same_target_intent(
@@ -1200,7 +1268,11 @@ fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Resul
                 .barrier_offset
                 .is_none_or(|barrier| barrier > checkpoint.covered_offset)
     });
+    let receipt_identity = receipt.operation_id == receipt.split.operation_id
+        && receipt.tenant == receipt.split.current_map.tenant().to_string()
+        && receipt.tenant == receipt.split.target_map.tenant().to_string();
     let valid = no_partial_boundary
+        && receipt_identity
         && target_identity
         && source_identity
         && match receipt.phase {
@@ -1309,7 +1381,7 @@ pub(super) async fn reconcile_before_readiness(
     config: &SubstrateRuntimeConfig,
     engines: &mut LiveMultirangeEngines,
     checkpoint_store: Option<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>>,
-    discovered: Option<TopologyActivationReceipt>,
+    discovered: Option<ActivationDiscovery>,
 ) -> std::io::Result<Option<RangeMap>> {
     if discovered.is_none() && !engines.engines.contains_key(&RangeId::COORDINATOR) {
         return Ok(None);
@@ -1324,7 +1396,7 @@ pub(super) async fn reconcile_before_readiness(
         .list()
         .await
         .map_err(|error| std::io::Error::other(format!("list activation receipts: {error}")))?;
-    if let Some(discovered) = discovered {
+    if let Some(discovered) = discovered.map(|discovery| discovery.receipt) {
         if let Some(existing) = receipts
             .iter_mut()
             .find(|receipt| receipt.operation_id == discovered.operation_id)
@@ -1781,7 +1853,7 @@ mod tests {
 
     use super::{
         canonicalize_receipt_history, next_replacement_generation, routing_table_id,
-        validate_receipt_extension, validate_receipt_history,
+        validate_receipt_extension, validate_receipt_history, validate_receipt_wal_identity,
     };
     use crabka_gres_ranges::{
         MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
@@ -1940,6 +2012,10 @@ mod tests {
             .unwrap()
             .range_id = RangeId::new(9);
         assert!(validate_receipt_history(&[mismatched_identity]).is_err());
+
+        let mut mismatched_operation = receipt();
+        mismatched_operation.operation_id = "payload-op".into();
+        assert!(validate_receipt_history(&[mismatched_operation]).is_err());
     }
 
     #[test]
@@ -2017,6 +2093,22 @@ mod tests {
         let missing = canonicalize_receipt_history(&operation_id, [prepared, missing])
             .expect("canonical values retain the gap");
         assert!(validate_receipt_history(&missing).is_err());
+    }
+
+    #[test]
+    fn wal_receipt_key_must_match_payload_operation_and_tenant() {
+        let receipt = receipt();
+        let exact = crabka_pgkv::key::topology_activation_receipt_key(
+            &receipt.tenant,
+            &receipt.operation_id,
+        );
+        validate_receipt_wal_identity(&receipt.tenant, &exact, &receipt).expect("exact identity");
+        let wrong_operation =
+            crabka_pgkv::key::topology_activation_receipt_key(&receipt.tenant, "other-op");
+        assert!(
+            validate_receipt_wal_identity(&receipt.tenant, &wrong_operation, &receipt).is_err()
+        );
+        assert!(validate_receipt_wal_identity("other-tenant", &exact, &receipt).is_err());
     }
 
     fn receipt() -> TopologyActivationReceipt {
