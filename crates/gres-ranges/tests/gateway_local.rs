@@ -760,12 +760,16 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
             end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
             endpoint: "unhosted-r0-is-local".to_string(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
         RangeLayoutEntry {
             range_id: 1,
             end_key: None,
             endpoint: remote_address.to_string(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
     ])
     .expect("layout");
@@ -828,18 +832,24 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
             end_key: Some(crabka_gres_control::RangeBoundary::new(50, 0)),
             endpoint: "local-r0".into(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
         RangeLayoutEntry {
             range_id: 1,
             end_key: Some(crabka_gres_control::RangeBoundary::new(50, 10)),
             endpoint: "local-r1".into(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
         RangeLayoutEntry {
             range_id: 2,
             end_key: None,
             endpoint: "127.0.0.1:1".into(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
     ])
     .expect("layout");
@@ -1078,12 +1088,16 @@ async fn remote_extended_statement_participates_in_cross_range_commit() {
             end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
             endpoint: "local".to_string(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
         RangeLayoutEntry {
             range_id: 1,
             end_key: None,
             endpoint: "127.0.0.1:1".to_string(),
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         },
     ])
     .expect("layout");

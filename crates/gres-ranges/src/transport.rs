@@ -81,6 +81,8 @@ pub enum RangeRequest {
     TimestampPrimaryRecover(TimestampPrimaryRecoverReq),
     /// Read a validated primary descriptor without choosing a decision.
     TimestampPrimaryInspect(TimestampPrimaryRecoverReq),
+    /// Run one generation-fenced split control operation over authenticated transport.
+    Control(RangeControlReq),
 }
 
 /// Response sent between range computes.
@@ -134,10 +136,107 @@ pub enum RangeResponse {
         decision: WirePrimaryTxnDecision,
         operations: Vec<WireTimestampOperation>,
     },
+    /// Explicit result of a split control operation.
+    Control(RangeControlResp),
     /// Range compute rejected the request.
     Error {
         error: WireErrorKind,
         message: String,
+    },
+}
+
+/// Serializable `(table_id, rowid)` boundary used by split control.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireRangeKey {
+    pub table_id: u64,
+    pub rowid: u64,
+}
+
+/// Serializable in-doubt marker returned during interval inheritance.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireInDoubtMarker {
+    pub transaction_id: u64,
+    pub key: WireRangeKey,
+}
+
+/// One committed WAL record in a bounded split-transfer tail.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct WireCommittedTailRecord {
+    pub offset: i64,
+    pub bytes: Vec<u8>,
+}
+
+/// One authenticated, generation-fenced split control request.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeControlReq {
+    pub tenant: String,
+    pub range_id: RangeId,
+    pub generation: u64,
+    pub operation_id: String,
+    pub operation: RangeControlOperation,
+}
+
+/// Idempotent side effect requested from one hosted range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "operation")]
+pub enum RangeControlOperation {
+    ForceCheckpoint,
+    PauseAtCoveredOffset {
+        manifest_key: String,
+        covered_offset: i64,
+    },
+    Status,
+    StageFilteredRestore {
+        source_range: RangeId,
+        source_generation: u64,
+        manifest_key: String,
+        covered_offset: i64,
+        barrier_offset: i64,
+        routing_table_id: u64,
+        physical_table_id: u32,
+        interval_start: WireRangeKey,
+        interval_end: Option<WireRangeKey>,
+        tail: Vec<WireCommittedTailRecord>,
+        tail_sha256: String,
+        target_map: crate::RangeMap,
+    },
+    SuccessorFencePrologue,
+    InheritMarkers {
+        interval_start: WireRangeKey,
+        interval_end: Option<WireRangeKey>,
+    },
+    Park,
+    Resume,
+}
+
+/// Explicit control result; callers never infer success from connection closure.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case", tag = "result")]
+pub enum RangeControlResp {
+    Applied,
+    AlreadyApplied,
+    Ambiguous {
+        message: String,
+    },
+    Rejected {
+        code: String,
+        message: String,
+    },
+    Checkpoint {
+        generation: u64,
+        covered_offset: i64,
+        manifest_key: String,
+    },
+    Paused {
+        barrier_offset: i64,
+    },
+    Status {
+        paused: bool,
+        serving: bool,
+        barrier_offset: Option<i64>,
+    },
+    Markers {
+        markers: Vec<WireInDoubtMarker>,
     },
 }
 
@@ -1409,6 +1508,114 @@ mod tests {
 
     use super::*;
 
+    #[test]
+    fn range_control_protocol_roundtrips_every_operation_and_explicit_outcome() {
+        let operations = [
+            RangeControlOperation::ForceCheckpoint,
+            RangeControlOperation::PauseAtCoveredOffset {
+                manifest_key: "tenant/r0/checkpoint.json".into(),
+                covered_offset: 41,
+            },
+            RangeControlOperation::Status,
+            RangeControlOperation::StageFilteredRestore {
+                source_range: RangeId::COORDINATOR,
+                source_generation: 8,
+                manifest_key: "tenant/r1/checkpoint.json".into(),
+                covered_offset: 41,
+                barrier_offset: 44,
+                routing_table_id: 7,
+                physical_table_id: 700,
+                interval_start: WireRangeKey {
+                    table_id: 7,
+                    rowid: 10,
+                },
+                interval_end: Some(WireRangeKey {
+                    table_id: 7,
+                    rowid: 20,
+                }),
+                tail: vec![WireCommittedTailRecord {
+                    offset: 42,
+                    bytes: vec![1, 2],
+                }],
+                tail_sha256: "fixture-sha256".into(),
+                target_map: crate::RangeMap::new(
+                    crate::TenantName::parse("tenant-a").expect("wire tenant"),
+                    crate::MapEpoch::new(1),
+                    vec![crate::RangeSpec::new(
+                        RangeId::COORDINATOR,
+                        crate::TableId::ZERO,
+                        None,
+                    )],
+                )
+                .expect("wire target map"),
+            },
+            RangeControlOperation::SuccessorFencePrologue,
+            RangeControlOperation::InheritMarkers {
+                interval_start: WireRangeKey {
+                    table_id: 7,
+                    rowid: 10,
+                },
+                interval_end: None,
+            },
+            RangeControlOperation::Park,
+            RangeControlOperation::Resume,
+        ];
+        for operation in operations {
+            let request = RangeRequest::Control(RangeControlReq {
+                tenant: "tenant-a".into(),
+                range_id: RangeId::new(1),
+                generation: 9,
+                operation_id: "split-42".into(),
+                operation,
+            });
+            let encoded = serde_json::to_vec(&request).expect("encode control request");
+            assert_eq!(
+                serde_json::from_slice::<RangeRequest>(&encoded).expect("decode control request"),
+                request
+            );
+        }
+
+        let outcomes = [
+            RangeControlResp::Applied,
+            RangeControlResp::AlreadyApplied,
+            RangeControlResp::Ambiguous {
+                message: "commit result unknown".into(),
+            },
+            RangeControlResp::Rejected {
+                code: "stale_generation".into(),
+                message: "expected 10".into(),
+            },
+            RangeControlResp::Checkpoint {
+                generation: 9,
+                covered_offset: 41,
+                manifest_key: "manifest".into(),
+            },
+            RangeControlResp::Paused { barrier_offset: 44 },
+            RangeControlResp::Status {
+                paused: true,
+                serving: false,
+                barrier_offset: Some(44),
+            },
+            RangeControlResp::Markers {
+                markers: vec![WireInDoubtMarker {
+                    transaction_id: 5,
+                    key: WireRangeKey {
+                        table_id: 7,
+                        rowid: 12,
+                    },
+                }],
+            },
+        ];
+        for outcome in outcomes {
+            let response = RangeResponse::Control(outcome);
+            let encoded = serde_json::to_vec(&response).expect("encode control response");
+            assert_eq!(
+                serde_json::from_slice::<RangeResponse>(&encoded).expect("decode control response"),
+                response
+            );
+        }
+    }
+
     #[derive(Default)]
     struct EchoService {
         calls: AtomicUsize,
@@ -1471,6 +1678,10 @@ mod tests {
                         operations: Vec::new(),
                     }
                 }
+                RangeRequest::Control(_) => RangeResponse::Error {
+                    error: WireErrorKind::Failed,
+                    message: "wrong rpc".into(),
+                },
             }
         }
     }
@@ -1602,6 +1813,48 @@ mod tests {
 
         assert!(matches!(sql, RangeResponse::Sql { .. }));
         assert!(matches!(scan, RangeResponse::ScanRange(_)));
+    }
+
+    struct AppliedControl;
+
+    #[async_trait]
+    impl crate::control::RangeControlExecutor for AppliedControl {
+        async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
+            RangeControlResp::Applied
+        }
+    }
+
+    #[tokio::test]
+    async fn mtls_allowlisted_principal_executes_generation_fenced_control() {
+        let fixture = MtlsFixture::new(BTreeSet::from([
+            "CN=test-client,OU=integration,O=crabka".to_string()
+        ]));
+        let control = Arc::new(crate::control::GenerationFencedRangeControl::new(
+            "tenant-a",
+            RangeId::new(1),
+            9,
+            Box::new(AppliedControl),
+        ));
+        let service =
+            crate::forward::HostedRangeService::new(Default::default()).with_range_control(control);
+        let address = spawn_tls(Arc::new(service), fixture.server).await;
+        let client = FramedTcpClient::with_tls(fixture.client).expect("mTLS client");
+
+        let response = client
+            .call(
+                &address.to_string(),
+                &RangeRequest::Control(RangeControlReq {
+                    tenant: "tenant-a".into(),
+                    range_id: RangeId::new(1),
+                    generation: 9,
+                    operation_id: "split-a/checkpoint".into(),
+                    operation: RangeControlOperation::ForceCheckpoint,
+                }),
+            )
+            .await
+            .expect("allowlisted control RPC");
+
+        assert_eq!(response, RangeResponse::Control(RangeControlResp::Applied));
     }
 
     #[tokio::test]

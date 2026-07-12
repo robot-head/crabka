@@ -184,12 +184,16 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::new(10, 25)),
                 endpoint: "127.0.0.1:7000".to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
             RangeLayoutEntry {
                 range_id: 1,
                 end_key: None,
                 endpoint: "127.0.0.1:7001".to_string(),
                 wal_generation: 4,
+                lifecycle: Default::default(),
+                retirement: None,
             },
         ])
         .unwrap()

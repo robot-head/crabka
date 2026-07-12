@@ -914,6 +914,46 @@ impl SqlEngine {
         timestamp_txn::timestamp_txn_descriptors(self.kv.as_ref()).map_err(Into::into)
     }
 
+    /// Read one durable range-control receipt from the range-0 system keyspace.
+    pub fn range_control_receipt(
+        &self,
+        tenant: &str,
+        receipt: &str,
+    ) -> Result<Option<Vec<u8>>, ExecError> {
+        self.kv
+            .get(&crabka_pgkv::key::range_control_receipt_key(
+                tenant, receipt,
+            ))
+            .map_err(Into::into)
+    }
+
+    /// Compare-and-swap one range-control receipt through this engine's durable committer.
+    pub async fn compare_and_swap_range_control_receipt(
+        &self,
+        tenant: &str,
+        receipt: &str,
+        expected: Option<Vec<u8>>,
+        value: Vec<u8>,
+    ) -> Result<bool, ExecError> {
+        let key = crabka_pgkv::key::range_control_receipt_key(tenant, receipt);
+        let operation = crabka_pgkv::WriteOp::ConditionalPut {
+            key: key.clone(),
+            expected: expected.clone(),
+            value: value.clone(),
+        };
+        if let Err(error) = self.committer.commit(vec![operation]).await {
+            let actual = self.kv.get(&key)?;
+            if actual == Some(value) {
+                return Ok(true);
+            }
+            if actual != expected {
+                return Ok(false);
+            }
+            return Err(error);
+        }
+        Ok(self.kv.get(&key)? == Some(value))
+    }
+
     pub fn durable_timestamp_intent_identities(
         &self,
     ) -> Result<Vec<crate::timestamp_txn::DurableTimestampIntentIdentity>, ExecError> {

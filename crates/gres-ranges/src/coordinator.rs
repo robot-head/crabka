@@ -349,7 +349,8 @@ impl TxnRpc {
             | RangeResponse::ResolveTxn(_)
             | RangeResponse::TimestampParticipantDone
             | RangeResponse::TimestampPrimaryDecision { .. }
-            | RangeResponse::TimestampPrimaryOutcome { .. } => Err(TxnRpcError::UnexpectedResponse),
+            | RangeResponse::TimestampPrimaryOutcome { .. }
+            | RangeResponse::Control(_) => Err(TxnRpcError::UnexpectedResponse),
         }
     }
 }
@@ -548,6 +549,8 @@ mod tests {
                 }),
                 endpoint: addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             });
         }
         let record = TenantRecord::new(

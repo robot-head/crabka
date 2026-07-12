@@ -205,6 +205,85 @@ pub struct RangeLayoutEntry {
     pub endpoint: String,
     /// Per-range WAL generation. Controllers bump this independently for parking.
     pub wal_generation: u64,
+    /// Range-scoped serving lifecycle; absent legacy values decode as serving.
+    #[serde(default)]
+    pub lifecycle: RangeLifecycle,
+    /// Durable predecessor-retirement intent while parking or parked.
+    #[serde(default)]
+    pub retirement: Option<RangeRetirement>,
+}
+
+/// Independent lifecycle for one range placement.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RangeLifecycle {
+    #[default]
+    Serving,
+    Parking,
+    Parked,
+}
+
+/// Durable, generation-fenced retirement metadata for one predecessor range.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RangeRetirement {
+    pub operation_id: String,
+    pub retiring_generation: u64,
+    pub checkpoint: FinalCheckpoint,
+}
+
+impl RangeLayoutEntry {
+    pub fn begin_parking(
+        &self,
+        operation_id: impl Into<String>,
+        expected_generation: u64,
+        checkpoint: FinalCheckpoint,
+    ) -> Result<Self, ControlError> {
+        let operation_id = operation_id.into();
+        checkpoint.ensure_valid()?;
+        if self.lifecycle != RangeLifecycle::Serving
+            || self.wal_generation != expected_generation
+            || checkpoint.wal_generation != expected_generation
+            || operation_id.is_empty()
+        {
+            return Err(ControlError::InvalidField {
+                field: "ranges.retirement",
+                reason: "parking requires serving state, matching generation/checkpoint, and operation id".into(),
+            });
+        }
+        let mut next = self.clone();
+        next.lifecycle = RangeLifecycle::Parking;
+        next.retirement = Some(RangeRetirement {
+            operation_id,
+            retiring_generation: expected_generation,
+            checkpoint,
+        });
+        Ok(next)
+    }
+
+    pub fn confirm_parked(
+        &self,
+        operation_id: &str,
+        expected_generation: u64,
+    ) -> Result<Self, ControlError> {
+        let Some(retirement) = &self.retirement else {
+            return Err(ControlError::InvalidField {
+                field: "ranges.retirement",
+                reason: "parking intent is missing".into(),
+            });
+        };
+        if self.lifecycle != RangeLifecycle::Parking
+            || retirement.operation_id != operation_id
+            || retirement.retiring_generation != expected_generation
+        {
+            return Err(ControlError::InvalidField {
+                field: "ranges.retirement",
+                reason: "park confirmation does not match durable intent".into(),
+            });
+        }
+        let mut next = self.clone();
+        next.lifecycle = RangeLifecycle::Parked;
+        Ok(next)
+    }
 }
 
 /// Registry-visible hash-sharded table placement metadata.
@@ -507,11 +586,54 @@ impl TenantRecord {
                 "range id is not in layout",
             ));
         };
+        if self.ranges[index].lifecycle != RangeLifecycle::Serving {
+            return Err(ControlError::invalid_field(
+                "ranges.lifecycle",
+                "only a serving range may advance generation",
+            ));
+        }
         let next_generation = self.ranges[index].wal_generation.max(generation);
         if next_generation == self.ranges[index].wal_generation {
             return Ok(self);
         }
         self.ranges[index].wal_generation = next_generation;
+        self.record_version = self.next_record_version()?;
+        self.ensure_valid()?;
+        Ok(self)
+    }
+
+    /// Persist a generation-fenced parking intent for one range.
+    pub fn begin_range_parking(
+        mut self,
+        range_id: u32,
+        operation_id: impl Into<String>,
+        expected_generation: u64,
+        checkpoint: FinalCheckpoint,
+    ) -> Result<Self, ControlError> {
+        let range = self
+            .ranges
+            .iter_mut()
+            .find(|range| range.range_id == range_id)
+            .ok_or_else(|| ControlError::invalid_field("ranges.range_id", "range is missing"))?;
+        *range = range.begin_parking(operation_id, expected_generation, checkpoint)?;
+        self.record_version = self.next_record_version()?;
+        self.ensure_valid()?;
+        Ok(self)
+    }
+
+    /// Confirm one range parked after its retiring WAL generation is absent.
+    pub fn confirm_range_parked(
+        mut self,
+        range_id: u32,
+        operation_id: &str,
+        expected_generation: u64,
+    ) -> Result<Self, ControlError> {
+        let range = self
+            .ranges
+            .iter_mut()
+            .find(|range| range.range_id == range_id)
+            .ok_or_else(|| ControlError::invalid_field("ranges.range_id", "range is missing"))?;
+        *range = range.confirm_parked(operation_id, expected_generation)?;
         self.record_version = self.next_record_version()?;
         self.ensure_valid()?;
         Ok(self)
@@ -552,6 +674,12 @@ impl TenantRecord {
                 "source range id is not in layout",
             ));
         };
+        if self.ranges[index].lifecycle != RangeLifecycle::Serving {
+            return Err(ControlError::invalid_field(
+                "ranges.lifecycle",
+                "only a serving range may split",
+            ));
+        }
         let previous_end = index
             .checked_sub(1)
             .and_then(|previous| self.ranges[previous].end_key)
@@ -567,6 +695,8 @@ impl TenantRecord {
                 end_key: source_end,
                 endpoint: split.successor_endpoint,
                 wal_generation: split.successor_wal_generation,
+                lifecycle: RangeLifecycle::Serving,
+                retirement: None,
             },
         );
         self.record_version = self.next_record_version()?;
@@ -599,6 +729,14 @@ impl TenantRecord {
         };
 
         let right_index = left_index + 1;
+        if self.ranges[left_index].lifecycle != RangeLifecycle::Serving
+            || self.ranges[right_index].lifecycle != RangeLifecycle::Serving
+        {
+            return Err(ControlError::invalid_field(
+                "ranges.lifecycle",
+                "only serving ranges may merge",
+            ));
+        }
         let right = self.ranges.remove(right_index);
         let left = &mut self.ranges[left_index];
         left.end_key = right.end_key;
@@ -663,6 +801,22 @@ fn ensure_range_layout_valid(ranges: &[RangeLayoutEntry]) -> Result<(), ControlE
                 "ranges.endpoint",
                 "must not be empty",
             ));
+        }
+        match (&range.lifecycle, &range.retirement) {
+            (RangeLifecycle::Serving, None) => {}
+            (RangeLifecycle::Parking | RangeLifecycle::Parked, Some(retirement))
+                if !retirement.operation_id.is_empty()
+                    && retirement.retiring_generation == range.wal_generation
+                    && retirement.checkpoint.wal_generation == range.wal_generation =>
+            {
+                retirement.checkpoint.ensure_valid()?;
+            }
+            _ => {
+                return Err(ControlError::invalid_field(
+                    "ranges.retirement",
+                    "must match lifecycle, operation id, and WAL generation",
+                ));
+            }
         }
         if range.end_key.is_none() && index + 1 != ranges.len() {
             return Err(ControlError::invalid_field(
@@ -1040,6 +1194,8 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
             wal_generation: 0,
+            lifecycle: Default::default(),
+            retirement: None,
         }];
         let placements = vec![HashPlacement {
             table_id: 7,
@@ -1086,6 +1242,8 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
             wal_generation: 5,
+            lifecycle: Default::default(),
+            retirement: None,
         }];
         input.suspend_max_checkpoint_bytes = Some(1_048_576);
         let (key, value) = encode_registry_record(&input).unwrap();
@@ -1181,12 +1339,16 @@ mod tests {
                     end_key: Some(RangeBoundary::new(10, 55)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
                 RangeLayoutEntry {
                     range_id: 1,
                     end_key: None,
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 2,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
             ])
             .unwrap();
@@ -1205,6 +1367,8 @@ mod tests {
                     end_key: None,
                     endpoint: String::new(),
                     wal_generation: 0,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 }])
                 .is_err()
         );
@@ -1218,6 +1382,8 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                 wal_generation: 7,
+                lifecycle: Default::default(),
+                retirement: None,
             }])
             .unwrap();
 
@@ -1236,6 +1402,8 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                 wal_generation: 7,
+                lifecycle: Default::default(),
+                retirement: None,
             }])
             .unwrap()
             .with_range_wal_generation(0, 9)
@@ -1254,12 +1422,16 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(10)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
                 RangeLayoutEntry {
                     range_id: 1,
                     end_key: None,
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 2,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
             ])
             .unwrap();
@@ -1283,18 +1455,24 @@ mod tests {
                         end_key: Some(RangeBoundary::table_start(10)),
                         endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                         wal_generation: 1,
+                        lifecycle: Default::default(),
+                        retirement: None,
                     },
                     RangeLayoutEntry {
                         range_id: 1,
                         end_key: Some(RangeBoundary::table_start(20)),
                         endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                         wal_generation: 2,
+                        lifecycle: Default::default(),
+                        retirement: None,
                     },
                     RangeLayoutEntry {
                         range_id: 2,
                         end_key: None,
                         endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                         wal_generation: 5,
+                        lifecycle: Default::default(),
+                        retirement: None,
                     },
                 ]
         );
@@ -1309,18 +1487,24 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(10)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
                 RangeLayoutEntry {
                     range_id: 1,
                     end_key: Some(RangeBoundary::table_start(20)),
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 7,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
                 RangeLayoutEntry {
                     range_id: 2,
                     end_key: None,
                     endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                     wal_generation: 5,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
             ])
             .unwrap();
@@ -1343,12 +1527,16 @@ mod tests {
                         end_key: Some(RangeBoundary::table_start(10)),
                         endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                         wal_generation: 1,
+                        lifecycle: Default::default(),
+                        retirement: None,
                     },
                     RangeLayoutEntry {
                         range_id: 1,
                         end_key: None,
                         endpoint: "tenant-a-r1-merged.gres.svc:7432".to_string(),
                         wal_generation: 7,
+                        lifecycle: Default::default(),
+                        retirement: None,
                     },
                 ]
         );
@@ -1363,18 +1551,24 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(10)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
                 RangeLayoutEntry {
                     range_id: 1,
                     end_key: Some(RangeBoundary::table_start(20)),
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 2,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
                 RangeLayoutEntry {
                     range_id: 2,
                     end_key: None,
                     endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                     wal_generation: 3,
+                    lifecycle: Default::default(),
+                    retirement: None,
                 },
             ])
             .unwrap();
@@ -1393,5 +1587,42 @@ mod tests {
     fn registry_key_layout_is_deterministic() {
         let key = tenant_registry_key(&TenantName::try_from("tenant-a").unwrap()).unwrap();
         assert!(key == br#"{"keytype":"TENANT","name":"tenant-a","magic":1}"#);
+    }
+
+    #[test]
+    fn range_lifecycle_defaults_serving_and_parking_is_generation_fenced() {
+        let legacy = r#"{"range_id":1,"end_key":null,"endpoint":"r1:7432","wal_generation":4}"#;
+        let range: RangeLayoutEntry = serde_json::from_str(legacy).expect("legacy range layout");
+        assert_eq!(range.lifecycle, RangeLifecycle::Serving);
+        assert!(range.retirement.is_none());
+
+        let checkpoint = FinalCheckpoint {
+            wal_generation: 4,
+            covered_offset: 12,
+            manifest_key: "tenant/r1/g4/manifest".into(),
+            total_bytes: 99,
+        };
+        let parking = range
+            .begin_parking("split-7", 4, checkpoint.clone())
+            .expect("matching generation parks");
+        assert_eq!(parking.lifecycle, RangeLifecycle::Parking);
+        assert_eq!(parking.retirement.as_ref().unwrap().operation_id, "split-7");
+        assert!(range.begin_parking("split-7", 3, checkpoint).is_err());
+        assert!(parking.confirm_parked("another-operation", 4).is_err());
+        assert_eq!(
+            parking.confirm_parked("split-7", 4).unwrap().lifecycle,
+            RangeLifecycle::Parked
+        );
+        let mut malformed = parking;
+        malformed
+            .retirement
+            .as_mut()
+            .unwrap()
+            .checkpoint
+            .manifest_key
+            .clear();
+        let mut record = record(1);
+        record.ranges = vec![malformed];
+        assert!(record.ensure_valid().is_err());
     }
 }

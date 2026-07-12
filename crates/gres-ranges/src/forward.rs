@@ -66,6 +66,7 @@ pub struct HostedRangeService {
     next_session_id: AtomicU64,
     sessions: tokio::sync::Mutex<BTreeMap<u64, HostedSession>>,
     explicit_gate: Arc<ExplicitGate>,
+    range_control: Option<Arc<crate::control::GenerationFencedRangeControl>>,
 }
 
 struct ExplicitGate {
@@ -107,7 +108,18 @@ impl HostedRangeService {
                 changed: tokio::sync::Notify::new(),
                 next_token: AtomicU64::new(1),
             }),
+            range_control: None,
         }
+    }
+
+    /// Attach authenticated split-orchestration control for this compute generation.
+    #[must_use]
+    pub fn with_range_control(
+        mut self,
+        control: Arc<crate::control::GenerationFencedRangeControl>,
+    ) -> Self {
+        self.range_control = Some(control);
+        self
     }
 
     #[must_use]
@@ -282,6 +294,15 @@ impl HostedRangeService {
 impl RangeService for HostedRangeService {
     async fn handle(&self, request: RangeRequest) -> RangeResponse {
         match request {
+            RangeRequest::Control(request) => {
+                let Some(control) = &self.range_control else {
+                    return RangeResponse::Control(crate::transport::RangeControlResp::Rejected {
+                        code: "control_unavailable".into(),
+                        message: "range control is not configured on this compute".into(),
+                    });
+                };
+                RangeResponse::Control(control.handle(request).await)
+            }
             RangeRequest::SessionOpen { range_id } => {
                 let engine = match self.hosted_engine(range_id) {
                     Ok(engine) => engine,
@@ -3396,7 +3417,8 @@ mod tests {
                 | RangeRequest::TimestampResolve(_)
                 | RangeRequest::TimestampRecover(_)
                 | RangeRequest::TimestampPrimaryRecover(_)
-                | RangeRequest::TimestampPrimaryInspect(_) => RangeResponse::Error {
+                | RangeRequest::TimestampPrimaryInspect(_)
+                | RangeRequest::Control(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".to_string(),
                 },
@@ -3436,6 +3458,8 @@ mod tests {
             end_key: None,
             endpoint,
             wal_generation: 1,
+            lifecycle: Default::default(),
+            retirement: None,
         }])
     }
 
@@ -3674,6 +3698,8 @@ mod tests {
                 end_key: None,
                 endpoint: address.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             }]))
             .expect("registry");
         let forward = RegistryRemoteForward::new(registry, FramedTcpClient::default());
@@ -3902,12 +3928,16 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
                 endpoint: left_addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
             RangeLayoutEntry {
                 range_id: 2,
                 end_key: None,
                 endpoint: right_addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
         ]))
         .unwrap();
@@ -3996,12 +4026,16 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
                 endpoint: left_addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
             RangeLayoutEntry {
                 range_id: 2,
                 end_key: None,
                 endpoint: right_addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
         ]))
         .unwrap();
@@ -4072,12 +4106,16 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
                 endpoint: left_addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
             RangeLayoutEntry {
                 range_id: 2,
                 end_key: None,
                 endpoint: right_addr.to_string(),
                 wal_generation: 1,
+                lifecycle: Default::default(),
+                retirement: None,
             },
         ]))
         .unwrap();
