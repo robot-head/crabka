@@ -860,23 +860,21 @@ fn phase_authorizes_operation(
     }
     match operation {
         RangeControlOperation::Status => phase != Phase::Initiated && phase != Phase::Failed,
-        RangeControlOperation::ForceCheckpoint => {
-            phase >= Phase::Running && phase <= Phase::Resuming
-        }
+        RangeControlOperation::ForceCheckpoint => phase.is_between(Phase::Running, Phase::Resuming),
         RangeControlOperation::PauseAtCoveredOffset { .. } => {
-            phase >= Phase::Checkpointed && phase <= Phase::Resuming
+            phase.is_between(Phase::Checkpointed, Phase::Resuming)
         }
         RangeControlOperation::StageFilteredRestore { .. } => {
-            phase >= Phase::Paused && phase <= Phase::Resuming
+            phase.is_between(Phase::Paused, Phase::Resuming)
         }
         RangeControlOperation::InheritMarkers { .. } => {
-            phase >= Phase::Paused && phase <= Phase::Resuming
+            phase.is_between(Phase::Paused, Phase::Resuming)
         }
         RangeControlOperation::SuccessorFencePrologue { .. } => {
-            phase >= Phase::Restored && phase <= Phase::Resuming
+            phase.is_between(Phase::Restored, Phase::Resuming)
         }
         RangeControlOperation::RetirePredecessor => {
-            phase >= Phase::Activated && phase <= Phase::Resuming
+            phase.is_between(Phase::Activated, Phase::Resuming)
         }
         RangeControlOperation::Resume => {
             matches!(phase, Phase::Running | Phase::Checkpointed | Phase::Paused)

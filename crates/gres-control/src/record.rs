@@ -10,9 +10,7 @@ use crate::ControlError;
 pub const TENANT_REGISTRY_TOPIC: &str = "__gres_tenants";
 
 /// Ordered durable progress for one registry-owned split initiation.
-#[derive(
-    Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, serde::Serialize, serde::Deserialize,
-)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "snake_case", deny_unknown_fields)]
 pub enum SplitOperationPhase {
     /// Immutable split intent has been accepted by the registry.
@@ -23,12 +21,12 @@ pub enum SplitOperationPhase {
     Checkpointed,
     /// Source writer pause receipt was acknowledged.
     Paused,
-    /// Atomic successor layout publication completed.
-    LayoutPublished,
     /// Successor filtered restore and marker inheritance completed.
     Restored,
     /// Successor fence/prologue proved the replacements ready.
     Activated,
+    /// Atomic successor layout publication completed.
+    LayoutPublished,
     /// Predecessor retirement is in progress or acknowledged.
     Retiring,
     /// Serving successors are being resumed after retirement.
@@ -245,6 +243,19 @@ impl SplitOperationPhase {
             self,
             Self::LayoutPublished | Self::Retiring | Self::Resuming | Self::Completed
         )
+    }
+
+    /// Whether this phase lies in one explicit durable progress window.
+    #[must_use]
+    pub const fn is_between(self, first: Self, last: Self) -> bool {
+        match (
+            progress_rank(self),
+            progress_rank(first),
+            progress_rank(last),
+        ) {
+            (Some(value), Some(first), Some(last)) => value >= first && value <= last,
+            _ => false,
+        }
     }
 }
 
@@ -1621,6 +1632,8 @@ mod tests {
 
     use super::*;
 
+    static_assertions::assert_not_impl_any!(SplitOperationPhase: PartialOrd, Ord);
+
     fn record(version: u64) -> TenantRecord {
         TenantRecord::new(
             version,
@@ -1691,6 +1704,28 @@ mod tests {
             paused
                 .advance(SplitOperationPhase::Running, 1, None)
                 .is_err()
+        );
+    }
+
+    #[test]
+    fn split_operation_progress_rank_is_total_and_contiguous() {
+        let phases = [
+            SplitOperationPhase::Initiated,
+            SplitOperationPhase::Running,
+            SplitOperationPhase::Checkpointed,
+            SplitOperationPhase::Paused,
+            SplitOperationPhase::Restored,
+            SplitOperationPhase::Activated,
+            SplitOperationPhase::LayoutPublished,
+            SplitOperationPhase::Retiring,
+            SplitOperationPhase::Resuming,
+            SplitOperationPhase::Completed,
+        ];
+        assert!(
+            phases
+                .iter()
+                .enumerate()
+                .all(|(rank, phase)| { progress_rank(*phase) == u8::try_from(rank).ok() })
         );
     }
 
