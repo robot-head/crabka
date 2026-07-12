@@ -1742,6 +1742,66 @@ struct LiveRangeRegistrySource {
     security: Option<ClientSecurity>,
 }
 
+struct LiveSplitIntentAuthority {
+    bootstrap: String,
+    tenant: crabka_gres_control::TenantName,
+}
+
+#[cfg(test)]
+struct AllowSplitIntentAuthority;
+
+#[cfg(test)]
+#[async_trait::async_trait]
+impl crabka_gres_ranges::control::SplitIntentAuthority for AllowSplitIntentAuthority {
+    async fn authorize_request(
+        &self,
+        _request: &crabka_gres_ranges::transport::RangeControlReq,
+    ) -> Result<bool, String> {
+        Ok(true)
+    }
+}
+
+#[async_trait::async_trait]
+impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthority {
+    async fn authorize_request(
+        &self,
+        request: &crabka_gres_ranges::transport::RangeControlReq,
+    ) -> Result<bool, String> {
+        if request.tenant != self.tenant.as_str() {
+            return Ok(false);
+        }
+        let mut registry = crabka_gres_control::Registry::connect(&self.bootstrap)
+            .await
+            .map_err(|error| format!("connect split intent registry: {error}"))?;
+        let operation = registry
+            .load_split_operation(self.tenant.as_str(), &request.operation_id)
+            .await
+            .map_err(|error| format!("load split operation: {error}"))?;
+        let Some(operation) = operation else {
+            return Ok(false);
+        };
+        let current = registry
+            .get(self.tenant.as_str())
+            .await
+            .map_err(|error| format!("load current tenant layout: {error}"))?;
+        let Some(current) = current else {
+            return Ok(false);
+        };
+        let layout_matches = current.ranges.iter().any(|range| {
+            range.range_id == operation.split.source_range_id
+                && range.wal_generation == operation.split.predecessor_generation
+        }) || [&operation.split.left, &operation.split.right]
+            .into_iter()
+            .all(|expected| current.ranges.iter().any(|range| range == expected));
+        if !layout_matches {
+            return Ok(false);
+        }
+        crabka_gres_ranges::control::RegistrySplitIntentView::new([operation])
+            .authorize_request(request)
+            .await
+    }
+}
+
 #[async_trait::async_trait]
 impl crabka_gres_ranges::registry::RangeRegistrySource for LiveRangeRegistrySource {
     async fn load_current(&self) -> Result<TenantRecord, crabka_gres_ranges::RegistryError> {
@@ -2687,6 +2747,11 @@ async fn open_live_multirange_tenant(
         first_range,
         first_generation,
         executor,
+        Arc::new(LiveSplitIntentAuthority {
+            bootstrap: config.bootstrap.clone(),
+            tenant: crabka_gres_control::TenantName::try_from(config.tenant.as_str())
+                .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?,
+        }),
     )
     .with_receipt_store(receipt_store.clone());
     for (range_id, generation) in generations.into_iter().skip(1) {
@@ -5578,6 +5643,7 @@ mod tests {
                 crabka_gres_ranges::RangeId::COORDINATOR,
                 0,
                 Box::new(StatusExecutor),
+                Arc::new(AllowSplitIntentAuthority),
             ),
         );
         let dynamic = DynamicLiveRangeService::new(

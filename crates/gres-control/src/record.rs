@@ -19,6 +19,20 @@ pub enum SplitOperationPhase {
     Initiated,
     /// At least one execution attempt has started.
     Running,
+    /// Source checkpoint receipt was acknowledged.
+    Checkpointed,
+    /// Source writer pause receipt was acknowledged.
+    Paused,
+    /// Atomic successor layout publication completed.
+    LayoutPublished,
+    /// Successor filtered restore and marker inheritance completed.
+    Restored,
+    /// Successor fence/prologue proved the replacements ready.
+    Activated,
+    /// Predecessor retirement is in progress or acknowledged.
+    Retiring,
+    /// Serving successors are being resumed after retirement.
+    Resuming,
     /// The latest attempt failed and may be retried.
     Failed,
     /// The split completed successfully.
@@ -103,9 +117,15 @@ impl SplitOperationRecord {
             SplitOperationPhase::Initiated => {
                 self.revision == 0 && self.attempts == 0 && self.errors.is_empty()
             }
-            SplitOperationPhase::Running | SplitOperationPhase::Completed => {
-                self.revision > 0 && self.attempts > 0
-            }
+            SplitOperationPhase::Running
+            | SplitOperationPhase::Checkpointed
+            | SplitOperationPhase::Paused
+            | SplitOperationPhase::LayoutPublished
+            | SplitOperationPhase::Restored
+            | SplitOperationPhase::Activated
+            | SplitOperationPhase::Retiring
+            | SplitOperationPhase::Resuming
+            | SplitOperationPhase::Completed => self.revision > 0 && self.attempts > 0,
             SplitOperationPhase::Failed => {
                 self.revision > 0 && self.attempts > 0 && !self.errors.is_empty()
             }
@@ -129,9 +149,18 @@ impl SplitOperationRecord {
             && self.operation_id == prior.operation_id
             && self.split == prior.split;
         let errors_extend = self.errors.starts_with(&prior.errors);
+        let phase_extends = self.phase == prior.phase
+            || (self.phase == SplitOperationPhase::Failed
+                && prior.phase != SplitOperationPhase::Completed)
+            || (prior.phase == SplitOperationPhase::Failed
+                && self.phase == SplitOperationPhase::Running
+                && self.attempts > prior.attempts)
+            || progress_rank(self.phase).is_some_and(|next| {
+                progress_rank(prior.phase).is_some_and(|previous| next > previous)
+            });
         if immutable
             && revision == Some(self.revision)
-            && self.phase >= prior.phase
+            && phase_extends
             && prior.phase != SplitOperationPhase::Completed
             && self.attempts >= prior.attempts
             && errors_extend
@@ -144,6 +173,22 @@ impl SplitOperationRecord {
                 reason: "update is not a monotone extension".to_string(),
             })
         }
+    }
+}
+
+const fn progress_rank(phase: SplitOperationPhase) -> Option<u8> {
+    match phase {
+        SplitOperationPhase::Initiated => Some(0),
+        SplitOperationPhase::Running => Some(1),
+        SplitOperationPhase::Checkpointed => Some(2),
+        SplitOperationPhase::Paused => Some(3),
+        SplitOperationPhase::LayoutPublished => Some(4),
+        SplitOperationPhase::Restored => Some(5),
+        SplitOperationPhase::Activated => Some(6),
+        SplitOperationPhase::Retiring => Some(7),
+        SplitOperationPhase::Resuming => Some(8),
+        SplitOperationPhase::Completed => Some(9),
+        SplitOperationPhase::Failed => None,
     }
 }
 /// Prefix for the ACL-scoped per-tenant config topic read by the compute.
@@ -1316,6 +1361,66 @@ mod tests {
             3,
         )
         .unwrap()
+    }
+
+    fn split_intent() -> RangeLayoutSplit {
+        RangeLayoutSplit {
+            source_range_id: 1,
+            predecessor_generation: 4,
+            left: RangeLayoutEntry {
+                range_id: 2,
+                end_key: Some(RangeBoundary::new(7, 50)),
+                endpoint: "left:7432".into(),
+                wal_generation: 5,
+                lifecycle: RangeLifecycle::Serving,
+                retirement: None,
+            },
+            right: RangeLayoutEntry {
+                range_id: 3,
+                end_key: None,
+                endpoint: "right:7432".into(),
+                wal_generation: 5,
+                lifecycle: RangeLifecycle::Serving,
+                retirement: None,
+            },
+        }
+    }
+
+    #[test]
+    fn split_operation_journal_tracks_control_phases_and_retry() {
+        let initiated = SplitOperationRecord::new(
+            TenantName::try_from("tenant-a").unwrap(),
+            "split-phases",
+            split_intent(),
+        )
+        .unwrap();
+        let running = initiated
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        let checkpointed = running
+            .advance(SplitOperationPhase::Checkpointed, 1, None)
+            .unwrap();
+        let paused = checkpointed
+            .advance(SplitOperationPhase::Paused, 1, None)
+            .unwrap();
+        let failed = paused
+            .advance(
+                SplitOperationPhase::Failed,
+                1,
+                Some("operator restart".into()),
+            )
+            .unwrap();
+
+        assert!(
+            failed
+                .advance(SplitOperationPhase::Running, 2, None)
+                .is_ok()
+        );
+        assert!(
+            paused
+                .advance(SplitOperationPhase::Running, 1, None)
+                .is_err()
+        );
     }
 
     #[test]

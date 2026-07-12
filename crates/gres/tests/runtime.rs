@@ -827,8 +827,124 @@ async fn control_request(
     }
 }
 
+fn control_layout_entry(descriptor: &SuccessorDescriptor) -> crabka_gres_control::RangeLayoutEntry {
+    crabka_gres_control::RangeLayoutEntry {
+        range_id: descriptor.range_id.as_u32(),
+        end_key: descriptor
+            .interval
+            .end
+            .map(|end| crabka_gres_control::RangeBoundary {
+                table_id: end.table_id.as_u64(),
+                rowid: end.rowid,
+            }),
+        endpoint: descriptor.endpoint.clone(),
+        wal_generation: descriptor.wal_generation,
+        lifecycle: crabka_gres_control::RangeLifecycle::Serving,
+        retirement: None,
+    }
+}
+
+async fn seed_control_operation(
+    bootstrap: &str,
+    tenant: &str,
+    split: &crabka_gres_ranges::SplitState,
+) {
+    let verifier = crabka_security::scram::PgScramVerifier::generate_with_salt(
+        "control-secret",
+        8192,
+        vec![7; 16],
+    )
+    .unwrap();
+    let mut record = crabka_gres_control::TenantRecord::new(
+        1,
+        crabka_gres_control::TenantId::try_from(tenant).unwrap(),
+        crabka_gres_control::TenantName::try_from(tenant).unwrap(),
+        crabka_gres_control::TenantState::Active,
+        crabka_gres_control::SqlUser::try_from("operator").unwrap(),
+        verifier.to_string(),
+        1,
+    )
+    .unwrap();
+    record = record
+        .with_range_layout(
+            split
+                .current_map
+                .ranges()
+                .iter()
+                .map(|range| crabka_gres_control::RangeLayoutEntry {
+                    range_id: range.range_id.as_u32(),
+                    end_key: range.end.map(|end| crabka_gres_control::RangeBoundary {
+                        table_id: end.table_id.as_u64(),
+                        rowid: end.rowid,
+                    }),
+                    endpoint: "127.0.0.1:7443".into(),
+                    wal_generation: split.predecessor_generation,
+                    lifecycle: crabka_gres_control::RangeLifecycle::Serving,
+                    retirement: None,
+                })
+                .collect(),
+        )
+        .unwrap();
+    record.record_version = 1;
+    let right = split
+        .right
+        .as_ref()
+        .expect("proper split has right successor");
+    let operation = crabka_gres_control::SplitOperationRecord::new(
+        crabka_gres_control::TenantName::try_from(tenant).unwrap(),
+        &split.operation_id,
+        crabka_gres_control::RangeLayoutSplit {
+            source_range_id: split.predecessor.as_u32(),
+            predecessor_generation: split.predecessor_generation,
+            left: control_layout_entry(&split.left),
+            right: control_layout_entry(right),
+        },
+    )
+    .unwrap();
+    let mut registry = crabka_gres_control::Registry::connect(bootstrap)
+        .await
+        .unwrap();
+    registry.ensure_topic(1).await.unwrap();
+    registry.replace_if_version(&record, None).await.unwrap();
+    let operation = registry.begin_split_operation(&operation).await.unwrap();
+    if operation.phase == crabka_gres_control::SplitOperationPhase::Initiated {
+        let running = operation
+            .advance(crabka_gres_control::SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        registry
+            .compare_and_swap_split_operation(Some(operation.revision), &running)
+            .await
+            .unwrap();
+    }
+}
+
+async fn advance_control_operation(
+    bootstrap: &str,
+    tenant: &str,
+    operation_id: &str,
+    phase: crabka_gres_control::SplitOperationPhase,
+) {
+    let mut registry = crabka_gres_control::Registry::connect(bootstrap)
+        .await
+        .unwrap();
+    let current = registry
+        .load_split_operation(tenant, operation_id)
+        .await
+        .unwrap()
+        .expect("seeded control operation");
+    if current.phase == phase || current.phase > phase {
+        return;
+    }
+    let next = current.advance(phase, current.attempts, None).unwrap();
+    registry
+        .compare_and_swap_split_operation(Some(current.revision), &next)
+        .await
+        .unwrap();
+}
+
 async fn drive_live_control_split(
     runtime: &crabka_gres::GresRuntime,
+    bootstrap: &str,
     tenant: &str,
     operation_id: &str,
     state_path: &std::path::Path,
@@ -893,6 +1009,7 @@ async fn drive_live_control_split(
             .record_topology_activation_intent(&split)
             .await
             .expect("journal topology intent before checkpoint");
+        seed_control_operation(bootstrap, tenant, &split).await;
         let checkpoint =
             control_request(runtime, tenant, operation_id, Operation::ForceCheckpoint).await;
         let RangeControlResp::Checkpoint {
@@ -903,6 +1020,13 @@ async fn drive_live_control_split(
         else {
             panic!("checkpoint failed: {checkpoint:?}");
         };
+        advance_control_operation(
+            bootstrap,
+            tenant,
+            operation_id,
+            crabka_gres_control::SplitOperationPhase::Checkpointed,
+        )
+        .await;
         transfer
             .record_topology_activation_checkpoint(
                 operation_id,
@@ -927,6 +1051,13 @@ async fn drive_live_control_split(
         let RangeControlResp::Paused { barrier_offset } = pause else {
             panic!("pause failed: {pause:?}");
         };
+        advance_control_operation(
+            bootstrap,
+            tenant,
+            operation_id,
+            crabka_gres_control::SplitOperationPhase::Paused,
+        )
+        .await;
         let state = DriverState {
             split,
             manifest_key,
@@ -969,6 +1100,13 @@ async fn drive_live_control_split(
             ),
             "active prologue replay: {prologue:?}"
         );
+        advance_control_operation(
+            bootstrap,
+            tenant,
+            operation_id,
+            crabka_gres_control::SplitOperationPhase::Activated,
+        )
+        .await;
         let retire =
             control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
         assert!(
@@ -978,6 +1116,13 @@ async fn drive_live_control_split(
             ),
             "active retire: {retire:?}"
         );
+        advance_control_operation(
+            bootstrap,
+            tenant,
+            operation_id,
+            crabka_gres_control::SplitOperationPhase::Completed,
+        )
+        .await;
         return;
     }
     let checkpoint =
@@ -1023,6 +1168,13 @@ async fn drive_live_control_split(
         matches!(stage, RangeControlResp::Staged { .. }),
         "stage: {stage:?}"
     );
+    advance_control_operation(
+        bootstrap,
+        tenant,
+        operation_id,
+        crabka_gres_control::SplitOperationPhase::Restored,
+    )
+    .await;
     let markers = control_request(
         runtime,
         tenant,
@@ -1059,6 +1211,13 @@ async fn drive_live_control_split(
         ),
         "prologue: {prologue:?}"
     );
+    advance_control_operation(
+        bootstrap,
+        tenant,
+        operation_id,
+        crabka_gres_control::SplitOperationPhase::Activated,
+    )
+    .await;
     let retire = control_request(runtime, tenant, operation_id, Operation::RetirePredecessor).await;
     assert!(
         matches!(
@@ -1067,6 +1226,13 @@ async fn drive_live_control_split(
         ),
         "retire: {retire:?}"
     );
+    advance_control_operation(
+        bootstrap,
+        tenant,
+        operation_id,
+        crabka_gres_control::SplitOperationPhase::Completed,
+    )
+    .await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -1080,7 +1246,7 @@ async fn control_executor_crash_child() {
         std::env::var("CRABKA_GRES_ACTIVATION_CHECKPOINT_ROOT").expect("checkpoint env"),
     );
     let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
-        bootstrap,
+        bootstrap.clone(),
         tenant.clone(),
         checkpoint_root.clone(),
     ))
@@ -1093,6 +1259,7 @@ async fn control_executor_crash_child() {
         .expect("seed control crash ledger");
     drive_live_control_split(
         &runtime,
+        &bootstrap,
         &tenant,
         "control-crash",
         &checkpoint_root.join("control-driver.json"),
@@ -1140,7 +1307,7 @@ async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
 
         let started = std::time::Instant::now();
         let runtime = crabka_gres::open_substrate_runtime(&activation_crash_config(
-            bootstrap,
+            bootstrap.clone(),
             tenant.clone(),
             checkpoint_root.clone(),
         ))
@@ -1148,6 +1315,7 @@ async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
         .unwrap_or_else(|error| panic!("pre-readiness reconcile after {step}: {error}"));
         drive_live_control_split(
             &runtime,
+            &bootstrap,
             &tenant,
             "control-crash",
             &checkpoint_root.join("control-driver.json"),

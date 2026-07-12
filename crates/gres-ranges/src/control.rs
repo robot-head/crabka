@@ -9,11 +9,7 @@ use crate::transport::{RangeControlOperation, RangeControlReq, RangeControlResp}
 /// Read-only tenant-scoped view of the registry's durable split-operation journal.
 #[async_trait]
 pub trait SplitIntentAuthority: Send + Sync {
-    async fn load_operation(
-        &self,
-        tenant: &str,
-        operation_id: &str,
-    ) -> Result<Option<crabka_gres_control::SplitOperationRecord>, String>;
+    async fn authorize_request(&self, request: &RangeControlReq) -> Result<bool, String>;
 }
 
 /// Immutable registry/config snapshot suitable for compute-side authorization.
@@ -46,15 +42,11 @@ impl RegistrySplitIntentView {
 
 #[async_trait]
 impl SplitIntentAuthority for RegistrySplitIntentView {
-    async fn load_operation(
-        &self,
-        tenant: &str,
-        operation_id: &str,
-    ) -> Result<Option<crabka_gres_control::SplitOperationRecord>, String> {
+    async fn authorize_request(&self, request: &RangeControlReq) -> Result<bool, String> {
         Ok(self
             .operations
-            .get(&(tenant.to_string(), operation_id.to_string()))
-            .cloned())
+            .get(&(request.tenant.clone(), request.operation_id.clone()))
+            .is_some_and(|operation| request_matches_split_operation(request, operation)))
     }
 }
 
@@ -320,7 +312,7 @@ pub struct GenerationFencedRangeControl {
     generations: BTreeMap<crate::RangeId, std::collections::BTreeSet<u64>>,
     executor: Box<dyn RangeControlExecutor>,
     receipts: Arc<dyn RangeControlReceiptStore>,
-    intent_authority: Option<Arc<dyn SplitIntentAuthority>>,
+    intent_authority: Arc<dyn SplitIntentAuthority>,
 }
 
 impl GenerationFencedRangeControl {
@@ -330,6 +322,7 @@ impl GenerationFencedRangeControl {
         range_id: crate::RangeId,
         generation: u64,
         executor: Box<dyn RangeControlExecutor>,
+        intent_authority: Arc<dyn SplitIntentAuthority>,
     ) -> Self {
         Self {
             tenant: tenant.into(),
@@ -339,19 +332,13 @@ impl GenerationFencedRangeControl {
             )]),
             executor,
             receipts: Arc::new(MemoryRangeControlReceiptStore::default()),
-            intent_authority: None,
+            intent_authority,
         }
     }
 
     #[must_use]
     pub fn with_receipt_store(mut self, store: Arc<dyn RangeControlReceiptStore>) -> Self {
         self.receipts = store;
-        self
-    }
-
-    #[must_use]
-    pub fn with_intent_authority(mut self, authority: Arc<dyn SplitIntentAuthority>) -> Self {
-        self.intent_authority = Some(authority);
         self
     }
 
@@ -374,26 +361,15 @@ impl GenerationFencedRangeControl {
         if request.operation_id.is_empty() {
             return rejected("invalid_operation_id", "operation_id must not be empty");
         }
-        if let Some(authority) = &self.intent_authority {
-            let operation = match authority
-                .load_operation(&request.tenant, &request.operation_id)
-                .await
-            {
-                Ok(Some(operation)) => operation,
-                Ok(None) => {
-                    return rejected(
-                        "unauthorized_intent",
-                        "operation is absent from the tenant split journal",
-                    );
-                }
-                Err(message) => return rejected("intent_authority", message),
-            };
-            if !request_matches_split_operation(&request, &operation) {
+        match self.intent_authority.authorize_request(&request).await {
+            Ok(true) => {}
+            Ok(false) => {
                 return rejected(
                     "unauthorized_intent",
                     "control request differs from the durable split intent",
                 );
             }
+            Err(message) => return rejected("intent_authority", message),
         }
         let receipt_key = receipt_key(&request);
         let digest = request_digest(&request);
@@ -617,17 +593,14 @@ fn request_matches_split_operation(
     operation: &crabka_gres_control::SplitOperationRecord,
 ) -> bool {
     let intent = &operation.split;
-    if operation.tenant.as_str() != request.tenant || operation.operation_id != request.operation_id
+    if operation.tenant.as_str() != request.tenant
+        || operation.operation_id != request.operation_id
+        || !phase_authorizes_operation(operation.phase, &request.operation)
     {
         return false;
     }
     let source = request.range_id.as_u32() == intent.source_range_id
         && request.generation == intent.predecessor_generation;
-    let target = |range_id: crate::RangeId, generation: u64| {
-        [&intent.left, &intent.right].into_iter().any(|successor| {
-            successor.range_id == range_id.as_u32() && successor.wal_generation == generation
-        })
-    };
     match &request.operation {
         RangeControlOperation::ForceCheckpoint
         | RangeControlOperation::PauseAtCoveredOffset { .. }
@@ -641,7 +614,7 @@ fn request_matches_split_operation(
             target_map: _,
             ..
         } => {
-            target(request.range_id, request.generation)
+            source
                 && runtime_split_matches_intent(requested, intent, &request.operation_id)
                 && source_range.as_u32() == intent.source_range_id
                 && *source_generation == intent.predecessor_generation
@@ -649,8 +622,40 @@ fn request_matches_split_operation(
         RangeControlOperation::SuccessorFencePrologue { split: requested } => {
             source && runtime_split_matches_intent(requested, intent, &request.operation_id)
         }
+        RangeControlOperation::InheritMarkers { .. } => source,
+    }
+}
+
+fn phase_authorizes_operation(
+    phase: crabka_gres_control::SplitOperationPhase,
+    operation: &RangeControlOperation,
+) -> bool {
+    use crabka_gres_control::SplitOperationPhase as Phase;
+    if phase == Phase::Completed {
+        return true;
+    }
+    match operation {
+        RangeControlOperation::Status => phase != Phase::Initiated && phase != Phase::Failed,
+        RangeControlOperation::ForceCheckpoint => {
+            phase >= Phase::Running && phase <= Phase::Resuming
+        }
+        RangeControlOperation::PauseAtCoveredOffset { .. } => {
+            phase >= Phase::Checkpointed && phase <= Phase::Resuming
+        }
+        RangeControlOperation::StageFilteredRestore { .. } => {
+            phase >= Phase::Paused && phase <= Phase::Resuming
+        }
         RangeControlOperation::InheritMarkers { .. } => {
-            target(request.range_id, request.generation)
+            phase >= Phase::Paused && phase <= Phase::Resuming
+        }
+        RangeControlOperation::SuccessorFencePrologue { .. } => {
+            phase >= Phase::Restored && phase <= Phase::Resuming
+        }
+        RangeControlOperation::RetirePredecessor => {
+            phase >= Phase::Activated && phase <= Phase::Resuming
+        }
+        RangeControlOperation::Resume => {
+            matches!(phase, Phase::Running | Phase::Checkpointed | Phase::Paused)
         }
     }
 }
@@ -705,13 +710,51 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SplitIntentAuthority for MissingIntent {
-        async fn load_operation(
-            &self,
-            _tenant: &str,
-            _operation_id: &str,
-        ) -> Result<Option<crabka_gres_control::SplitOperationRecord>, String> {
-            Ok(None)
+        async fn authorize_request(&self, _request: &RangeControlReq) -> Result<bool, String> {
+            Ok(false)
         }
+    }
+
+    struct AllowIntent;
+
+    #[async_trait::async_trait]
+    impl SplitIntentAuthority for AllowIntent {
+        async fn authorize_request(&self, _request: &RangeControlReq) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
+    fn allow_authority() -> Arc<dyn SplitIntentAuthority> {
+        Arc::new(AllowIntent)
+    }
+
+    #[test]
+    fn journal_phase_only_authorizes_current_or_replay_control_step() {
+        use crabka_gres_control::SplitOperationPhase as Phase;
+
+        assert!(phase_authorizes_operation(
+            Phase::Running,
+            &RangeControlOperation::ForceCheckpoint
+        ));
+        assert!(!phase_authorizes_operation(
+            Phase::Running,
+            &RangeControlOperation::RetirePredecessor
+        ));
+        assert!(phase_authorizes_operation(
+            Phase::Checkpointed,
+            &RangeControlOperation::ForceCheckpoint
+        ));
+        assert!(phase_authorizes_operation(
+            Phase::Checkpointed,
+            &RangeControlOperation::PauseAtCoveredOffset {
+                manifest_key: "m".into(),
+                covered_offset: 1,
+            }
+        ));
+        assert!(!phase_authorizes_operation(
+            Phase::Activated,
+            &RangeControlOperation::Resume
+        ));
     }
 
     struct CountingExecutor {
@@ -772,8 +815,8 @@ mod tests {
                 calls: Arc::new(AtomicUsize::new(0)),
                 response: RangeControlResp::Applied,
             }),
-        )
-        .with_intent_authority(Arc::new(MissingIntent));
+            Arc::new(MissingIntent),
+        );
 
         let response = control.handle(request("tenant-a", 7, "forged")).await;
 
@@ -793,6 +836,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 response: RangeControlResp::Applied,
             }),
+            allow_authority(),
         );
 
         for rejected_request in [request("tenant-b", 7, "a"), request("tenant-a", 6, "b")] {
@@ -815,6 +859,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 response: RangeControlResp::Applied,
             }),
+            allow_authority(),
         );
         let mut original = request("tenant-a", 7, "same");
         original.operation = RangeControlOperation::PauseAtCoveredOffset {
@@ -853,6 +898,7 @@ mod tests {
                     message: "unknown".into(),
                 },
             }),
+            allow_authority(),
         );
         let original = request("tenant-a", 7, "retry");
         assert!(matches!(
@@ -880,6 +926,7 @@ mod tests {
                     message: "killed after effect".into(),
                 },
             }),
+            allow_authority(),
         )
         .with_receipt_store(store.clone());
         let original = request("tenant-a", 7, "restart");
@@ -896,6 +943,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 response: RangeControlResp::Applied,
             }),
+            allow_authority(),
         )
         .with_receipt_store(store);
         assert_eq!(
@@ -930,6 +978,7 @@ mod tests {
                         message: "killed".into(),
                     },
                 }),
+                allow_authority(),
             )
             .with_receipt_store(Arc::new(RangeZeroReceiptStore::new("tenant-a", engine)));
             assert!(matches!(
@@ -946,6 +995,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 response: RangeControlResp::Applied,
             }),
+            allow_authority(),
         )
         .with_receipt_store(Arc::new(RangeZeroReceiptStore::new("tenant-a", engine)));
         assert_eq!(
@@ -970,6 +1020,7 @@ mod tests {
                 calls: Arc::clone(&calls),
                 response: RangeControlResp::Applied,
             }),
+            allow_authority(),
         )
         .with_range(RangeId::new(2), 8);
         let first = request("tenant-a", 7, "split-same");
@@ -997,6 +1048,7 @@ mod tests {
                 execute: RangeControlResp::Paused { barrier_offset: 10 },
                 reconcile: RangeControlResp::Paused { barrier_offset: 10 },
             }),
+            allow_authority(),
         )
         .with_receipt_store(store.clone());
         assert_eq!(
@@ -1012,6 +1064,7 @@ mod tests {
                 execute: RangeControlResp::Paused { barrier_offset: 14 },
                 reconcile: RangeControlResp::Paused { barrier_offset: 14 },
             }),
+            allow_authority(),
         )
         .with_receipt_store(store.clone());
         assert_eq!(
@@ -1046,6 +1099,7 @@ mod tests {
                 execute: RangeControlResp::Paused { barrier_offset: 10 },
                 reconcile: RangeControlResp::Paused { barrier_offset: 10 },
             }),
+            allow_authority(),
         )
         .with_receipt_store(store.clone());
         assert!(matches!(
@@ -1060,6 +1114,7 @@ mod tests {
                 execute: RangeControlResp::Paused { barrier_offset: 9 },
                 reconcile: RangeControlResp::Paused { barrier_offset: 9 },
             }),
+            allow_authority(),
         )
         .with_receipt_store(store.clone());
         assert!(matches!(
