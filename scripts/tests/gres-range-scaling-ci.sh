@@ -52,7 +52,8 @@ def validate(source, benchmark=script):
         'decision_ceiling_passed = all(point["within_expected_envelope"] for point in decision_points)',
         'expected_min_tps <= measured_tps <= expected_max_tps',
         'sharded_range_boundaries()', 'boundaries+=("0:$((index * 1000000))")',
-        'primary_range_distribution', 'all expected sharded ranges received writes',
+        'primary_range_distribution', 'runtime timestamp_primary_committed observations cover all expected ranges',
+        'timestamp_primary_committed', 'observed_primary_transactions',
     ]
     for needle in required_script:
         assert needle in benchmark, f'missing benchmark/gate contract: {needle}'
@@ -88,6 +89,17 @@ except AssertionError:
     pass
 else:
     raise AssertionError('table-id sharded-boundary mutation unexpectedly passed')
+
+fabricated_distribution = script.replace(
+    'timestamp_primary_committed',
+    'sessions_per_range * txns_per_session',
+)
+try:
+    validate(workflow, fabricated_distribution)
+except AssertionError:
+    pass
+else:
+    raise AssertionError('fabricated primary distribution unexpectedly passed')
 PY
 
 echo 'PASS: live Gres scaling CI contract and negative mutations'

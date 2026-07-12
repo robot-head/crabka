@@ -61,3 +61,11 @@ The robust workload used two persistent sessions/range, five warmups, 50 measure
 - range-4 G-9/G-8 decision-ceiling contrast: `1.7185`, unflattened;
 - primary distribution: `{0: 100}`, `{0: 100, 1: 100}`, then `{0: 100, 1: 100, 2: 100, 3: 100}`;
 - all JSON gates: passed.
+
+## Independent review remediation
+
+The follow-up robust run at `target/gres-scaling-observed-final/range-scaling.json` replaces the earlier formula-derived distribution with runtime observations emitted only after the primary decision becomes durable. It reports 110 observed primaries on r0 for one range, 110 each on r0/r1 for two ranges, and 110 each on r0/r1/r2/r3 for four ranges (measured plus warmup transactions). The artifact rejects missing ranges or an observation total different from the executed workload, and the static gate rejects replacing the observation marker with a workload formula.
+
+This run preserved every threshold: range-local `3.2110x`, sharded `3.3473x`, range-4 envelope efficiency `0.8368`, and all JSON gates true.
+
+Recovery and fencing review tests additionally cover the prewrite-before-primary-ack crash window, rN-only recovery through an authenticated remote primary, forged primary identity/terminal decisions, and conditional descriptor CAS no-op races.

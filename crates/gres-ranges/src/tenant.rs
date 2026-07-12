@@ -3527,6 +3527,11 @@ impl GatewaySession {
                 writes_by_range.get(&primary_range).expect("primary writes"),
             )
             .await?;
+            tracing::info!(
+                primary_range = primary_range.as_u32(),
+                start_ts = start_ts.get(),
+                "timestamp_primary_committed"
+            );
             for (range_id, writes) in &writes_by_range {
                 if *range_id != primary_range {
                     self.timestamp_resolve(
