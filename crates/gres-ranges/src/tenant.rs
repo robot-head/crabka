@@ -138,6 +138,13 @@ impl MultiRangeTenantConfig {
         })
     }
 
+    /// Bind the initial serving map to the authoritative registry record version.
+    pub fn with_map_epoch(mut self, epoch: MapEpoch) -> Result<Self, TenantError> {
+        self.range_map =
+            RangeMap::new(self.tenant.clone(), epoch, self.range_map.ranges().to_vec())?;
+        Ok(self)
+    }
+
     /// Return a config that opens each range under `data_dir/r<id>`.
     #[must_use]
     pub fn with_data_dir(mut self, data_dir: PathBuf) -> Self {

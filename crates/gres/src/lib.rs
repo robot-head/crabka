@@ -716,8 +716,14 @@ impl GresRuntime {
         self.checkpoint_runtime.is_some()
     }
 
-    fn into_parts(self) -> (RuntimeEngine, Option<StartedCheckpointRuntime>) {
-        (self.engine, self.checkpoint_runtime)
+    fn into_parts(
+        self,
+    ) -> (
+        RuntimeEngine,
+        Option<StartedCheckpointRuntime>,
+        Option<Arc<LiveMultiRangeTransfer>>,
+    ) {
+        (self.engine, self.checkpoint_runtime, self.staged_transfer)
     }
 
     fn range_service(&self) -> Option<Arc<dyn crabka_gres_ranges::RangeService>> {
@@ -1515,7 +1521,7 @@ pub async fn serve_listener_with_tenant_config_loader(
     let session_config = build_session_config_from_tenant(&effective_args, tenant_record.as_ref())?;
 
     let range_service = runtime.range_service();
-    let (engine, checkpoint_runtime) = runtime.into_parts();
+    let (engine, checkpoint_runtime, _range_transfer_keepalive) = runtime.into_parts();
     let activity = Arc::new(crabka_pgwire::server::ActivityTracker::new());
     let shutdown = CancellationToken::new();
     let serve = crabka_pgwire::server::serve_tls_with_activity_until(
@@ -1869,16 +1875,19 @@ impl crabka_gres_ranges::control::SplitIntentAuthority for LiveSplitIntentAuthor
         } else {
             &plan.current_layout
         };
-        let expected_version = if target_phase {
-            plan.source_record_version.checked_add(1)
-        } else {
-            Some(plan.source_record_version)
-        };
-        let mut layout_matches =
-            current.ranges == *expected_layout && Some(current.record_version) == expected_version;
+        let mut layout_matches = current.ranges == *expected_layout
+            && if target_phase {
+                plan.source_record_version
+                    .checked_add(1)
+                    .is_some_and(|minimum| current.record_version >= minimum)
+            } else {
+                current.record_version == plan.source_record_version
+            };
         if activated_pre_cutover_status {
             layout_matches |= current.ranges == plan.current_layout
                 && current.record_version == plan.source_record_version;
+            layout_matches |= current.ranges == plan.target_layout
+                && Some(current.record_version) == plan.source_record_version.checked_add(1);
         }
         if !layout_matches {
             return Ok(None);
@@ -2149,6 +2158,11 @@ async fn open_multirange_runtime(
     let mut tenant_config =
         crabka_gres_ranges::MultiRangeTenantConfig::from_boundaries(tenant, boundaries)
             .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    if let Some(record) = tenant_record {
+        tenant_config = tenant_config
+            .with_map_epoch(crabka_gres_ranges::MapEpoch::new(record.record_version))
+            .map_err(|error| std::io::Error::new(std::io::ErrorKind::InvalidInput, error))?;
+    }
     if let Ok(fault) = std::env::var("CRABKA_GRES_TEST_COMMIT_FAULT") {
         let fault = match fault.as_str() {
             "before_decision_after_prepare" => {

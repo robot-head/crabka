@@ -3,6 +3,19 @@ mod harness;
 use harness::{TwoComputeHarness, process::ProcessHarness};
 
 #[tokio::test]
+async fn combined_r0_r1_source_starts_with_local_activation_receipt_authority() {
+    let system = ProcessHarness::start_all_on_zero("tenant-combined-receipt-authority").await;
+    system
+        .sql(0)
+        .await
+        .simple_query("SELECT 1")
+        .await
+        .expect("combined source SQL ready");
+    assert_ne!(system.endpoints()[0].1, system.endpoints()[1].1);
+    system.shutdown().await;
+}
+
+#[tokio::test]
 async fn concurrent_process_harnesses_publish_distinct_ports_and_shutdown_cleanly() {
     let (first, second) = tokio::join!(
         ProcessHarness::start("tenant-concurrent-harness-a"),

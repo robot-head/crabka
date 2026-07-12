@@ -50,6 +50,7 @@ serde_json = { workspace = true }
 async-trait = { workspace = true }
 
 [dev-dependencies]
+crabka-operator = { path = "../operator" }
 async-trait = { workspace = true }
 assert2 = { workspace = true }
 bytes = { workspace = true }

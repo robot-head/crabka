@@ -197,11 +197,20 @@ pub async fn verify_target_topology_ready(
     client: &dyn RangeMutationClient,
     record: &SplitOperationRecord,
 ) -> Result<(), SplitReconcileError> {
-    let plan = record
-        .plan
-        .as_ref()
-        .ok_or_else(|| SplitReconcileError::InvalidJournal("sealed plan is missing".into()))?;
-    for target in &plan.target_layout {
+    if record.plan.is_none() {
+        return Err(SplitReconcileError::InvalidJournal(
+            "sealed plan is missing".into(),
+        ));
+    }
+    let targets = match &record.mutation {
+        crabka_gres_control::RangeMutationPlan::Split { split } => {
+            vec![&split.left, &split.right]
+        }
+        crabka_gres_control::RangeMutationPlan::Move { move_range } => {
+            vec![&move_range.replacement]
+        }
+    };
+    for target in targets {
         let response = client
             .mutate(
                 &target.endpoint,
@@ -217,7 +226,13 @@ pub async fn verify_target_topology_ready(
         match response {
             RangeControlResp::Status { serving: true, .. } => {}
             RangeControlResp::Rejected { code, message } => {
-                return Err(SplitReconcileError::Rejected { code, message });
+                return Err(SplitReconcileError::Rejected {
+                    code,
+                    message: format!(
+                        "target r{} generation {} at {}: {message}",
+                        target.range_id, target.wal_generation, target.endpoint
+                    ),
+                });
             }
             RangeControlResp::Ambiguous { message } => {
                 return Err(SplitReconcileError::Ambiguous(message));
@@ -1089,6 +1104,27 @@ mod tests {
             requests
                 .iter()
                 .all(|request| request.operation == RangeControlOperation::Status)
+        );
+
+        let move_client = ReceiptClient {
+            response: RangeControlResp::Status {
+                paused: false,
+                serving: true,
+                barrier_offset: None,
+            },
+            requests: Mutex::new(Vec::new()),
+        };
+        verify_target_topology_ready(&move_client, &move_operation())
+            .await
+            .unwrap();
+        let move_requests = move_client.requests.lock().await;
+        assert_eq!(move_requests.len(), 1);
+        assert_eq!(
+            (
+                move_requests[0].range_id.as_u32(),
+                move_requests[0].generation
+            ),
+            (9, 5)
         );
     }
 }
