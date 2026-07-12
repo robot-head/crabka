@@ -9,7 +9,19 @@ use crate::transport::{RangeControlOperation, RangeControlReq, RangeControlResp}
 /// Read-only tenant-scoped view of the registry's durable split-operation journal.
 #[async_trait]
 pub trait SplitIntentAuthority: Send + Sync {
-    async fn authorize_request(&self, request: &RangeControlReq) -> Result<bool, String>;
+    async fn authorize_request(
+        &self,
+        request: &RangeControlReq,
+        context: IntentAuthorizationContext,
+    ) -> Result<bool, String>;
+}
+
+/// Dispatcher-derived receipt state; callers cannot claim replay status on the wire.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum IntentAuthorizationContext {
+    New,
+    InProgress,
+    CompletedReplay,
 }
 
 /// Immutable registry/config snapshot suitable for compute-side authorization.
@@ -42,11 +54,15 @@ impl RegistrySplitIntentView {
 
 #[async_trait]
 impl SplitIntentAuthority for RegistrySplitIntentView {
-    async fn authorize_request(&self, request: &RangeControlReq) -> Result<bool, String> {
+    async fn authorize_request(
+        &self,
+        request: &RangeControlReq,
+        context: IntentAuthorizationContext,
+    ) -> Result<bool, String> {
         Ok(self
             .operations
             .get(&(request.tenant.clone(), request.operation_id.clone()))
-            .is_some_and(|operation| request_matches_split_operation(request, operation)))
+            .is_some_and(|operation| request_matches_split_operation(request, operation, context)))
     }
 }
 
@@ -361,7 +377,25 @@ impl GenerationFencedRangeControl {
         if request.operation_id.is_empty() {
             return rejected("invalid_operation_id", "operation_id must not be empty");
         }
-        match self.intent_authority.authorize_request(&request).await {
+        let receipt_key = receipt_key(&request);
+        let digest = request_digest(&request);
+        let existing = match self.receipts.load(&receipt_key).await {
+            Ok(existing) => existing,
+            Err(message) => return rejected("receipt_store", message),
+        };
+        let authorization_context = match existing
+            .as_ref()
+            .and_then(|receipt| receipt.result.as_ref())
+        {
+            Some(_) => IntentAuthorizationContext::CompletedReplay,
+            None if existing.is_some() => IntentAuthorizationContext::InProgress,
+            None => IntentAuthorizationContext::New,
+        };
+        match self
+            .intent_authority
+            .authorize_request(&request, authorization_context)
+            .await
+        {
             Ok(true) => {}
             Ok(false) => {
                 return rejected(
@@ -371,12 +405,6 @@ impl GenerationFencedRangeControl {
             }
             Err(message) => return rejected("intent_authority", message),
         }
-        let receipt_key = receipt_key(&request);
-        let digest = request_digest(&request);
-        let existing = match self.receipts.load(&receipt_key).await {
-            Ok(existing) => existing,
-            Err(message) => return rejected("receipt_store", message),
-        };
         if !expected_generations.contains(&request.generation)
             && !existing.as_ref().is_some_and(|receipt| {
                 receipt.request == request && receipt.request_digest == digest
@@ -591,11 +619,12 @@ fn replayed(response: &RangeControlResp) -> RangeControlResp {
 fn request_matches_split_operation(
     request: &RangeControlReq,
     operation: &crabka_gres_control::SplitOperationRecord,
+    context: IntentAuthorizationContext,
 ) -> bool {
     let intent = &operation.split;
     if operation.tenant.as_str() != request.tenant
         || operation.operation_id != request.operation_id
-        || !phase_authorizes_operation(operation.phase, &request.operation)
+        || !phase_authorizes_operation(operation.phase, &request.operation, context)
     {
         return false;
     }
@@ -629,10 +658,11 @@ fn request_matches_split_operation(
 fn phase_authorizes_operation(
     phase: crabka_gres_control::SplitOperationPhase,
     operation: &RangeControlOperation,
+    context: IntentAuthorizationContext,
 ) -> bool {
     use crabka_gres_control::SplitOperationPhase as Phase;
     if phase == Phase::Completed {
-        return true;
+        return context == IntentAuthorizationContext::CompletedReplay;
     }
     match operation {
         RangeControlOperation::Status => phase != Phase::Initiated && phase != Phase::Failed,
@@ -710,7 +740,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SplitIntentAuthority for MissingIntent {
-        async fn authorize_request(&self, _request: &RangeControlReq) -> Result<bool, String> {
+        async fn authorize_request(
+            &self,
+            _request: &RangeControlReq,
+            _context: IntentAuthorizationContext,
+        ) -> Result<bool, String> {
             Ok(false)
         }
     }
@@ -719,7 +753,11 @@ mod tests {
 
     #[async_trait::async_trait]
     impl SplitIntentAuthority for AllowIntent {
-        async fn authorize_request(&self, _request: &RangeControlReq) -> Result<bool, String> {
+        async fn authorize_request(
+            &self,
+            _request: &RangeControlReq,
+            _context: IntentAuthorizationContext,
+        ) -> Result<bool, String> {
             Ok(true)
         }
     }
@@ -734,26 +772,41 @@ mod tests {
 
         assert!(phase_authorizes_operation(
             Phase::Running,
-            &RangeControlOperation::ForceCheckpoint
+            &RangeControlOperation::ForceCheckpoint,
+            IntentAuthorizationContext::New,
         ));
         assert!(!phase_authorizes_operation(
             Phase::Running,
-            &RangeControlOperation::RetirePredecessor
+            &RangeControlOperation::RetirePredecessor,
+            IntentAuthorizationContext::New,
         ));
         assert!(phase_authorizes_operation(
             Phase::Checkpointed,
-            &RangeControlOperation::ForceCheckpoint
+            &RangeControlOperation::ForceCheckpoint,
+            IntentAuthorizationContext::New,
         ));
         assert!(phase_authorizes_operation(
             Phase::Checkpointed,
             &RangeControlOperation::PauseAtCoveredOffset {
                 manifest_key: "m".into(),
                 covered_offset: 1,
-            }
+            },
+            IntentAuthorizationContext::New,
         ));
         assert!(!phase_authorizes_operation(
             Phase::Activated,
-            &RangeControlOperation::Resume
+            &RangeControlOperation::Resume,
+            IntentAuthorizationContext::New,
+        ));
+        assert!(!phase_authorizes_operation(
+            Phase::Completed,
+            &RangeControlOperation::RetirePredecessor,
+            IntentAuthorizationContext::New,
+        ));
+        assert!(phase_authorizes_operation(
+            Phase::Completed,
+            &RangeControlOperation::RetirePredecessor,
+            IntentAuthorizationContext::CompletedReplay,
         ));
     }
 
