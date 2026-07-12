@@ -981,6 +981,101 @@ mod tests {
         ));
     }
 
+    #[tokio::test]
+    async fn registry_authority_binds_exact_journal_and_sealed_topology() {
+        use crabka_gres_control::SplitOperationPhase as Phase;
+
+        let mut record = authorized_test_fixture().record().clone();
+        record.phase = Phase::Paused;
+        record.revision = 3;
+        let authorized = AuthorizedSplitIntent::from_record(record.clone()).unwrap();
+        let request = RangeControlReq {
+            tenant: record.tenant.as_str().into(),
+            range_id: RangeId::new(record.split.source_range_id),
+            generation: record.split.predecessor_generation,
+            operation_id: record.operation_id.clone(),
+            operation: RangeControlOperation::StageFilteredRestore {
+                journal_revision: record.revision,
+                journal_digest: authorized.digest().into(),
+            },
+        };
+        async fn allowed(
+            record: crabka_gres_control::SplitOperationRecord,
+            request: &RangeControlReq,
+        ) -> bool {
+            RegistrySplitIntentView::new([record])
+                .authorize_request(request, IntentAuthorizationContext::New)
+                .await
+                .unwrap_or(None)
+                .is_some()
+        }
+        assert!(allowed(record.clone(), &request).await);
+
+        let mut request_mutations = Vec::new();
+        let mut changed = request.clone();
+        changed.tenant = "tenant-b".into();
+        request_mutations.push(changed);
+        let mut changed = request.clone();
+        changed.operation_id = "other".into();
+        request_mutations.push(changed);
+        let mut changed = request.clone();
+        changed.range_id = RangeId::new(9);
+        request_mutations.push(changed);
+        let mut changed = request.clone();
+        changed.generation += 1;
+        request_mutations.push(changed);
+        let mut changed = request.clone();
+        changed.operation = RangeControlOperation::StageFilteredRestore {
+            journal_revision: record.revision + 1,
+            journal_digest: authorized.digest().into(),
+        };
+        request_mutations.push(changed);
+        let mut changed = request.clone();
+        changed.operation = RangeControlOperation::StageFilteredRestore {
+            journal_revision: record.revision,
+            journal_digest: "tampered".into(),
+        };
+        request_mutations.push(changed);
+        for changed in request_mutations {
+            assert!(!allowed(record.clone(), &changed).await);
+        }
+
+        let mut record_mutations = Vec::new();
+        let mut changed = record.clone();
+        changed.phase = Phase::Failed;
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.split.predecessor_generation += 1;
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.split.left.endpoint.push_str("-other");
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.split.right.wal_generation += 1;
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.plan.as_mut().unwrap().source_map_epoch += 1;
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.plan.as_mut().unwrap().current_layout[0]
+            .endpoint
+            .push_str("-other");
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.plan.as_mut().unwrap().target_layout[0]
+            .end_key
+            .as_mut()
+            .unwrap()
+            .rowid += 1;
+        record_mutations.push(changed);
+        let mut changed = record.clone();
+        changed.evidence.manifest_key = Some("other".into());
+        record_mutations.push(changed);
+        for changed in record_mutations {
+            assert!(!allowed(changed, &request).await);
+        }
+    }
+
     struct CountingExecutor {
         calls: Arc<AtomicUsize>,
         response: RangeControlResp,
