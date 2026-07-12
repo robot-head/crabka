@@ -67,6 +67,8 @@ pub struct LiveRecoveryConfig {
     pub wal_generation: u64,
     /// Authenticated local range-control endpoint advertised by this compute.
     pub advertised_endpoint: Option<String>,
+    /// Noncanonical identity used while a recovered range is staged and must not fence serving.
+    staging_identity: Option<String>,
 }
 
 /// Checkpoint inputs for live recovery.
@@ -100,6 +102,7 @@ impl LiveRecoveryConfig {
             checkpoints: None,
             wal_generation: 0,
             advertised_endpoint: None,
+            staging_identity: None,
         }
     }
 
@@ -131,6 +134,13 @@ impl LiveRecoveryConfig {
         self
     }
 
+    /// Recover with an operation-scoped producer identity that cannot fence the serving writer.
+    #[must_use]
+    pub fn with_staging_identity(mut self, operation_id: impl Into<String>) -> Self {
+        self.staging_identity = Some(operation_id.into());
+        self
+    }
+
     /// WAL topic selected for replay and barrier writes.
     #[must_use]
     pub fn wal_topic(&self) -> String {
@@ -140,7 +150,12 @@ impl LiveRecoveryConfig {
     /// Transactional producer id selected for fencing this range.
     #[must_use]
     pub fn transactional_id(&self) -> String {
-        transactional_id_for_range(&self.tenant, self.range)
+        let canonical = transactional_id_for_range(&self.tenant, self.range);
+        self.staging_identity
+            .as_ref()
+            .map_or(canonical.clone(), |identity| {
+                format!("{canonical}-staged-{identity}")
+            })
     }
 
     /// Checkpoint namespace selected for this tenant range.
@@ -1048,6 +1063,17 @@ mod tests {
         assert!(data_range.checkpoint_namespace() == "tenant-a/r9");
         assert!(coordinator.wal_topic() != data_range.wal_topic());
         assert!(coordinator.transactional_id() != data_range.transactional_id());
+    }
+
+    #[test]
+    fn staged_recovery_uses_noncanonical_transactional_identity() {
+        let tenant = TenantName::parse("deferred_activation").expect("tenant");
+        let canonical = LiveRecoveryConfig::new("broker:9092", tenant, RangeId::new(4), None);
+        let staged = canonical.clone().with_staging_identity("split-op-7");
+
+        assert_ne!(staged.transactional_id(), canonical.transactional_id());
+        assert!(staged.transactional_id().contains("split-op-7"));
+        assert_eq!(staged.wal_topic(), canonical.wal_topic());
     }
 
     #[tokio::test]
