@@ -30,6 +30,7 @@ pub struct ProcessHarness {
     tenant: String,
     tls: TlsPaths,
     commit_fault: Option<String>,
+    sql_proxy: RangeProxy,
     r0_proxy: RangeProxy,
     r1_proxy: RangeProxy,
     r0: ProcessNode,
@@ -69,6 +70,7 @@ impl ProcessHarness {
             .expect("start real broker");
         let bootstrap = broker.listen_addr().to_string();
         let tenant = name.to_owned();
+        let sql_proxy = RangeProxy::start().await;
         let r0_proxy = RangeProxy::start().await;
         let r1_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
@@ -91,6 +93,7 @@ impl ProcessHarness {
             tenant,
             tls,
             commit_fault,
+            sql_proxy,
             r0_proxy,
             r1_proxy,
             r0,
@@ -108,6 +111,7 @@ impl ProcessHarness {
             .expect("start real broker");
         let bootstrap = broker.listen_addr().to_string();
         let tenant = name.to_owned();
+        let sql_proxy = RangeProxy::start().await;
         let r0_proxy = RangeProxy::start().await;
         let r1_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
@@ -120,6 +124,7 @@ impl ProcessHarness {
             tenant,
             tls,
             commit_fault: None,
+            sql_proxy,
             r0_proxy,
             r1_proxy,
             r0,
@@ -152,6 +157,10 @@ impl ProcessHarness {
                 self.r1_proxy.port,
             ),
         ]
+    }
+
+    pub fn stable_sql_port(&self) -> u16 {
+        self.sql_proxy.port
     }
 
     pub fn bootstrap(&self) -> &str {
@@ -275,6 +284,11 @@ impl ProcessHarness {
             },
         );
         *self.node_mut(range) = replacement;
+        if range == 0 && self.r1.is_none() {
+            let replacement_port = self.r0.range_port;
+            self.r0_proxy.set_backend(replacement_port);
+            self.r1_proxy.set_backend(replacement_port);
+        }
         self.wait_ready(range).await;
     }
 
@@ -293,6 +307,12 @@ impl ProcessHarness {
         node.sql_port = ready.sql.port();
         node.range_port = range_addr.port();
         self.proxy(range).set_backend(range_addr.port());
+        if range == 0 {
+            self.sql_proxy.set_backend(ready.sql.port());
+        }
+        if range == 0 && self.r1.is_none() {
+            self.r1_proxy.set_backend(range_addr.port());
+        }
     }
 
     fn node(&self, range: u32) -> &ProcessNode {

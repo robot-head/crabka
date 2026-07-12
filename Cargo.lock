@@ -2737,6 +2737,7 @@ dependencies = [
  "crabka-pgwire",
  "crabka-protocol",
  "crabka-security",
+ "futures-util",
  "rand 0.10.2",
  "rustls",
  "rustls-pemfile",
