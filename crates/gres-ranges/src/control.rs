@@ -809,8 +809,16 @@ fn request_matches_split_operation(
     let source = request.range_id.as_u32() == intent.source_range_id
         && request.generation == intent.predecessor_generation;
     match &request.operation {
+        RangeControlOperation::Status => {
+            source
+                || [intent.left.clone(), intent.right.clone()]
+                    .iter()
+                    .any(|successor| {
+                        request.range_id.as_u32() == successor.range_id
+                            && request.generation == successor.wal_generation
+                    })
+        }
         RangeControlOperation::ForceCheckpoint
-        | RangeControlOperation::Status
         | RangeControlOperation::RetirePredecessor
         | RangeControlOperation::Resume => source,
         RangeControlOperation::PauseAtCoveredOffset {

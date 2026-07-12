@@ -183,6 +183,42 @@ pub async fn reconcile_activated_cutover(
     Ok(record.clone())
 }
 
+/// Authenticate both exact successor generations and require their serving status before cutover.
+pub async fn verify_target_topology_ready(
+    client: &dyn RangeMutationClient,
+    record: &SplitOperationRecord,
+) -> Result<(), SplitReconcileError> {
+    let plan = record
+        .plan
+        .as_ref()
+        .ok_or_else(|| SplitReconcileError::InvalidJournal("sealed plan is missing".into()))?;
+    for target in &plan.target_layout {
+        let response = client
+            .mutate(
+                &target.endpoint,
+                RangeControlReq {
+                    tenant: record.tenant.as_str().into(),
+                    range_id: RangeId::new(target.range_id),
+                    generation: target.wal_generation,
+                    operation_id: record.operation_id.clone(),
+                    operation: RangeControlOperation::Status,
+                },
+            )
+            .await?;
+        match response {
+            RangeControlResp::Status { serving: true, .. } => {}
+            RangeControlResp::Rejected { code, message } => {
+                return Err(SplitReconcileError::Rejected { code, message });
+            }
+            RangeControlResp::Ambiguous { message } => {
+                return Err(SplitReconcileError::Ambiguous(message));
+            }
+            _ => return Err(SplitReconcileError::UnexpectedResponse),
+        }
+    }
+    Ok(())
+}
+
 fn complete_retirement_evidence(
     record: &SplitOperationRecord,
 ) -> Result<RangeRetirementCheckpoint, SplitReconcileError> {
@@ -363,11 +399,11 @@ pub(crate) fn active_operations(
     records
 }
 
-/// Successor pods require the source-written staged activation receipt. Before this point,
-/// changing the source Deployment can destroy the only process able to create that receipt.
+/// Successor pods require the irreversible activation receipt written by the source prologue.
+/// Before this point, changing the source Deployment can destroy the only process holding staged
+/// successor state and able to publish that receipt.
 pub(crate) fn successors_may_be_deployed(record: &SplitOperationRecord) -> bool {
-    record.phase > SplitOperationPhase::Paused
-        || (record.phase == SplitOperationPhase::Paused && record.evidence.tail_sha256.is_some())
+    record.phase >= SplitOperationPhase::Activated
 }
 
 #[cfg(test)]
@@ -558,7 +594,7 @@ mod tests {
     }
 
     #[test]
-    fn target_deployments_wait_for_source_staging_receipt() {
+    fn target_deployments_wait_for_irreversible_source_prologue() {
         let running = operation()
             .advance(SplitOperationPhase::Running, 1, None)
             .unwrap();
@@ -586,7 +622,18 @@ mod tests {
             },
         )
         .unwrap();
-        assert!(successors_may_be_deployed(&staged));
+        assert!(!successors_may_be_deployed(&staged));
+        let restored = apply_response(
+            &staged,
+            RangeControlResp::Markers {
+                markers: vec![],
+                digest: "markers".into(),
+            },
+        )
+        .unwrap();
+        assert!(!successors_may_be_deployed(&restored));
+        let activated = apply_response(&restored, RangeControlResp::Applied).unwrap();
+        assert!(successors_may_be_deployed(&activated));
     }
 
     struct CrashOnceControl {
@@ -903,5 +950,35 @@ mod tests {
         let requests = client.requests.lock().await;
         assert_eq!(requests.len(), 2);
         assert_eq!(requests[0], requests[1]);
+    }
+
+    #[tokio::test]
+    async fn cutover_status_checks_exact_target_ids_and_generations() {
+        let client = ReceiptClient {
+            response: RangeControlResp::Status {
+                paused: false,
+                serving: true,
+                barrier_offset: None,
+            },
+            requests: Mutex::new(Vec::new()),
+        };
+        verify_target_topology_ready(&client, &operation())
+            .await
+            .unwrap();
+        let requests = client.requests.lock().await;
+        assert_eq!(requests.len(), 2);
+        assert_eq!(
+            (requests[0].range_id.as_u32(), requests[0].generation),
+            (0, 5)
+        );
+        assert_eq!(
+            (requests[1].range_id.as_u32(), requests[1].generation),
+            (1, 5)
+        );
+        assert!(
+            requests
+                .iter()
+                .all(|request| request.operation == RangeControlOperation::Status)
+        );
     }
 }
