@@ -164,7 +164,7 @@ fn replay_committed_frames_from_with_filter(
         let filtered_ops;
         let ops = match filter {
             Some(ref filter) => {
-                filtered_ops = filter_write_ops(&frame.ops, filter);
+                filtered_ops = filter_write_ops(&frame.ops, filter)?;
                 filtered_ops.as_slice()
             }
             None => frame.ops.as_slice(),
@@ -180,14 +180,20 @@ fn replay_committed_frames_from_with_filter(
     ))
 }
 
-fn filter_write_ops(ops: &[WriteOp], filter: &CheckpointFilter) -> Vec<WriteOp> {
+fn filter_write_ops(
+    ops: &[WriteOp],
+    filter: &CheckpointFilter,
+) -> Result<Vec<WriteOp>, SubstrateError> {
     ops.iter()
-        .filter(|op| match op {
+        .filter_map(|op| match op {
             WriteOp::Put { key, .. }
             | WriteOp::ConditionalPut { key, .. }
-            | WriteOp::Delete { key } => filter.contains_key(key),
+            | WriteOp::Delete { key } => match filter.contains_key(key) {
+                Ok(true) => Some(Ok(op.clone())),
+                Ok(false) => None,
+                Err(error) => Some(Err(error)),
+            },
         })
-        .cloned()
         .collect()
 }
 
@@ -373,7 +379,11 @@ mod tests {
             RangeKey::new(TableId::new(7), 20),
             Some(RangeKey::new(TableId::new(7), 30)),
         )
-        .expect("filter");
+        .expect("filter")
+        .with_physical_to_logical(std::collections::BTreeMap::from([(
+            TableId::new(7),
+            TableId::new(7),
+        )]));
 
         let outcome = replay_committed_frames_from_filtered(&kv, frames, 1, 0, 0, filter)
             .expect("filtered replay");

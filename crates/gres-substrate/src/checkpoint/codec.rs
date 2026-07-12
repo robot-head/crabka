@@ -70,7 +70,7 @@ impl CheckpointFilter {
 
     /// Return true when a KV key belongs to this row interval.
     #[must_use]
-    pub fn contains_key(&self, bytes: &[u8]) -> bool {
+    pub fn contains_key(&self, bytes: &[u8]) -> Result<bool, SubstrateError> {
         // Non-row substrate metadata has no range key. Assign it exactly once
         // to the interval beginning at the global minimum (the r0 successor),
         // so two adjacent successor restores form a disjoint full partition.
@@ -79,7 +79,7 @@ impl CheckpointFilter {
             key::KeyClass::PrimaryRow { table_id, rowid }
             | key::KeyClass::PrimaryVersion {
                 table_id, rowid, ..
-            } => RangeKey::new(self.logical_table(table_id), rowid),
+            } => RangeKey::new(self.logical_table(table_id)?, rowid),
             key::KeyClass::HashPrimaryRow {
                 table_id,
                 bucket,
@@ -90,28 +90,28 @@ impl CheckpointFilter {
                 bucket,
                 rowid,
                 ..
-            } => RangeKey::hash(self.logical_table(table_id), bucket, rowid),
+            } => RangeKey::hash(self.logical_table(table_id)?, bucket, rowid),
             key::KeyClass::Sequence { table_id } => {
-                RangeKey::table_start(self.logical_table(table_id))
+                RangeKey::table_start(self.logical_table(table_id)?)
             }
             key::KeyClass::Clog { .. }
             | key::KeyClass::SecondaryIndex { .. }
             | key::KeyClass::System
-            | key::KeyClass::Unknown => return owns_structural,
+            | key::KeyClass::Unknown => return Ok(owns_structural),
         };
         if row_key < self.start {
-            return false;
+            return Ok(false);
         };
 
-        self.end.is_none_or(|end| row_key < end)
+        Ok(self.end.is_none_or(|end| row_key < end))
     }
 
-    fn logical_table(&self, physical: u32) -> TableId {
-        let physical = TableId::new(u64::from(physical));
+    fn logical_table(&self, physical_id: u32) -> Result<TableId, SubstrateError> {
+        let physical = TableId::new(u64::from(physical_id));
         self.physical_to_logical
             .get(&physical)
             .copied()
-            .unwrap_or(physical)
+            .ok_or(SubstrateError::UnmappedPhysicalTable(physical_id))
     }
 }
 
@@ -238,6 +238,39 @@ mod tests {
         let bytes = CheckpointPart::new(vec![(b"k".to_vec(), b"value".to_vec())]).encode();
 
         assert!(CheckpointPart::decode(&bytes[..bytes.len() - 1]).is_err());
+    }
+
+    #[test]
+    fn filtered_restore_rejects_unmapped_row_and_sequence_tables() {
+        let filter = CheckpointFilter::new(RangeKey::MIN, None).expect("filter");
+        for key in [
+            crabka_pgkv::key::row_key(41, 7),
+            crabka_pgkv::key::seq_key(42),
+        ] {
+            assert!(matches!(
+                filter.contains_key(&key),
+                Err(SubstrateError::UnmappedPhysicalTable(41 | 42))
+            ));
+        }
+    }
+
+    #[test]
+    fn filtered_restore_uses_explicit_physical_to_logical_mapping() {
+        let filter = CheckpointFilter::new(
+            RangeKey::new(TableId::new(10), 0),
+            Some(RangeKey::new(TableId::new(20), 0)),
+        )
+        .expect("filter")
+        .with_physical_to_logical(BTreeMap::from([
+            (TableId::new(41), TableId::new(10)),
+            (TableId::new(42), TableId::new(30)),
+        ]));
+        assert!(
+            filter
+                .contains_key(&crabka_pgkv::key::row_key(41, 7))
+                .unwrap()
+        );
+        assert!(!filter.contains_key(&crabka_pgkv::key::seq_key(42)).unwrap());
     }
 
     #[test]

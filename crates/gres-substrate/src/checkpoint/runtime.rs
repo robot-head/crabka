@@ -790,7 +790,7 @@ async fn restore_manifest(
         },
         parts_by_name: &parts_by_name,
     })?;
-    let mut snapshot = PartKvSnapshot::new(parts, filter);
+    let mut snapshot = PartKvSnapshot::new(parts, filter)?;
     let expected_pairs = snapshot.len();
     let restored_pairs = kv.restore_sorted(&mut snapshot)?;
     if restored_pairs != expected_pairs {
@@ -829,7 +829,7 @@ async fn restore_manifest_table_transfer(
     let materialized = staged_selector.materialize_checkpoint(pairs)?;
     let expected_pairs = u64::try_from(materialized.pairs.len())
         .map_err(|_| SubstrateError::Checkpoint("table transfer pair count overflow".into()))?;
-    let mut snapshot = PartKvSnapshot::new(vec![CheckpointPart::new(materialized.pairs)], None);
+    let mut snapshot = PartKvSnapshot::new(vec![CheckpointPart::new(materialized.pairs)], None)?;
     let restored_pairs = kv.restore_sorted(&mut snapshot)?;
     if restored_pairs != expected_pairs {
         return Err(SubstrateError::Checkpoint(format!(
@@ -907,18 +907,25 @@ struct PartKvSnapshot {
 }
 
 impl PartKvSnapshot {
-    fn new(parts: Vec<CheckpointPart>, filter: Option<CheckpointFilter>) -> Self {
+    fn new(
+        parts: Vec<CheckpointPart>,
+        filter: Option<CheckpointFilter>,
+    ) -> Result<Self, SubstrateError> {
         let pairs = parts.into_iter().flat_map(|part| part.pairs);
         let pairs = match filter {
             Some(filter) => pairs
-                .filter(|(key, _)| filter.contains_key(key))
-                .collect::<Vec<_>>(),
+                .filter_map(|pair| match filter.contains_key(&pair.0) {
+                    Ok(true) => Some(Ok(pair)),
+                    Ok(false) => None,
+                    Err(error) => Some(Err(error)),
+                })
+                .collect::<Result<Vec<_>, _>>()?,
             None => pairs.collect::<Vec<_>>(),
         };
 
-        Self {
+        Ok(Self {
             pairs: pairs.into_iter(),
-        }
+        })
     }
 
     fn len(&self) -> u64 {
@@ -1168,7 +1175,8 @@ mod tests {
             RangeKey::new(TableId::new(7), 20),
             Some(RangeKey::new(TableId::new(7), 31)),
         )
-        .expect("filter");
+        .expect("filter")
+        .with_physical_to_logical(BTreeMap::from([(TableId::new(7), TableId::new(7))]));
         let full = MemKv::default();
         let filtered = MemKv::default();
 
@@ -1234,12 +1242,14 @@ mod tests {
                 &left,
                 CheckpointFilter::new(RangeKey::new(TableId::new(7), 0), Some(split))
                     .expect("left filter")
+                    .with_physical_to_logical(BTreeMap::from([(TableId::new(7), TableId::new(7))]))
                     .with_structural_ownership(true),
             ),
             (
                 &right,
                 CheckpointFilter::new(split, Some(RangeKey::new(TableId::new(8), 0)))
                     .expect("right filter")
+                    .with_physical_to_logical(BTreeMap::from([(TableId::new(7), TableId::new(7))]))
                     .with_structural_ownership(false),
             ),
         ] {
@@ -1277,6 +1287,7 @@ mod tests {
                 Some(RangeKey::new(TableId::new(8), 0)),
             )
             .expect("control filter")
+            .with_physical_to_logical(BTreeMap::from([(TableId::new(7), TableId::new(7))]))
             .with_structural_ownership(true),
         )
         .await
