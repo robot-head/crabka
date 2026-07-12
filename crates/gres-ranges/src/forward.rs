@@ -4608,7 +4608,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn hosted_service_resolves_historical_move_primaries_on_exact_successor() {
+    async fn rebuilt_hosted_service_preserves_historical_move_primary_aliases() {
         let kv = Arc::new(MemKv::new());
         let engine = crabka_pgexec::SqlEngine::with_kv(kv.clone()).expect("engine");
         let decisions = [
@@ -4639,21 +4639,28 @@ mod tests {
         }
         let predecessor = RangeId::new(1);
         let successor = RangeId::new(2);
-        let service = HostedRangeService::new(BTreeMap::from([(successor, engine)]))
-            .with_timestamp_primary_aliases(BTreeMap::from([(predecessor, successor)]));
+        let aliases = BTreeMap::from([(predecessor, successor)]);
+        let services = [
+            HostedRangeService::new(BTreeMap::from([(successor, engine.clone_handle())]))
+                .with_timestamp_primary_aliases(aliases.clone()),
+            HostedRangeService::new(BTreeMap::from([(successor, engine)]))
+                .with_timestamp_primary_aliases(aliases),
+        ];
 
-        for (start, expected) in [
-            (5, ResolveTxnResp::Pending),
-            (6, ResolveTxnResp::Aborted),
-            (7, ResolveTxnResp::Committed { commit_ts: 8 }),
-        ] {
-            let response = service
-                .handle(RangeRequest::ResolveTxn(crate::transport::ResolveTxnReq {
-                    primary_range: predecessor,
-                    start_ts: start,
-                }))
-                .await;
-            assert_eq!(response, RangeResponse::ResolveTxn(expected));
+        for service in services {
+            for (start, expected) in [
+                (5, ResolveTxnResp::Pending),
+                (6, ResolveTxnResp::Aborted),
+                (7, ResolveTxnResp::Committed { commit_ts: 8 }),
+            ] {
+                let response = service
+                    .handle(RangeRequest::ResolveTxn(crate::transport::ResolveTxnReq {
+                        primary_range: predecessor,
+                        start_ts: start,
+                    }))
+                    .await;
+                assert_eq!(response, RangeResponse::ResolveTxn(expected));
+            }
         }
     }
 

@@ -44,7 +44,16 @@ impl ActivationDiscovery {
     pub(super) fn provisional_tenant_record(
         &self,
         current: &crabka_gres_control::TenantRecord,
+        source_record_version: u64,
     ) -> std::io::Result<crabka_gres_control::TenantRecord> {
+        let target_record_version = source_record_version
+            .checked_add(1)
+            .ok_or_else(|| std::io::Error::other("activation tenant version overflow"))?;
+        if self.receipt.split.target_map.epoch() <= self.receipt.split.current_map.epoch() {
+            return Err(std::io::Error::other(
+                "activation target map epoch must advance current map epoch",
+            ));
+        }
         let layout_matches = |map: &RangeMap| {
             current.ranges.len() == map.ranges().len()
                 && map.ranges().iter().all(|spec| {
@@ -61,6 +70,11 @@ impl ActivationDiscovery {
                 })
         };
         if layout_matches(&self.receipt.split.target_map) {
+            if current.record_version < target_record_version {
+                return Err(std::io::Error::other(
+                    "activation target tenant version predates sealed cutover",
+                ));
+            }
             let exact_targets = self.receipt.targets.values().all(|target| {
                 current.ranges.iter().any(|entry| {
                     entry.range_id == target.range_id.as_u32()
@@ -78,6 +92,11 @@ impl ActivationDiscovery {
         if !layout_matches(&self.receipt.split.current_map) {
             return Err(std::io::Error::other(
                 "activation receipt current map conflicts with tenant registry",
+            ));
+        }
+        if current.record_version != source_record_version {
+            return Err(std::io::Error::other(
+                "activation current tenant version differs from sealed source version",
             ));
         }
         let predecessor = current
@@ -113,7 +132,7 @@ impl ActivationDiscovery {
             target_layout.push(entry);
         }
         let mut target = current.clone();
-        target.record_version = u64::from(self.receipt.split.target_map.epoch());
+        target.record_version = target_record_version;
         target.ranges = target_layout;
         Ok(target)
     }
@@ -285,7 +304,8 @@ impl LiveMultiRangeTransfer {
                 .iter()
                 .map(|(id, engine)| (*id, engine.clone_handle()))
                 .collect(),
-        );
+        )
+        .with_timestamp_primary_aliases(self.timestamp_primary_aliases.clone());
         if let Some(tso) = tso_rpc.clone() {
             service = service.with_tso(tso);
         }
@@ -2274,9 +2294,10 @@ mod tests {
                 recovery_generations: BTreeMap::new(),
                 receipt,
             };
+            let source_record_version = current.record_version;
 
             let provisional = discovery
-                .provisional_tenant_record(&current)
+                .provisional_tenant_record(&current, source_record_version)
                 .expect("exact overlay");
 
             assert_eq!(
@@ -2287,10 +2308,7 @@ mod tests {
                     .collect::<Vec<_>>(),
                 expected_ids
             );
-            assert_eq!(
-                provisional.record_version,
-                u64::from(discovery.receipt.split.target_map.epoch())
-            );
+            assert_eq!(provisional.record_version, source_record_version + 1);
             for target in discovery.receipt.targets.values() {
                 let overlaid = provisional
                     .ranges
@@ -2302,7 +2320,7 @@ mod tests {
             }
             assert_eq!(
                 discovery
-                    .provisional_tenant_record(&provisional)
+                    .provisional_tenant_record(&provisional, source_record_version)
                     .expect("already-target layout remains exact"),
                 provisional
             );
@@ -2320,7 +2338,41 @@ mod tests {
             receipt,
         };
 
-        assert!(discovery.provisional_tenant_record(&current).is_err());
+        assert!(
+            discovery
+                .provisional_tenant_record(&current, current.record_version)
+                .is_err()
+        );
+    }
+
+    #[test]
+    fn provisional_registry_overlay_rejects_unsealed_record_versions() {
+        let receipt = move_receipt();
+        let current = tenant_record_for_receipt(&receipt);
+        let source_record_version = current.record_version;
+        let discovery = ActivationDiscovery {
+            recovery_map: receipt.split.current_map.clone(),
+            recovery_generations: BTreeMap::new(),
+            receipt,
+        };
+
+        let mut wrong_current = current.clone();
+        wrong_current.record_version += 1;
+        assert!(
+            discovery
+                .provisional_tenant_record(&wrong_current, source_record_version)
+                .is_err()
+        );
+
+        let mut stale_target = discovery
+            .provisional_tenant_record(&current, source_record_version)
+            .expect("target");
+        stale_target.record_version = source_record_version;
+        assert!(
+            discovery
+                .provisional_tenant_record(&stale_target, source_record_version)
+                .is_err()
+        );
     }
 
     #[test]
