@@ -5,17 +5,21 @@ use std::{any::Any, sync::Arc};
 use async_trait::async_trait;
 use crabka_pgexec::SqlEngine;
 
-use crate::{CheckpointManifest, RangeId, TableId};
+use crate::{CheckpointManifest, RangeId, RangeSpec};
 
-/// Immutable description of the one ordinary table staged into a successor.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+/// Exact key interval staged into one successor.
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TableTransferRequest {
     /// The unhosted range that will eventually own the table.
     pub target_range: RangeId,
-    /// The table identity used only by range-map routing and gateway write gates.
-    pub routing_table_id: TableId,
-    /// The physical catalog identity encoded in row, sequence, and checkpoint keys.
-    pub physical_table_id: u32,
+    /// Exact successor interval; its range id must equal `target_range`.
+    pub interval: RangeSpec,
+    /// Endpoint expected by the authoritative placement descriptor.
+    pub endpoint: String,
+    /// Successor WAL generation expected at publication.
+    pub wal_generation: u64,
+    /// Source generation fenced by this transfer.
+    pub predecessor_generation: u64,
 }
 
 /// A restored successor that has not been published into a serving range map.
@@ -27,6 +31,10 @@ pub struct TableTransferRequest {
 pub struct StagedRangeSuccessor {
     /// The still-unhosted successor range.
     pub range_id: RangeId,
+    /// Endpoint lineage copied from the authoritative descriptor.
+    pub endpoint: String,
+    /// Fenced WAL generation of the staged runtime.
+    pub wal_generation: u64,
     /// A checkpoint written by the successor under its own namespace.
     pub bootstrap_checkpoint: CheckpointManifest,
 }
@@ -34,8 +42,8 @@ pub struct StagedRangeSuccessor {
 /// Both staged halves produced from one checkpoint and one bounded tail.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StagedRangeSuccessors {
-    /// Staged left half.
-    pub left: StagedRangeSuccessor,
+    /// Staged left half, or `None` when range zero is reused in place.
+    pub left: Option<StagedRangeSuccessor>,
     /// Staged right half.
     pub right: StagedRangeSuccessor,
 }
@@ -45,6 +53,12 @@ pub struct StagedRangeSuccessors {
 /// The opaque keepalive retains runtime-owned tasks and stores without coupling the
 /// range orchestration crate to a particular substrate implementation.
 pub struct ClaimedStagedSuccessor {
+    /// Claimed range identity.
+    pub range_id: RangeId,
+    /// Claimed endpoint lineage.
+    pub endpoint: String,
+    /// Claimed WAL generation.
+    pub wal_generation: u64,
     /// The fully restored SQL engine, still absent from every serving map.
     pub engine: SqlEngine,
     /// Runtime resources that must outlive the published engine.
@@ -53,8 +67,8 @@ pub struct ClaimedStagedSuccessor {
 
 /// Runtime resources for both successors, claimed as one publication unit.
 pub struct ClaimedStagedSuccessors {
-    /// Claimed left half.
-    pub left: ClaimedStagedSuccessor,
+    /// Claimed left half, or `None` when range zero is reused in place.
+    pub left: Option<ClaimedStagedSuccessor>,
     /// Claimed right half.
     pub right: ClaimedStagedSuccessor,
 }

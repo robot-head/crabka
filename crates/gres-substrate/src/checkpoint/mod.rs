@@ -20,7 +20,8 @@ pub use self::{
     manifest::{MANIFEST_FORMAT_VERSION, Manifest, ManifestValidation, PartEntry},
     runtime::{
         CheckpointMetadata, CheckpointSnapshot, RestorePlan, RestoreTail, RestoredFrom,
-        TableTransferRestore, WalPrunePlan, latest_checkpoint_metadata, plan_prune, restore_latest,
+        TableTransferRestore, WalPrunePlan, latest_checkpoint_metadata, plan_prune,
+        restore_filtered_from_manifest_and_replay_tail, restore_latest,
         restore_latest_and_replay_tail, restore_latest_filtered,
         restore_latest_filtered_and_replay_tail, restore_latest_table_transfer,
         restore_latest_table_transfer_and_replay_tail,

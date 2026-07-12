@@ -96,16 +96,41 @@ fn split_fixture(
             interval: RangeSpec::for_interval(right_range, split_at, predecessor.end),
         },
     };
+    let coordinator = gateway
+        .hosted_range_engines()
+        .remove(&RangeId::COORDINATOR)
+        .expect("coordinator");
+    let physical_table_id = crabka_pgcatalog::get_table(
+        coordinator.catalog_kv(),
+        &format!("t{}", u64::from(table_id)),
+    )
+    .expect("physical table")
+    .id;
+    let physical_table = TableId::new(u64::from(physical_table_id));
     let requests = [
         TableTransferRequest {
             target_range: left_range,
-            routing_table_id: table_id,
-            physical_table_id: 1,
+            interval: RangeSpec::for_interval(
+                left_range,
+                RangeKey::MIN,
+                Some(RangeKey::table_start(physical_table)),
+            ),
+            endpoint: command.left.endpoint.clone(),
+            wal_generation: command.left.wal_generation,
+            predecessor_generation: command.predecessor_generation,
         },
         TableTransferRequest {
             target_range: right_range,
-            routing_table_id: table_id,
-            physical_table_id: 1,
+            interval: RangeSpec::for_interval(
+                right_range,
+                RangeKey::table_start(physical_table),
+                Some(RangeKey::table_start(TableId::new(
+                    u64::from(physical_table_id) + 1,
+                ))),
+            ),
+            endpoint: command.right.endpoint.clone(),
+            wal_generation: command.right.wal_generation,
+            predecessor_generation: command.predecessor_generation,
         },
     ];
     (command, requests)
@@ -249,10 +274,14 @@ async fn empty_table_boundary_split_publishes_ready_successor_and_requires_old_s
         .expect("bind before split");
 
     let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
-    gateway
+    let state = gateway
         .split_empty_successors("empty-t100", command)
         .await
         .expect("empty table split");
+    let hosted = gateway.hosted_range_engines();
+    assert!(hosted.contains_key(&RangeId::COORDINATOR));
+    assert!(hosted.contains_key(&RangeId::new(2)));
+    assert_eq!(gateway.control_range_map(), state.target_map);
 
     let old_session_error = old_session
         .simple_query("SELECT id FROM t100")
@@ -406,6 +435,27 @@ impl InProcessTransfer {
             .scan_range(&[], &[u8::MAX])
             .map_err(|error| Self::error(request.target_range, &error.to_string()))?
         {
+            if request.interval.start != RangeKey::MIN {
+                target_kv
+                    .put(key, value)
+                    .map_err(|error| Self::error(request.target_range, &error.to_string()))?;
+                continue;
+            }
+            if matches!(
+                crabka_pgkv::key::classify_key(&key),
+                crabka_pgkv::key::KeyClass::Clog { .. }
+            ) {
+                target_kv
+                    .put(key, value)
+                    .map_err(|error| Self::error(request.target_range, &error.to_string()))?;
+                continue;
+            }
+            let Some(range_key) = storage_range_key(&key) else {
+                continue;
+            };
+            if !request.interval.contains_key(range_key) {
+                continue;
+            }
             target_kv
                 .put(key, value)
                 .map_err(|error| Self::error(request.target_range, &error.to_string()))?;
@@ -418,12 +468,27 @@ impl InProcessTransfer {
             .insert(request.target_range, target);
         Ok(StagedRangeSuccessor {
             range_id: request.target_range,
+            endpoint: request.endpoint,
+            wal_generation: request.wal_generation,
             bootstrap_checkpoint: CheckpointManifest {
                 range_id: request.target_range,
                 covered_offset: 1,
                 manifest_key: "in-process-target".to_owned(),
             },
         })
+    }
+}
+
+fn storage_range_key(bytes: &[u8]) -> Option<RangeKey> {
+    match crabka_pgkv::key::classify_key(bytes) {
+        crabka_pgkv::key::KeyClass::PrimaryRow { table_id, rowid }
+        | crabka_pgkv::key::KeyClass::PrimaryVersion {
+            table_id, rowid, ..
+        } => Some(RangeKey::new(TableId::new(u64::from(table_id)), rowid)),
+        crabka_pgkv::key::KeyClass::Sequence { table_id } => {
+            Some(RangeKey::table_start(TableId::new(u64::from(table_id))))
+        }
+        _ => None,
     }
 }
 
@@ -495,7 +560,11 @@ impl RangeTransferCapability for InProcessTransfer {
         }
         let [left, right] = requests;
         Ok(StagedRangeSuccessors {
-            left: self.stage_range(left).await?,
+            left: if left.target_range.is_coordinator() {
+                None
+            } else {
+                Some(self.stage_range(left).await?)
+            },
             right: self.stage_range(right).await?,
         })
     }
@@ -506,24 +575,36 @@ impl RangeTransferCapability for InProcessTransfer {
         _barrier: RangeTransferBarrier,
     ) -> Result<ClaimedStagedSuccessors, RangeTransferError> {
         let mut engines = self.staged.lock().expect("staged lock");
-        if !engines.contains_key(&staged.left.range_id)
+        if staged
+            .left
+            .as_ref()
+            .is_some_and(|left| !engines.contains_key(&left.range_id))
             || !engines.contains_key(&staged.right.range_id)
         {
             return Err(Self::error(
-                staged.left.range_id,
+                staged.right.range_id,
                 "both successors must be staged",
             ));
         }
-        let left = engines.remove(&staged.left.range_id).expect("checked left");
+        let left = staged
+            .left
+            .as_ref()
+            .map(|left| engines.remove(&left.range_id).expect("checked left"));
         let right = engines
             .remove(&staged.right.range_id)
             .expect("checked right");
         Ok(ClaimedStagedSuccessors {
-            left: ClaimedStagedSuccessor {
+            left: left.map(|left| ClaimedStagedSuccessor {
+                range_id: staged.left.as_ref().expect("left").range_id,
+                endpoint: staged.left.as_ref().expect("left").endpoint.clone(),
+                wal_generation: staged.left.as_ref().expect("left").wal_generation,
                 engine: left,
                 keepalive: Arc::new(()),
-            },
+            }),
             right: ClaimedStagedSuccessor {
+                range_id: staged.right.range_id,
+                endpoint: staged.right.endpoint.clone(),
+                wal_generation: staged.right.wal_generation,
                 engine: right,
                 keepalive: Arc::new(()),
             },
@@ -685,8 +766,18 @@ async fn populated_transfer_publishes_a_sql_ready_successor_and_releases_source_
         .hosted_range_engines()
         .remove(&RangeId::new(1))
         .expect("source engine");
-    let failed_transfer = InProcessTransfer::new(source.clone_handle(), true);
+    let forged_transfer = InProcessTransfer::new(source.clone_handle(), false);
+    let (command, mut requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
+    requests[1].endpoint = "forged.internal:7443".into();
     let initial_map = handles.range_map();
+    gateway
+        .split_successors("forged-t10", command, requests, &forged_transfer)
+        .await
+        .expect_err("forged placement must fail before transfer side effects");
+    assert!(!forged_transfer.paused.load(Ordering::Acquire));
+    assert_eq!(handles.range_map(), initial_map);
+
+    let failed_transfer = InProcessTransfer::new(source.clone_handle(), true);
     let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     gateway
         .split_successors("fault-t10", command, requests, &failed_transfer)

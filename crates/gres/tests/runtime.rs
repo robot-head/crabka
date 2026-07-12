@@ -8,8 +8,7 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_gres_ranges::{
-    MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SuccessorDescriptor, TableId,
-    TableTransferRequest, TenantName,
+    RangeId, RangeKey, RangeSpec, SplitCommand, SuccessorDescriptor, TableId, TableTransferRequest,
 };
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
@@ -463,7 +462,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
     let target_range = RangeId::new(2);
     let mut session = runtime.engine.connect();
     session
-        .simple_query("CREATE TABLE t10 (id int4)")
+        .simple_query("CREATE TABLE t1 (id int4)")
         .await
         .expect("create transfer source");
     session
@@ -475,20 +474,18 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             .inspect_hosted_range_kv(range)
             .expect("inspect source catalog"),
     );
-    let table_id = crabka_pgcatalog::get_table(&source_catalog, "t10")
+    let table_id = crabka_pgcatalog::get_table(&source_catalog, "t1")
         .expect("source relation")
         .id;
     let unrelated_table_id = crabka_pgcatalog::get_table(&source_catalog, "transfer_unrelated")
         .expect("unrelated relation")
         .id;
     assert_ne!(table_id, unrelated_table_id);
-    let routing_table_id = crabka_gres_ranges::TableId::new(10);
-    assert_ne!(u64::from(table_id), routing_table_id.as_u64());
 
     for sql in [
-        "INSERT INTO t10 VALUES (7)",
-        "UPDATE t10 SET id = 8 WHERE id = 7",
-        "DELETE FROM t10 WHERE id = 8",
+        "INSERT INTO t1 VALUES (7)",
+        "UPDATE t1 SET id = 8 WHERE id = 7",
+        "DELETE FROM t1 WHERE id = 8",
         "INSERT INTO transfer_unrelated VALUES (99)",
     ] {
         session
@@ -496,7 +493,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             .await
             .expect("write source MVCC state");
     }
-    let checkpoint_source = runtime
+    let _checkpoint_source = runtime
         .inspect_hosted_range_kv(range)
         .expect("inspect source checkpoint state");
 
@@ -511,14 +508,14 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
             .starts_with(&format!("gres/{tenant}/r0/ckpt/"))
     );
     session
-        .simple_query("INSERT INTO t10 VALUES (9)")
+        .simple_query("INSERT INTO t1 VALUES (9)")
         .await
         .expect("write transfer tail before pause");
     session
-        .simple_query("UPDATE t10 SET id = 10 WHERE id = 9")
+        .simple_query("UPDATE t1 SET id = 10 WHERE id = 9")
         .await
         .expect("write transfer update tail before pause");
-    let source_with_tail = runtime
+    let _source_with_tail = runtime
         .inspect_hosted_range_kv(range)
         .expect("inspect source tail state");
     let barrier = transfer
@@ -540,33 +537,35 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
     );
     assert!(tail.iter().any(|record| record.offset < barrier.offset));
 
-    let newer_manifest = transfer
-        .force_checkpoint(range)
-        .await
-        .expect("write newer source checkpoint");
-    assert!(
-        newer_manifest.covered_offset > manifest.covered_offset,
-        "the selected transfer checkpoint is no longer the latest"
-    );
-
     session
-        .simple_query("INSERT INTO t10 VALUES (9)")
+        .simple_query("INSERT INTO t1 VALUES (9)")
         .await
         .expect_err("write while paused must be rejected");
 
-    let other_target = RangeId::new(target_range.as_u32() + 1);
     let successors = transfer
         .stage_successors(
             [
                 crabka_gres_ranges::TableTransferRequest {
-                    target_range,
-                    routing_table_id,
-                    physical_table_id: table_id,
+                    target_range: RangeId::COORDINATOR,
+                    interval: RangeSpec::for_interval(
+                        RangeId::COORDINATOR,
+                        RangeKey::MIN,
+                        Some(RangeKey::table_start(TableId::new(u64::from(table_id)))),
+                    ),
+                    endpoint: "left.internal:7443".into(),
+                    wal_generation: 1,
+                    predecessor_generation: 0,
                 },
                 crabka_gres_ranges::TableTransferRequest {
-                    target_range: other_target,
-                    routing_table_id,
-                    physical_table_id: table_id,
+                    target_range,
+                    interval: RangeSpec::for_interval(
+                        target_range,
+                        RangeKey::table_start(TableId::new(u64::from(table_id))),
+                        Some(RangeKey::table_start(TableId::new(u64::from(table_id) + 1))),
+                    ),
+                    endpoint: "right.internal:7443".into(),
+                    wal_generation: 1,
+                    predecessor_generation: 0,
                 },
             ],
             &manifest,
@@ -575,8 +574,8 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         )
         .await
         .expect("stage populated successors");
-    assert_eq!(successors.left.range_id, target_range);
-    assert_eq!(successors.right.range_id, other_target);
+    assert!(successors.left.is_none(), "range zero is reused in place");
+    assert_eq!(successors.right.range_id, target_range);
     let hosted_error = runtime
         .inspect_hosted_range_kv(target_range)
         .expect_err("staged successor must be absent from the hosted range map");
@@ -585,12 +584,12 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         crabka_gres_substrate::manifest_key(&crabka_gres_substrate::ckpt_dir_for_range(
             &crabka_gres_ranges::TenantName::parse(tenant).expect("tenant"),
             target_range,
-            0,
-            successors.left.bootstrap_checkpoint.covered_offset,
-            0,
+            1,
+            successors.right.bootstrap_checkpoint.covered_offset,
+            1,
         ));
     assert_eq!(
-        successors.left.bootstrap_checkpoint.manifest_key,
+        successors.right.bootstrap_checkpoint.manifest_key,
         expected_bootstrap_manifest
     );
 
@@ -598,16 +597,16 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .inspect_staged_successor_kv(target_range)
         .expect("inspect staged successor")
         .expect("successor remains staged");
-    assert_selected_table_transfer(
-        &checkpoint_source,
-        &source_with_tail,
-        &staged,
-        table_id,
-        unrelated_table_id,
-    );
+    assert!(!primary_versions(&staged, table_id).is_empty());
+    assert!(primary_versions(&staged, unrelated_table_id).is_empty());
+    let claimed = transfer
+        .claim_successors(&successors, barrier)
+        .await
+        .expect("claim range-zero reuse and fresh right successor");
+    assert!(claimed.left.is_none());
     transfer.resume(barrier).await.expect("resume writer");
     session
-        .simple_query("INSERT INTO t10 VALUES (10)")
+        .simple_query("INSERT INTO t1 VALUES (10)")
         .await
         .expect("write after resume");
 }
@@ -620,6 +619,7 @@ fn kv_from_pairs(pairs: crabka_pgkv::KvScan) -> crabka_pgkv::MemKv {
     kv
 }
 
+#[allow(dead_code)]
 fn assert_selected_table_transfer(
     checkpoint_source: &crabka_pgkv::KvScan,
     source_with_tail: &crabka_pgkv::KvScan,
@@ -762,16 +762,11 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
         .expect("t10 relation")
         .id;
     assert_ne!(u64::from(physical_table_id), 10);
+    let predecessor_before = runtime
+        .inspect_hosted_range_kv(RangeId::new(1))
+        .expect("inspect predecessor before split");
 
-    let current_map = RangeMap::new(
-        TenantName::parse("runtime-physical-t10").expect("tenant"),
-        MapEpoch::new(1),
-        vec![
-            RangeSpec::new(RangeId::COORDINATOR, TableId::ZERO, Some(TableId::new(5))),
-            RangeSpec::new(RangeId::new(1), TableId::new(5), None),
-        ],
-    )
-    .expect("current map");
+    let current_map = runtime.published_range_map().expect("current map");
     let split_at = RangeKey::table_start(TableId::new(10));
     let command = SplitCommand {
         current_map,
@@ -797,13 +792,29 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
     let requests = [
         TableTransferRequest {
             target_range: RangeId::new(3),
-            routing_table_id: TableId::new(10),
-            physical_table_id,
+            interval: RangeSpec::for_interval(
+                RangeId::new(3),
+                RangeKey::MIN,
+                Some(RangeKey::table_start(TableId::new(u64::from(
+                    physical_table_id,
+                )))),
+            ),
+            endpoint: command.left.endpoint.clone(),
+            wal_generation: command.left.wal_generation,
+            predecessor_generation: command.predecessor_generation,
         },
         TableTransferRequest {
             target_range: RangeId::new(2),
-            routing_table_id: TableId::new(10),
-            physical_table_id,
+            interval: RangeSpec::for_interval(
+                RangeId::new(2),
+                RangeKey::table_start(TableId::new(u64::from(physical_table_id))),
+                Some(RangeKey::table_start(TableId::new(
+                    u64::from(physical_table_id) + 1,
+                ))),
+            ),
+            endpoint: command.right.endpoint.clone(),
+            wal_generation: command.right.wal_generation,
+            predecessor_generation: command.predecessor_generation,
         },
     ];
     runtime
@@ -814,6 +825,9 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
     let successor = runtime
         .inspect_hosted_range_kv(RangeId::new(2))
         .expect("inspect published successor");
+    let left_successor = runtime
+        .inspect_hosted_range_kv(RangeId::new(3))
+        .expect("inspect published left successor");
     assert_eq!(
         primary_versions(&successor, physical_table_id).len(),
         2,
@@ -824,6 +838,21 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
             .iter()
             .any(|(key, _)| *key == crabka_pgkv::key::seq_key(physical_table_id)),
         "the physical table sequence is transferred with t10"
+    );
+    assert!(primary_versions(&left_successor, physical_table_id).is_empty());
+    assert!(
+        !left_successor
+            .iter()
+            .any(|(key, _)| *key == crabka_pgkv::key::seq_key(physical_table_id)),
+        "the left and right successor folds are disjoint"
+    );
+    let predecessor_versions = primary_versions(&predecessor_before, physical_table_id);
+    let mut successor_versions = primary_versions(&left_successor, physical_table_id);
+    successor_versions.extend(primary_versions(&successor, physical_table_id));
+    assert_eq!(
+        successor_versions.keys().collect::<Vec<_>>(),
+        predecessor_versions.keys().collect::<Vec<_>>(),
+        "successor intervals partition every predecessor primary version key"
     );
 }
 

@@ -834,16 +834,16 @@ fn is_layout_mutation_already_applied(
 }
 
 fn is_split_already_applied(current: &TenantRecord, split: &RangeLayoutSplit) -> bool {
-    current.ranges.windows(2).any(|pair| {
-        pair[0].range_id == split.left.range_id
-            && pair[0].end_key == split.left.end_key
-            && pair[0].endpoint == split.left.endpoint
-            && pair[0].wal_generation >= split.left.wal_generation
-            && pair[1].range_id == split.right.range_id
-            && pair[1].end_key == split.right.end_key
-            && pair[1].endpoint == split.right.endpoint
-            && pair[1].wal_generation >= split.right.wal_generation
-    })
+    let source_absent_or_reused = split.source_range_id == split.left.range_id
+        || !current
+            .ranges
+            .iter()
+            .any(|range| range.range_id == split.source_range_id);
+    source_absent_or_reused
+        && current
+            .ranges
+            .windows(2)
+            .any(|pair| pair[0] == split.left && pair[1] == split.right)
 }
 
 fn is_merge_already_applied(current: &TenantRecord, merge: &RangeLayoutMerge) -> bool {
@@ -1380,6 +1380,28 @@ mod tests {
         assert!(first.record_version == 5);
         assert!(first.ranges.len() == 2);
         assert!(first.ranges[0].end_key == Some(RangeBoundary::table_start(100)));
+    }
+
+    #[test]
+    fn split_retry_rejects_conflicting_generation_or_lineage() {
+        let mut store = InMemoryRegistryStore::new();
+        let name = tenant_name("tenant-a");
+        store.upsert(ranged_record("tenant-a", 4)).unwrap();
+        let split = split_layout(RangeBoundary::table_start(100));
+        store
+            .split_range_layout_if_version(&name, 4, split.clone())
+            .unwrap();
+        let mut conflicting = split;
+        conflicting.right.wal_generation += 1;
+
+        let error = store
+            .split_range_layout_if_version(&name, 4, conflicting)
+            .expect_err("conflicting retry must not be accepted as applied");
+
+        assert!(matches!(
+            error,
+            ControlError::RegistryVersionConflict { .. }
+        ));
     }
 
     #[test]

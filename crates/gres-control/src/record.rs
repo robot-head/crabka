@@ -640,7 +640,7 @@ impl TenantRecord {
     /// Return a record whose layout splits one row-key interval into two ranges.
     pub fn split_range_layout(mut self, split: RangeLayoutSplit) -> Result<Self, ControlError> {
         if split.left.range_id == split.right.range_id
-            || split.source_range_id == split.left.range_id
+            || (split.source_range_id == split.left.range_id && split.source_range_id != 0)
             || split.source_range_id == split.right.range_id
         {
             return Err(ControlError::invalid_field(
@@ -649,7 +649,8 @@ impl TenantRecord {
             ));
         }
         if self.ranges.iter().any(|range| {
-            range.range_id == split.left.range_id || range.range_id == split.right.range_id
+            (range.range_id == split.left.range_id && range.range_id != split.source_range_id)
+                || range.range_id == split.right.range_id
         }) {
             return Err(ControlError::invalid_field(
                 "ranges.range_id",
@@ -1504,6 +1505,48 @@ mod tests {
                     },
                 ]
         );
+    }
+
+    #[test]
+    fn split_range_layout_reuses_range_zero_only_as_the_left_successor() {
+        let record = record(4)
+            .with_range_layout(vec![RangeLayoutEntry {
+                range_id: 0,
+                end_key: None,
+                endpoint: "tenant-a-r0.gres.svc:7432".into(),
+                wal_generation: 2,
+                lifecycle: Default::default(),
+                retirement: None,
+            }])
+            .unwrap();
+
+        let split = record
+            .split_range_layout(RangeLayoutSplit {
+                source_range_id: 0,
+                predecessor_generation: 2,
+                left: RangeLayoutEntry {
+                    range_id: 0,
+                    end_key: Some(RangeBoundary::table_start(20)),
+                    endpoint: "tenant-a-r0.gres.svc:7432".into(),
+                    wal_generation: 3,
+                    lifecycle: Default::default(),
+                    retirement: None,
+                },
+                right: RangeLayoutEntry {
+                    range_id: 1,
+                    end_key: None,
+                    endpoint: "tenant-a-r1.gres.svc:7432".into(),
+                    wal_generation: 3,
+                    lifecycle: Default::default(),
+                    retirement: None,
+                },
+            })
+            .expect("range-zero split");
+
+        assert!(split.ranges.len() == 2);
+        assert!(split.ranges[0].range_id == 0);
+        assert!(split.ranges[0].wal_generation == 3);
+        assert!(split.ranges[1].range_id == 1);
     }
 
     #[test]

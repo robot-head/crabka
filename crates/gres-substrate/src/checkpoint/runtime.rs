@@ -683,6 +683,60 @@ pub async fn restore_table_transfer_from_manifest_and_replay_tail(
     Ok((restored, replay))
 }
 
+/// Restore one exact interval from a caller-selected manifest and replay the
+/// same interval from its bounded committed tail.
+pub async fn restore_filtered_from_manifest_and_replay_tail(
+    objects: &dyn CheckpointStore,
+    manifest_key: &str,
+    tenant: &str,
+    expected_covered_offset: i64,
+    kv: &dyn RestoreKv,
+    tail: RestoreTail,
+    filter: CheckpointFilter,
+) -> Result<RestorePlan, SubstrateError> {
+    let manifest_bytes = objects.get(manifest_key).await?;
+    let manifest = Manifest::decode(&manifest_bytes)?;
+    if manifest.tenant != tenant {
+        return Err(SubstrateError::Checkpoint(format!(
+            "checkpoint manifest {manifest_key} belongs to tenant {}",
+            manifest.tenant
+        )));
+    }
+    if manifest.covered_offset != expected_covered_offset {
+        return Err(SubstrateError::Checkpoint(format!(
+            "checkpoint manifest {manifest_key} covers offset {}, expected {expected_covered_offset}",
+            manifest.covered_offset
+        )));
+    }
+    if manifest.wal_generation != tail.current_generation {
+        return Err(SubstrateError::Checkpoint(format!(
+            "checkpoint manifest {manifest_key} generation {} differs from transfer generation {}",
+            manifest.wal_generation, tail.current_generation
+        )));
+    }
+    let restored = restore_manifest(
+        objects,
+        kv,
+        &manifest,
+        tail.current_generation,
+        tail.log_start,
+        Some(filter),
+    )
+    .await?;
+    let replay = replay_committed_frames_from_filtered(
+        kv,
+        tail.committed_frames,
+        tail.barrier_offset,
+        restored.covered_offset.saturating_add(1),
+        restored.journal_seq,
+        filter,
+    )?;
+    Ok(RestorePlan {
+        restored_from: Some(restored),
+        replay,
+    })
+}
+
 /// Build prune requests and checkpoint-object deletions after a durable checkpoint.
 pub async fn plan_prune(
     store: &dyn CheckpointStore,
@@ -880,6 +934,8 @@ impl KvSnapshot for PartKvSnapshot {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use assert2::assert;
     use crabka_gres_ranges::{RangeKey, RowInterval, TableId};
     use crabka_pgkv::{Kv, MemKv, WriteOp, key};
@@ -1139,6 +1195,101 @@ mod tests {
             filtered.get(&successor_hi_key).expect("get successor hi")
                 == full.get(&successor_hi_key).expect("get full successor hi")
         );
+    }
+
+    #[tokio::test]
+    async fn selected_manifest_and_tail_partition_exactly_across_two_intervals() {
+        let objects = InMemoryCheckpointStore::shared();
+        let base = MemKv::default();
+        let left_key = key::row_key(7, 10);
+        let right_key = key::row_key(7, 30);
+        base.put(left_key.clone(), b"left".to_vec()).expect("left");
+        base.put(right_key.clone(), b"right".to_vec())
+            .expect("right");
+        let manifest = write_checkpoint(
+            objects.as_ref(),
+            "t",
+            &base,
+            snapshot_at(4),
+            DEFAULT_PART_MAX_BYTES,
+        )
+        .await
+        .expect("checkpoint");
+        let manifest_key = objects
+            .list(&ckpt_prefix("t"))
+            .await
+            .expect("list checkpoint")
+            .into_iter()
+            .map(|object| object.key)
+            .find(|key| key.ends_with("/MANIFEST"))
+            .expect("manifest key");
+        let split = RangeKey::new(TableId::new(7), 20);
+        let left = MemKv::default();
+        let right = MemKv::default();
+        let control = MemKv::default();
+        for (target, filter) in [
+            (
+                &left,
+                CheckpointFilter::new(RangeKey::new(TableId::new(7), 0), Some(split))
+                    .expect("left filter"),
+            ),
+            (
+                &right,
+                CheckpointFilter::new(split, Some(RangeKey::new(TableId::new(8), 0)))
+                    .expect("right filter"),
+            ),
+        ] {
+            restore_filtered_from_manifest_and_replay_tail(
+                objects.as_ref(),
+                &manifest_key,
+                "t",
+                manifest.covered_offset,
+                target,
+                RestoreTail {
+                    current_generation: manifest.wal_generation,
+                    log_start: None,
+                    committed_frames: vec![barrier(5)],
+                    barrier_offset: 5,
+                },
+                filter,
+            )
+            .await
+            .expect("filtered selected restore");
+        }
+        restore_filtered_from_manifest_and_replay_tail(
+            objects.as_ref(),
+            &manifest_key,
+            "t",
+            manifest.covered_offset,
+            &control,
+            RestoreTail {
+                current_generation: manifest.wal_generation,
+                log_start: None,
+                committed_frames: vec![barrier(5)],
+                barrier_offset: 5,
+            },
+            CheckpointFilter::new(
+                RangeKey::new(TableId::new(7), 0),
+                Some(RangeKey::new(TableId::new(8), 0)),
+            )
+            .expect("control filter"),
+        )
+        .await
+        .expect("control selected restore");
+
+        assert!(left.get(&left_key).expect("left get") == Some(b"left".to_vec()));
+        assert!(left.get(&right_key).expect("left excludes right").is_none());
+        assert!(right.get(&left_key).expect("right excludes left").is_none());
+        assert!(right.get(&right_key).expect("right get") == Some(b"right".to_vec()));
+        let left_pairs = left.scan_range(&[], &[u8::MAX]).expect("left scan");
+        let right_pairs = right.scan_range(&[], &[u8::MAX]).expect("right scan");
+        let control_pairs = control.scan_range(&[], &[u8::MAX]).expect("control scan");
+        let left_map = left_pairs.into_iter().collect::<BTreeMap<_, _>>();
+        let right_map = right_pairs.into_iter().collect::<BTreeMap<_, _>>();
+        assert!(left_map.keys().all(|key| !right_map.contains_key(key)));
+        let mut union = left_map;
+        union.extend(right_map);
+        assert_eq!(union, control_pairs.into_iter().collect::<BTreeMap<_, _>>());
     }
 
     #[test]

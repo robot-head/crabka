@@ -710,9 +710,16 @@ impl MultiRangeTenant {
             .ok_or(SplitError::InvalidSuccessorPartition)?;
         if requests[0].target_range != state.left.range_id
             || requests[1].target_range != right.range_id
+            || requests[0].interval.range_id != state.left.range_id
+            || requests[1].interval.range_id != right.range_id
+            || requests[0].interval.end != Some(requests[1].interval.start)
+            || requests[0].endpoint != state.left.endpoint
+            || requests[1].endpoint != right.endpoint
+            || requests[0].wal_generation != state.left.wal_generation
+            || requests[1].wal_generation != right.wal_generation
             || requests
                 .iter()
-                .any(|request| request.physical_table_id != transfer_table.physical_table_id)
+                .any(|request| request.predecessor_generation != state.predecessor_generation)
         {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
@@ -769,23 +776,45 @@ impl MultiRangeTenant {
             .engines
             .get(&RangeId::COORDINATOR)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
-        let mut left = claimed.left.engine;
-        let mut right = claimed.right.engine;
-        configure_successor_engine(coordinator, &mut left);
-        configure_successor_engine(coordinator, &mut right);
+        let mut left = claimed.left;
+        if state.predecessor.is_coordinator() != left.is_none() {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
+        let mut right = claimed.right;
+        if left.as_ref().is_some_and(|left| {
+            left.range_id != state.left.range_id
+                || left.endpoint != state.left.endpoint
+                || left.wal_generation != state.left.wal_generation
+        }) {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
+        let right_descriptor = state
+            .right
+            .as_ref()
+            .ok_or(SplitError::InvalidSuccessorPartition)?;
+        if right.range_id != right_descriptor.range_id
+            || right.endpoint != right_descriptor.endpoint
+            || right.wal_generation != right_descriptor.wal_generation
+        {
+            return Err(LocalSqlSplitError::RetryMismatch);
+        }
+        if let Some(left) = left.as_mut() {
+            configure_successor_engine(coordinator, &mut left.engine);
+        }
+        configure_successor_engine(coordinator, &mut right.engine);
 
         let mut engines = serving
             .engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
             .collect::<BTreeMap<_, _>>();
-        engines.remove(&state.predecessor);
-        engines.insert(state.left.range_id, left);
-        let right_descriptor = state
-            .right
-            .as_ref()
-            .ok_or(SplitError::InvalidSuccessorPartition)?;
-        engines.insert(right_descriptor.range_id, right);
+        if !state.predecessor.is_coordinator() {
+            engines.remove(&state.predecessor);
+        }
+        if let Some(left) = left.as_mut() {
+            engines.insert(state.left.range_id, left.engine.clone_handle());
+        }
+        engines.insert(right_descriptor.range_id, right.engine);
         let scanner: Arc<dyn crabka_pgexec::RangeScanner> = Arc::new(InProcessRangeScanner {
             engines: engines
                 .iter()
@@ -797,9 +826,13 @@ impl MultiRangeTenant {
             engine.set_range_scanner(Arc::clone(&scanner));
         }
         let mut keepalives = serving.keepalives.clone();
-        keepalives.remove(&state.predecessor);
-        keepalives.insert(state.left.range_id, claimed.left.keepalive);
-        keepalives.insert(right_descriptor.range_id, claimed.right.keepalive);
+        if !state.predecessor.is_coordinator() {
+            keepalives.remove(&state.predecessor);
+        }
+        if let Some(left) = left {
+            keepalives.insert(state.left.range_id, left.keepalive);
+        }
+        keepalives.insert(right_descriptor.range_id, right.keepalive);
         self.inner
             .serving
             .store(Arc::new(ServingSnapshot::ready_with_keepalives(
@@ -876,10 +909,7 @@ impl MultiRangeTenant {
         {
             return Err(LocalSqlSplitError::IndexedTable(table_id));
         }
-        Ok(PopulatedTransferTable {
-            predecessor,
-            physical_table_id: table.id,
-        })
+        Ok(PopulatedTransferTable { predecessor })
     }
 
     fn validate_successor_interval(
@@ -1731,7 +1761,6 @@ struct TenantInner {
 
 struct PopulatedTransferTable {
     predecessor: RangeId,
-    physical_table_id: u32,
 }
 
 /// Owns a successful source pause until the transfer either resumes it or is dropped.
@@ -1912,28 +1941,43 @@ impl SplitHooks for LocalSqlSplitBridge<'_> {
         if serving.range_map == state.target_map {
             return Ok(());
         }
-        let successor = open_range_engine(self.tenant.inner.data_dir.as_ref(), state.successor)
-            .map_err(|error| {
-                SplitError::Hook(format!("successor r{} engine: {error:?}", state.successor))
-            })?;
         let coordinator = serving.engines.get(&RangeId::COORDINATOR).ok_or_else(|| {
             SplitError::Hook("local SQL split requires hosted range r0".to_owned())
         })?;
-        let mut successor = successor;
-        successor.set_catalog_kv(coordinator.kv_handle());
-        coordinator.share_gtm_to(&mut successor);
-        successor.set_timestamp_oracle(coordinator.timestamp_oracle_handle());
-        successor.set_range_scanner(coordinator.range_scanner_handle());
-        if let Some(scanner) = coordinator.foreign_scanner_handle() {
-            successor.set_foreign_scanner(scanner);
-        }
 
         let mut engines = serving
             .engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
             .collect::<BTreeMap<_, _>>();
-        engines.insert(state.successor, successor);
+        if !state.predecessor.is_coordinator() {
+            engines.remove(&state.predecessor);
+        }
+        for descriptor in std::iter::once(&state.left).chain(state.right.iter()) {
+            if descriptor.range_id.is_coordinator() {
+                continue;
+            }
+            let mut successor =
+                open_range_engine(self.tenant.inner.data_dir.as_ref(), descriptor.range_id)
+                    .map_err(|error| {
+                        SplitError::Hook(format!(
+                            "successor r{} engine: {error:?}",
+                            descriptor.range_id
+                        ))
+                    })?;
+            configure_successor_engine(coordinator, &mut successor);
+            engines.insert(descriptor.range_id, successor);
+        }
+        let scanner: Arc<dyn crabka_pgexec::RangeScanner> = Arc::new(InProcessRangeScanner {
+            engines: engines
+                .iter()
+                .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
+                .collect(),
+            range_map: state.target_map.clone(),
+        });
+        for engine in engines.values_mut() {
+            engine.set_range_scanner(Arc::clone(&scanner));
+        }
         // The sole serving publication is after the successor is fully initialized. A reader sees
         // either the old map/engine set or this complete new set, never a mixed pair.
         self.tenant
