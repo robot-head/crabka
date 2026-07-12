@@ -1911,6 +1911,15 @@ mod tests {
 
     struct AppliedControl;
 
+    struct AllowControlIntent;
+
+    #[async_trait]
+    impl crate::control::SplitIntentAuthority for AllowControlIntent {
+        async fn authorize_request(&self, _request: &RangeControlReq) -> Result<bool, String> {
+            Ok(true)
+        }
+    }
+
     #[async_trait]
     impl crate::control::RangeControlExecutor for AppliedControl {
         async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
@@ -1928,6 +1937,7 @@ mod tests {
             RangeId::new(1),
             9,
             Box::new(AppliedControl),
+            Arc::new(AllowControlIntent),
         ));
         let service =
             crate::forward::HostedRangeService::new(Default::default()).with_range_control(control);

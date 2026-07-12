@@ -1947,20 +1947,37 @@ mod tests {
         let failed = store
             .compare_and_swap_split_operation(Some(1), failed)
             .expect("persist failure");
-        let completed = failed
-            .advance(SplitOperationPhase::Completed, 2, None)
-            .expect("complete retry");
-        store
-            .compare_and_swap_split_operation(Some(2), completed.clone())
-            .expect("persist completion");
+        let mut completed = failed
+            .advance(SplitOperationPhase::Running, 2, None)
+            .expect("restart failed attempt");
+        completed = store
+            .compare_and_swap_split_operation(Some(2), completed)
+            .expect("persist retry");
+        for phase in [
+            SplitOperationPhase::Checkpointed,
+            SplitOperationPhase::Paused,
+            SplitOperationPhase::LayoutPublished,
+            SplitOperationPhase::Restored,
+            SplitOperationPhase::Activated,
+            SplitOperationPhase::Retiring,
+            SplitOperationPhase::Resuming,
+            SplitOperationPhase::Completed,
+        ] {
+            let prior_revision = completed.revision;
+            completed = completed.advance(phase, 2, None).expect("advance retry");
+            completed = store
+                .compare_and_swap_split_operation(Some(prior_revision), completed)
+                .expect("persist retry phase");
+        }
 
+        let completed_revision = completed.revision;
         let regression = SplitOperationRecord {
-            revision: 4,
+            revision: completed_revision + 1,
             phase: SplitOperationPhase::Running,
             ..completed
         };
         assert!(matches!(
-            store.compare_and_swap_split_operation(Some(3), regression),
+            store.compare_and_swap_split_operation(Some(completed_revision), regression),
             Err(ControlError::SplitOperationConflict { .. })
         ));
     }
@@ -2026,14 +2043,25 @@ mod tests {
             .push("failure before any attempt".to_string());
         assert!(malformed.ensure_valid().is_err());
 
-        let completed = SplitOperationRecord::new(
+        let mut completed = SplitOperationRecord::new(
             tenant_name("tenant-a"),
             "split-2",
             split_layout(RangeBoundary::table_start(100)),
         )
-        .unwrap()
-        .advance(SplitOperationPhase::Completed, 1, None)
         .unwrap();
+        for phase in [
+            SplitOperationPhase::Running,
+            SplitOperationPhase::Checkpointed,
+            SplitOperationPhase::Paused,
+            SplitOperationPhase::LayoutPublished,
+            SplitOperationPhase::Restored,
+            SplitOperationPhase::Activated,
+            SplitOperationPhase::Retiring,
+            SplitOperationPhase::Resuming,
+            SplitOperationPhase::Completed,
+        ] {
+            completed = completed.advance(phase, 1, None).unwrap();
+        }
         assert!(
             completed
                 .advance(SplitOperationPhase::Completed, 2, None)
