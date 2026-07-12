@@ -16,7 +16,7 @@ use crabka_gres_ranges::{
     RangeService, RangeSpec, RangeTlsClientConfig, RangeTlsServerConfig, RangeTransferBarrier,
     RangeTransferCapability, RangeTransferError, SplitCommand, StagedRangeSuccessor,
     StagedRangeSuccessors, SuccessorDescriptor, TableId, TableTransferRequest, TenantName,
-    serve_tls, tenant::EmptyTableSplitTestHook,
+    ValidatedSplitTransferPlan, serve_tls, tenant::EmptyTableSplitTestHook,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{Kv, MemKv};
@@ -52,7 +52,7 @@ fn split_fixture(
     gateway: &MultiRangeTenant,
     right_range: RangeId,
     table_id: TableId,
-) -> (SplitCommand, [TableTransferRequest; 2]) {
+) -> SplitCommand {
     let current_map = gateway.control_range_map();
     let split_at = RangeKey::table_start(table_id);
     let predecessor_id = current_map
@@ -79,61 +79,23 @@ fn split_fixture(
                 + 1,
         )
     };
-    let command = SplitCommand {
+    SplitCommand {
         current_map,
         predecessor: predecessor_id,
         predecessor_generation: 0,
         left: SuccessorDescriptor {
             range_id: left_range,
-            endpoint: format!("left-r{left_range}.internal:7443"),
+            endpoint: "local.internal:7443".into(),
             wal_generation: 1,
             interval: RangeSpec::for_interval(left_range, predecessor.start, Some(split_at)),
         },
         right: SuccessorDescriptor {
             range_id: right_range,
-            endpoint: format!("right-r{right_range}.internal:7443"),
+            endpoint: "local.internal:7443".into(),
             wal_generation: 1,
             interval: RangeSpec::for_interval(right_range, split_at, predecessor.end),
         },
-    };
-    let coordinator = gateway
-        .hosted_range_engines()
-        .remove(&RangeId::COORDINATOR)
-        .expect("coordinator");
-    let physical_table_id = crabka_pgcatalog::get_table(
-        coordinator.catalog_kv(),
-        &format!("t{}", u64::from(table_id)),
-    )
-    .expect("physical table")
-    .id;
-    let physical_table = TableId::new(u64::from(physical_table_id));
-    let requests = [
-        TableTransferRequest {
-            target_range: left_range,
-            interval: RangeSpec::for_interval(
-                left_range,
-                RangeKey::MIN,
-                Some(RangeKey::table_start(physical_table)),
-            ),
-            endpoint: command.left.endpoint.clone(),
-            wal_generation: command.left.wal_generation,
-            predecessor_generation: command.predecessor_generation,
-        },
-        TableTransferRequest {
-            target_range: right_range,
-            interval: RangeSpec::for_interval(
-                right_range,
-                RangeKey::table_start(physical_table),
-                Some(RangeKey::table_start(TableId::new(
-                    u64::from(physical_table_id) + 1,
-                ))),
-            ),
-            endpoint: command.right.endpoint.clone(),
-            wal_generation: command.right.wal_generation,
-            predecessor_generation: command.predecessor_generation,
-        },
-    ];
-    (command, requests)
+    }
 }
 
 impl MtlsFixture {
@@ -273,7 +235,7 @@ async fn empty_table_boundary_split_publishes_ready_successor_and_requires_old_s
         .await
         .expect("bind before split");
 
-    let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
+    let command = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
     let state = gateway
         .split_empty_successors("empty-t100", command)
         .await
@@ -339,7 +301,7 @@ async fn populated_table_boundary_split_fails_closed_without_publishing_a_partia
         .await
         .expect("write predecessor row");
 
-    let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
+    let command = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
     let error = gateway
         .split_empty_successors("populated-t100", command)
         .await
@@ -494,6 +456,21 @@ fn storage_range_key(bytes: &[u8]) -> Option<RangeKey> {
 
 #[async_trait]
 impl RangeTransferCapability for InProcessTransfer {
+    fn validate_successors(
+        &self,
+        plan: &ValidatedSplitTransferPlan,
+    ) -> Result<(), RangeTransferError> {
+        let state = plan.state();
+        let right = state.right.as_ref().expect("split right");
+        if state.left.endpoint != "local.internal:7443" || right.endpoint != "local.internal:7443" {
+            return Err(Self::error(
+                state.predecessor,
+                "unauthenticated successor endpoint",
+            ));
+        }
+        Ok(())
+    }
+
     async fn force_checkpoint(
         &self,
         range_id: RangeId,
@@ -545,7 +522,7 @@ impl RangeTransferCapability for InProcessTransfer {
 
     async fn stage_successors(
         &self,
-        requests: [TableTransferRequest; 2],
+        plan: &ValidatedSplitTransferPlan,
         _checkpoint: &CheckpointManifest,
         _tail: &[CommittedTailRecord],
         _barrier: RangeTransferBarrier,
@@ -558,13 +535,12 @@ impl RangeTransferCapability for InProcessTransfer {
                 .notified()
                 .await;
         }
-        let [left, right] = requests;
+        let [left, right] = plan
+            .state()
+            .transfer_requests()
+            .expect("valid split requests");
         Ok(StagedRangeSuccessors {
-            left: if left.target_range.is_coordinator() {
-                None
-            } else {
-                Some(self.stage_range(left).await?)
-            },
+            left: self.stage_range(left).await?,
             right: self.stage_range(right).await?,
         })
     }
@@ -575,10 +551,7 @@ impl RangeTransferCapability for InProcessTransfer {
         _barrier: RangeTransferBarrier,
     ) -> Result<ClaimedStagedSuccessors, RangeTransferError> {
         let mut engines = self.staged.lock().expect("staged lock");
-        if staged
-            .left
-            .as_ref()
-            .is_some_and(|left| !engines.contains_key(&left.range_id))
+        if !engines.contains_key(&staged.left.range_id)
             || !engines.contains_key(&staged.right.range_id)
         {
             return Err(Self::error(
@@ -586,21 +559,18 @@ impl RangeTransferCapability for InProcessTransfer {
                 "both successors must be staged",
             ));
         }
-        let left = staged
-            .left
-            .as_ref()
-            .map(|left| engines.remove(&left.range_id).expect("checked left"));
+        let left = engines.remove(&staged.left.range_id).expect("checked left");
         let right = engines
             .remove(&staged.right.range_id)
             .expect("checked right");
         Ok(ClaimedStagedSuccessors {
-            left: left.map(|left| ClaimedStagedSuccessor {
-                range_id: staged.left.as_ref().expect("left").range_id,
-                endpoint: staged.left.as_ref().expect("left").endpoint.clone(),
-                wal_generation: staged.left.as_ref().expect("left").wal_generation,
+            left: ClaimedStagedSuccessor {
+                range_id: staged.left.range_id,
+                endpoint: staged.left.endpoint.clone(),
+                wal_generation: staged.left.wal_generation,
                 engine: left,
                 keepalive: Arc::new(()),
-            }),
+            },
             right: ClaimedStagedSuccessor {
                 range_id: staged.right.range_id,
                 endpoint: staged.right.endpoint.clone(),
@@ -638,10 +608,10 @@ async fn cancelled_populated_transfer_resumes_the_source_after_the_pause_barrier
 
     let split_gateway = gateway.clone();
     let split_transfer = Arc::clone(&transfer);
-    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
+    let command = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     let split = tokio::spawn(async move {
         split_gateway
-            .split_successors("cancel-t10", command, requests, split_transfer.as_ref())
+            .split_successors("cancel-t10", command, split_transfer.as_ref())
             .await
     });
     stage_started.notified().await;
@@ -682,15 +652,10 @@ async fn ddl_in_the_successor_interval_waits_for_populated_transfer_publication(
 
     let split_gateway = gateway.clone();
     let split_transfer = Arc::clone(&transfer);
-    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
+    let command = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     let split = tokio::spawn(async move {
         split_gateway
-            .split_successors(
-                "move-t10-with-ddl",
-                command,
-                requests,
-                split_transfer.as_ref(),
-            )
+            .split_successors("move-t10-with-ddl", command, split_transfer.as_ref())
             .await
     });
     stage_started.notified().await;
@@ -767,20 +732,20 @@ async fn populated_transfer_publishes_a_sql_ready_successor_and_releases_source_
         .remove(&RangeId::new(1))
         .expect("source engine");
     let forged_transfer = InProcessTransfer::new(source.clone_handle(), false);
-    let (command, mut requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
-    requests[1].endpoint = "forged.internal:7443".into();
+    let mut command = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
+    command.right.endpoint = "forged.internal:7443".into();
     let initial_map = handles.range_map();
     gateway
-        .split_successors("forged-t10", command, requests, &forged_transfer)
+        .split_successors("forged-t10", command, &forged_transfer)
         .await
         .expect_err("forged placement must fail before transfer side effects");
     assert!(!forged_transfer.paused.load(Ordering::Acquire));
     assert_eq!(handles.range_map(), initial_map);
 
     let failed_transfer = InProcessTransfer::new(source.clone_handle(), true);
-    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
+    let command = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     gateway
-        .split_successors("fault-t10", command, requests, &failed_transfer)
+        .split_successors("fault-t10", command, &failed_transfer)
         .await
         .expect_err("fault before publication");
     assert!(!failed_transfer.paused.load(Ordering::Acquire));
@@ -791,9 +756,9 @@ async fn populated_transfer_publishes_a_sql_ready_successor_and_releases_source_
         .expect("source remains serving after prepublish failure");
 
     let transfer = InProcessTransfer::new(source, false);
-    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
+    let command = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     gateway
-        .split_successors("move-t10", command, requests, &transfer)
+        .split_successors("move-t10", command, &transfer)
         .await
         .expect("publish populated successor");
     assert!(!transfer.paused.load(Ordering::Acquire));
@@ -848,7 +813,7 @@ async fn empty_table_split_revalidates_after_a_concurrent_predecessor_insert() {
         .expect("create empty moved table");
 
     let split_gateway = gateway.clone();
-    let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
+    let command = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
     let split = tokio::spawn(async move {
         split_gateway
             .split_empty_successors("empty-t100-race", command)

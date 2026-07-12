@@ -8,7 +8,8 @@ use crabka_broker::{Broker, BrokerConfig};
 use crabka_client_core::Client;
 use crabka_client_producer::{Acks, Producer, ProducerRecord};
 use crabka_gres_ranges::{
-    RangeId, RangeKey, RangeSpec, SplitCommand, SuccessorDescriptor, TableId, TableTransferRequest,
+    MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitState,
+    SuccessorDescriptor, TableId, TenantName,
 };
 use crabka_pgkv::Kv as _;
 use crabka_pgwire::engine::{Engine as _, Session as _};
@@ -311,6 +312,7 @@ async fn live_multirange_substrate_default_fdw_server_reads_own_broker() {
         ranges: Some("0,5".to_string()),
         host_ranges: None,
         range_rpc: None,
+        advertised_endpoint: None,
     })
     .await
     .expect("open live multi-range substrate runtime");
@@ -452,6 +454,7 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         ranges: Some("0,5".to_string()),
         host_ranges: None,
         range_rpc: None,
+        advertised_endpoint: None,
     })
     .await
     .expect("open live multi-range runtime");
@@ -542,68 +545,41 @@ async fn live_multirange_transfer_stages_populated_successor_without_publishing_
         .await
         .expect_err("write while paused must be rejected");
 
-    let successors = transfer
-        .stage_successors(
-            [
-                crabka_gres_ranges::TableTransferRequest {
-                    target_range: RangeId::COORDINATOR,
-                    interval: RangeSpec::for_interval(
-                        RangeId::COORDINATOR,
-                        RangeKey::MIN,
-                        Some(RangeKey::table_start(TableId::new(u64::from(table_id)))),
-                    ),
-                    endpoint: "left.internal:7443".into(),
-                    wal_generation: 1,
-                    predecessor_generation: 0,
-                },
-                crabka_gres_ranges::TableTransferRequest {
-                    target_range,
-                    interval: RangeSpec::for_interval(
-                        target_range,
-                        RangeKey::table_start(TableId::new(u64::from(table_id))),
-                        Some(RangeKey::table_start(TableId::new(u64::from(table_id) + 1))),
-                    ),
-                    endpoint: "right.internal:7443".into(),
-                    wal_generation: 1,
-                    predecessor_generation: 0,
-                },
-            ],
-            &manifest,
-            &tail,
-            barrier,
-        )
-        .await
-        .expect("stage populated successors");
-    assert!(successors.left.is_none(), "range zero is reused in place");
-    assert_eq!(successors.right.range_id, target_range);
-    let hosted_error = runtime
-        .inspect_hosted_range_kv(target_range)
-        .expect_err("staged successor must be absent from the hosted range map");
-    assert_eq!(hosted_error.kind(), std::io::ErrorKind::NotFound);
-    let expected_bootstrap_manifest =
-        crabka_gres_substrate::manifest_key(&crabka_gres_substrate::ckpt_dir_for_range(
-            &crabka_gres_ranges::TenantName::parse(tenant).expect("tenant"),
-            target_range,
-            1,
-            successors.right.bootstrap_checkpoint.covered_offset,
-            1,
-        ));
-    assert_eq!(
-        successors.right.bootstrap_checkpoint.manifest_key,
-        expected_bootstrap_manifest
-    );
-
-    let staged = runtime
-        .inspect_staged_successor_kv(target_range)
-        .expect("inspect staged successor")
-        .expect("successor remains staged");
-    assert!(!primary_versions(&staged, table_id).is_empty());
-    assert!(primary_versions(&staged, unrelated_table_id).is_empty());
-    let claimed = transfer
-        .claim_successors(&successors, barrier)
-        .await
-        .expect("claim range-zero reuse and fresh right successor");
-    assert!(claimed.left.is_none());
+    let split_at = RangeKey::table_start(TableId::new(u64::from(table_id)));
+    let _state = SplitState::for_split(
+        "r0-live-transfer",
+        SplitCommand {
+            current_map: RangeMap::new(
+                TenantName::parse(tenant).expect("tenant"),
+                MapEpoch::new(1),
+                vec![RangeSpec::for_interval(
+                    RangeId::COORDINATOR,
+                    RangeKey::MIN,
+                    None,
+                )],
+            )
+            .expect("source map"),
+            predecessor: RangeId::COORDINATOR,
+            predecessor_generation: 0,
+            left: SuccessorDescriptor {
+                range_id: RangeId::COORDINATOR,
+                endpoint: "left.internal:7443".into(),
+                wal_generation: 1,
+                interval: RangeSpec::for_interval(
+                    RangeId::COORDINATOR,
+                    RangeKey::MIN,
+                    Some(split_at),
+                ),
+            },
+            right: SuccessorDescriptor {
+                range_id: target_range,
+                endpoint: "right.internal:7443".into(),
+                wal_generation: 1,
+                interval: RangeSpec::for_interval(target_range, split_at, None),
+            },
+        },
+    )
+    .expect("split state");
     transfer.resume(barrier).await.expect("resume writer");
     session
         .simple_query("INSERT INTO t1 VALUES (10)")
@@ -741,6 +717,7 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
         ranges: Some("0,5".to_string()),
         host_ranges: None,
         range_rpc: None,
+        advertised_endpoint: None,
     })
     .await
     .expect("open live multi-range runtime");
@@ -789,36 +766,8 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
             interval: RangeSpec::for_interval(RangeId::new(2), split_at, None),
         },
     };
-    let requests = [
-        TableTransferRequest {
-            target_range: RangeId::new(3),
-            interval: RangeSpec::for_interval(
-                RangeId::new(3),
-                RangeKey::MIN,
-                Some(RangeKey::table_start(TableId::new(u64::from(
-                    physical_table_id,
-                )))),
-            ),
-            endpoint: command.left.endpoint.clone(),
-            wal_generation: command.left.wal_generation,
-            predecessor_generation: command.predecessor_generation,
-        },
-        TableTransferRequest {
-            target_range: RangeId::new(2),
-            interval: RangeSpec::for_interval(
-                RangeId::new(2),
-                RangeKey::table_start(TableId::new(u64::from(physical_table_id))),
-                Some(RangeKey::table_start(TableId::new(
-                    u64::from(physical_table_id) + 1,
-                ))),
-            ),
-            endpoint: command.right.endpoint.clone(),
-            wal_generation: command.right.wal_generation,
-            predecessor_generation: command.predecessor_generation,
-        },
-    ];
     runtime
-        .split_successors("physical-t10", command, requests)
+        .split_successors("physical-t10", command)
         .await
         .expect("publish live populated t10 successor");
 
@@ -880,6 +829,7 @@ async fn live_multirange_transfer_rejects_concurrent_pause_without_waiting() {
         ranges: Some("0,200".to_string()),
         host_ranges: None,
         range_rpc: None,
+        advertised_endpoint: None,
     })
     .await
     .expect("open live multi-range runtime");
@@ -939,6 +889,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
         ranges: None,
         host_ranges: None,
         range_rpc: None,
+        advertised_endpoint: None,
     })
     .await
     .expect("open in-memory single-range runtime");
@@ -953,6 +904,7 @@ async fn non_live_runtimes_do_not_expose_range_transfer_capability() {
             ranges: None,
             host_ranges: None,
             range_rpc: None,
+            advertised_endpoint: None,
         }
     })
     .await

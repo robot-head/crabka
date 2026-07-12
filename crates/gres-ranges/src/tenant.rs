@@ -29,7 +29,7 @@ use crate::{
     CheckpointManifest, HashShardSpec, MapEpoch, RangeId, RangeKey, RangeMap, RangeScanSegment,
     RangeSpec, RangeTransferCapability, RangeTransferError, RouteIntent,
     RowInterval as MapRowInterval, SplitCommand, SplitError, SplitHooks, SplitState,
-    SplitStateStore, TableId, TableTransferRequest, TenantName,
+    SplitStateStore, TableId, TenantName, ValidatedSplitTransferPlan,
     barrier::{Range0Barrier, Range0EndSampler},
     coordinator::{LocalCoordinator, LocalCoordinatorError, TransactionDecision},
     forward::{
@@ -685,7 +685,6 @@ impl MultiRangeTenant {
         &self,
         operation_id: impl Into<String>,
         command: SplitCommand,
-        requests: [TableTransferRequest; 2],
         transfer: &dyn RangeTransferCapability,
     ) -> Result<SplitState, LocalSqlSplitError> {
         let _split_guard = self.inner.split_lock.lock().await;
@@ -704,40 +703,15 @@ impl MultiRangeTenant {
         }
         let state = SplitState::for_split(operation_id, command)?;
         Self::validate_successor_interval(&serving, &state, table_id)?;
-        let right = state
-            .right
-            .as_ref()
-            .ok_or(SplitError::InvalidSuccessorPartition)?;
-        if requests[0].target_range != state.left.range_id
-            || requests[1].target_range != right.range_id
-            || requests[0].interval.range_id != state.left.range_id
-            || requests[1].interval.range_id != right.range_id
-            || requests[0].interval.end != Some(requests[1].interval.start)
-            || requests[0].endpoint != state.left.endpoint
-            || requests[1].endpoint != right.endpoint
-            || requests[0].wal_generation != state.left.wal_generation
-            || requests[1].wal_generation != right.wal_generation
-            || requests
-                .iter()
-                .any(|request| request.predecessor_generation != state.predecessor_generation)
-        {
-            return Err(LocalSqlSplitError::RetryMismatch);
-        }
-
+        let plan = Self::validated_transfer_plan(&serving, state.clone())?;
+        transfer.validate_successors(&plan)?;
         let checkpoint = transfer
             .force_checkpoint(transfer_table.predecessor)
             .await?;
         let barrier = transfer.pause_at_checkpoint(&checkpoint).await?;
         let pause = TransferPauseGuard::new(transfer, barrier);
-        self.stage_and_publish_successors(
-            transfer,
-            &serving,
-            &state,
-            requests,
-            &checkpoint,
-            barrier,
-        )
-        .await?;
+        self.stage_and_publish_successors(transfer, &serving, &state, &plan, &checkpoint, barrier)
+            .await?;
         pause.resume().await?;
         self.inner
             .split_states
@@ -752,7 +726,7 @@ impl MultiRangeTenant {
         transfer: &dyn RangeTransferCapability,
         serving: &ServingSnapshot,
         state: &SplitState,
-        requests: [TableTransferRequest; 2],
+        plan: &ValidatedSplitTransferPlan,
         checkpoint: &CheckpointManifest,
         barrier: crate::RangeTransferBarrier,
     ) -> Result<(), LocalSqlSplitError> {
@@ -760,7 +734,7 @@ impl MultiRangeTenant {
             .read_committed_tail(state.predecessor, checkpoint.covered_offset, barrier)
             .await?;
         let staged = transfer
-            .stage_successors(requests, checkpoint, &tail, barrier)
+            .stage_successors(plan, checkpoint, &tail, barrier)
             .await?;
         let claimed = transfer.claim_successors(&staged, barrier).await?;
         self.publish_claimed_successors(serving, state, claimed)
@@ -777,15 +751,11 @@ impl MultiRangeTenant {
             .get(&RangeId::COORDINATOR)
             .ok_or(LocalSqlSplitError::RemoteRange)?;
         let mut left = claimed.left;
-        if state.predecessor.is_coordinator() != left.is_none() {
-            return Err(LocalSqlSplitError::RetryMismatch);
-        }
         let mut right = claimed.right;
-        if left.as_ref().is_some_and(|left| {
-            left.range_id != state.left.range_id
-                || left.endpoint != state.left.endpoint
-                || left.wal_generation != state.left.wal_generation
-        }) {
+        if left.range_id != state.left.range_id
+            || left.endpoint != state.left.endpoint
+            || left.wal_generation != state.left.wal_generation
+        {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
         let right_descriptor = state
@@ -798,23 +768,44 @@ impl MultiRangeTenant {
         {
             return Err(LocalSqlSplitError::RetryMismatch);
         }
-        if let Some(left) = left.as_mut() {
+        if state.left.range_id.is_coordinator() {
+            left.engine.set_catalog_kv(left.engine.kv_handle());
+            left.engine.init_gtm_coordinator().map_err(|error| {
+                LocalSqlSplitError::SuccessorEngine {
+                    range_id: state.left.range_id,
+                    error,
+                }
+            })?;
+            left.engine
+                .set_timestamp_oracle(coordinator.timestamp_oracle_handle());
+            if let Some(scanner) = coordinator.foreign_scanner_handle() {
+                left.engine.set_foreign_scanner(scanner);
+            }
+            configure_successor_engine(&left.engine, &mut right.engine);
+        } else {
             configure_successor_engine(coordinator, &mut left.engine);
+            configure_successor_engine(coordinator, &mut right.engine);
         }
-        configure_successor_engine(coordinator, &mut right.engine);
 
         let mut engines = serving
             .engines
             .iter()
             .map(|(range_id, engine)| (*range_id, engine.clone_handle()))
             .collect::<BTreeMap<_, _>>();
-        if !state.predecessor.is_coordinator() {
-            engines.remove(&state.predecessor);
-        }
-        if let Some(left) = left.as_mut() {
-            engines.insert(state.left.range_id, left.engine.clone_handle());
-        }
+        engines.remove(&state.predecessor);
+        engines.insert(state.left.range_id, left.engine.clone_handle());
         engines.insert(right_descriptor.range_id, right.engine);
+        if state.left.range_id.is_coordinator() {
+            let replacement = engines
+                .get(&RangeId::COORDINATOR)
+                .expect("replacement r0 inserted")
+                .clone_handle();
+            for (range_id, engine) in &mut engines {
+                if !range_id.is_coordinator() {
+                    configure_successor_engine(&replacement, engine);
+                }
+            }
+        }
         let scanner: Arc<dyn crabka_pgexec::RangeScanner> = Arc::new(InProcessRangeScanner {
             engines: engines
                 .iter()
@@ -826,12 +817,8 @@ impl MultiRangeTenant {
             engine.set_range_scanner(Arc::clone(&scanner));
         }
         let mut keepalives = serving.keepalives.clone();
-        if !state.predecessor.is_coordinator() {
-            keepalives.remove(&state.predecessor);
-        }
-        if let Some(left) = left {
-            keepalives.insert(state.left.range_id, left.keepalive);
-        }
+        keepalives.remove(&state.predecessor);
+        keepalives.insert(state.left.range_id, left.keepalive);
         keepalives.insert(right_descriptor.range_id, right.keepalive);
         self.inner
             .serving
@@ -910,6 +897,55 @@ impl MultiRangeTenant {
             return Err(LocalSqlSplitError::IndexedTable(table_id));
         }
         Ok(PopulatedTransferTable { predecessor })
+    }
+
+    fn validated_transfer_plan(
+        serving: &ServingSnapshot,
+        state: SplitState,
+    ) -> Result<ValidatedSplitTransferPlan, LocalSqlSplitError> {
+        let coordinator = serving
+            .engines
+            .get(&RangeId::COORDINATOR)
+            .ok_or(LocalSqlSplitError::RemoteRange)?;
+        let mut mapping = BTreeMap::new();
+        for table in crabka_pgcatalog::list_tables(coordinator.catalog_kv())? {
+            let logical = routing_table_id(&table.name);
+            if serving
+                .range_map
+                .route_table(logical)
+                .map_err(SplitError::from)?
+                .range_id
+                == state.predecessor
+            {
+                mapping.insert(TableId::new(u64::from(table.id)), logical);
+            }
+        }
+        let source = serving
+            .engines
+            .get(&state.predecessor)
+            .ok_or(LocalSqlSplitError::RemoteRange)?;
+        for (bytes, _) in source.kv_handle().scan_range(&[], &[u8::MAX])? {
+            let physical = match crabka_pgkv::key::classify_key(&bytes) {
+                crabka_pgkv::key::KeyClass::PrimaryRow { table_id, .. }
+                | crabka_pgkv::key::KeyClass::PrimaryVersion { table_id, .. }
+                | crabka_pgkv::key::KeyClass::HashPrimaryRow { table_id, .. }
+                | crabka_pgkv::key::KeyClass::HashPrimaryVersion { table_id, .. }
+                | crabka_pgkv::key::KeyClass::SecondaryIndex { table_id, .. }
+                | crabka_pgkv::key::KeyClass::Sequence { table_id } => {
+                    Some(TableId::new(u64::from(table_id)))
+                }
+                _ => None,
+            };
+            if let Some(physical) = physical
+                && !mapping.contains_key(&physical)
+            {
+                return Err(LocalSqlSplitError::Transfer(RangeTransferError::Boundary {
+                    range_id: state.predecessor,
+                    reason: format!("unmapped physical table {physical} in predecessor storage"),
+                }));
+            }
+        }
+        Ok(ValidatedSplitTransferPlan::new(state, mapping))
     }
 
     fn validate_successor_interval(

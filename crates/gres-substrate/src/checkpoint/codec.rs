@@ -3,6 +3,7 @@
 use crabka_gres_ranges::{RangeKey, RowInterval, TableId};
 use crabka_pgkv::key;
 use sha2::{Digest, Sha256};
+use std::collections::BTreeMap;
 
 use crate::{error::SubstrateError, frame::Reader};
 
@@ -10,10 +11,12 @@ use crate::{error::SubstrateError, frame::Reader};
 pub type PartPayload = (Vec<u8>, Vec<u8>);
 
 /// Row-key interval used to ingest a checkpoint subset during range restore.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CheckpointFilter {
     start: RangeKey,
     end: Option<RangeKey>,
+    physical_to_logical: BTreeMap<TableId, TableId>,
+    owns_structural: Option<bool>,
 }
 
 impl CheckpointFilter {
@@ -29,7 +32,26 @@ impl CheckpointFilter {
             ));
         }
 
-        Ok(Self { start, end })
+        Ok(Self {
+            start,
+            end,
+            physical_to_logical: BTreeMap::new(),
+            owns_structural: None,
+        })
+    }
+
+    /// Translate physical catalog table ids before applying the logical range interval.
+    #[must_use]
+    pub fn with_physical_to_logical(mut self, mapping: BTreeMap<TableId, TableId>) -> Self {
+        self.physical_to_logical = mapping;
+        self
+    }
+
+    /// Assign non-row metadata to exactly one successor in a partition.
+    #[must_use]
+    pub fn with_structural_ownership(mut self, owns_structural: bool) -> Self {
+        self.owns_structural = Some(owns_structural);
+        self
     }
 
     /// Build a table-local row interval filter.
@@ -48,12 +70,16 @@ impl CheckpointFilter {
 
     /// Return true when a KV key belongs to this row interval.
     #[must_use]
-    pub fn contains_key(self, bytes: &[u8]) -> bool {
+    pub fn contains_key(&self, bytes: &[u8]) -> bool {
+        // Non-row substrate metadata has no range key. Assign it exactly once
+        // to the interval beginning at the global minimum (the r0 successor),
+        // so two adjacent successor restores form a disjoint full partition.
+        let owns_structural = self.owns_structural.unwrap_or(self.start == RangeKey::MIN);
         let row_key = match key::classify_key(bytes) {
             key::KeyClass::PrimaryRow { table_id, rowid }
             | key::KeyClass::PrimaryVersion {
                 table_id, rowid, ..
-            } => RangeKey::new(TableId::new(u64::from(table_id)), rowid),
+            } => RangeKey::new(self.logical_table(table_id), rowid),
             key::KeyClass::HashPrimaryRow {
                 table_id,
                 bucket,
@@ -64,20 +90,28 @@ impl CheckpointFilter {
                 bucket,
                 rowid,
                 ..
-            } => RangeKey::hash(TableId::new(u64::from(table_id)), bucket, rowid),
+            } => RangeKey::hash(self.logical_table(table_id), bucket, rowid),
             key::KeyClass::Sequence { table_id } => {
-                RangeKey::table_start(TableId::new(u64::from(table_id)))
+                RangeKey::table_start(self.logical_table(table_id))
             }
-            key::KeyClass::Clog { .. } => return true,
-            key::KeyClass::SecondaryIndex { .. }
+            key::KeyClass::Clog { .. }
+            | key::KeyClass::SecondaryIndex { .. }
             | key::KeyClass::System
-            | key::KeyClass::Unknown => return false,
+            | key::KeyClass::Unknown => return owns_structural,
         };
         if row_key < self.start {
             return false;
         };
 
         self.end.is_none_or(|end| row_key < end)
+    }
+
+    fn logical_table(&self, physical: u32) -> TableId {
+        let physical = TableId::new(u64::from(physical));
+        self.physical_to_logical
+            .get(&physical)
+            .copied()
+            .unwrap_or(physical)
     }
 }
 

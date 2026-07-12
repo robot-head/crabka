@@ -68,7 +68,7 @@ pub use self::{
     transfer::{
         ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord, RangeTransferBarrier,
         RangeTransferCapability, RangeTransferError, StagedRangeSuccessor, StagedRangeSuccessors,
-        TableTransferRequest,
+        TableTransferRequest, ValidatedSplitTransferPlan,
     },
     transport::{
         FramedTcpClient, RangeRequest, RangeResponse, RangeService, RangeTlsClientConfig,

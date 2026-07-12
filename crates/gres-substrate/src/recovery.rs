@@ -65,6 +65,8 @@ pub struct LiveRecoveryConfig {
     pub checkpoints: Option<LiveRecoveryCheckpoints>,
     /// WAL generation selected by lifecycle recreation. Generation zero is the initial topic.
     pub wal_generation: u64,
+    /// Authenticated local range-control endpoint advertised by this compute.
+    pub advertised_endpoint: Option<String>,
 }
 
 /// Checkpoint inputs for live recovery.
@@ -97,6 +99,7 @@ impl LiveRecoveryConfig {
             security,
             checkpoints: None,
             wal_generation: 0,
+            advertised_endpoint: None,
         }
     }
 
@@ -111,6 +114,20 @@ impl LiveRecoveryConfig {
     #[must_use]
     pub fn with_wal_generation(mut self, wal_generation: u64) -> Self {
         self.wal_generation = wal_generation;
+        self
+    }
+
+    /// Bind local transfer descriptors to this compute's advertised endpoint.
+    #[must_use]
+    pub fn with_advertised_endpoint(mut self, endpoint: impl Into<String>) -> Self {
+        self.advertised_endpoint = Some(endpoint.into());
+        self
+    }
+
+    /// Bind an endpoint when this runtime exposes authenticated range control.
+    #[must_use]
+    pub fn with_optional_advertised_endpoint(mut self, endpoint: Option<String>) -> Self {
+        self.advertised_endpoint = endpoint;
         self
     }
 

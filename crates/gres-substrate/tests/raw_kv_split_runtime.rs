@@ -6,8 +6,8 @@ use std::sync::{
 use assert2::assert;
 use async_trait::async_trait;
 use crabka_gres_ranges::{
-    MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand, SplitError, SplitHooks,
-    SplitState, SplitStateStore, SplitStep, TableId, TenantName, run_split,
+    MapEpoch, RangeId, RangeMap, RangeSpec, SplitCommand, SplitError, SplitHooks, SplitState,
+    SplitStateStore, SplitStep, SuccessorDescriptor, TableId, TenantName, run_split,
 };
 use crabka_gres_substrate::{InMemorySplitStateStore, RawKvSplitRuntime};
 use crabka_pgkv::{Kv, key};
@@ -341,7 +341,18 @@ fn split_command() -> SplitCommand {
         )
         .expect("map"),
         predecessor: RangeId::new(1),
-        successor: RangeId::new(2),
-        split_at: RangeKey::table_start(TableId::new(20)),
+        predecessor_generation: 0,
+        left: SuccessorDescriptor {
+            range_id: RangeId::new(1),
+            interval: RangeSpec::new(RangeId::new(1), TableId::new(10), Some(TableId::new(20))),
+            endpoint: "local.test:7443".into(),
+            wal_generation: 1,
+        },
+        right: SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            interval: RangeSpec::new(RangeId::new(2), TableId::new(20), Some(TableId::new(30))),
+            endpoint: "local.test:7443".into(),
+            wal_generation: 1,
+        },
     }
 }
