@@ -2511,7 +2511,6 @@ async fn open_multirange_runtime(
         split_activation::discover_activation_receipt(config, checkpoint_store.as_deref())
             .await
             .map_err(|error| std::io::Error::other(format!("substrate recovery: {error}")))?;
-    let activation_recovery_pending = activation_receipt.is_some();
     let timestamp_primary_aliases = activation_receipt
         .as_ref()
         .map(split_activation::ActivationDiscovery::timestamp_primary_aliases)
@@ -2579,7 +2578,7 @@ async fn open_multirange_runtime(
     if let Some(hosted_ranges) = &config.host_ranges {
         tenant_config = bind_recovered_hosted_ranges(tenant_config, hosted_ranges)?;
     }
-    if activation_recovery_pending || paused_control_recovery {
+    if paused_control_recovery {
         tenant_config = tenant_config.defer_timestamp_recovery();
     }
     if tenant_config.range_registry.is_some()
