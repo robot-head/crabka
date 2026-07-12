@@ -796,6 +796,24 @@ impl SqlEngine {
         }
     }
 
+    /// Fence primary mutations against the complete immutable transaction identity.
+    pub fn validate_timestamp_primary_identity(
+        &self,
+        identity: TimestampTxnIdentity,
+    ) -> Result<TimestampTxnDescriptor, ExecError> {
+        let descriptor =
+            timestamp_txn::read_timestamp_txn_descriptor(self.kv.as_ref(), identity.start_ts)?
+                .ok_or_else(|| {
+                    ExecError::Unsupported("timestamp primary identity is fenced".into())
+                })?;
+        if descriptor.global_xid != identity.global_xid {
+            return Err(ExecError::Unsupported(
+                "timestamp primary identity is fenced".into(),
+            ));
+        }
+        Ok(descriptor)
+    }
+
     /// Durably expand a pending descriptor's participant set with CAS fencing.
     pub async fn add_timestamp_transaction_participant(
         &self,
