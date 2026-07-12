@@ -54,6 +54,7 @@ def validate(source, benchmark=script):
         'sharded_range_boundaries()', 'boundaries+=("0:$((index * 1000000))")',
         'primary_range_distribution', 'runtime timestamp_primary_committed observations cover all expected ranges',
         'timestamp_primary_committed', 'observed_primary_transactions',
+        'check-gres-primary-distribution.py',
     ]
     for needle in required_script:
         assert needle in benchmark, f'missing benchmark/gate contract: {needle}'
@@ -101,5 +102,15 @@ except AssertionError:
 else:
     raise AssertionError('fabricated primary distribution unexpectedly passed')
 PY
+
+skewed_artifact="$(mktemp)"
+trap 'rm -f "$skewed_artifact"' EXIT
+cat >"$skewed_artifact" <<'JSON'
+{"primary_range_distribution":{"0":437,"1":1,"2":1,"3":1},"observed_primary_transactions":440}
+JSON
+if python3 scripts/check-gres-primary-distribution.py "$skewed_artifact" 4 2 50 5 >/dev/null 2>&1; then
+    echo 'FAIL: skewed observed primary artifact unexpectedly passed' >&2
+    exit 1
+fi
 
 echo 'PASS: live Gres scaling CI contract and negative mutations'

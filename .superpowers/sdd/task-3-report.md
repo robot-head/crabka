@@ -72,3 +72,10 @@ Final robust live result at `target/gres-scaling-primary-range-final/range-scali
 - Runtime `timestamp_primary_committed` observations now replace the benchmark's derived distribution formula. The final robust artifact reports balanced observed counts of 110, 220, and 440 transactions across 1/2/4 ranges and passes at `3.2110x` range-local and `3.3473x` sharded scaling.
 
 Post-remediation verification: formatting and diff checks passed; pgexec library `341/341` and transaction integration `36/36`; gres-ranges library `114/114`, crossrange `21/21`, and multirange `33/33`; gateway-local `10/11` with only the pre-existing invalid-socket fixture failure at `gateway_local.rs:1110`; targeted CLI row-boundary parsing `1/1`; static scaling contract and negative mutations passed; robust live artifact passed every threshold. Clippy remains blocked only by the verified pre-existing `semicolon_if_nothing_returned` lint in `crates/pgwire/src/engine.rs:297`.
+
+## Second-review recovery and distribution closure
+
+- `TimestampRecover` now treats its identity, decision, and operations as assertions only. It authenticates the complete identity against the actual hosted or registry/mTLS-resolved primary, obtains the primary descriptor's terminal decision and operations, rejects missing/pending/mismatched outcomes with `40001`, and only then mutates the participant using primary-derived state. Forged abort and forged commit/operation tests prove the local intent remains unchanged.
+- The gateway restart fixture now exposes the local primary through a real TLS range endpoint, so remote-secondary recovery exercises direct primary authentication rather than caller trust.
+- `scripts/check-gres-primary-distribution.py` requires the exact uniform count per range, exact range-id set, and exact total. A concrete `{437,1,1,1}` artifact fails with `expected 110 per range`.
+- Fresh robust artifact `target/gres-scaling-auth-recovery-final2/range-scaling.json` passes all gates: range-local `3.2778x`, sharded `3.4144x`, envelope efficiency `0.8536`, and observed distributions exactly 110 per range.

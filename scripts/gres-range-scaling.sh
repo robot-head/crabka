@@ -576,6 +576,9 @@ print(json.dumps({
     },
 }, sort_keys=True))
 PY
+    python3 scripts/check-gres-primary-distribution.py \
+        "${ARTIFACT_DIR}/result-sharded-${range_count}-trial-${trial}.json" \
+        "$range_count" "$sessions_per_range" "$txns_per_session" "$warmup_txns"
 }
 
 write_dry_run_results() {

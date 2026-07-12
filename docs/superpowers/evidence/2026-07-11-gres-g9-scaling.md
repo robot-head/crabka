@@ -71,3 +71,7 @@ This run preserved every threshold: range-local `3.2110x`, sharded `3.3473x`, ra
 Recovery and fencing review tests additionally cover the prewrite-before-primary-ack crash window, rN-only recovery through an authenticated remote primary, forged primary identity/terminal decisions, and conditional descriptor CAS no-op races.
 
 Post-remediation broad verification passed 341 pgexec library tests, 36 pgexec transaction tests, 114 gres-ranges library tests, 21 crossrange tests, 33 multirange tests, the targeted CLI row-boundary parser test, formatting/diff checks, and the static scaling mutation suite. Gateway-local retained its single known invalid-socket fixture failure (10 passed), and strict clippy retained its known pgwire semicolon lint blocker; neither file is part of this remediation.
+
+Second-review hardening removes the remaining recovery trust edge: participant recovery authenticates the full identity and reads the effective decision plus operation set from the actual primary before applying anything. Wrong-primary/global-xid aborts and forged commit timestamps/operations return `40001` without changing the local intent. The distribution validator also rejects the concrete skewed observation `{0:437,1:1,2:1,3:1}` because this uniform workload requires exactly 110 observed primaries per range.
+
+The fresh live artifact at `target/gres-scaling-auth-recovery-final2/range-scaling.json` reports range-local `3.2778x`, sharded `3.4144x`, range-4 envelope efficiency `0.8536`, exact per-range counts of 110, and every gate true.
