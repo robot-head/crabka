@@ -122,6 +122,15 @@ impl HostedRangeService {
         self
     }
 
+    /// Borrow the stable control dispatcher so a dynamic service wrapper can preserve it while
+    /// replacing the hosted-engine snapshot.
+    #[must_use]
+    pub fn range_control_dispatcher(
+        &self,
+    ) -> Option<Arc<crate::control::GenerationFencedRangeControl>> {
+        self.range_control.clone()
+    }
+
     #[must_use]
     pub fn with_timestamp_primary_remote(
         mut self,

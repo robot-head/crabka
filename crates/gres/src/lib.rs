@@ -2354,18 +2354,32 @@ struct LiveRangeResources {
 
 struct DynamicLiveRangeService {
     current: std::sync::RwLock<Arc<crabka_gres_ranges::HostedRangeService>>,
+    range_control:
+        std::sync::RwLock<Option<Arc<crabka_gres_ranges::control::GenerationFencedRangeControl>>>,
     publishing: std::sync::atomic::AtomicBool,
 }
 
 impl DynamicLiveRangeService {
     fn new(service: crabka_gres_ranges::HostedRangeService) -> Self {
+        let range_control = service.range_control_dispatcher();
         Self {
             current: std::sync::RwLock::new(Arc::new(service)),
+            range_control: std::sync::RwLock::new(range_control),
             publishing: std::sync::atomic::AtomicBool::new(false),
         }
     }
 
+    fn attach_range_control(
+        &self,
+        control: Arc<crabka_gres_ranges::control::GenerationFencedRangeControl>,
+    ) {
+        *self.range_control.write().expect("live range control lock") = Some(control);
+    }
+
     fn replace(&self, service: crabka_gres_ranges::HostedRangeService) {
+        if let Some(control) = service.range_control_dispatcher() {
+            self.attach_range_control(control);
+        }
         *self.current.write().expect("live range service lock") = Arc::new(service);
     }
 
@@ -2382,6 +2396,15 @@ impl DynamicLiveRangeService {
     fn load(&self) -> Arc<crabka_gres_ranges::HostedRangeService> {
         Arc::clone(&self.current.read().expect("live range service lock"))
     }
+
+    fn load_range_control(
+        &self,
+    ) -> Option<Arc<crabka_gres_ranges::control::GenerationFencedRangeControl>> {
+        self.range_control
+            .read()
+            .expect("live range control lock")
+            .clone()
+    }
 }
 
 #[async_trait::async_trait]
@@ -2396,6 +2419,17 @@ impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
                 message: "range topology publication is in progress; retry".into(),
             };
         }
+        if let crabka_gres_ranges::RangeRequest::Control(control_request) = request {
+            if let Some(control) = self.load_range_control() {
+                return crabka_gres_ranges::RangeResponse::Control(
+                    control.handle(control_request).await,
+                );
+            }
+            return self
+                .load()
+                .handle(crabka_gres_ranges::RangeRequest::Control(control_request))
+                .await;
+        }
         self.load().handle(request).await
     }
 
@@ -2409,6 +2443,20 @@ impl crabka_gres_ranges::RangeService for DynamicLiveRangeService {
                 error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
                 message: "range topology publication is in progress; retry".into(),
             }));
+        }
+        if let crabka_gres_ranges::RangeRequest::Control(control_request) = request {
+            if let Some(control) = self.load_range_control() {
+                return Ok(Some(crabka_gres_ranges::RangeResponse::Control(
+                    control.handle(control_request).await,
+                )));
+            }
+            return self
+                .load()
+                .handle_connection(
+                    crabka_gres_ranges::RangeRequest::Control(control_request),
+                    writer,
+                )
+                .await;
         }
         self.load().handle_connection(request, writer).await
     }
@@ -5133,6 +5181,64 @@ mod tests {
                 error: crabka_gres_ranges::WireErrorKind::StaleEndpoint,
                 ..
             }
+        ));
+    }
+
+    #[tokio::test]
+    async fn dynamic_range_service_preserves_control_across_inner_replacement() {
+        struct StatusExecutor;
+
+        #[async_trait::async_trait]
+        impl crabka_gres_ranges::control::RangeControlExecutor for StatusExecutor {
+            async fn execute(
+                &self,
+                _request: &crabka_gres_ranges::transport::RangeControlReq,
+            ) -> crabka_gres_ranges::transport::RangeControlResp {
+                crabka_gres_ranges::transport::RangeControlResp::Status {
+                    paused: false,
+                    serving: true,
+                    barrier_offset: None,
+                }
+            }
+        }
+
+        let control = Arc::new(
+            crabka_gres_ranges::control::GenerationFencedRangeControl::new(
+                "tenant-a",
+                crabka_gres_ranges::RangeId::COORDINATOR,
+                0,
+                Box::new(StatusExecutor),
+            ),
+        );
+        let dynamic = DynamicLiveRangeService::new(
+            crabka_gres_ranges::HostedRangeService::new(BTreeMap::new())
+                .with_range_control(control),
+        );
+        let request = crabka_gres_ranges::RangeRequest::Control(
+            crabka_gres_ranges::transport::RangeControlReq {
+                tenant: "tenant-a".into(),
+                range_id: crabka_gres_ranges::RangeId::COORDINATOR,
+                generation: 0,
+                operation_id: "status-after-replace".into(),
+                operation: crabka_gres_ranges::transport::RangeControlOperation::Status,
+            },
+        );
+        assert!(matches!(
+            crabka_gres_ranges::RangeService::handle(&dynamic, request.clone()).await,
+            crabka_gres_ranges::RangeResponse::Control(
+                crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
+            )
+        ));
+
+        dynamic.replace(crabka_gres_ranges::HostedRangeService::new(BTreeMap::from(
+            [(crabka_gres_ranges::RangeId::COORDINATOR, SqlEngine::new())],
+        )));
+
+        assert!(matches!(
+            crabka_gres_ranges::RangeService::handle(&dynamic, request).await,
+            crabka_gres_ranges::RangeResponse::Control(
+                crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
+            )
         ));
     }
 }
