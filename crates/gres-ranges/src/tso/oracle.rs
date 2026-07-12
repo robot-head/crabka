@@ -161,6 +161,27 @@ where
         )
     }
 
+    /// Recover with an explicit liveness-certificate interval for deterministic tests.
+    #[doc(hidden)]
+    pub fn recover_with_heartbeat_interval(
+        committer: C,
+        heartbeat: H,
+        epoch: i16,
+        stride: NonZeroU64,
+        persisted_max_ts: u64,
+        heartbeat_interval: Duration,
+    ) -> Result<Self, TsoError> {
+        Self::recover_with_clock(
+            committer,
+            heartbeat,
+            epoch,
+            stride,
+            persisted_max_ts,
+            heartbeat_interval,
+            Arc::new(SystemTsoClock(Instant::now())),
+        )
+    }
+
     fn recover_with_clock(
         committer: C,
         heartbeat: H,
