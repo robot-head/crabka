@@ -834,22 +834,16 @@ fn is_layout_mutation_already_applied(
 }
 
 fn is_split_already_applied(current: &TenantRecord, split: &RangeLayoutSplit) -> bool {
-    let Some(source_index) = current
-        .ranges
-        .iter()
-        .position(|range| range.range_id == split.source_range_id)
-    else {
-        return false;
-    };
-    let Some(successor) = current.ranges.get(source_index + 1) else {
-        return false;
-    };
-    let source = &current.ranges[source_index];
-
-    source.end_key == Some(split.split_key)
-        && successor.range_id == split.successor_range_id
-        && successor.endpoint == split.successor_endpoint
-        && successor.wal_generation >= split.successor_wal_generation
+    current.ranges.windows(2).any(|pair| {
+        pair[0].range_id == split.left.range_id
+            && pair[0].end_key == split.left.end_key
+            && pair[0].endpoint == split.left.endpoint
+            && pair[0].wal_generation >= split.left.wal_generation
+            && pair[1].range_id == split.right.range_id
+            && pair[1].end_key == split.right.end_key
+            && pair[1].endpoint == split.right.endpoint
+            && pair[1].wal_generation >= split.right.wal_generation
+    })
 }
 
 fn is_merge_already_applied(current: &TenantRecord, merge: &RangeLayoutMerge) -> bool {
@@ -1063,6 +1057,29 @@ mod tests {
                 retirement: None,
             }])
             .unwrap()
+    }
+
+    fn split_layout(split_key: RangeBoundary) -> RangeLayoutSplit {
+        RangeLayoutSplit {
+            source_range_id: 0,
+            predecessor_generation: 7,
+            left: crate::record::RangeLayoutEntry {
+                range_id: 1,
+                end_key: Some(split_key),
+                endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
+                wal_generation: 8,
+                lifecycle: Default::default(),
+                retirement: None,
+            },
+            right: crate::record::RangeLayoutEntry {
+                range_id: 2,
+                end_key: None,
+                endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
+                wal_generation: 8,
+                lifecycle: Default::default(),
+                retirement: None,
+            },
+        }
     }
 
     fn encoded(record: &TenantRecord) -> (Vec<u8>, Option<Vec<u8>>) {
@@ -1311,23 +1328,13 @@ mod tests {
         store.upsert(ranged_record("tenant-a", 4)).unwrap();
 
         store
-            .split_range_layout_if_version(
-                &name,
-                4,
-                RangeLayoutSplit {
-                    source_range_id: 0,
-                    split_key: RangeBoundary::table_start(100),
-                    successor_range_id: 1,
-                    successor_endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
-                    successor_wal_generation: 3,
-                },
-            )
+            .split_range_layout_if_version(&name, 4, split_layout(RangeBoundary::table_start(100)))
             .unwrap();
         let split = store.get(&name).unwrap();
         assert!(split.record_version == 5);
         assert!(split.ranges.len() == 2);
-        assert!(split.ranges[0].wal_generation == 7);
-        assert!(split.ranges[1].wal_generation == 3);
+        assert!(split.ranges[0].wal_generation == 8);
+        assert!(split.ranges[1].wal_generation == 8);
     }
 
     #[test]
@@ -1339,13 +1346,7 @@ mod tests {
         let result = store.split_range_layout_if_version(
             &name,
             3,
-            RangeLayoutSplit {
-                source_range_id: 0,
-                split_key: RangeBoundary::table_start(100),
-                successor_range_id: 1,
-                successor_endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
-                successor_wal_generation: 8,
-            },
+            split_layout(RangeBoundary::table_start(100)),
         );
 
         assert!(matches!(
@@ -1364,13 +1365,7 @@ mod tests {
         let mut store = InMemoryRegistryStore::new();
         let name = tenant_name("tenant-a");
         store.upsert(ranged_record("tenant-a", 4)).unwrap();
-        let split = RangeLayoutSplit {
-            source_range_id: 0,
-            split_key: RangeBoundary::table_start(100),
-            successor_range_id: 1,
-            successor_endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
-            successor_wal_generation: 8,
-        };
+        let split = split_layout(RangeBoundary::table_start(100));
 
         let first = store
             .split_range_layout_if_version(&name, 4, split.clone())
@@ -1392,19 +1387,13 @@ mod tests {
         let mut store = InMemoryRegistryStore::new();
         let name = tenant_name("tenant-a");
         let split = ranged_record("tenant-a", 4)
-            .split_range_layout(RangeLayoutSplit {
-                source_range_id: 0,
-                split_key: RangeBoundary::table_start(100),
-                successor_range_id: 1,
-                successor_endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
-                successor_wal_generation: 8,
-            })
+            .split_range_layout(split_layout(RangeBoundary::table_start(100)))
             .unwrap();
         store.upsert(split).unwrap();
         let merge = RangeLayoutMerge {
-            left_range_id: 0,
-            right_range_id: 1,
-            merged_endpoint: "tenant-a-r0-merged.gres.svc:7432".to_string(),
+            left_range_id: 1,
+            right_range_id: 2,
+            merged_endpoint: "tenant-a-r1-merged.gres.svc:7432".to_string(),
             merged_wal_generation: 9,
         };
 
@@ -1420,8 +1409,8 @@ mod tests {
         assert!(first == retry);
         assert!(first.record_version == 6);
         assert!(first.ranges.len() == 1);
-        assert!(first.ranges[0].range_id == 0);
-        assert!(first.ranges[0].endpoint == "tenant-a-r0-merged.gres.svc:7432");
+        assert!(first.ranges[0].range_id == 1);
+        assert!(first.ranges[0].endpoint == "tenant-a-r1-merged.gres.svc:7432");
         assert!(first.ranges[0].wal_generation == 9);
     }
 
@@ -1431,23 +1420,13 @@ mod tests {
         let name = tenant_name("tenant-a");
         store.upsert(ranged_record("tenant-a", 4)).unwrap();
         store
-            .split_range_layout_if_version(
-                &name,
-                4,
-                RangeLayoutSplit {
-                    source_range_id: 0,
-                    split_key: RangeBoundary::new(100, 25),
-                    successor_range_id: 1,
-                    successor_endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
-                    successor_wal_generation: 8,
-                },
-            )
+            .split_range_layout_if_version(&name, 4, split_layout(RangeBoundary::new(100, 25)))
             .unwrap();
         let split = store.get(&name).unwrap();
 
-        assert!(owners(&split, 99, u64::MAX) == vec![0]);
-        assert!(owners(&split, 100, 0) == vec![0]);
-        assert!(owners(&split, 100, 25) == vec![1]);
+        assert!(owners(&split, 99, u64::MAX) == vec![1]);
+        assert!(owners(&split, 100, 0) == vec![1]);
+        assert!(owners(&split, 100, 25) == vec![2]);
     }
 
     fn owners(record: &TenantRecord, table: u64, rowid: u64) -> Vec<u32> {

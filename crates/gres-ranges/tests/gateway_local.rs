@@ -10,12 +10,13 @@ use std::{
 use async_trait::async_trait;
 use crabka_gres_control::{RangeLayoutEntry, SqlUser, TenantId, TenantRecord, TenantState};
 use crabka_gres_ranges::{
-    CheckpointManifest, ClaimedStagedSuccessor, CommittedTailRecord, FramedTcpClient,
-    GatewayCommitFault, HostedRangeService, LocalSqlSplitError, MultiRangeTenant,
-    MultiRangeTenantConfig, RangeId, RangeRegistry, RangeRequest, RangeResponse, RangeService,
-    RangeTlsClientConfig, RangeTlsServerConfig, RangeTransferBarrier, RangeTransferCapability,
-    RangeTransferError, StagedRangeSuccessor, TableId, TableTransferRequest, TenantName, serve_tls,
-    tenant::EmptyTableSplitTestHook,
+    CheckpointManifest, ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord,
+    FramedTcpClient, GatewayCommitFault, HostedRangeService, LocalSqlSplitError, MultiRangeTenant,
+    MultiRangeTenantConfig, RangeId, RangeKey, RangeRegistry, RangeRequest, RangeResponse,
+    RangeService, RangeSpec, RangeTlsClientConfig, RangeTlsServerConfig, RangeTransferBarrier,
+    RangeTransferCapability, RangeTransferError, SplitCommand, StagedRangeSuccessor,
+    StagedRangeSuccessors, SuccessorDescriptor, TableId, TableTransferRequest, TenantName,
+    serve_tls, tenant::EmptyTableSplitTestHook,
 };
 use crabka_pgexec::SqlEngine;
 use crabka_pgkv::{Kv, MemKv};
@@ -45,6 +46,69 @@ struct MtlsFixture {
     _dir: tempfile::TempDir,
     server: RangeTlsServerConfig,
     client: RangeTlsClientConfig,
+}
+
+fn split_fixture(
+    gateway: &MultiRangeTenant,
+    right_range: RangeId,
+    table_id: TableId,
+) -> (SplitCommand, [TableTransferRequest; 2]) {
+    let current_map = gateway.control_range_map();
+    let split_at = RangeKey::table_start(table_id);
+    let predecessor_id = current_map
+        .range_for_key(table_id, 0)
+        .expect("split predecessor")
+        .range_id;
+    let predecessor = current_map
+        .ranges()
+        .iter()
+        .find(|range| range.range_id == predecessor_id)
+        .expect("split predecessor interval")
+        .clone();
+    let left_range = if predecessor_id.is_coordinator() {
+        predecessor_id
+    } else {
+        RangeId::new(
+            current_map
+                .ranges()
+                .iter()
+                .map(|range| range.range_id.as_u32())
+                .chain(std::iter::once(right_range.as_u32()))
+                .max()
+                .expect("range id")
+                + 1,
+        )
+    };
+    let command = SplitCommand {
+        current_map,
+        predecessor: predecessor_id,
+        predecessor_generation: 0,
+        left: SuccessorDescriptor {
+            range_id: left_range,
+            endpoint: format!("left-r{left_range}.internal:7443"),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(left_range, predecessor.start, Some(split_at)),
+        },
+        right: SuccessorDescriptor {
+            range_id: right_range,
+            endpoint: format!("right-r{right_range}.internal:7443"),
+            wal_generation: 1,
+            interval: RangeSpec::for_interval(right_range, split_at, predecessor.end),
+        },
+    };
+    let requests = [
+        TableTransferRequest {
+            target_range: left_range,
+            routing_table_id: table_id,
+            physical_table_id: 1,
+        },
+        TableTransferRequest {
+            target_range: right_range,
+            routing_table_id: table_id,
+            physical_table_id: 1,
+        },
+    ];
+    (command, requests)
 }
 
 impl MtlsFixture {
@@ -184,8 +248,9 @@ async fn empty_table_boundary_split_publishes_ready_successor_and_requires_old_s
         .await
         .expect("bind before split");
 
+    let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
     gateway
-        .split_empty_table_successor("empty-t100", RangeId::new(2), TableId::new(100))
+        .split_empty_successors("empty-t100", command)
         .await
         .expect("empty table split");
 
@@ -245,8 +310,9 @@ async fn populated_table_boundary_split_fails_closed_without_publishing_a_partia
         .await
         .expect("write predecessor row");
 
+    let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
     let error = gateway
-        .split_empty_table_successor("populated-t100", RangeId::new(2), TableId::new(100))
+        .split_empty_successors("populated-t100", command)
         .await
         .expect_err("nonempty SQL table requires durable snapshot transfer");
 
@@ -280,7 +346,7 @@ struct InProcessTransfer {
     source: SqlEngine,
     paused: AtomicBool,
     fail_before_stage: bool,
-    staged: Mutex<Option<SqlEngine>>,
+    staged: Mutex<BTreeMap<RangeId, SqlEngine>>,
     stage_started: Option<Arc<tokio::sync::Notify>>,
     allow_stage: Option<Arc<tokio::sync::Notify>>,
 }
@@ -291,7 +357,7 @@ impl InProcessTransfer {
             source,
             paused: AtomicBool::new(false),
             fail_before_stage,
-            staged: Mutex::new(None),
+            staged: Mutex::new(BTreeMap::new()),
             stage_started: None,
             allow_stage: None,
         }
@@ -307,7 +373,7 @@ impl InProcessTransfer {
                 source,
                 paused: AtomicBool::new(false),
                 fail_before_stage: false,
-                staged: Mutex::new(None),
+                staged: Mutex::new(BTreeMap::new()),
                 stage_started: Some(Arc::clone(&stage_started)),
                 allow_stage: Some(Arc::clone(&allow_stage)),
             },
@@ -321,6 +387,43 @@ impl InProcessTransfer {
             range_id,
             reason: reason.to_owned(),
         }
+    }
+
+    async fn stage_range(
+        &self,
+        request: TableTransferRequest,
+    ) -> Result<StagedRangeSuccessor, RangeTransferError> {
+        if self.fail_before_stage {
+            return Err(Self::error(
+                request.target_range,
+                "injected prepublish fault",
+            ));
+        }
+        let target_kv = Arc::new(MemKv::new());
+        for (key, value) in self
+            .source
+            .kv_handle()
+            .scan_range(&[], &[u8::MAX])
+            .map_err(|error| Self::error(request.target_range, &error.to_string()))?
+        {
+            target_kv
+                .put(key, value)
+                .map_err(|error| Self::error(request.target_range, &error.to_string()))?;
+        }
+        let target = SqlEngine::with_kv(target_kv)
+            .map_err(|error| Self::error(request.target_range, &format!("{error:?}")))?;
+        self.staged
+            .lock()
+            .expect("staged lock")
+            .insert(request.target_range, target);
+        Ok(StagedRangeSuccessor {
+            range_id: request.target_range,
+            bootstrap_checkpoint: CheckpointManifest {
+                range_id: request.target_range,
+                covered_offset: 1,
+                manifest_key: "in-process-target".to_owned(),
+            },
+        })
     }
 }
 
@@ -375,13 +478,13 @@ impl RangeTransferCapability for InProcessTransfer {
         self.paused.store(false, Ordering::Release);
     }
 
-    async fn stage_empty_successor(
+    async fn stage_successors(
         &self,
-        request: TableTransferRequest,
+        requests: [TableTransferRequest; 2],
         _checkpoint: &CheckpointManifest,
         _tail: &[CommittedTailRecord],
         _barrier: RangeTransferBarrier,
-    ) -> Result<StagedRangeSuccessor, RangeTransferError> {
+    ) -> Result<StagedRangeSuccessors, RangeTransferError> {
         if let Some(stage_started) = &self.stage_started {
             stage_started.notify_one();
             self.allow_stage
@@ -390,50 +493,40 @@ impl RangeTransferCapability for InProcessTransfer {
                 .notified()
                 .await;
         }
-        if self.fail_before_stage {
-            return Err(Self::error(
-                request.target_range,
-                "injected prepublish fault",
-            ));
-        }
-        let target_kv = Arc::new(MemKv::new());
-        for (key, value) in self
-            .source
-            .kv_handle()
-            .scan_range(&[], &[u8::MAX])
-            .map_err(|error| Self::error(request.target_range, &error.to_string()))?
-        {
-            target_kv
-                .put(key, value)
-                .map_err(|error| Self::error(request.target_range, &error.to_string()))?;
-        }
-        let target = SqlEngine::with_kv(target_kv)
-            .map_err(|error| Self::error(request.target_range, &format!("{error:?}")))?;
-        *self.staged.lock().expect("staged lock") = Some(target);
-        Ok(StagedRangeSuccessor {
-            range_id: request.target_range,
-            bootstrap_checkpoint: CheckpointManifest {
-                range_id: request.target_range,
-                covered_offset: 1,
-                manifest_key: "in-process-target".to_owned(),
-            },
+        let [left, right] = requests;
+        Ok(StagedRangeSuccessors {
+            left: self.stage_range(left).await?,
+            right: self.stage_range(right).await?,
         })
     }
 
-    async fn claim_staged_successor(
+    async fn claim_successors(
         &self,
-        staged: &StagedRangeSuccessor,
+        staged: &StagedRangeSuccessors,
         _barrier: RangeTransferBarrier,
-    ) -> Result<ClaimedStagedSuccessor, RangeTransferError> {
-        let engine = self
-            .staged
-            .lock()
-            .expect("staged lock")
-            .take()
-            .ok_or_else(|| Self::error(staged.range_id, "successor was not staged"))?;
-        Ok(ClaimedStagedSuccessor {
-            engine,
-            keepalive: Arc::new(()),
+    ) -> Result<ClaimedStagedSuccessors, RangeTransferError> {
+        let mut engines = self.staged.lock().expect("staged lock");
+        if !engines.contains_key(&staged.left.range_id)
+            || !engines.contains_key(&staged.right.range_id)
+        {
+            return Err(Self::error(
+                staged.left.range_id,
+                "both successors must be staged",
+            ));
+        }
+        let left = engines.remove(&staged.left.range_id).expect("checked left");
+        let right = engines
+            .remove(&staged.right.range_id)
+            .expect("checked right");
+        Ok(ClaimedStagedSuccessors {
+            left: ClaimedStagedSuccessor {
+                engine: left,
+                keepalive: Arc::new(()),
+            },
+            right: ClaimedStagedSuccessor {
+                engine: right,
+                keepalive: Arc::new(()),
+            },
         })
     }
 }
@@ -464,14 +557,10 @@ async fn cancelled_populated_transfer_resumes_the_source_after_the_pause_barrier
 
     let split_gateway = gateway.clone();
     let split_transfer = Arc::clone(&transfer);
+    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     let split = tokio::spawn(async move {
         split_gateway
-            .split_populated_table_successor(
-                "cancel-t10",
-                RangeId::new(3),
-                TableId::new(10),
-                split_transfer.as_ref(),
-            )
+            .split_successors("cancel-t10", command, requests, split_transfer.as_ref())
             .await
     });
     stage_started.notified().await;
@@ -512,12 +601,13 @@ async fn ddl_in_the_successor_interval_waits_for_populated_transfer_publication(
 
     let split_gateway = gateway.clone();
     let split_transfer = Arc::clone(&transfer);
+    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     let split = tokio::spawn(async move {
         split_gateway
-            .split_populated_table_successor(
+            .split_successors(
                 "move-t10-with-ddl",
-                RangeId::new(3),
-                TableId::new(10),
+                command,
+                requests,
                 split_transfer.as_ref(),
             )
             .await
@@ -597,13 +687,9 @@ async fn populated_transfer_publishes_a_sql_ready_successor_and_releases_source_
         .expect("source engine");
     let failed_transfer = InProcessTransfer::new(source.clone_handle(), true);
     let initial_map = handles.range_map();
+    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     gateway
-        .split_populated_table_successor(
-            "fault-t10",
-            RangeId::new(3),
-            TableId::new(10),
-            &failed_transfer,
-        )
+        .split_successors("fault-t10", command, requests, &failed_transfer)
         .await
         .expect_err("fault before publication");
     assert!(!failed_transfer.paused.load(Ordering::Acquire));
@@ -614,8 +700,9 @@ async fn populated_transfer_publishes_a_sql_ready_successor_and_releases_source_
         .expect("source remains serving after prepublish failure");
 
     let transfer = InProcessTransfer::new(source, false);
+    let (command, requests) = split_fixture(&gateway, RangeId::new(3), TableId::new(10));
     gateway
-        .split_populated_table_successor("move-t10", RangeId::new(3), TableId::new(10), &transfer)
+        .split_successors("move-t10", command, requests, &transfer)
         .await
         .expect("publish populated successor");
     assert!(!transfer.paused.load(Ordering::Acquire));
@@ -670,9 +757,10 @@ async fn empty_table_split_revalidates_after_a_concurrent_predecessor_insert() {
         .expect("create empty moved table");
 
     let split_gateway = gateway.clone();
+    let (command, _) = split_fixture(&gateway, RangeId::new(2), TableId::new(100));
     let split = tokio::spawn(async move {
         split_gateway
-            .split_empty_table_successor("empty-t100-race", RangeId::new(2), TableId::new(100))
+            .split_empty_successors("empty-t100-race", command)
             .await
     });
     split_hook.initial_validation_complete().await;

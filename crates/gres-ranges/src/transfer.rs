@@ -31,6 +31,15 @@ pub struct StagedRangeSuccessor {
     pub bootstrap_checkpoint: CheckpointManifest,
 }
 
+/// Both staged halves produced from one checkpoint and one bounded tail.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StagedRangeSuccessors {
+    /// Staged left half.
+    pub left: StagedRangeSuccessor,
+    /// Staged right half.
+    pub right: StagedRangeSuccessor,
+}
+
 /// Runtime resources claimed from a staged successor at the publication boundary.
 ///
 /// The opaque keepalive retains runtime-owned tasks and stores without coupling the
@@ -40,6 +49,14 @@ pub struct ClaimedStagedSuccessor {
     pub engine: SqlEngine,
     /// Runtime resources that must outlive the published engine.
     pub keepalive: Arc<dyn Any + Send + Sync>,
+}
+
+/// Runtime resources for both successors, claimed as one publication unit.
+pub struct ClaimedStagedSuccessors {
+    /// Claimed left half.
+    pub left: ClaimedStagedSuccessor,
+    /// Claimed right half.
+    pub right: ClaimedStagedSuccessor,
 }
 
 /// A committed WAL record retained for a bounded range transfer tail.
@@ -141,22 +158,24 @@ pub trait RangeTransferCapability: Send + Sync {
     /// The returned successor is intentionally not serving and no range map is
     /// mutated. The caller retains ownership of the source pause represented by
     /// `barrier` and must resume it on every failure path.
-    async fn stage_empty_successor(
+    /// Stage both successor intervals from the same immutable checkpoint and bounded tail.
+    async fn stage_successors(
         &self,
-        request: TableTransferRequest,
+        requests: [TableTransferRequest; 2],
         checkpoint: &CheckpointManifest,
         tail: &[CommittedTailRecord],
         barrier: RangeTransferBarrier,
-    ) -> Result<StagedRangeSuccessor, RangeTransferError>;
+    ) -> Result<StagedRangeSuccessors, RangeTransferError>;
 
     /// Transfer ownership of a staged successor to the serving-map publisher.
     ///
     /// This must only succeed while the source barrier remains held. Callers must
     /// discard the claimed resources and resume the source if publication cannot
     /// proceed.
-    async fn claim_staged_successor(
+    /// Claim both staged successors before an atomic map publication.
+    async fn claim_successors(
         &self,
-        staged: &StagedRangeSuccessor,
+        staged: &StagedRangeSuccessors,
         barrier: RangeTransferBarrier,
-    ) -> Result<ClaimedStagedSuccessor, RangeTransferError>;
+    ) -> Result<ClaimedStagedSuccessors, RangeTransferError>;
 }

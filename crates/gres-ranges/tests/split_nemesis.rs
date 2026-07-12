@@ -15,7 +15,7 @@ use std::{
 use crabka_gres_ranges::{
     CheckpointManifest, InDoubtMarker, MapEpoch, MergeRangeCommand, RangeId, RangeKey, RangeMap,
     RangeSpec, SplitCommand, SplitError, SplitHooks, SplitState, SplitStateStore, SplitStep,
-    TableId, TenantName, run_merge, run_split,
+    SuccessorDescriptor, TableId, TenantName, run_merge, run_split,
 };
 use crabka_pgwire::engine::Engine;
 use harness::{first_i64, run};
@@ -406,11 +406,31 @@ async fn read_balance(
 }
 
 fn split_command(tenant: TenantName) -> SplitCommand {
+    let split_at = RangeKey::table_start(TableId::new(100));
     SplitCommand {
         current_map: range_map(tenant),
         predecessor: RangeId::new(1),
-        successor: RangeId::new(2),
-        split_at: RangeKey::table_start(TableId::new(100)),
+        predecessor_generation: 3,
+        left: SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            endpoint: "left.internal:7443".into(),
+            wal_generation: 4,
+            interval: RangeSpec::for_interval(
+                RangeId::new(2),
+                RangeKey::table_start(TableId::new(1)),
+                Some(split_at),
+            ),
+        },
+        right: SuccessorDescriptor {
+            range_id: RangeId::new(4),
+            endpoint: "right.internal:7443".into(),
+            wal_generation: 4,
+            interval: RangeSpec::for_interval(
+                RangeId::new(4),
+                split_at,
+                Some(RangeKey::table_start(TableId::new(200))),
+            ),
+        },
     }
 }
 

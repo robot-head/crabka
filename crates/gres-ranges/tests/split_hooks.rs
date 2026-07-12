@@ -6,7 +6,8 @@ use crabka_gres_ranges::{
     InDoubtMarkerInheritanceOperation, MapEpoch, PredecessorParkingOperation, RangeId, RangeKey,
     RangeMap, RangeMapCommitOperation, RangeSpec, SplitCommand, SplitError,
     SplitHookAdapterBuilder, SplitHookOperation, SplitState, SplitStateStore, SplitStep,
-    SuccessorPrologueOperation, TableId, TenantName, WriteGateOperation, run_split,
+    SuccessorDescriptor, SuccessorPrologueOperation, TableId, TenantName, WriteGateOperation,
+    run_split,
 };
 
 #[derive(Default)]
@@ -249,6 +250,7 @@ async fn unavailable_operation_fails_at_its_step_without_advancing_persisted_sta
 }
 
 fn split_command() -> SplitCommand {
+    let split_at = RangeKey::table_start(TableId::new(20));
     SplitCommand {
         current_map: RangeMap::new(
             TenantName::parse("adapter-test").expect("tenant"),
@@ -261,7 +263,26 @@ fn split_command() -> SplitCommand {
         )
         .expect("range map"),
         predecessor: RangeId::new(1),
-        successor: RangeId::new(2),
-        split_at: RangeKey::table_start(TableId::new(20)),
+        predecessor_generation: 3,
+        left: SuccessorDescriptor {
+            range_id: RangeId::new(2),
+            endpoint: "left.internal:7443".into(),
+            wal_generation: 4,
+            interval: RangeSpec::for_interval(
+                RangeId::new(2),
+                RangeKey::table_start(TableId::new(10)),
+                Some(split_at),
+            ),
+        },
+        right: SuccessorDescriptor {
+            range_id: RangeId::new(4),
+            endpoint: "right.internal:7443".into(),
+            wal_generation: 4,
+            interval: RangeSpec::for_interval(
+                RangeId::new(4),
+                split_at,
+                Some(RangeKey::table_start(TableId::new(30))),
+            ),
+        },
     }
 }
