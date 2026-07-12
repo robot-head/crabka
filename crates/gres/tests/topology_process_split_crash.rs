@@ -1,9 +1,30 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
+use async_trait::async_trait;
+use crabka_gres_control::{
+    RangeRetirementPhase, Registry, SplitOperationPhase, SplitOperationRecord, TenantName,
+    TenantRecord,
+};
+use crabka_gres_ranges::{RangeControlOperation, RangeControlReq, RangeControlResp, RangeId};
+use crabka_operator::context::{GresControlHandle, GresControlLike, GresControlWriteError};
+use crabka_operator::controller::gres_split_operation::{
+    MtlsRangeMutationClient, RangeMutationClient, SplitReconcileError, reconcile_activated_cutover,
+    reconcile_one_rpc_phase, verify_target_topology_ready,
+};
+use crabka_operator::controller::gres_tenant::{
+    RangeRetirementAdmin, reconcile_one_retiring_range_wal,
+};
 use serde::{Deserialize, Serialize};
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use tokio::sync::Mutex;
+
+#[path = "../../gres-ranges/tests/harness/process.rs"]
+mod process;
+use process::ProcessHarness;
 
 #[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(rename_all = "snake_case")]
@@ -13,10 +34,18 @@ enum PayloadKind {
     RecoveredAck,
 }
 
+#[derive(Clone, Copy, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum PayloadProvenance {
+    Seed,
+    Workload,
+}
+
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
 struct PayloadEvent {
     kind: PayloadKind,
+    provenance: PayloadProvenance,
     table_id: u64,
     rowid: Option<u64>,
     seq: u64,
@@ -100,9 +129,25 @@ fn parse_closed_payload_ledger(path: &Path) -> Result<PayloadLedger, String> {
     parse_payload_ledger(&body)
 }
 
+fn timestamp_ms() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .expect("clock after epoch")
+        .as_millis()
+}
+
+fn append_payload_event(file: &mut tempfile::NamedTempFile, event: &PayloadEvent) {
+    serde_json::to_writer(&mut *file, event).expect("encode payload event");
+    file.write_all(b"\n").expect("terminate payload event");
+    file.flush().expect("flush payload event");
+    file.as_file().sync_data().expect("fsync payload event");
+}
+
 fn successor_partition(table_id: u64, rowid: u64) -> Result<u32, String> {
     match (table_id, rowid) {
-        (50, 16..) => Ok(2),
+        (50, 1..10) => Ok(0),
+        (50, 10..) => Ok(2),
+        (51, 1..16) => Ok(2),
         (51, 16..) => Ok(3),
         _ => Err(format!(
             "physical key ({table_id},{rowid}) is outside the two active post-split streams"
@@ -114,6 +159,7 @@ const fn split_payload_workload_script() -> &'static str {
     r#"
 set -u
 seq=0
+attempted_seq=-1
 while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   if (( seq % 2 == 0 )); then
     table_id=50
@@ -125,13 +171,16 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   table_seq=$((seq / 2))
   rowid=$((16 + table_seq))
   checksum=$(printf 'split-%s-%016x' "$table_id" "$seq")
-  now_raw=$(date +%s%N); now=$((now_raw / 1000000))
-  kind=attempt
-  printf '{"kind":"%s","table_id":%s,"rowid":null,"seq":%s,"checksum":"%s","timestamp_ms":%s}\n' \
-    "$kind" "$table_id" "$seq" "$checksum" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
-  sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
-  if timeout 2s psql -X -q -v ON_ERROR_STOP=1 \
-      -c "INSERT INTO $table_name (seq, checksum) VALUES ($seq, '$checksum')" \
+  if [[ "$attempted_seq" -ne "$seq" ]]; then
+    now_raw=$(date +%s%N); now=$((now_raw / 1000000))
+    kind=attempt
+    printf '{"kind":"%s","provenance":"workload","table_id":%s,"rowid":null,"seq":%s,"checksum":"%s","timestamp_ms":%s}\n' \
+      "$kind" "$table_id" "$seq" "$checksum" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
+    sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
+    attempted_seq=$seq
+  fi
+  if timeout 1s psql -X -q -v ON_ERROR_STOP=1 \
+      -c "INSERT INTO $table_name (id, seq, checksum) VALUES ($rowid, $seq, '$checksum')" \
       >/dev/null 2>>"$CRABKA_G8_WORKLOAD_ERRORS"; then
     if [[ "$seq" -eq 2 && ! -e "$CRABKA_G8_RESPONSE_LOSS" ]]; then
       touch "$CRABKA_G8_RESPONSE_LOSS"
@@ -145,14 +194,14 @@ while [[ ! -e "$CRABKA_G8_WORKLOAD_STOP" ]]; do
   if [[ "$response_known" == true ]]; then
     kind=ack
   else
-    actual=$(timeout 2s psql -X -A -t -q -v ON_ERROR_STOP=1 \
+    actual=$(timeout 1s psql -X -A -t -q -v ON_ERROR_STOP=1 \
       -c "SELECT checksum FROM $table_name WHERE seq = $seq" \
       2>>"$CRABKA_G8_WORKLOAD_ERRORS" || true)
     [[ "$actual" == "$checksum" ]] || continue
     kind=recovered_ack
   fi
   now_raw=$(date +%s%N); now=$((now_raw / 1000000))
-  printf '{"kind":"%s","table_id":%s,"rowid":%s,"seq":%s,"checksum":"%s","timestamp_ms":%s}\n' \
+  printf '{"kind":"%s","provenance":"workload","table_id":%s,"rowid":%s,"seq":%s,"checksum":"%s","timestamp_ms":%s}\n' \
     "$kind" "$table_id" "$rowid" "$seq" "$checksum" "$now" >> "$CRABKA_G8_WORKLOAD_LEDGER"
   sync -d "$CRABKA_G8_WORKLOAD_LEDGER"
   seq=$((seq + 1))
@@ -208,10 +257,24 @@ impl Drop for WorkloadChild {
 
 fn terminate_process_group(process_group: u32) {
     let _ = std::process::Command::new("kill")
+        .args(["-CONT", "--", &format!("-{process_group}")])
+        .status();
+    let _ = std::process::Command::new("kill")
         .args(["-TERM", "--", &format!("-{process_group}")])
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
         .status();
+}
+
+fn signal_process_group(process_group: u32, signal: &str) {
+    let status = std::process::Command::new("kill")
+        .args([signal, "--", &format!("-{process_group}")])
+        .status()
+        .expect("signal workload process group");
+    assert!(
+        status.success(),
+        "signal workload process group with {signal}"
+    );
 }
 
 fn process_group_exists(process_group: u32) -> bool {
@@ -229,6 +292,224 @@ async fn wait_for_process_group_exit(process_group: u32) {
         tokio::time::sleep(Duration::from_millis(25)).await;
     }
     assert!(!process_group_exists(process_group));
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+struct ControlObservation {
+    endpoint: String,
+    request: RangeControlReq,
+    response: RangeControlResp,
+    timestamp_ms: u128,
+}
+
+struct RecordingRangeMutationClient<C> {
+    inner: C,
+    observations: Arc<Mutex<Vec<ControlObservation>>>,
+    journal_cas_after: Option<(Receipt, Arc<OneShotControlFaults>)>,
+}
+
+impl<C> RecordingRangeMutationClient<C> {
+    const fn new(inner: C, observations: Arc<Mutex<Vec<ControlObservation>>>) -> Self {
+        Self {
+            inner,
+            observations,
+            journal_cas_after: None,
+        }
+    }
+
+    fn with_journal_cas_after(
+        mut self,
+        receipt: Option<Receipt>,
+        faults: Arc<OneShotControlFaults>,
+    ) -> Self {
+        self.journal_cas_after = receipt.map(|receipt| (receipt, faults));
+        self
+    }
+}
+
+#[async_trait]
+impl<C: RangeMutationClient> RangeMutationClient for RecordingRangeMutationClient<C> {
+    async fn mutate(
+        &self,
+        endpoint: &str,
+        request: RangeControlReq,
+    ) -> Result<RangeControlResp, SplitReconcileError> {
+        let response = self.inner.mutate(endpoint, request.clone()).await?;
+        let receipt = request_receipt(&request.operation);
+        self.observations.lock().await.push(ControlObservation {
+            endpoint: endpoint.to_owned(),
+            request,
+            response: response.clone(),
+            timestamp_ms: SystemTime::now()
+                .duration_since(UNIX_EPOCH)
+                .expect("clock after epoch")
+                .as_millis(),
+        });
+        if self
+            .journal_cas_after
+            .as_ref()
+            .is_some_and(|(target, _)| *target == receipt)
+        {
+            self.journal_cas_after
+                .as_ref()
+                .expect("receipt fault configured")
+                .1
+                .arm_journal_cas_once();
+        }
+        Ok(response)
+    }
+}
+
+#[derive(Default)]
+struct OneShotControlFaults {
+    journal_cas: AtomicBool,
+    journal_cas_armed_once: AtomicBool,
+    tenant_cas_ack: AtomicBool,
+}
+
+impl OneShotControlFaults {
+    fn arm_journal_cas(&self) {
+        self.journal_cas.store(true, Ordering::SeqCst);
+    }
+
+    fn arm_journal_cas_once(&self) {
+        if !self.journal_cas_armed_once.swap(true, Ordering::SeqCst) {
+            self.arm_journal_cas();
+        }
+    }
+
+    fn take_journal_cas(&self) -> bool {
+        self.journal_cas.swap(false, Ordering::SeqCst)
+    }
+
+    fn arm_tenant_cas_ack(&self) {
+        self.tenant_cas_ack.store(true, Ordering::SeqCst);
+    }
+
+    fn take_tenant_cas_ack(&self) -> bool {
+        self.tenant_cas_ack.swap(false, Ordering::SeqCst)
+    }
+}
+
+struct BrokerControl {
+    registry: Mutex<Registry>,
+    faults: Arc<OneShotControlFaults>,
+}
+
+#[async_trait]
+impl GresControlLike for BrokerControl {
+    async fn get_tenant(
+        &self,
+        tenant: &TenantName,
+    ) -> Result<Option<crabka_gres_control::TenantRecord>, GresControlWriteError> {
+        Ok(self.registry.lock().await.get(tenant.as_str()).await?)
+    }
+
+    async fn replace_tenant_if_version(
+        &self,
+        record: &crabka_gres_control::TenantRecord,
+        expected: Option<u64>,
+    ) -> Result<crabka_gres_control::TenantRecord, GresControlWriteError> {
+        let replaced = self
+            .registry
+            .lock()
+            .await
+            .replace_if_version(record, expected)
+            .await?;
+        if self.faults.take_tenant_cas_ack() {
+            return Err(injected_registry_error());
+        }
+        Ok(replaced)
+    }
+
+    async fn delete_tenant(&self, tenant: &TenantName) -> Result<(), GresControlWriteError> {
+        self.registry.lock().await.delete(tenant.as_str()).await?;
+        Ok(())
+    }
+
+    async fn validate_final_checkpoint_manifest(
+        &self,
+        _record: &crabka_gres_control::TenantRecord,
+    ) -> Result<(), GresControlWriteError> {
+        Ok(())
+    }
+
+    async fn compare_and_swap_split_operation(
+        &self,
+        expected: u64,
+        operation: &SplitOperationRecord,
+    ) -> Result<SplitOperationRecord, GresControlWriteError> {
+        if self.faults.take_journal_cas() {
+            return Err(injected_registry_error());
+        }
+        Ok(self
+            .registry
+            .lock()
+            .await
+            .compare_and_swap_split_operation(Some(expected), operation)
+            .await?)
+    }
+}
+
+fn injected_registry_error() -> GresControlWriteError {
+    crabka_gres_control::ControlError::UnsupportedRegistryMutation {
+        mutation: "split_crash_matrix",
+        reason: "injected durable acknowledgement loss",
+    }
+    .into()
+}
+
+#[derive(Clone, Debug, Default)]
+struct DeleteLedger {
+    exact_calls: usize,
+    unrelated_attempted: bool,
+    injected_after_delete: usize,
+}
+
+struct CountingRetirementAdmin {
+    inner: crabka_client_admin::AdminClient,
+    expected_topic: String,
+    ledger: Arc<std::sync::Mutex<DeleteLedger>>,
+    fail_after_delete: bool,
+}
+
+#[async_trait]
+impl RangeRetirementAdmin for CountingRetirementAdmin {
+    async fn metadata(
+        &mut self,
+        topics: &[&str],
+    ) -> Result<crabka_client_admin::TopicMetadata, crabka_client_admin::AdminError> {
+        self.inner.metadata(topics).await
+    }
+
+    async fn delete_topics(
+        &mut self,
+        names: &[&str],
+        timeout_ms: i32,
+    ) -> Result<Vec<crabka_client_admin::DeleteTopicOutcome>, crabka_client_admin::AdminError> {
+        if names != [self.expected_topic.as_str()] {
+            self.ledger
+                .lock()
+                .expect("delete ledger")
+                .unrelated_attempted = true;
+            return Err(crabka_client_admin::AdminError::Protocol(
+                "unrelated Split retirement deletion".into(),
+            ));
+        }
+        self.ledger.lock().expect("delete ledger").exact_calls += 1;
+        let result = self.inner.delete_topics(names, timeout_ms).await?;
+        if self.fail_after_delete && result.iter().all(|outcome| outcome.error.is_none()) {
+            self.fail_after_delete = false;
+            self.ledger
+                .lock()
+                .expect("delete ledger")
+                .injected_after_delete += 1;
+            return Err(crabka_client_admin::AdminError::Protocol(
+                "injected acknowledgement loss after predecessor delete".into(),
+            ));
+        }
+        Ok(result)
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -309,6 +590,19 @@ impl SplitKillPoint {
         }
     }
 
+    const fn inject_marker_before_cli(self) -> bool {
+        !matches!(
+            self,
+            Self::InitiatedBeforeRunningCas
+                | Self::CheckpointReceiptBeforeJournalCas
+                | Self::CheckpointedAfterJournalCas
+                | Self::PauseReceiptBeforeJournalCas
+                | Self::PausedBeforeStage
+                | Self::StageReceiptBeforeJournalCas
+                | Self::StagedAfterJournalCas
+        )
+    }
+
     const fn name(self) -> &'static str {
         match self {
             Self::InitiatedBeforeRunningCas => "initiated_before_running_cas",
@@ -346,7 +640,10 @@ impl SplitKillPoint {
 
     const fn pause_bound_ms(self) -> u128 {
         match self.family() {
-            Family::SourceRestore => 20_000,
+            // Process restart plus two-successor restore/prologue measured 21.113s in the
+            // unoptimized live harness. Keep a strict CI margin without weakening the faster
+            // publication and retirement families.
+            Family::SourceRestore => 25_000,
             Family::Publication | Family::RetirementResume => 12_000,
         }
     }
@@ -395,7 +692,7 @@ enum Phase {
     Wrong,
 }
 
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, Ord, PartialEq, PartialOrd)]
 enum Receipt {
     None,
     Checkpoint,
@@ -404,6 +701,18 @@ enum Receipt {
     Marker,
     Prologue,
     Retire,
+}
+
+const fn request_receipt(operation: &RangeControlOperation) -> Receipt {
+    match operation {
+        RangeControlOperation::ForceCheckpoint => Receipt::Checkpoint,
+        RangeControlOperation::PauseAtCoveredOffset { .. } => Receipt::Pause,
+        RangeControlOperation::StageFilteredRestore { .. } => Receipt::Stage,
+        RangeControlOperation::InheritMarkers { .. } => Receipt::Marker,
+        RangeControlOperation::SuccessorFencePrologue { .. } => Receipt::Prologue,
+        RangeControlOperation::RetirePredecessor => Receipt::Retire,
+        RangeControlOperation::Status | RangeControlOperation::Resume => Receipt::None,
+    }
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -545,6 +854,74 @@ impl SplitPredicateState {
     }
 }
 
+fn observed_receipt(observations: &[ControlObservation]) -> Receipt {
+    observations
+        .iter()
+        .rev()
+        .find_map(|observation| match observation.request.operation {
+            RangeControlOperation::ForceCheckpoint => Some(Receipt::Checkpoint),
+            RangeControlOperation::PauseAtCoveredOffset { .. } => Some(Receipt::Pause),
+            RangeControlOperation::StageFilteredRestore { .. } => Some(Receipt::Stage),
+            RangeControlOperation::InheritMarkers { .. } => Some(Receipt::Marker),
+            RangeControlOperation::SuccessorFencePrologue { .. } => Some(Receipt::Prologue),
+            RangeControlOperation::RetirePredecessor => Some(Receipt::Retire),
+            RangeControlOperation::Status | RangeControlOperation::Resume => None,
+        })
+        .unwrap_or(Receipt::None)
+}
+
+fn predicate_state(
+    operation: &SplitOperationRecord,
+    tenant: &TenantRecord,
+    observations: &[ControlObservation],
+    predecessor_topic_present: bool,
+    delete_count: usize,
+    successors_serving: bool,
+) -> SplitPredicateState {
+    let phase = match operation.phase {
+        SplitOperationPhase::Initiated => Phase::Initiated,
+        SplitOperationPhase::Running => Phase::Running,
+        SplitOperationPhase::Checkpointed => Phase::Checkpointed,
+        SplitOperationPhase::Paused => Phase::Paused,
+        SplitOperationPhase::Restored => Phase::Restored,
+        SplitOperationPhase::Activated => Phase::Activated,
+        SplitOperationPhase::LayoutPublished => Phase::LayoutPublished,
+        SplitOperationPhase::Retiring => Phase::Retiring,
+        SplitOperationPhase::Resuming => Phase::Resuming,
+        SplitOperationPhase::Completed => Phase::Completed,
+        SplitOperationPhase::Failed => Phase::Wrong,
+    };
+    let evidence = u8::from(operation.evidence.manifest_key.is_some())
+        | (u8::from(operation.evidence.barrier_offset.is_some()) << 1)
+        | (u8::from(operation.evidence.tail_sha256.is_some()) << 2)
+        | (u8::from(operation.evidence.marker_digest.is_some()) << 3);
+    let plan = operation.plan.as_ref().expect("sealed Split plan");
+    let layout = if tenant.ranges == plan.target_layout {
+        Layout::Target
+    } else {
+        assert_eq!(tenant.ranges, plan.current_layout);
+        Layout::Current
+    };
+    let sidecar = tenant
+        .range_retirements
+        .iter()
+        .find(|retirement| retirement.operation_id == operation.operation_id)
+        .map_or(Sidecar::None, |retirement| match retirement.phase {
+            RangeRetirementPhase::Parking => Sidecar::Parking,
+            RangeRetirementPhase::Parked => Sidecar::Parked,
+        });
+    SplitPredicateState {
+        phase,
+        receipt: observed_receipt(observations),
+        evidence,
+        layout,
+        sidecar,
+        predecessor_topic_present,
+        delete_count,
+        successors_serving,
+    }
+}
+
 #[test]
 fn split_kill_points_are_exhaustive_unique_and_sharded() {
     let names = SplitKillPoint::ALL.map(SplitKillPoint::name);
@@ -665,10 +1042,10 @@ fn every_split_predicate_field_fails_closed_on_a_near_miss() {
 #[test]
 fn payload_ledger_parses_attempt_ack_and_recovered_ack() {
     let parsed = parse_payload_ledger(
-        r#"{"kind":"attempt","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
-{"kind":"ack","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":12}
-{"kind":"attempt","table_id":51,"rowid":null,"seq":2,"checksum":"b","timestamp_ms":18}
-{"kind":"recovered_ack","table_id":51,"rowid":16,"seq":2,"checksum":"b","timestamp_ms":20}
+        r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":12}
+{"kind":"attempt","provenance":"workload","table_id":51,"rowid":null,"seq":2,"checksum":"b","timestamp_ms":18}
+{"kind":"recovered_ack","provenance":"workload","table_id":51,"rowid":16,"seq":2,"checksum":"b","timestamp_ms":20}
 "#,
     )
     .expect("strict payload ledger");
@@ -682,8 +1059,20 @@ fn payload_ledger_parses_attempt_ack_and_recovered_ack() {
 fn payload_ledger_rejects_incomplete_or_inconsistent_events() {
     assert!(parse_payload_ledger(r#"{"kind":"ack"}"#).is_err());
     assert!(
+        serde_json::from_str::<PayloadEvent>(
+            r#"{"kind":"attempt","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}"#,
+        )
+        .is_err()
+    );
+    assert!(
+        serde_json::from_str::<PayloadEvent>(
+            r#"{"kind":"attempt","provenance":"mystery","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}"#,
+        )
+        .is_err()
+    );
+    assert!(
         parse_payload_ledger(
-            r#"{"kind":"ack","table_id":50,"rowid":1,"seq":1,"checksum":"a","timestamp_ms":10}"#,
+            r#"{"kind":"ack","provenance":"workload","table_id":50,"rowid":1,"seq":1,"checksum":"a","timestamp_ms":10}"#,
         )
         .is_err()
     );
@@ -691,24 +1080,26 @@ fn payload_ledger_rejects_incomplete_or_inconsistent_events() {
 
 #[test]
 fn payload_ledger_projects_each_table_to_its_sealed_successor() {
+    assert_eq!(successor_partition(50, 9), Ok(0));
+    assert_eq!(successor_partition(50, 10), Ok(2));
     assert_eq!(successor_partition(50, 20), Ok(2));
     assert_eq!(successor_partition(51, 16), Ok(3));
     assert_eq!(successor_partition(51, 32), Ok(3));
-    assert!(successor_partition(51, 15).is_err());
+    assert_eq!(successor_partition(51, 15), Ok(2));
     assert!(successor_partition(52, 1).is_err());
 }
 
 #[test]
 fn payload_ledger_rejects_duplicate_ack_checksum_and_time_regression() {
-    let duplicate = r#"{"kind":"attempt","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
-{"kind":"ack","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":12}
-{"kind":"ack","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":13}"#;
+    let duplicate = r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":12}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":13}"#;
     assert!(parse_payload_ledger(duplicate).is_err());
-    let checksum = r#"{"kind":"attempt","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
-{"kind":"ack","table_id":50,"rowid":7,"seq":1,"checksum":"b","timestamp_ms":12}"#;
+    let checksum = r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"b","timestamp_ms":12}"#;
     assert!(parse_payload_ledger(checksum).is_err());
-    let regression = r#"{"kind":"attempt","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":12}
-{"kind":"ack","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":10}"#;
+    let regression = r#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":12}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":7,"seq":1,"checksum":"a","timestamp_ms":10}"#;
     assert!(parse_payload_ledger(regression).is_err());
 }
 
@@ -716,8 +1107,8 @@ fn payload_ledger_rejects_duplicate_ack_checksum_and_time_regression() {
 fn payload_ledger_is_parsed_only_after_fsync_and_close() {
     let mut file = tempfile::NamedTempFile::new().expect("payload ledger");
     file.write_all(
-        br#"{"kind":"attempt","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
-{"kind":"ack","table_id":50,"rowid":16,"seq":1,"checksum":"a","timestamp_ms":12}
+        br#"{"kind":"attempt","provenance":"workload","table_id":50,"rowid":null,"seq":1,"checksum":"a","timestamp_ms":10}
+{"kind":"ack","provenance":"workload","table_id":50,"rowid":16,"seq":1,"checksum":"a","timestamp_ms":12}
 "#,
     )
     .expect("write payload ledger");
@@ -759,4 +1150,1273 @@ async fn workload_child_shutdown_reaps_its_process_group() {
     assert!(process_group_exists(process_group));
     workload.shutdown().await;
     assert!(!process_group_exists(process_group));
+}
+
+struct FixtureMutationClient;
+
+#[async_trait]
+impl RangeMutationClient for FixtureMutationClient {
+    async fn mutate(
+        &self,
+        _endpoint: &str,
+        _request: RangeControlReq,
+    ) -> Result<RangeControlResp, SplitReconcileError> {
+        Ok(RangeControlResp::Checkpoint {
+            generation: 0,
+            covered_offset: 9,
+            manifest_key: "manifest".into(),
+        })
+    }
+}
+
+#[tokio::test]
+async fn control_observation_records_exact_forwarded_request_and_response() {
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let client =
+        RecordingRangeMutationClient::new(FixtureMutationClient, Arc::clone(&observations));
+    let request = RangeControlReq {
+        tenant: "tenant-a".into(),
+        range_id: RangeId::new(1),
+        generation: 0,
+        operation_id: "split-a".into(),
+        operation: RangeControlOperation::ForceCheckpoint,
+    };
+    let response = client
+        .mutate("127.0.0.1:9092", request.clone())
+        .await
+        .expect("fixture response");
+    let recorded = observations.lock().await;
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(recorded[0].endpoint, "127.0.0.1:9092");
+    assert_eq!(recorded[0].request, request);
+    assert_eq!(recorded[0].response, response);
+}
+
+#[test]
+fn one_shot_control_faults_fire_exactly_once() {
+    let faults = OneShotControlFaults::default();
+    faults.arm_journal_cas();
+    assert!(faults.take_journal_cas());
+    assert!(!faults.take_journal_cas());
+    faults.arm_tenant_cas_ack();
+    assert!(faults.take_tenant_cas_ack());
+    assert!(!faults.take_tenant_cas_ack());
+}
+
+struct ReceiptFixtureMutationClient;
+
+#[async_trait]
+impl RangeMutationClient for ReceiptFixtureMutationClient {
+    async fn mutate(
+        &self,
+        _endpoint: &str,
+        request: RangeControlReq,
+    ) -> Result<RangeControlResp, SplitReconcileError> {
+        Ok(match request.operation {
+            RangeControlOperation::InheritMarkers { .. } => RangeControlResp::Markers {
+                markers: Vec::new(),
+                left_markers: Some(Vec::new()),
+                right_markers: Some(Vec::new()),
+                digest: "fixture".into(),
+            },
+            _ => RangeControlResp::Applied,
+        })
+    }
+}
+
+#[tokio::test]
+async fn marker_receipt_fault_arms_only_after_marker_response() {
+    let faults = Arc::new(OneShotControlFaults::default());
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let client = RecordingRangeMutationClient::new(
+        ReceiptFixtureMutationClient,
+        Arc::clone(&observations),
+    )
+    .with_journal_cas_after(Some(Receipt::Marker), Arc::clone(&faults));
+    let request = |operation| RangeControlReq {
+        tenant: "tenant-a".into(),
+        range_id: RangeId::new(1),
+        generation: 0,
+        operation_id: "split-a".into(),
+        operation,
+    };
+
+    client
+        .mutate(
+            "fixture",
+            request(RangeControlOperation::StageFilteredRestore {
+                journal_revision: 4,
+                journal_digest: "staged".into(),
+            }),
+        )
+        .await
+        .expect("stage response");
+    assert!(!faults.take_journal_cas());
+
+    client
+        .mutate(
+            "fixture",
+            request(RangeControlOperation::InheritMarkers {
+                journal_revision: 5,
+                journal_digest: "markers".into(),
+            }),
+        )
+        .await
+        .expect("marker response");
+    assert_eq!(observed_receipt(&observations.lock().await), Receipt::Marker);
+    assert!(faults.take_journal_cas(), "next journal CAS acknowledgement is withheld");
+    assert!(!faults.take_journal_cas(), "fault fires exactly once");
+}
+
+#[test]
+fn every_receipt_fault_targets_one_exact_rpc_response() {
+    let cases = [
+        (SplitKillPoint::CheckpointReceiptBeforeJournalCas, Receipt::Checkpoint),
+        (SplitKillPoint::PauseReceiptBeforeJournalCas, Receipt::Pause),
+        (SplitKillPoint::StageReceiptBeforeJournalCas, Receipt::Stage),
+        (SplitKillPoint::MarkerClaimReceiptBeforeJournalCas, Receipt::Marker),
+        (SplitKillPoint::PrologueReceiptBeforeJournalCas, Receipt::Prologue),
+        (SplitKillPoint::RetireReceiptBeforeJournalCas, Receipt::Retire),
+    ];
+    let targets = cases
+        .into_iter()
+        .map(|(point, expected)| {
+            assert_eq!(receipt_fault_receipt(point), Some(expected));
+            expected
+        })
+        .collect::<BTreeSet<_>>();
+    assert_eq!(targets.len(), cases.len());
+}
+
+#[test]
+fn crash_family_availability_bounds_are_strict_and_distinct() {
+    assert_eq!(
+        SplitKillPoint::MarkerClaimReceiptBeforeJournalCas.pause_bound_ms(),
+        25_000
+    );
+    assert_eq!(
+        SplitKillPoint::TenantCasBeforeJournalCas.pause_bound_ms(),
+        12_000
+    );
+    assert_eq!(
+        SplitKillPoint::RetiringBeforeDelete.pause_bound_ms(),
+        12_000
+    );
+}
+
+#[test]
+fn marker_session_lifecycle_preserves_pending_state_until_prologue_or_crash() {
+    assert_eq!(
+        marker_session_action(true, false, false, &SplitOperationPhase::Paused),
+        MarkerSessionAction::Keep,
+        "Markers response alone must leave the Pending session live"
+    );
+    assert_eq!(
+        marker_session_action(true, true, false, &SplitOperationPhase::Paused),
+        MarkerSessionAction::DropAfterCrash,
+        "a pre-Prologue crash closes the dead connection without issuing SQL"
+    );
+    assert_eq!(
+        marker_session_action(true, false, true, &SplitOperationPhase::Restored),
+        MarkerSessionAction::RollbackAfterPrologue,
+        "authenticated Prologue permits an explicit rollback"
+    );
+}
+
+fn cli_binary() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("../..")
+        .join("target/debug/crabka")
+}
+
+async fn initiate_split(system: &ProcessHarness, operation_id: &str) {
+    let [left, right] = system.split_successor_endpoints();
+    let output = tokio::process::Command::new(cli_binary())
+        .args([
+            "gres",
+            "split",
+            "--bootstrap",
+            system.bootstrap(),
+            system.tenant(),
+            "51",
+            "16",
+            "--operation-id",
+            operation_id,
+            "--left-range-id",
+            "2",
+            "--left-endpoint",
+            &left,
+            "--successor-range-id",
+            "3",
+            "--successor-endpoint",
+            &right,
+            "--successor-wal-generation",
+            "1",
+        ])
+        .output()
+        .await
+        .expect("run Split CLI");
+    assert!(
+        output.status.success(),
+        "Split CLI: {}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+async fn load_operation(system: &ProcessHarness, operation_id: &str) -> SplitOperationRecord {
+    Registry::connect(system.bootstrap())
+        .await
+        .expect("registry")
+        .load_split_operation(system.tenant(), operation_id)
+        .await
+        .expect("load Split operation")
+        .expect("Split operation")
+}
+
+async fn load_tenant(system: &ProcessHarness) -> TenantRecord {
+    Registry::connect(system.bootstrap())
+        .await
+        .expect("registry")
+        .get(system.tenant())
+        .await
+        .expect("load tenant")
+        .expect("tenant")
+}
+
+async fn predecessor_topic_present(admin: &mut dyn RangeRetirementAdmin, topic: &str) -> bool {
+    admin
+        .metadata(&[topic])
+        .await
+        .expect("predecessor metadata")
+        .topics
+        .iter()
+        .any(|entry| entry.name == topic && entry.error.is_none())
+}
+
+async fn assert_static_ids_match_physical_rows(system: &ProcessHarness, table_id: u64) {
+    let scan = crabka_gres_ranges::transport::ScanRangeReq {
+        range_id: RangeId::new(1),
+        table_name: format!("live_ledger{table_id}"),
+        interval: crabka_gres_ranges::transport::WireRowInterval {
+            start: Some(16),
+            end: None,
+        },
+        local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        global_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        own_xid: None,
+        read_ts: Some(u64::MAX),
+        own_start_ts: None,
+        predicate: crabka_gres_ranges::transport::WirePredicatePushdown::FullScan,
+        projection: crabka_gres_ranges::transport::WireProjectionPushdown::All,
+        partial_aggregate: None,
+        top_k: None,
+    };
+    let response = system
+        .operator_control_client()
+        .call(
+            &system.range_endpoint(1),
+            &crabka_gres_ranges::RangeRequest::ScanRange(scan),
+        )
+        .await
+        .expect("direct static-id scan");
+    let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
+        panic!("unexpected direct static-id response {response:?}");
+    };
+    let mut workload_rows = 0;
+    for row in response.rows {
+        let (_, _, values) =
+            crabka_pgmvcc::version::decode_tuple(&row.tuple).expect("decode static-id tuple");
+        let [
+            crabka_pgtypes::Datum::Int4(id),
+            crabka_pgtypes::Datum::Int4(seq),
+            crabka_pgtypes::Datum::Text(_),
+        ] = values.as_slice()
+        else {
+            panic!("unexpected static-id tuple {values:?}");
+        };
+        assert_eq!(u64::try_from(*id).expect("positive id"), row.rowid);
+        assert!(successor_partition(table_id, row.rowid).is_ok());
+        if *seq < 1_000_000 {
+            workload_rows += 1;
+        }
+    }
+    assert!(workload_rows > 0, "table{table_id} live stream reached r1");
+}
+
+async fn assert_pre_split_seed_rows_on_predecessor(system: &ProcessHarness) {
+    let r0_locations = direct_payload_locations(system, 0, 50).await;
+    let r1_locations = direct_payload_locations(system, 1, 50).await;
+    let r0 = direct_payload_rows(system, 0, 50, Some(10), Some(16))
+        .await
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let r1 = direct_payload_rows(system, 1, 50, Some(10), Some(16))
+        .await
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let expected = (10..16)
+        .map(|rowid| PhysicalPayloadRow {
+            table_id: 50,
+            rowid,
+            seq: 1_000_000 + rowid,
+            checksum: format!("seed-50-{rowid}"),
+        })
+        .collect::<BTreeSet<_>>();
+    if r1 != expected {
+        system
+            .preserve_logs(Path::new("target/g8-checkpoint-child-logs"))
+            .await;
+    }
+    assert_eq!(
+        r1, expected,
+        "pre-split predecessor seed rows; r0={r0:?}; r0_locations={r0_locations:?}; r1_locations={r1_locations:?}"
+    );
+}
+
+async fn direct_payload_locations(
+    system: &ProcessHarness,
+    range_id: u32,
+    table_id: u64,
+) -> Vec<(u64, i32, i32, String)> {
+    let scan = crabka_gres_ranges::transport::ScanRangeReq {
+        range_id: RangeId::new(range_id),
+        table_name: format!("live_ledger{table_id}"),
+        interval: crabka_gres_ranges::transport::WireRowInterval {
+            start: None,
+            end: None,
+        },
+        local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        global_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        own_xid: None,
+        read_ts: Some(u64::MAX),
+        own_start_ts: None,
+        predicate: crabka_gres_ranges::transport::WirePredicatePushdown::FullScan,
+        projection: crabka_gres_ranges::transport::WireProjectionPushdown::All,
+        partial_aggregate: None,
+        top_k: None,
+    };
+    let response = system
+        .operator_control_client()
+        .call(
+            &system.range_endpoint(range_id),
+            &crabka_gres_ranges::RangeRequest::ScanRange(scan),
+        )
+        .await
+        .expect("direct payload-location scan");
+    let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
+        panic!("unexpected direct payload-location response {response:?}");
+    };
+    response
+        .rows
+        .into_iter()
+        .filter_map(|row| {
+            let (_, _, values) = crabka_pgmvcc::version::decode_tuple(&row.tuple)
+                .expect("decode payload-location tuple");
+            let [
+                crabka_pgtypes::Datum::Int4(id),
+                crabka_pgtypes::Datum::Int4(seq),
+                crabka_pgtypes::Datum::Text(checksum),
+            ] = values.as_slice()
+            else {
+                panic!("unexpected payload-location tuple {values:?}");
+            };
+            (10..16)
+                .contains(id)
+                .then(|| (row.rowid, *id, *seq, checksum.clone()))
+        })
+        .collect()
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct PhysicalPayloadRow {
+    table_id: u64,
+    rowid: u64,
+    seq: u64,
+    checksum: String,
+}
+
+async fn direct_payload_rows(
+    system: &ProcessHarness,
+    range_id: u32,
+    table_id: u64,
+    start: Option<u64>,
+    end: Option<u64>,
+) -> Vec<PhysicalPayloadRow> {
+    let scan = crabka_gres_ranges::transport::ScanRangeReq {
+        range_id: RangeId::new(range_id),
+        table_name: format!("live_ledger{table_id}"),
+        interval: crabka_gres_ranges::transport::WireRowInterval { start, end },
+        local_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        global_snapshot: crabka_gres_ranges::transport::WireSnapshot {
+            xmin: 1,
+            xmax: u64::MAX,
+            xip: vec![],
+        },
+        own_xid: None,
+        read_ts: Some(u64::MAX),
+        own_start_ts: None,
+        predicate: crabka_gres_ranges::transport::WirePredicatePushdown::FullScan,
+        projection: crabka_gres_ranges::transport::WireProjectionPushdown::All,
+        partial_aggregate: None,
+        top_k: None,
+    };
+    let response = system
+        .operator_control_client()
+        .call(
+            &system.range_endpoint(range_id),
+            &crabka_gres_ranges::RangeRequest::ScanRange(scan),
+        )
+        .await
+        .expect("direct terminal payload scan");
+    let crabka_gres_ranges::RangeResponse::ScanRange(response) = response else {
+        panic!("unexpected direct payload response {response:?}");
+    };
+    response
+        .rows
+        .into_iter()
+        .map(|row| {
+            let (_, _, values) = crabka_pgmvcc::version::decode_tuple(&row.tuple)
+                .expect("decode terminal payload tuple");
+            let [
+                crabka_pgtypes::Datum::Int4(id),
+                crabka_pgtypes::Datum::Int4(seq),
+                crabka_pgtypes::Datum::Text(checksum),
+            ] = values.as_slice()
+            else {
+                panic!("unexpected terminal payload tuple {values:?}");
+            };
+            assert_eq!(u64::try_from(*id).expect("positive payload id"), row.rowid);
+            PhysicalPayloadRow {
+                table_id,
+                rowid: row.rowid,
+                seq: u64::try_from(*seq).expect("positive payload seq"),
+                checksum: checksum.clone(),
+            }
+        })
+        .collect()
+}
+
+#[derive(Debug, Serialize)]
+struct SplitCrashEvidence {
+    schema_version: u32,
+    family: &'static str,
+    case: &'static str,
+    tenant_id: String,
+    operation_id: String,
+    acknowledged_rows: usize,
+    recovered_acknowledgements: usize,
+    max_ack_gap_ms: u128,
+    max_ack_gap_bound_ms: u128,
+    operation_elapsed_ms: u128,
+    operation_bound_ms: u128,
+    marker_count: usize,
+    left_marker_count: usize,
+    right_marker_count: usize,
+    delete_count: usize,
+    old_pid: u32,
+    new_pid: u32,
+    kill_ms: u128,
+    restart_ms: u128,
+    publication_ms: u128,
+    post_publication_r2_ack: bool,
+    post_publication_r3_ack: bool,
+    predecessor_topic_absent: bool,
+    sentinel_topic: String,
+    sentinel_topic_present: bool,
+    workload_process_reaped: bool,
+}
+
+async fn verify_completed_split_case(
+    system: &ProcessHarness,
+    point: SplitKillPoint,
+    operation_id: &str,
+    ledger_path: &Path,
+    observations: &[ControlObservation],
+    delete_ledger: &DeleteLedger,
+    old_pid: u32,
+    new_pid: u32,
+    kill_ms: u128,
+    restart_ms: u128,
+    publication_ms: u128,
+    elapsed_ms: u128,
+    workload_process_reaped: bool,
+    sentinel_topic: &str,
+) -> SplitCrashEvidence {
+    let ledger = parse_closed_payload_ledger(ledger_path).expect("closed fsynced payload oracle");
+    assert!(ledger.recovered >= 1);
+    assert!(
+        ledger.max_ack_gap_ms <= point.pause_bound_ms(),
+        "max ACK gap {}ms exceeded {}ms bound at {point:?}",
+        ledger.max_ack_gap_ms,
+        point.pause_bound_ms()
+    );
+    assert!(
+        ledger
+            .acknowledged
+            .values()
+            .any(|event| event.timestamp_ms < kill_ms)
+    );
+    assert!(
+        ledger
+            .acknowledged
+            .values()
+            .any(|event| event.timestamp_ms > restart_ms)
+    );
+    let post_publication_r2_ack = ledger.acknowledged.values().any(|event| {
+        event.provenance == PayloadProvenance::Workload
+            && event.timestamp_ms > publication_ms
+            && event.table_id == 50
+            && event.rowid.is_some_and(|rowid| rowid >= 16)
+    });
+    let post_publication_r3_ack = ledger.acknowledged.values().any(|event| {
+        event.provenance == PayloadProvenance::Workload
+            && event.timestamp_ms > publication_ms
+            && event.table_id == 51
+            && event.rowid.is_some_and(|rowid| rowid >= 16)
+    });
+    assert!(post_publication_r2_ack && post_publication_r3_ack);
+
+    let expected = ledger
+        .acknowledged
+        .values()
+        .map(|event| PhysicalPayloadRow {
+            table_id: event.table_id,
+            rowid: event.rowid.expect("ack physical rowid"),
+            seq: event.seq,
+            checksum: event.checksum.clone(),
+        })
+        .collect::<BTreeSet<_>>();
+    for row in &expected {
+        assert_eq!(successor_partition(row.table_id, row.rowid).is_ok(), true);
+    }
+    let mut direct = Vec::new();
+    direct.extend(direct_payload_rows(system, 0, 50, None, Some(10)).await);
+    direct.extend(direct_payload_rows(system, 2, 50, Some(10), None).await);
+    direct.extend(direct_payload_rows(system, 2, 51, None, Some(16)).await);
+    direct.extend(direct_payload_rows(system, 3, 51, Some(16), None).await);
+    assert_eq!(direct.into_iter().collect::<BTreeSet<_>>(), expected);
+
+    let sql = system.sql(0).await;
+    let mut sql_rows = BTreeSet::new();
+    for table_id in [50_u64, 51] {
+        for row in sql
+            .query(
+                &format!("SELECT id, seq, checksum FROM live_ledger{table_id}"),
+                &[],
+            )
+            .await
+            .expect("fresh terminal SQL union")
+        {
+            let id: i32 = row.get(0);
+            let seq: i32 = row.get(1);
+            sql_rows.insert(PhysicalPayloadRow {
+                table_id,
+                rowid: u64::try_from(id).expect("positive SQL id"),
+                seq: u64::try_from(seq).expect("positive SQL seq"),
+                checksum: row.get(2),
+            });
+        }
+    }
+    assert_eq!(sql_rows, expected);
+
+    let marker_receipts = observations
+        .iter()
+        .filter_map(|observation| {
+            if let RangeControlResp::Markers {
+                markers,
+                left_markers,
+                right_markers,
+                digest,
+            } = &observation.response
+            {
+                Some((markers, left_markers, right_markers, digest))
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    let (markers, left, right, marker_digest) = marker_receipts
+        .first()
+        .copied()
+        .expect("authenticated marker receipt");
+    let left = left.as_ref().expect("explicit left marker partition");
+    let right = right.as_ref().expect("explicit right marker partition");
+    assert_eq!(markers.len(), 1, "one durable source Pending marker");
+    assert!(
+        left.is_empty(),
+        "table52 marker cannot belong to left successor"
+    );
+    assert_eq!(right, markers, "table52 marker belongs to right successor");
+    assert_eq!((markers[0].key.table_id, markers[0].key.rowid), (52, 1));
+    assert!(
+        marker_receipts
+            .iter()
+            .all(|receipt| *receipt == marker_receipts[0])
+    );
+    assert!(
+        left.iter()
+            .all(|item| right.iter().all(|other| item != other))
+    );
+    assert!(left.iter().chain(right).eq(markers.iter()));
+
+    let operation = load_operation(system, operation_id).await;
+    assert_eq!(operation.phase, SplitOperationPhase::Completed);
+    assert_eq!(
+        operation.evidence.marker_digest.as_deref(),
+        Some(marker_digest.as_str())
+    );
+    let tenant = load_tenant(system).await;
+    let plan = operation.plan.as_ref().expect("sealed completed plan");
+    assert_eq!(tenant.ranges, plan.target_layout);
+    let r2 = tenant
+        .ranges
+        .iter()
+        .find(|range| range.range_id == 2)
+        .expect("r2");
+    let r3 = tenant
+        .ranges
+        .iter()
+        .find(|range| range.range_id == 3)
+        .expect("r3");
+    assert_ne!(r2.endpoint, r3.endpoint);
+    assert_eq!((r2.wal_generation, r3.wal_generation), (1, 1));
+    let retirement = tenant
+        .range_retirements
+        .iter()
+        .find(|retirement| retirement.operation_id == operation_id)
+        .expect("retirement sidecar");
+    assert_eq!(retirement.phase, RangeRetirementPhase::Parked);
+    assert_eq!(retirement.checkpoint.marker_digest, *marker_digest);
+
+    let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+        .await
+        .expect("terminal topic admin");
+    let topics = admin
+        .metadata(&[])
+        .await
+        .expect("terminal topic metadata")
+        .topics
+        .into_iter()
+        .filter(|topic| topic.error.is_none())
+        .map(|topic| topic.name)
+        .collect::<BTreeSet<_>>();
+    let predecessor_topic = format!("__gres_wal.{}.r1", system.tenant());
+    let predecessor_topic_absent = !topics.contains(&predecessor_topic);
+    let sentinel_topic_present = topics.contains(sentinel_topic);
+    assert!(predecessor_topic_absent);
+    assert!(sentinel_topic_present);
+    assert!(topics.contains(&format!("__gres_wal.{}.r0", system.tenant())));
+    assert!(topics.contains(&format!("__gres_wal.{}.r2.g0000000001", system.tenant())));
+    assert!(topics.contains(&format!("__gres_wal.{}.r3.g0000000001", system.tenant())));
+    assert_eq!(delete_ledger.exact_calls, 1);
+    assert!(!delete_ledger.unrelated_attempted);
+    assert_ne!(old_pid, new_pid);
+    assert!(workload_process_reaped);
+    assert!(elapsed_ms < point.operation_bound_ms());
+
+    SplitCrashEvidence {
+        schema_version: 1,
+        family: family_name(point.family()),
+        case: point.name(),
+        tenant_id: system.tenant().to_owned(),
+        operation_id: operation_id.to_owned(),
+        acknowledged_rows: expected.len(),
+        recovered_acknowledgements: ledger.recovered,
+        max_ack_gap_ms: ledger.max_ack_gap_ms,
+        max_ack_gap_bound_ms: point.pause_bound_ms(),
+        operation_elapsed_ms: elapsed_ms,
+        operation_bound_ms: point.operation_bound_ms(),
+        marker_count: markers.len(),
+        left_marker_count: left.len(),
+        right_marker_count: right.len(),
+        delete_count: delete_ledger.exact_calls,
+        old_pid,
+        new_pid,
+        kill_ms,
+        restart_ms,
+        publication_ms,
+        post_publication_r2_ack,
+        post_publication_r3_ack,
+        predecessor_topic_absent,
+        sentinel_topic: sentinel_topic.to_owned(),
+        sentinel_topic_present,
+        workload_process_reaped,
+    }
+}
+
+const fn family_name(family: Family) -> &'static str {
+    match family {
+        Family::SourceRestore => "source_restore",
+        Family::Publication => "publication",
+        Family::RetirementResume => "retirement_resume",
+    }
+}
+
+async fn wait_for_payload_acks(path: &Path, errors_path: &Path, minimum: usize) {
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let body = std::fs::read_to_string(path).unwrap_or_default();
+        let (count, tables) = workload_ack_stats(&body);
+        if count >= minimum && tables == BTreeSet::from([50, 51]) {
+            return;
+        }
+        assert!(
+            Instant::now() < deadline,
+            "only {count} payload ACKs; ledger={body:?}; errors={}",
+            std::fs::read_to_string(errors_path).unwrap_or_default()
+        );
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+}
+
+fn payload_ack_count(path: &Path) -> usize {
+    workload_ack_stats(&std::fs::read_to_string(path).unwrap_or_default()).0
+}
+
+fn workload_ack_stats(body: &str) -> (usize, BTreeSet<u64>) {
+    let events = body
+        .lines()
+        .filter_map(|line| serde_json::from_str::<PayloadEvent>(line).ok())
+        .filter(|event| {
+            event.provenance == PayloadProvenance::Workload
+                && matches!(event.kind, PayloadKind::Ack | PayloadKind::RecoveredAck)
+        })
+        .collect::<Vec<_>>();
+    (
+        events.len(),
+        events.into_iter().map(|event| event.table_id).collect(),
+    )
+}
+
+const fn receipt_fault_receipt(point: SplitKillPoint) -> Option<Receipt> {
+    match point {
+        SplitKillPoint::CheckpointReceiptBeforeJournalCas => Some(Receipt::Checkpoint),
+        SplitKillPoint::PauseReceiptBeforeJournalCas => Some(Receipt::Pause),
+        SplitKillPoint::StageReceiptBeforeJournalCas => Some(Receipt::Stage),
+        SplitKillPoint::MarkerClaimReceiptBeforeJournalCas => Some(Receipt::Marker),
+        SplitKillPoint::PrologueReceiptBeforeJournalCas => Some(Receipt::Prologue),
+        SplitKillPoint::RetireReceiptBeforeJournalCas => Some(Receipt::Retire),
+        _ => None,
+    }
+}
+
+async fn inject_pending_split_marker(system: &ProcessHarness) -> Result<MarkerSession, String> {
+    let (client, driver) = system.sql_with_driver(0).await;
+    let result = client
+        .simple_query("INSERT INTO split_marker52 VALUES (1, 'g8-pending-marker')")
+        .await;
+    let error = match result {
+        Ok(response) => {
+            return Err(format!(
+                "marker insert unexpectedly committed: {response:?}"
+            ));
+        }
+        Err(error) => error,
+    };
+    if error.as_db_error().is_some_and(|error| {
+        error
+            .message()
+            .contains("after timestamp prewrites before durable decision")
+    }) {
+        Ok(MarkerSession { client, driver })
+    } else {
+        Err(format!("unexpected timestamp marker fault: {error}"))
+    }
+}
+
+struct MarkerSession {
+    client: tokio_postgres::Client,
+    driver: tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum MarkerSessionAction {
+    Keep,
+    DropAfterCrash,
+    RollbackAfterPrologue,
+}
+
+const fn marker_session_action(
+    has_session: bool,
+    compute_killed: bool,
+    authenticated_prologue: bool,
+    phase: &SplitOperationPhase,
+) -> MarkerSessionAction {
+    if !has_session {
+        MarkerSessionAction::Keep
+    } else if compute_killed {
+        MarkerSessionAction::DropAfterCrash
+    } else if authenticated_prologue || matches!(phase, SplitOperationPhase::Activated) {
+        MarkerSessionAction::RollbackAfterPrologue
+    } else {
+        MarkerSessionAction::Keep
+    }
+}
+
+async fn close_marker_session(marker: MarkerSession, rollback: bool) {
+    if rollback {
+        marker
+            .client
+            .simple_query("ROLLBACK")
+            .await
+            .expect("release marker session publication guard");
+    }
+    let MarkerSession { client, mut driver } = marker;
+    drop(client);
+    if tokio::time::timeout(Duration::from_secs(5), &mut driver)
+        .await
+        .is_err()
+    {
+        driver.abort();
+        let _ = driver.await;
+    }
+}
+
+async fn reconcile_rpc_with_diagnostics(
+    system: &ProcessHarness,
+    point: SplitKillPoint,
+    control: &GresControlHandle,
+    mutation: &impl RangeMutationClient,
+    operation: &SplitOperationRecord,
+) {
+    match tokio::time::timeout(
+        Duration::from_secs(15),
+        reconcile_one_rpc_phase(control, mutation, operation),
+    )
+    .await
+    {
+        Ok(_) => {}
+        Err(_) => {
+            let preserved_logs = Path::new(env!("CARGO_MANIFEST_DIR"))
+                .join("../../target/g8-split-child-logs")
+                .join(point.name());
+            system.preserve_logs(&preserved_logs).await;
+            panic!(
+                "Split reconciliation timed out in phase {:?}; logs={}",
+                operation.phase,
+                preserved_logs.display()
+            );
+        }
+    }
+}
+
+async fn run_real_split_crash_case(point: SplitKillPoint) {
+    use std::os::unix::process::CommandExt as _;
+
+    assert!(
+        cli_binary().is_file(),
+        "build crabka CLI before live matrix"
+    );
+    let identity = format!(
+        "{}-p{}",
+        SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+        std::process::id()
+    );
+    let operation_id = format!("g8-split-crash-{}-{identity}", point.name());
+    let point_index = SplitKillPoint::ALL
+        .iter()
+        .position(|candidate| *candidate == point)
+        .expect("kill point index");
+    let tenant = format!("tg8sc-{point_index}-{:x}", std::process::id());
+    let timestamp_fault = "after_timestamp_prewrite_before_decision";
+    let mut system = if point.inject_marker_before_cli() {
+        ProcessHarness::start_all_on_zero_with_commit_fault(&tenant, timestamp_fault).await
+    } else {
+        ProcessHarness::start_all_on_zero(&tenant).await
+    };
+    let mut marker_session = None;
+    let sentinel_topic = format!("g8-sentinel-{identity}");
+    let mut sentinel_admin =
+        crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+            .await
+            .expect("sentinel admin");
+    let sentinel_outcomes = sentinel_admin
+        .create_topics(
+            &[crabka_client_admin::CreateTopicSpec {
+                name: sentinel_topic.clone(),
+                partitions: 1,
+                replicas: 1,
+                configs: BTreeMap::new(),
+            }],
+            30_000,
+        )
+        .await
+        .expect("create sentinel topic");
+    assert!(
+        sentinel_outcomes
+            .iter()
+            .all(|outcome| outcome.error.is_none()),
+        "sentinel topic: {sentinel_outcomes:?}"
+    );
+
+    let mut ddl = String::new();
+    for table in 1..50 {
+        ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
+    }
+    ddl.push_str("CREATE TABLE live_ledger50 (id int4, seq int4, checksum text NOT NULL) SHARDED;");
+    ddl.push_str("CREATE TABLE live_ledger51 (id int4, seq int4, checksum text NOT NULL) SHARDED;");
+    ddl.push_str("CREATE TABLE split_marker52 (id int4, checksum text NOT NULL) SHARDED;");
+    let sql = system.sql(0).await;
+    sql.simple_query(&ddl)
+        .await
+        .expect("create Split workload tables");
+    drop(sql);
+    if point.inject_marker_before_cli() {
+        marker_session = Some(
+            inject_pending_split_marker(&system)
+                .await
+                .expect("inject pre-CLI Pending marker"),
+        );
+        system.clear_commit_fault();
+    }
+    for rowid in 1..16_i32 {
+        for table in [50, 51] {
+            let sql = system.sql(0).await;
+            sql.simple_query(&format!(
+                "INSERT INTO live_ledger{table} VALUES ({rowid}, {}, 'seed-{table}-{rowid}')",
+                1_000_000 + rowid
+            ))
+            .await
+            .expect("seed static physical rowid");
+        }
+    }
+
+    let root = tempfile::tempdir().expect("Split crash workload root");
+    let mut ledger_file = tempfile::NamedTempFile::new_in(root.path()).expect("payload ledger");
+    for rowid in 1..16_u64 {
+        for table_id in [50, 51] {
+            let seq = 1_000_000 + rowid;
+            let checksum = format!("seed-{table_id}-{rowid}");
+            append_payload_event(
+                &mut ledger_file,
+                &PayloadEvent {
+                    kind: PayloadKind::Attempt,
+                    provenance: PayloadProvenance::Seed,
+                    table_id,
+                    rowid: None,
+                    seq,
+                    checksum: checksum.clone(),
+                    timestamp_ms: timestamp_ms(),
+                },
+            );
+            append_payload_event(
+                &mut ledger_file,
+                &PayloadEvent {
+                    kind: PayloadKind::Ack,
+                    provenance: PayloadProvenance::Seed,
+                    table_id,
+                    rowid: Some(rowid),
+                    seq,
+                    checksum,
+                    timestamp_ms: timestamp_ms(),
+                },
+            );
+        }
+    }
+    let ledger_path = ledger_file.into_temp_path();
+    let stop_path = root.path().join("stop");
+    let errors_path = root.path().join("errors.log");
+    let response_loss = root.path().join("response-loss");
+    let mut command = tokio::process::Command::new("bash");
+    command
+        .args(["-c", split_payload_workload_script()])
+        .env("CRABKA_G8_WORKLOAD_STOP", &stop_path)
+        .env("CRABKA_G8_WORKLOAD_LEDGER", &ledger_path)
+        .env("CRABKA_G8_WORKLOAD_ERRORS", &errors_path)
+        .env("CRABKA_G8_RESPONSE_LOSS", &response_loss)
+        .env("PGHOST", "127.0.0.1")
+        .env("PGPORT", system.stable_sql_port().to_string())
+        .env("PGUSER", "alice")
+        .env("PGPASSWORD", "process-secret")
+        .env("PGDATABASE", system.tenant())
+        .kill_on_drop(true);
+    command.as_std_mut().process_group(0);
+    let child = command.spawn().expect("spawn Split workload");
+    let process_group = child.id().expect("Split workload PID");
+    let mut workload = WorkloadChild::new(child, process_group, stop_path);
+    wait_for_payload_acks(&ledger_path, &errors_path, 8).await;
+    assert_static_ids_match_physical_rows(&system, 50).await;
+    assert_static_ids_match_physical_rows(&system, 51).await;
+    assert_pre_split_seed_rows_on_predecessor(&system).await;
+    initiate_split(&system, &operation_id).await;
+
+    let tenant_name = TenantName::try_from(system.tenant()).expect("tenant name");
+    let mut registry = Registry::connect(system.bootstrap())
+        .await
+        .expect("registry");
+    registry.ensure_topic(1).await.expect("registry topic");
+    let faults = Arc::new(OneShotControlFaults::default());
+    let mut control: GresControlHandle = Arc::new(BrokerControl {
+        registry: Mutex::new(registry),
+        faults: Arc::clone(&faults),
+    });
+    let observations = Arc::new(Mutex::new(Vec::new()));
+    let mut mutation = RecordingRangeMutationClient::new(
+        MtlsRangeMutationClient::new(system.operator_control_client()),
+        Arc::clone(&observations),
+    )
+    .with_journal_cas_after(receipt_fault_receipt(point), Arc::clone(&faults));
+    let predecessor_topic = format!("__gres_wal.{}.r1", system.tenant());
+    let delete_ledger = Arc::new(std::sync::Mutex::new(DeleteLedger::default()));
+    let mut retirement = CountingRetirementAdmin {
+        inner: crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+            .await
+            .expect("retirement admin"),
+        expected_topic: predecessor_topic.clone(),
+        ledger: Arc::clone(&delete_ledger),
+        fail_after_delete: false,
+    };
+    let started = Instant::now();
+    let mut killed = false;
+    let mut old_pid = 0;
+    let mut new_pid = 0;
+    let mut kill_ms = 0;
+    let mut restart_ms = 0;
+    let mut publication_ms = 0;
+    let mut marker_session_released = false;
+    let mut last_reported_phase = None;
+
+    loop {
+        assert!(started.elapsed().as_millis() < point.operation_bound_ms());
+        let operation = load_operation(&system, &operation_id).await;
+        if last_reported_phase.as_ref() != Some(&operation.phase) {
+            eprintln!(
+                "G8_MILESTONE timestamp_ms={} phase={:?}",
+                timestamp_ms(),
+                operation.phase
+            );
+            last_reported_phase = Some(operation.phase.clone());
+        }
+        let tenant = load_tenant(&system).await;
+        let obs = observations.lock().await.clone();
+        if marker_session.is_some() && !marker_session_released {
+            assert!(
+                marker_session.is_some(),
+                "Pending marker session remains live"
+            );
+        }
+        let authenticated_prologue = obs.iter().any(|item| {
+            matches!(
+                item.request.operation,
+                RangeControlOperation::SuccessorFencePrologue { .. }
+            ) && matches!(
+                item.response,
+                RangeControlResp::Applied | RangeControlResp::AlreadyApplied
+            )
+        });
+        if marker_session_action(
+            marker_session.is_some(),
+            false,
+            authenticated_prologue,
+            &operation.phase,
+        ) == MarkerSessionAction::RollbackAfterPrologue
+            && !marker_session_released
+        {
+            let marker_client = marker_session
+                .take()
+                .expect("Pending marker session remains live through prologue");
+            close_marker_session(marker_client, true).await;
+            marker_session_released = true;
+            eprintln!(
+                "G8_MILESTONE timestamp_ms={} marker_session_rollback",
+                timestamp_ms()
+            );
+        }
+        let topic_present = predecessor_topic_present(&mut retirement, &predecessor_topic).await;
+        let deletes = delete_ledger.lock().expect("delete ledger").exact_calls;
+        let successors_serving = if matches!(
+            operation.phase,
+            SplitOperationPhase::Restored
+                | SplitOperationPhase::Activated
+                | SplitOperationPhase::LayoutPublished
+                | SplitOperationPhase::Retiring
+                | SplitOperationPhase::Resuming
+                | SplitOperationPhase::Completed
+        ) && observed_receipt(&obs) == Receipt::Prologue
+            || matches!(
+                operation.phase,
+                SplitOperationPhase::Activated
+                    | SplitOperationPhase::LayoutPublished
+                    | SplitOperationPhase::Retiring
+                    | SplitOperationPhase::Resuming
+                    | SplitOperationPhase::Completed
+            ) {
+            verify_target_topology_ready(&mutation, &operation)
+                .await
+                .is_ok()
+        } else {
+            false
+        };
+        let state = predicate_state(
+            &operation,
+            &tenant,
+            &obs,
+            topic_present,
+            deletes,
+            successors_serving,
+        );
+        if publication_ms == 0 && state.layout == Layout::Target {
+            publication_ms = timestamp_ms();
+            let before = payload_ack_count(&ledger_path);
+            wait_for_payload_acks(&ledger_path, &errors_path, before + 4).await;
+        }
+        if !killed && point.is_ready(&state) {
+            wait_for_payload_acks(&ledger_path, &errors_path, 9).await;
+            old_pid = system.pid(0);
+            kill_ms = timestamp_ms();
+            if !point.inject_marker_before_cli() {
+                signal_process_group(process_group, "-STOP");
+                system.set_commit_fault_for_next_child(timestamp_fault);
+            }
+            system.kill(0).await;
+            if marker_session_action(
+                marker_session.is_some(),
+                true,
+                false,
+                &operation.phase,
+            ) == MarkerSessionAction::DropAfterCrash
+            {
+                close_marker_session(
+                    marker_session
+                        .take()
+                        .expect("crashed marker session remains owned by harness"),
+                    false,
+                )
+                .await;
+                marker_session_released = true;
+            }
+            system
+                .restart_with_hosted_ranges(0, point.restart_hosted_ranges())
+                .await;
+            new_pid = system.pid(0);
+            restart_ms = timestamp_ms();
+            assert_ne!(old_pid, new_pid);
+            if !point.inject_marker_before_cli() {
+                let marker_result = inject_pending_split_marker(&system).await;
+                system.clear_commit_fault();
+                if marker_result.is_err() {
+                    signal_process_group(process_group, "-CONT");
+                }
+                marker_session = Some(marker_result.expect("inject post-restart Pending marker"));
+                signal_process_group(process_group, "-CONT");
+            }
+            let mut fresh = Registry::connect(system.bootstrap())
+                .await
+                .expect("registry restart");
+            fresh.ensure_topic(1).await.expect("registry topic restart");
+            control = Arc::new(BrokerControl {
+                registry: Mutex::new(fresh),
+                faults: Arc::clone(&faults),
+            });
+            mutation = RecordingRangeMutationClient::new(
+                MtlsRangeMutationClient::new(system.operator_control_client()),
+                Arc::clone(&observations),
+            )
+            .with_journal_cas_after(receipt_fault_receipt(point), Arc::clone(&faults));
+            retirement.inner =
+                crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
+                    .await
+                    .expect("retirement admin restart");
+            killed = true;
+            continue;
+        }
+
+        match operation.phase {
+            SplitOperationPhase::Activated => {
+                verify_target_topology_ready(&mutation, &operation)
+                    .await
+                    .expect("successor readiness");
+                if !killed && point == SplitKillPoint::TenantCasBeforeJournalCas {
+                    faults.arm_tenant_cas_ack();
+                }
+                let _ = reconcile_activated_cutover(&control, &operation).await;
+            }
+            SplitOperationPhase::Retiring => {
+                if !killed && point == SplitKillPoint::DeleteSuccessBeforeSidecarCas {
+                    retirement.fail_after_delete = true;
+                }
+                let _ =
+                    reconcile_one_retiring_range_wal(&control, &mut retirement, &tenant_name).await;
+                let current = load_operation(&system, &operation_id).await;
+                reconcile_rpc_with_diagnostics(&system, point, &control, &mutation, &current).await;
+            }
+            SplitOperationPhase::Completed => {
+                assert!(killed, "selected Split boundary was never reached");
+                break;
+            }
+            _ => {
+                reconcile_rpc_with_diagnostics(&system, point, &control, &mutation, &operation)
+                    .await;
+            }
+        }
+        tokio::time::sleep(Duration::from_millis(25)).await;
+    }
+    workload.shutdown().await;
+    let workload_process_reaped = !process_group_exists(process_group);
+    let delete_snapshot = delete_ledger.lock().expect("delete ledger").clone();
+    let preserved_logs = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../target/g8-split-child-logs")
+        .join(point.name());
+    system.preserve_logs(&preserved_logs).await;
+    let evidence = verify_completed_split_case(
+        &system,
+        point,
+        &operation_id,
+        &ledger_path,
+        &observations.lock().await,
+        &delete_snapshot,
+        old_pid,
+        new_pid,
+        kill_ms,
+        restart_ms,
+        publication_ms,
+        started.elapsed().as_millis(),
+        workload_process_reaped,
+        &sentinel_topic,
+    )
+    .await;
+    if let Some(path) = std::env::var_os("CRABKA_G8_SPLIT_CRASH_EVIDENCE") {
+        let path = PathBuf::from(path);
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent).expect("evidence directory");
+        }
+        std::fs::write(path, serde_json::to_vec_pretty(&evidence).unwrap())
+            .expect("write Split crash evidence");
+    }
+    system.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn real_process_split_crash_anywhere() {
+    if std::env::var_os("CRABKA_G8_SPLIT_CRASH").is_none() {
+        return;
+    }
+    let point = SplitKillPoint::parse(
+        &std::env::var("CRABKA_G8_SPLIT_KILL_POINT").expect("Split kill point"),
+    )
+    .expect("known Split kill point");
+    run_real_split_crash_case(point).await;
 }

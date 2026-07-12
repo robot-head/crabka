@@ -15,6 +15,7 @@
 - Every ledger record includes table identity, physical rowid where acknowledged, sequence, checksum, kind, and fsynced wall-clock timestamp.
 - The authoritative oracle is parsed only after closing and reopening the fsynced ledger.
 - The pause bound is elapsed wall-clock time between fsynced ACK timestamps spanning pause/kill/restart.
+- Source/restore uses a 25-second bound, providing a strict CI margin above the measured 21.113-second process restart plus two-successor restore/prologue path; publication and retirement remain at 12 seconds.
 - Post-publication writes must prove table50 ownership on r2 and table51 rowids at or above 16 on r3.
 - r2 and r3 endpoints remain distinct and both sealed generations equal 1.
 - Preserve and exclude unrelated `crates/gres-ranges/src/control.rs` formatting changes.

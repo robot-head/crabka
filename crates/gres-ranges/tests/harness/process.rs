@@ -111,6 +111,14 @@ impl ProcessHarness {
     }
 
     pub async fn start_all_on_zero(name: &str) -> Self {
+        Self::start_all_on_zero_inner(name, None).await
+    }
+
+    pub async fn start_all_on_zero_with_commit_fault(name: &str, fault: &str) -> Self {
+        Self::start_all_on_zero_inner(name, Some(fault.to_owned())).await
+    }
+
+    async fn start_all_on_zero_inner(name: &str, commit_fault: Option<String>) -> Self {
         let root = tempfile::tempdir().expect("process harness root");
         let broker = Broker::start(BrokerConfig::for_tests(root.path().join("broker")))
             .await
@@ -124,14 +132,22 @@ impl ProcessHarness {
         let r3_proxy = RangeProxy::start().await;
         let tls = write_tls_fixture(root.path());
         provision_control(&bootstrap, &tenant, r0_proxy.port, r1_proxy.port).await;
-        let r0 = spawn_node(root.path(), &bootstrap, &tenant, 0, "r0,r1", &tls, None);
+        let r0 = spawn_node(
+            root.path(),
+            &bootstrap,
+            &tenant,
+            0,
+            "r0,r1",
+            &tls,
+            commit_fault.as_deref(),
+        );
         let mut harness = Self {
             _root: root,
             _broker: broker,
             bootstrap,
             tenant,
             tls,
-            commit_fault: None,
+            commit_fault,
             sql_proxy,
             r0_proxy,
             r1_proxy,
@@ -149,6 +165,18 @@ impl ProcessHarness {
 
     pub async fn sql(&self, range: u32) -> tokio_postgres::Client {
         connect(self.node(range).sql_port, &self.tenant).await
+    }
+
+    pub async fn sql_with_driver(
+        &self,
+        range: u32,
+    ) -> (
+        tokio_postgres::Client,
+        tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+    ) {
+        connect_with_driver(self.node(range).sql_port, &self.tenant)
+            .await
+            .expect("connect compute with driver")
     }
 
     pub async fn try_sql(&self, range: u32) -> Option<tokio_postgres::Client> {
@@ -177,6 +205,21 @@ impl ProcessHarness {
 
     pub fn bootstrap(&self) -> &str {
         &self.bootstrap
+    }
+
+    pub async fn preserve_logs(&self, destination: &Path) {
+        tokio::fs::create_dir_all(destination)
+            .await
+            .expect("create preserved process log directory");
+        let mut logs = vec![("r0.log", &self.r0.log_path)];
+        if let Some(r1) = &self.r1 {
+            logs.push(("r1.log", &r1.log_path));
+        }
+        for (name, source) in logs {
+            tokio::fs::copy(source, destination.join(name))
+                .await
+                .expect("preserve process log");
+        }
     }
 
     pub fn tenant(&self) -> &str {
@@ -250,6 +293,10 @@ impl ProcessHarness {
 
     pub fn clear_commit_fault(&mut self) {
         self.commit_fault = None;
+    }
+
+    pub fn set_commit_fault_for_next_child(&mut self, fault: &str) {
+        self.commit_fault = Some(fault.to_owned());
     }
 
     pub async fn partition(&self, range: u32) {
@@ -514,7 +561,13 @@ fn spawn_node(
     let checkpoint_dir = root.join("checkpoints");
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
     std::fs::create_dir_all(&checkpoint_dir).expect("checkpoint dir");
-    let log_path = root.join(format!("r{range}.log"));
+    let log_path = std::env::var_os("CRABKA_G8_PROCESS_LOG_DIR")
+        .map(PathBuf::from)
+        .map(|directory| {
+            std::fs::create_dir_all(&directory).expect("durable process log directory");
+            directory.join(format!("{tenant}-r{range}.log"))
+        })
+        .unwrap_or_else(|| root.join(format!("r{range}.log")));
     let stderr = File::create(&log_path).expect("node log");
     let binary = gres_binary();
     let mut command = Command::new(binary);
@@ -677,6 +730,20 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
 }
 
 async fn try_connect(port: u16, database: &str) -> Option<tokio_postgres::Client> {
+    let (client, driver) = connect_with_driver(port, database).await?;
+    tokio::spawn(async move {
+        let _ = driver.await;
+    });
+    Some(client)
+}
+
+async fn connect_with_driver(
+    port: u16,
+    database: &str,
+) -> Option<(
+    tokio_postgres::Client,
+    tokio::task::JoinHandle<Result<(), tokio_postgres::Error>>,
+)> {
     let connection = tokio_postgres::Config::new()
         .host("127.0.0.1")
         .port(port)
@@ -687,8 +754,7 @@ async fn try_connect(port: u16, database: &str) -> Option<tokio_postgres::Client
         .await
         .ok()?;
     let (client, driver) = connection;
-    tokio::spawn(driver);
-    Some(client)
+    Some((client, tokio::spawn(driver)))
 }
 async fn connect(port: u16, database: &str) -> tokio_postgres::Client {
     try_connect(port, database).await.expect("connect compute")
