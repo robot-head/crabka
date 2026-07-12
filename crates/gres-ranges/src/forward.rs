@@ -4335,6 +4335,14 @@ mod tests {
             .simple_query("INSERT INTO cursor_items VALUES (10), (20)")
             .await
             .expect("insert owner rows");
+        let table =
+            crabka_pgcatalog::get_table(owner.catalog_kv(), "cursor_items").expect("cursor table");
+        owner
+            .kv_handle()
+            .write_batch(&[crabka_pgkv::WriteOp::Delete {
+                key: crabka_pgkv::key::seq_key(table.id),
+            }])
+            .expect("remove non-owner structural sequence");
         let service = RangeScanService::new(std::collections::BTreeMap::from([(
             RangeId::new(1),
             owner.clone_handle(),

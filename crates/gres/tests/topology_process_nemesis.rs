@@ -1478,6 +1478,20 @@ async fn real_process_split_two_successor_foundation() {
     successor_rowids.sort_unstable();
 
     assert_eq!(successor_rowids, (1..33_u64).collect::<Vec<_>>());
+    let fresh = system.sql(0).await;
+    let full_sequences = fresh
+        .query("SELECT seq FROM live_ledger51 ORDER BY seq", &[])
+        .await
+        .expect("fresh full split ledger scan")
+        .into_iter()
+        .map(|row| row.get::<_, i32>(0))
+        .collect::<Vec<_>>();
+    assert_eq!(
+        full_sequences,
+        (0..32_i32).collect::<Vec<_>>(),
+        "post-restart SQL scatter log:\n{}",
+        system.log(0)
+    );
 
     let mut admin = crabka_client_admin::AdminClient::connect(&[system.bootstrap().to_owned()])
         .await
