@@ -1288,6 +1288,8 @@ async fn control_executor_hard_crash_matrix_reconciles_and_replays() {
             move || {
                 std::process::Command::new(executable)
                     .args(["--exact", "control_executor_crash_child", "--nocapture"])
+                    .stdout(std::process::Stdio::null())
+                    .stderr(std::process::Stdio::null())
                     .env("CRABKA_GRES_CONTROL_CRASH_CHILD", "1")
                     .env("CRABKA_GRES_CONTROL_CRASH_AFTER_EFFECT", step)
                     .env("CRABKA_GRES_ACTIVATION_BOOTSTRAP", bootstrap)
