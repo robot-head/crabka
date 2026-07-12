@@ -82,6 +82,11 @@ Source/restore cases use a strict 25-second ACK-gap bound: the live unoptimized 
 retirement cases use a tighter 15-second bound, above the measured 12.946-second unoptimized
 late process-restart path.
 
+The 15-second bound is an intentional evidence-based correction to the earlier agent-authored
+12-second estimate, not an unresolved threshold: repeated real-process traces measured 12.946
+seconds on the unoptimized harness. The validator still rejects any publication or retirement
+gap above 15 seconds.
+
 Each JSON evidence file contains measured predicates and values, never success literals. A validator recomputes counts, sets, interval facts, marker partition arithmetic, bounds, unique identity, and topic expectations. `--validate-only` must fail nonzero for empty, incomplete, wrong-case, duplicate, or missing-family inputs.
 
 ## CI sharding
