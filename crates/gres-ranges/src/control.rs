@@ -1,8 +1,9 @@
 //! Generation-fenced, idempotent range-control dispatch for split orchestration.
 
-use std::{collections::BTreeMap, sync::Arc};
+use std::{collections::BTreeMap, fmt::Write as _, sync::Arc};
 
 use async_trait::async_trait;
+use sha2::{Digest as _, Sha256};
 
 use crate::transport::{RangeControlOperation, RangeControlReq, RangeControlResp};
 
@@ -13,7 +14,167 @@ pub trait SplitIntentAuthority: Send + Sync {
         &self,
         request: &RangeControlReq,
         context: IntentAuthorizationContext,
-    ) -> Result<bool, String>;
+    ) -> Result<Option<AuthorizedSplitIntent>, String>;
+}
+
+#[derive(Debug, Clone)]
+pub struct AuthorizedSplitIntent {
+    record: crabka_gres_control::SplitOperationRecord,
+    split: crate::SplitState,
+    digest: String,
+}
+
+impl AuthorizedSplitIntent {
+    pub fn from_record(record: crabka_gres_control::SplitOperationRecord) -> Result<Self, String> {
+        let plan = record
+            .plan
+            .as_ref()
+            .ok_or("split operation has no sealed plan")?;
+        let tenant = crate::TenantName::parse(record.tenant.as_str().to_string())
+            .map_err(|error| error.to_string())?;
+        let current_map = map_from_layout(
+            tenant,
+            crate::MapEpoch::new(plan.source_map_epoch),
+            &plan.current_layout,
+        )?;
+        let split = crate::SplitState::for_split(
+            record.operation_id.clone(),
+            crate::SplitCommand {
+                current_map,
+                predecessor: crate::RangeId::new(record.split.source_range_id),
+                predecessor_generation: record.split.predecessor_generation,
+                left: successor_from_layout(&record.split.left, &plan.target_layout)?,
+                right: successor_from_layout(&record.split.right, &plan.target_layout)?,
+            },
+        )
+        .map_err(|error| error.to_string())?;
+        if !map_matches_layout(&split.target_map, &plan.target_layout) {
+            return Err("derived target map differs from sealed target layout".into());
+        }
+        let hash = Sha256::digest(serde_json::to_vec(&record).map_err(|error| error.to_string())?);
+        let mut digest = String::with_capacity(hash.len() * 2);
+        for byte in hash {
+            write!(&mut digest, "{byte:02x}").expect("write to string");
+        }
+        Ok(Self {
+            record,
+            split,
+            digest,
+        })
+    }
+
+    pub fn record(&self) -> &crabka_gres_control::SplitOperationRecord {
+        &self.record
+    }
+    pub fn split(&self) -> &crate::SplitState {
+        &self.split
+    }
+    pub fn digest(&self) -> &str {
+        &self.digest
+    }
+}
+
+fn map_from_layout(
+    tenant: crate::TenantName,
+    epoch: crate::MapEpoch,
+    layout: &[crabka_gres_control::RangeLayoutEntry],
+) -> Result<crate::RangeMap, String> {
+    let mut start = crate::RangeKey::MIN;
+    let mut ranges = Vec::with_capacity(layout.len());
+    for range in layout {
+        let end = range
+            .end_key
+            .map(|end| crate::RangeKey::new(crate::TableId::new(end.table_id), end.rowid));
+        ranges.push(crate::RangeSpec::for_interval(
+            crate::RangeId::new(range.range_id),
+            start,
+            end,
+        ));
+        if let Some(end) = end {
+            start = end;
+        }
+    }
+    crate::RangeMap::new(tenant, epoch, ranges).map_err(|error| error.to_string())
+}
+
+fn successor_from_layout(
+    entry: &crabka_gres_control::RangeLayoutEntry,
+    layout: &[crabka_gres_control::RangeLayoutEntry],
+) -> Result<crate::SuccessorDescriptor, String> {
+    let index = layout
+        .iter()
+        .position(|candidate| candidate.range_id == entry.range_id)
+        .ok_or("successor absent from sealed target layout")?;
+    let start = index
+        .checked_sub(1)
+        .and_then(|prior| layout[prior].end_key)
+        .map_or(crate::RangeKey::MIN, |start| {
+            crate::RangeKey::new(crate::TableId::new(start.table_id), start.rowid)
+        });
+    let end = entry
+        .end_key
+        .map(|end| crate::RangeKey::new(crate::TableId::new(end.table_id), end.rowid));
+    Ok(crate::SuccessorDescriptor {
+        range_id: crate::RangeId::new(entry.range_id),
+        endpoint: entry.endpoint.clone(),
+        wal_generation: entry.wal_generation,
+        interval: crate::RangeSpec::for_interval(crate::RangeId::new(entry.range_id), start, end),
+    })
+}
+
+#[cfg(test)]
+pub(crate) fn authorized_test_fixture() -> AuthorizedSplitIntent {
+    use crabka_gres_control::{
+        RangeBoundary, RangeLayoutEntry, RangeLayoutSplit, RangeLifecycle, SplitOperationPlan,
+        SplitOperationRecord, TenantName,
+    };
+    let source = RangeLayoutEntry {
+        range_id: 0,
+        end_key: None,
+        endpoint: "source:7443".into(),
+        wal_generation: 7,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let left = RangeLayoutEntry {
+        range_id: 0,
+        end_key: Some(RangeBoundary {
+            table_id: 7,
+            rowid: 10,
+        }),
+        endpoint: "left:7443".into(),
+        wal_generation: 8,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let right = RangeLayoutEntry {
+        range_id: 1,
+        end_key: None,
+        endpoint: "right:7443".into(),
+        wal_generation: 8,
+        lifecycle: RangeLifecycle::Serving,
+        retirement: None,
+    };
+    let record = SplitOperationRecord::new(
+        TenantName::try_from("tenant-a").unwrap(),
+        "test-authority",
+        RangeLayoutSplit {
+            source_range_id: 0,
+            predecessor_generation: 7,
+            left: left.clone(),
+            right: right.clone(),
+        },
+    )
+    .unwrap()
+    .with_plan(SplitOperationPlan {
+        source_record_version: 1,
+        source_map_epoch: 0,
+        routing_table_id: 7,
+        current_layout: vec![source],
+        target_layout: vec![left, right],
+    })
+    .unwrap();
+    AuthorizedSplitIntent::from_record(record).unwrap()
 }
 
 /// Dispatcher-derived receipt state; callers cannot claim replay status on the wire.
@@ -58,11 +219,13 @@ impl SplitIntentAuthority for RegistrySplitIntentView {
         &self,
         request: &RangeControlReq,
         context: IntentAuthorizationContext,
-    ) -> Result<bool, String> {
-        Ok(self
-            .operations
+    ) -> Result<Option<AuthorizedSplitIntent>, String> {
+        self.operations
             .get(&(request.tenant.clone(), request.operation_id.clone()))
-            .is_some_and(|operation| request_matches_split_operation(request, operation, context)))
+            .filter(|operation| request_matches_split_operation(request, operation, context))
+            .cloned()
+            .map(AuthorizedSplitIntent::from_record)
+            .transpose()
     }
 }
 
@@ -188,9 +351,17 @@ impl TopologyActivationReceiptStore for RangeZeroTopologyActivationStore {
 /// Runtime capability behind authenticated range-control requests.
 #[async_trait]
 pub trait RangeControlExecutor: Send + Sync {
-    async fn execute(&self, request: &RangeControlReq) -> RangeControlResp;
+    async fn execute(
+        &self,
+        request: &RangeControlReq,
+        intent: &AuthorizedSplitIntent,
+    ) -> RangeControlResp;
 
-    async fn reconcile(&self, _request: &RangeControlReq) -> RangeControlResp {
+    async fn reconcile(
+        &self,
+        _request: &RangeControlReq,
+        _intent: &AuthorizedSplitIntent,
+    ) -> RangeControlResp {
         RangeControlResp::Ambiguous {
             message: "operation intent is durable but runtime status is unknown".into(),
         }
@@ -203,9 +374,10 @@ pub trait RangeControlExecutor: Send + Sync {
     async fn reconcile_completed(
         &self,
         request: &RangeControlReq,
+        intent: &AuthorizedSplitIntent,
         _previous: &RangeControlResp,
     ) -> RangeControlResp {
-        self.reconcile(request).await
+        self.reconcile(request, intent).await
     }
 }
 
@@ -391,20 +563,20 @@ impl GenerationFencedRangeControl {
             None if existing.is_some() => IntentAuthorizationContext::InProgress,
             None => IntentAuthorizationContext::New,
         };
-        match self
+        let authorized = match self
             .intent_authority
             .authorize_request(&request, authorization_context)
             .await
         {
-            Ok(true) => {}
-            Ok(false) => {
+            Ok(Some(authorized)) => authorized,
+            Ok(None) => {
                 return rejected(
                     "unauthorized_intent",
                     "control request differs from the durable split intent",
                 );
             }
             Err(message) => return rejected("intent_authority", message),
-        }
+        };
         if !expected_generations.contains(&request.generation)
             && !existing.as_ref().is_some_and(|receipt| {
                 receipt.request == request && receipt.request_digest == digest
@@ -427,7 +599,10 @@ impl GenerationFencedRangeControl {
                         | RangeControlOperation::InheritMarkers { .. }
                         | RangeControlOperation::SuccessorFencePrologue { .. }
                 ) {
-                    let reconciled = self.executor.reconcile_completed(&request, response).await;
+                    let reconciled = self
+                        .executor
+                        .reconcile_completed(&request, &authorized, response)
+                        .await;
                     let accepted = match (response, &reconciled) {
                         (
                             RangeControlResp::Staged { tail_sha256: _ },
@@ -479,7 +654,7 @@ impl GenerationFencedRangeControl {
                 }
                 return replayed(response);
             }
-            let response = self.executor.reconcile(&request).await;
+            let response = self.executor.reconcile(&request, &authorized).await;
             crash_after_effect_if_requested(&request, &response);
             return self.complete_receipt(&receipt_key, receipt, response).await;
         }
@@ -499,7 +674,7 @@ impl GenerationFencedRangeControl {
             Ok(false) => return rejected("receipt_race", "control receipt changed concurrently"),
             Err(message) => return rejected("receipt_store", message),
         }
-        let response = self.executor.execute(&request).await;
+        let response = self.executor.execute(&request, &authorized).await;
         crash_after_effect_if_requested(&request, &response);
         self.complete_receipt(&receipt_key, intent, response).await
     }
@@ -622,7 +797,7 @@ fn request_matches_split_operation(
     context: IntentAuthorizationContext,
 ) -> bool {
     let intent = &operation.split;
-    let Some(plan) = operation.plan.as_ref() else {
+    if operation.plan.is_none() {
         return false;
     };
     if operation.tenant.as_str() != request.tenant
@@ -647,80 +822,22 @@ fn request_matches_split_operation(
                 && operation.evidence.covered_offset == Some(*covered_offset)
         }
         RangeControlOperation::StageFilteredRestore {
-            split: requested,
-            source_range,
-            source_generation,
-            manifest_key,
-            covered_offset,
-            barrier_offset,
-            target_map: _,
-            ..
+            journal_revision,
+            journal_digest,
+        }
+        | RangeControlOperation::SuccessorFencePrologue {
+            journal_revision,
+            journal_digest,
+        }
+        | RangeControlOperation::InheritMarkers {
+            journal_revision,
+            journal_digest,
         } => {
             source
-                && runtime_split_matches_intent(requested, intent, plan, &request.operation_id)
-                && source_range.as_u32() == intent.source_range_id
-                && *source_generation == intent.predecessor_generation
-                && operation.evidence.manifest_key.as_ref() == Some(manifest_key)
-                && operation.evidence.covered_offset == Some(*covered_offset)
-                && operation.evidence.barrier_offset == Some(*barrier_offset)
+                && *journal_revision == operation.revision
+                && AuthorizedSplitIntent::from_record(operation.clone())
+                    .is_ok_and(|authorized| authorized.digest() == journal_digest)
         }
-        RangeControlOperation::SuccessorFencePrologue { split: requested } => {
-            source && runtime_split_matches_intent(requested, intent, plan, &request.operation_id)
-        }
-        RangeControlOperation::InheritMarkers {
-            interval_start,
-            interval_end,
-        } => {
-            source
-                && wire_key_matches(*interval_start, requested_interval_start(plan, intent))
-                && wire_optional_key_matches(*interval_end, requested_interval_end(plan, intent))
-        }
-    }
-}
-
-fn requested_interval_start(
-    plan: &crabka_gres_control::SplitOperationPlan,
-    intent: &crabka_gres_control::SplitState,
-) -> crabka_gres_control::RangeBoundary {
-    let index = plan
-        .current_layout
-        .iter()
-        .position(|range| range.range_id == intent.source_range_id)
-        .unwrap_or(0);
-    index
-        .checked_sub(1)
-        .and_then(|prior| plan.current_layout[prior].end_key)
-        .unwrap_or(crabka_gres_control::RangeBoundary {
-            table_id: 0,
-            rowid: 0,
-        })
-}
-
-fn requested_interval_end(
-    plan: &crabka_gres_control::SplitOperationPlan,
-    intent: &crabka_gres_control::SplitState,
-) -> Option<crabka_gres_control::RangeBoundary> {
-    plan.current_layout
-        .iter()
-        .find(|range| range.range_id == intent.source_range_id)
-        .and_then(|range| range.end_key)
-}
-
-fn wire_key_matches(
-    actual: crate::transport::WireRangeKey,
-    expected: crabka_gres_control::RangeBoundary,
-) -> bool {
-    actual.table_id == expected.table_id && actual.rowid == expected.rowid
-}
-
-fn wire_optional_key_matches(
-    actual: Option<crate::transport::WireRangeKey>,
-    expected: Option<crabka_gres_control::RangeBoundary>,
-) -> bool {
-    match (actual, expected) {
-        (None, None) => true,
-        (Some(actual), Some(expected)) => wire_key_matches(actual, expected),
-        _ => false,
     }
 }
 
@@ -757,40 +874,6 @@ fn phase_authorizes_operation(
             matches!(phase, Phase::Running | Phase::Checkpointed | Phase::Paused)
         }
     }
-}
-
-fn runtime_split_matches_intent(
-    split: &crate::SplitState,
-    intent: &crabka_gres_control::SplitState,
-    plan: &crabka_gres_control::SplitOperationPlan,
-    operation_id: &str,
-) -> bool {
-    let matches_successor =
-        |runtime: &crate::SuccessorDescriptor, durable: &crabka_gres_control::RangeLayoutEntry| {
-            runtime.range_id.as_u32() == durable.range_id
-                && runtime.endpoint == durable.endpoint
-                && runtime.wal_generation == durable.wal_generation
-                && runtime
-                    .interval
-                    .end
-                    .map(|end| crabka_gres_control::RangeBoundary {
-                        table_id: end.table_id.as_u64(),
-                        rowid: end.rowid,
-                    })
-                    == durable.end_key
-        };
-    split.operation_id == operation_id
-        && split.predecessor.as_u32() == intent.source_range_id
-        && split.predecessor_generation == intent.predecessor_generation
-        && split.current_map.epoch().as_u64() == plan.source_map_epoch
-        && split.target_map.epoch().as_u64() == plan.source_map_epoch.saturating_add(1)
-        && map_matches_layout(&split.current_map, &plan.current_layout)
-        && map_matches_layout(&split.target_map, &plan.target_layout)
-        && matches_successor(&split.left, &intent.left)
-        && split
-            .right
-            .as_ref()
-            .is_some_and(|right| matches_successor(right, &intent.right))
 }
 
 fn map_matches_layout(
@@ -832,8 +915,8 @@ mod tests {
             &self,
             _request: &RangeControlReq,
             _context: IntentAuthorizationContext,
-        ) -> Result<bool, String> {
-            Ok(false)
+        ) -> Result<Option<AuthorizedSplitIntent>, String> {
+            Ok(None)
         }
     }
 
@@ -845,8 +928,8 @@ mod tests {
             &self,
             _request: &RangeControlReq,
             _context: IntentAuthorizationContext,
-        ) -> Result<bool, String> {
-            Ok(true)
+        ) -> Result<Option<AuthorizedSplitIntent>, String> {
+            Ok(Some(authorized_test_fixture()))
         }
     }
 
@@ -910,13 +993,18 @@ mod tests {
 
     #[async_trait]
     impl RangeControlExecutor for WideningExecutor {
-        async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
+        async fn execute(
+            &self,
+            _request: &RangeControlReq,
+            _intent: &AuthorizedSplitIntent,
+        ) -> RangeControlResp {
             self.execute.clone()
         }
 
         async fn reconcile_completed(
             &self,
             _request: &RangeControlReq,
+            _intent: &AuthorizedSplitIntent,
             _previous: &RangeControlResp,
         ) -> RangeControlResp {
             self.reconcile.clone()
@@ -925,12 +1013,20 @@ mod tests {
 
     #[async_trait]
     impl RangeControlExecutor for CountingExecutor {
-        async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
+        async fn execute(
+            &self,
+            _request: &RangeControlReq,
+            _intent: &AuthorizedSplitIntent,
+        ) -> RangeControlResp {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.response.clone()
         }
 
-        async fn reconcile(&self, _request: &RangeControlReq) -> RangeControlResp {
+        async fn reconcile(
+            &self,
+            _request: &RangeControlReq,
+            _intent: &AuthorizedSplitIntent,
+        ) -> RangeControlResp {
             self.calls.fetch_add(1, Ordering::SeqCst);
             self.response.clone()
         }

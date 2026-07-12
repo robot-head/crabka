@@ -180,24 +180,16 @@ pub enum RangeControlOperation {
     },
     Status,
     StageFilteredRestore {
-        split: Box<crate::SplitState>,
-        source_range: RangeId,
-        source_generation: u64,
-        manifest_key: String,
-        covered_offset: i64,
-        barrier_offset: i64,
-        routing_table_id: u64,
-        physical_table_id: u32,
-        interval_start: WireRangeKey,
-        interval_end: Option<WireRangeKey>,
-        target_map: crate::RangeMap,
+        journal_revision: u64,
+        journal_digest: String,
     },
     SuccessorFencePrologue {
-        split: Box<crate::SplitState>,
+        journal_revision: u64,
+        journal_digest: String,
     },
     InheritMarkers {
-        interval_start: WireRangeKey,
-        interval_end: Option<WireRangeKey>,
+        journal_revision: u64,
+        journal_digest: String,
     },
     RetirePredecessor,
     Resume,
@@ -1578,33 +1570,16 @@ mod tests {
             },
             RangeControlOperation::Status,
             RangeControlOperation::StageFilteredRestore {
-                split: Box::new(split_fixture()),
-                source_range: RangeId::COORDINATOR,
-                source_generation: 8,
-                manifest_key: "tenant/r1/checkpoint.json".into(),
-                covered_offset: 41,
-                barrier_offset: 44,
-                routing_table_id: 7,
-                physical_table_id: 700,
-                interval_start: WireRangeKey {
-                    table_id: 7,
-                    rowid: 10,
-                },
-                interval_end: Some(WireRangeKey {
-                    table_id: 7,
-                    rowid: 20,
-                }),
-                target_map: split_fixture().target_map,
+                journal_revision: 3,
+                journal_digest: "sealed".into(),
             },
             RangeControlOperation::SuccessorFencePrologue {
-                split: Box::new(split_fixture()),
+                journal_revision: 5,
+                journal_digest: "sealed".into(),
             },
             RangeControlOperation::InheritMarkers {
-                interval_start: WireRangeKey {
-                    table_id: 7,
-                    rowid: 10,
-                },
-                interval_end: None,
+                journal_revision: 4,
+                journal_digest: "sealed".into(),
             },
             RangeControlOperation::RetirePredecessor,
             RangeControlOperation::Resume,
@@ -1667,46 +1642,6 @@ mod tests {
                 response
             );
         }
-    }
-
-    fn split_fixture() -> crate::SplitState {
-        let tenant = crate::TenantName::parse("tenant-a").expect("wire tenant");
-        let current_map = crate::RangeMap::new(
-            tenant,
-            crate::MapEpoch::ZERO,
-            vec![crate::RangeSpec::for_interval(
-                RangeId::COORDINATOR,
-                crate::RangeKey::MIN,
-                None,
-            )],
-        )
-        .expect("wire current map");
-        let split_at = crate::RangeKey::new(crate::TableId::new(7), 10);
-        crate::SplitState::for_split(
-            "split-42",
-            crate::SplitCommand {
-                current_map,
-                predecessor: RangeId::COORDINATOR,
-                predecessor_generation: 8,
-                left: crate::SuccessorDescriptor {
-                    range_id: RangeId::COORDINATOR,
-                    endpoint: "left:7443".into(),
-                    wal_generation: 9,
-                    interval: crate::RangeSpec::for_interval(
-                        RangeId::COORDINATOR,
-                        crate::RangeKey::MIN,
-                        Some(split_at),
-                    ),
-                },
-                right: crate::SuccessorDescriptor {
-                    range_id: RangeId::new(1),
-                    endpoint: "right:7443".into(),
-                    wal_generation: 9,
-                    interval: crate::RangeSpec::for_interval(RangeId::new(1), split_at, None),
-                },
-            },
-        )
-        .expect("wire split")
     }
 
     #[derive(Default)]
@@ -1919,14 +1854,18 @@ mod tests {
             &self,
             _request: &RangeControlReq,
             _context: crate::control::IntentAuthorizationContext,
-        ) -> Result<bool, String> {
-            Ok(true)
+        ) -> Result<Option<crate::control::AuthorizedSplitIntent>, String> {
+            Ok(Some(crate::control::authorized_test_fixture()))
         }
     }
 
     #[async_trait]
     impl crate::control::RangeControlExecutor for AppliedControl {
-        async fn execute(&self, _request: &RangeControlReq) -> RangeControlResp {
+        async fn execute(
+            &self,
+            _request: &RangeControlReq,
+            _intent: &crate::control::AuthorizedSplitIntent,
+        ) -> RangeControlResp {
             RangeControlResp::Applied
         }
     }

@@ -8,7 +8,7 @@ use std::{
 use async_trait::async_trait;
 use crabka_gres_ranges::{
     CheckpointManifest, RangeId, RangeTransferBarrier, RangeTransferCapability, SplitCommand,
-    SplitOperation, TableId, ValidatedSplitTransferPlan,
+    TableId, ValidatedSplitTransferPlan,
     control::RangeControlExecutor,
     transport::{RangeControlOperation, RangeControlReq, RangeControlResp},
 };
@@ -185,7 +185,11 @@ impl LiveRangeControlExecutor {
         }
     }
 
-    async fn apply(&self, request: &RangeControlReq) -> Result<RangeControlResp, RangeControlResp> {
+    async fn apply(
+        &self,
+        request: &RangeControlReq,
+        intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
+    ) -> Result<RangeControlResp, RangeControlResp> {
         let transfer = self.transfer()?;
         match &request.operation {
             RangeControlOperation::ForceCheckpoint => {
@@ -240,29 +244,27 @@ impl LiveRangeControlExecutor {
             RangeControlOperation::Status => {
                 Ok(self.status(&request.operation_id, request.range_id).await)
             }
-            RangeControlOperation::StageFilteredRestore {
-                split,
-                source_range,
-                source_generation,
-                manifest_key,
-                covered_offset,
-                barrier_offset,
-                routing_table_id,
-                physical_table_id,
-                interval_start,
-                interval_end,
-                target_map,
-                ..
-            } => {
-                validate_stage_request(
-                    request,
-                    split,
-                    *source_range,
-                    *source_generation,
-                    *interval_start,
-                    *interval_end,
-                    target_map,
-                )?;
+            RangeControlOperation::StageFilteredRestore { .. } => {
+                let split = intent.split();
+                let evidence = &intent.record().evidence;
+                let manifest_key = evidence.manifest_key.as_ref().ok_or_else(|| {
+                    rejected(
+                        "missing_evidence",
+                        "checkpoint manifest is absent from journal",
+                    )
+                })?;
+                let covered_offset = evidence.covered_offset.ok_or_else(|| {
+                    rejected("missing_evidence", "covered offset is absent from journal")
+                })?;
+                let barrier_offset = evidence.barrier_offset.ok_or_else(|| {
+                    rejected("missing_evidence", "pause barrier is absent from journal")
+                })?;
+                let routing_table_id = intent
+                    .record()
+                    .plan
+                    .as_ref()
+                    .expect("authorized plan")
+                    .routing_table_id;
                 if let Some(tail_sha256) = self
                     .operations
                     .lock()
@@ -273,13 +275,13 @@ impl LiveRangeControlExecutor {
                     return Ok(RangeControlResp::Staged { tail_sha256 });
                 }
                 let checkpoint = CheckpointManifest {
-                    range_id: *source_range,
-                    covered_offset: *covered_offset,
+                    range_id: split.predecessor,
+                    covered_offset,
                     manifest_key: manifest_key.clone(),
                 };
                 let requested_barrier = RangeTransferBarrier {
-                    range_id: *source_range,
-                    offset: *barrier_offset,
+                    range_id: split.predecessor,
+                    offset: barrier_offset,
                 };
                 let barrier = self
                     .operations
@@ -297,10 +299,10 @@ impl LiveRangeControlExecutor {
                     ));
                 }
                 let plan = ValidatedSplitTransferPlan::from_control(
-                    (**split).clone(),
+                    split.clone(),
                     BTreeMap::from([(
-                        TableId::new(u64::from(*physical_table_id)),
-                        TableId::new(*routing_table_id),
+                        TableId::new(routing_table_id),
+                        TableId::new(routing_table_id),
                     )]),
                 )
                 .map_err(|error| rejected("invalid_split", error.to_string()))?;
@@ -318,11 +320,12 @@ impl LiveRangeControlExecutor {
                 runtime.checkpoint = Some(checkpoint);
                 runtime.barrier = Some(barrier);
                 runtime.staged = Some(staged);
-                runtime.split = Some((**split).clone());
+                runtime.split = Some(split.clone());
                 runtime.tail_sha256 = Some(tail_sha256.clone());
                 Ok(RangeControlResp::Staged { tail_sha256 })
             }
-            RangeControlOperation::SuccessorFencePrologue { split: requested } => {
+            RangeControlOperation::SuccessorFencePrologue { .. } => {
+                let requested = intent.split();
                 if request.operation_id != requested.operation_id
                     || request.range_id != requested.predecessor
                     || request.generation != requested.predecessor_generation
@@ -348,7 +351,7 @@ impl LiveRangeControlExecutor {
                         runtime
                             .split
                             .clone()
-                            .filter(|split| split == requested.as_ref())
+                            .filter(|split| split == requested)
                             .ok_or_else(|| {
                                 rejected("missing_stage", "split intent is not staged")
                             })?,
@@ -374,12 +377,10 @@ impl LiveRangeControlExecutor {
                     .published = true;
                 Ok(RangeControlResp::Applied)
             }
-            RangeControlOperation::InheritMarkers {
-                interval_start,
-                interval_end,
-            } => {
-                let start = wire_key(*interval_start);
-                let end = interval_end.map(wire_key);
+            RangeControlOperation::InheritMarkers { .. } => {
+                let authorized_split = intent.split();
+                let start = authorized_split.predecessor_before.start;
+                let end = authorized_split.predecessor_before.end;
                 let source = self
                     .gateway
                     .control_in_doubt_markers(start, end)
@@ -500,19 +501,27 @@ impl LiveRangeControlExecutor {
 
 #[async_trait]
 impl RangeControlExecutor for LiveRangeControlExecutor {
-    async fn execute(&self, request: &RangeControlReq) -> RangeControlResp {
-        self.apply(request)
+    async fn execute(
+        &self,
+        request: &RangeControlReq,
+        intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
+    ) -> RangeControlResp {
+        self.apply(request, intent)
             .await
             .unwrap_or_else(|response| response)
     }
 
-    async fn reconcile(&self, request: &RangeControlReq) -> RangeControlResp {
+    async fn reconcile(
+        &self,
+        request: &RangeControlReq,
+        intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
+    ) -> RangeControlResp {
         match request.operation {
             RangeControlOperation::Status => {
                 self.status(&request.operation_id, request.range_id).await
             }
             _ => self
-                .apply(request)
+                .apply(request, intent)
                 .await
                 .unwrap_or_else(|response| response),
         }
@@ -521,6 +530,7 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
     async fn reconcile_completed(
         &self,
         request: &RangeControlReq,
+        intent: &crabka_gres_ranges::control::AuthorizedSplitIntent,
         previous: &RangeControlResp,
     ) -> RangeControlResp {
         if let (
@@ -531,7 +541,7 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
         ) = (&request.operation, previous)
         {
             let current = self
-                .apply(request)
+                .apply(request, intent)
                 .await
                 .unwrap_or_else(|response| response);
             let RangeControlResp::Paused {
@@ -578,7 +588,7 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
                 barrier_offset: new_barrier,
             };
         }
-        self.reconcile(request).await
+        self.reconcile(request, intent).await
     }
 }
 
@@ -598,41 +608,8 @@ fn split_command(split: &crabka_gres_ranges::SplitState) -> Result<SplitCommand,
     })
 }
 
-#[allow(clippy::too_many_arguments)]
-fn validate_stage_request(
-    request: &RangeControlReq,
-    split: &crabka_gres_ranges::SplitState,
-    source_range: RangeId,
-    source_generation: u64,
-    interval_start: crabka_gres_ranges::transport::WireRangeKey,
-    interval_end: Option<crabka_gres_ranges::transport::WireRangeKey>,
-    target_map: &crabka_gres_ranges::RangeMap,
-) -> Result<(), RangeControlResp> {
-    let identity_matches = split.operation == SplitOperation::Split
-        && request.operation_id == split.operation_id
-        && request.range_id == source_range
-        && split.predecessor == source_range
-        && request.generation == source_generation
-        && split.predecessor_generation == source_generation;
-    let evidence_matches = *target_map == split.target_map
-        && wire_key(interval_start) == split.predecessor_before.start
-        && interval_end.map(wire_key) == split.predecessor_before.end
-        && split.predecessor_before.range_id == source_range;
-    if !identity_matches || !evidence_matches {
-        return Err(rejected(
-            "invalid_split",
-            "stage owner, generation, operation, map, or interval differs from split intent",
-        ));
-    }
-    Ok(())
-}
-
 fn transfer_error(error: crabka_gres_ranges::RangeTransferError) -> RangeControlResp {
     rejected("transfer_failed", error.to_string())
-}
-
-fn wire_key(key: crabka_gres_ranges::transport::WireRangeKey) -> crabka_gres_ranges::RangeKey {
-    crabka_gres_ranges::RangeKey::new(TableId::new(key.table_id), key.rowid)
 }
 
 fn wire_marker(
@@ -775,15 +752,12 @@ fn rejected(code: &str, message: impl Into<String>) -> RangeControlResp {
 #[cfg(test)]
 mod tests {
     use crabka_gres_ranges::{
-        InDoubtMarker, MapEpoch, RangeId, RangeKey, RangeMap, RangeSpec, SplitCommand,
-        SuccessorDescriptor, TableId, TenantName,
-        transport::{RangeControlOperation, RangeControlReq, RangeControlResp, WireRangeKey},
+        InDoubtMarker, RangeId, RangeKey, RangeSpec, TableId, transport::RangeControlResp,
     };
     use crabka_pgkv::WriteOp;
 
     use super::{
-        marker_digest, recovery_extension_is_structural, validate_stage_request,
-        verify_marker_partition, wire_marker,
+        marker_digest, recovery_extension_is_structural, verify_marker_partition, wire_marker,
     };
 
     fn tail_record(offset: i64, ops: Vec<WriteOp>) -> crabka_gres_ranges::CommittedTailRecord {
@@ -875,126 +849,6 @@ mod tests {
             transaction_id,
             key: RangeKey::new(TableId::new(7), rowid),
         }
-    }
-
-    fn split_fixture() -> crabka_gres_ranges::SplitState {
-        let current_map = RangeMap::new(
-            TenantName::parse("tenant-a").unwrap(),
-            MapEpoch::ZERO,
-            vec![RangeSpec::for_interval(
-                RangeId::COORDINATOR,
-                RangeKey::MIN,
-                None,
-            )],
-        )
-        .unwrap();
-        let split_at = RangeKey::new(TableId::new(7), 10);
-        crabka_gres_ranges::SplitState::for_split(
-            "split-42",
-            SplitCommand {
-                current_map,
-                predecessor: RangeId::COORDINATOR,
-                predecessor_generation: 8,
-                left: SuccessorDescriptor {
-                    range_id: RangeId::COORDINATOR,
-                    endpoint: "left:7443".into(),
-                    wal_generation: 9,
-                    interval: RangeSpec::for_interval(
-                        RangeId::COORDINATOR,
-                        RangeKey::MIN,
-                        Some(split_at),
-                    ),
-                },
-                right: SuccessorDescriptor {
-                    range_id: RangeId::new(1),
-                    endpoint: "right:7443".into(),
-                    wal_generation: 9,
-                    interval: RangeSpec::for_interval(RangeId::new(1), split_at, None),
-                },
-            },
-        )
-        .unwrap()
-    }
-
-    #[test]
-    fn stage_rejects_any_identity_generation_map_or_interval_mismatch() {
-        let split = split_fixture();
-        let request = RangeControlReq {
-            tenant: "tenant-a".into(),
-            range_id: split.predecessor,
-            generation: split.predecessor_generation,
-            operation_id: split.operation_id.clone(),
-            operation: RangeControlOperation::Status,
-        };
-        let start = WireRangeKey {
-            table_id: 0,
-            rowid: 0,
-        };
-        assert!(
-            validate_stage_request(
-                &request,
-                &split,
-                split.predecessor,
-                split.predecessor_generation,
-                start,
-                None,
-                &split.target_map,
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_stage_request(
-                &request,
-                &split,
-                split.predecessor,
-                split.predecessor_generation + 1,
-                start,
-                None,
-                &split.target_map,
-            )
-            .is_err()
-        );
-        let mut wrong_request = request.clone();
-        wrong_request.operation_id = "other".into();
-        assert!(
-            validate_stage_request(
-                &wrong_request,
-                &split,
-                split.predecessor,
-                split.predecessor_generation,
-                start,
-                None,
-                &split.target_map,
-            )
-            .is_err()
-        );
-        assert!(
-            validate_stage_request(
-                &request,
-                &split,
-                split.predecessor,
-                split.predecessor_generation,
-                WireRangeKey {
-                    table_id: 0,
-                    rowid: 1
-                },
-                None,
-                &split.target_map,
-            )
-            .is_err()
-        );
-        assert!(
-            validate_stage_request(
-                &request,
-                &split,
-                split.predecessor,
-                split.predecessor_generation,
-                start,
-                None,
-                &split.current_map,
-            )
-            .is_err()
-        );
     }
 
     #[test]
