@@ -2690,10 +2690,8 @@ async fn open_live_multirange_tenant(
             _ => None,
         })
         .collect::<std::collections::BTreeSet<_>>();
-    if !activated_operations.is_empty() {
-        transfer
-            .activation_irreversible
-            .store(true, std::sync::atomic::Ordering::Release);
+    for operation_id in &activated_operations {
+        transfer.note_activation_irreversible(operation_id);
     }
     recovery_receipts.retain(|receipt| {
         !activated_operations.contains(&receipt.request.operation_id)
@@ -2801,6 +2799,32 @@ impl Clone for LiveRangeResources {
     }
 }
 
+/// Operation-scoped activation decisions reconstructed from durable receipts at startup.
+#[derive(Default)]
+struct IrreversibleActivations {
+    operation_ids: std::sync::Mutex<std::collections::BTreeSet<String>>,
+}
+
+impl IrreversibleActivations {
+    fn contains(&self, operation_id: &str) -> Result<bool, String> {
+        self.operation_ids
+            .lock()
+            .map(|operations| operations.contains(operation_id))
+            .map_err(|_| "irreversible activation lock poisoned".to_string())
+    }
+
+    fn note(&self, operation_id: &str) -> Result<(), String> {
+        if operation_id.is_empty() {
+            return Err("irreversible activation operation id is empty".to_string());
+        }
+        self.operation_ids
+            .lock()
+            .map_err(|_| "irreversible activation lock poisoned".to_string())?
+            .insert(operation_id.to_string());
+        Ok(())
+    }
+}
+
 /// Live resources retained for foundation-only transfer operations.
 struct LiveMultiRangeTransfer {
     ranges: std::sync::RwLock<BTreeMap<crabka_gres_ranges::RangeId, LiveRangeResources>>,
@@ -2815,7 +2839,7 @@ struct LiveMultiRangeTransfer {
     committed_activation: std::sync::Mutex<Option<String>>,
     prepare_fault: std::sync::atomic::AtomicU8,
     activation_fault: std::sync::atomic::AtomicU8,
-    activation_irreversible: std::sync::atomic::AtomicBool,
+    irreversible_activations: IrreversibleActivations,
 }
 
 impl LiveMultiRangeTransfer {
@@ -2839,7 +2863,7 @@ impl LiveMultiRangeTransfer {
             committed_activation: std::sync::Mutex::new(None),
             prepare_fault: std::sync::atomic::AtomicU8::new(PrepareTopologyFault::None as u8),
             activation_fault: std::sync::atomic::AtomicU8::new(TopologyActivationFault::None as u8),
-            activation_irreversible: std::sync::atomic::AtomicBool::new(false),
+            irreversible_activations: IrreversibleActivations::default(),
         }
     }
 
@@ -2963,14 +2987,16 @@ impl LiveMultiRangeTransfer {
             })
     }
 
-    fn activation_is_irreversible(&self) -> bool {
-        self.activation_irreversible
-            .load(std::sync::atomic::Ordering::Acquire)
+    fn activation_is_irreversible(&self, operation_id: &str) -> bool {
+        self.irreversible_activations
+            .contains(operation_id)
+            .unwrap_or(true)
     }
 
-    fn note_activation_irreversible(&self) {
-        self.activation_irreversible
-            .store(true, std::sync::atomic::Ordering::Release);
+    fn note_activation_irreversible(&self, operation_id: &str) {
+        if let Err(error) = self.irreversible_activations.note(operation_id) {
+            tracing::error!(%error, %operation_id, "record irreversible activation");
+        }
     }
 
     async fn retire_predecessor(
@@ -2980,7 +3006,7 @@ impl LiveMultiRangeTransfer {
         generation: u64,
         current_map: &crabka_gres_ranges::RangeMap,
     ) -> Result<(), crabka_gres_ranges::RangeTransferError> {
-        if !self.activation_is_irreversible() {
+        if !self.activation_is_irreversible(operation_id) {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
                 range_id,
                 reason: "predecessor retirement requires irreversible successor activation".into(),
@@ -3537,10 +3563,19 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
     }
 
     fn resume_after_drop(&self, barrier: crabka_gres_ranges::RangeTransferBarrier) {
-        if self
-            .activation_irreversible
-            .load(std::sync::atomic::Ordering::Acquire)
-        {
+        let irreversible_operation = self
+            .pending
+            .lock()
+            .ok()
+            .as_ref()
+            .and_then(|pending| pending.as_ref())
+            .filter(|pending| {
+                pending.predecessor == barrier.range_id
+                    && pending.barrier_offset == barrier.offset
+            })
+            .map(|pending| pending.operation_id.clone())
+            .is_some_and(|operation_id| self.activation_is_irreversible(&operation_id));
+        if irreversible_operation {
             tracing::error!(
                 range_id = barrier.range_id.as_u32(),
                 "topology activation crossed writer binding; predecessor remains fail-closed for startup completion"
@@ -4398,6 +4433,15 @@ mod tests {
     use clap::{CommandFactory as _, Parser as _};
 
     use super::*;
+
+    #[test]
+    fn irreversible_activation_is_scoped_to_the_operation() {
+        let activations = IrreversibleActivations::default();
+        activations.note("split-a").expect("record split-a");
+
+        assert!(activations.contains("split-a").expect("load split-a"));
+        assert!(!activations.contains("split-b").expect("load split-b"));
+    }
 
     #[test]
     fn checkpoint_size_cache_survives_pruning_and_accepts_newer_smaller_manifest() {
