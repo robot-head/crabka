@@ -2034,23 +2034,20 @@ fn physical_to_logical(
     let coordinator = engines.engines.get(&RangeId::COORDINATOR).ok_or_else(|| {
         std::io::Error::other("range zero missing while reconstructing activation mapping")
     })?;
-    let mut mapping = BTreeMap::new();
-    for table in crabka_pgcatalog::list_tables(coordinator.engine.catalog_kv())
-        .map_err(|error| std::io::Error::other(format!("list activation tables: {error:?}")))?
-    {
-        let logical = routing_table_id(&table.name);
-        if receipt
-            .split
-            .current_map
-            .route_table(logical)
-            .map_err(|error| std::io::Error::other(format!("route activation table: {error}")))?
-            .range_id
-            == receipt.split.predecessor
-        {
-            mapping.insert(TableId::new(u64::from(table.id)), logical);
-        }
-    }
-    Ok(mapping)
+    crabka_gres_ranges::transfer::predecessor_table_mapping(
+        &receipt.split.current_map,
+        receipt.split.predecessor,
+        crabka_pgcatalog::list_tables(coordinator.engine.catalog_kv())
+            .map_err(|error| std::io::Error::other(format!("list activation tables: {error:?}")))?
+            .into_iter()
+            .map(|table| {
+                (
+                    TableId::new(u64::from(table.id)),
+                    routing_table_id(&table.name),
+                )
+            }),
+    )
+    .map_err(|error| std::io::Error::other(format!("activation table mapping: {error}")))
 }
 
 fn routing_table_id(table: &str) -> TableId {
