@@ -39,7 +39,7 @@ use sha2::{Digest as _, Sha256};
 
 use crate::controller::gres_split_operation::{
     MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
-    reconcile_one_rpc_phase,
+    reconcile_one_rpc_phase, successors_may_be_deployed,
 };
 use crate::{
     context::Context,
@@ -186,7 +186,7 @@ async fn reconcile_inner(
     let active_split = split_operations.first().cloned();
     let tenant_ranges = active_split
         .as_ref()
-        .filter(|operation| operation.phase >= crabka_gres_control::SplitOperationPhase::Paused)
+        .filter(|operation| successors_may_be_deployed(operation))
         .and_then(|operation| operation.plan.as_ref())
         .map_or_else(
             || reconcile_ranges(current_record.as_ref(), &spec_ranges),

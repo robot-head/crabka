@@ -363,6 +363,13 @@ pub(crate) fn active_operations(
     records
 }
 
+/// Successor pods require the source-written staged activation receipt. Before this point,
+/// changing the source Deployment can destroy the only process able to create that receipt.
+pub(crate) fn successors_may_be_deployed(record: &SplitOperationRecord) -> bool {
+    record.phase > SplitOperationPhase::Paused
+        || (record.phase == SplitOperationPhase::Paused && record.evidence.tail_sha256.is_some())
+}
+
 #[cfg(test)]
 mod tests {
     use std::sync::{
@@ -548,6 +555,38 @@ mod tests {
         ));
         assert_eq!(running.revision, 1);
         assert_eq!(running.phase, SplitOperationPhase::Running);
+    }
+
+    #[test]
+    fn target_deployments_wait_for_source_staging_receipt() {
+        let running = operation()
+            .advance(SplitOperationPhase::Running, 1, None)
+            .unwrap();
+        let checkpointed = apply_response(
+            &running,
+            RangeControlResp::Checkpoint {
+                generation: 4,
+                covered_offset: 8,
+                manifest_key: "manifest".into(),
+            },
+        )
+        .unwrap();
+        let paused = apply_response(
+            &checkpointed,
+            RangeControlResp::Paused { barrier_offset: 10 },
+        )
+        .unwrap();
+        assert!(!successors_may_be_deployed(&running));
+        assert!(!successors_may_be_deployed(&checkpointed));
+        assert!(!successors_may_be_deployed(&paused));
+        let staged = apply_response(
+            &paused,
+            RangeControlResp::Staged {
+                tail_sha256: "tail".into(),
+            },
+        )
+        .unwrap();
+        assert!(successors_may_be_deployed(&staged));
     }
 
     struct CrashOnceControl {
