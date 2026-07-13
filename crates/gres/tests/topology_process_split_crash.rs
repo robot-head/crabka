@@ -1556,6 +1556,7 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
     let mut end_key = start_key.clone();
     *end_key.last_mut().expect("table prefix") += 1;
     let mut buckets = BTreeSet::new();
+    let mut decoded_rows = Vec::new();
     for range_id in [0, 1] {
         let response = system
             .inspect_durable_records(crabka_gres_ranges::InspectDurableRecordsReq {
@@ -1582,6 +1583,10 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                 } => {
                     assert_eq!(table_id, 50);
                     assert!(buckets.insert(bucket), "bucket duplicated across ranges");
+                    decoded_rows.push(
+                        decode_hash_physical_record(range_id, record)
+                            .expect("decode authoritative hash row"),
+                    );
                 }
                 crabka_pgkv::key::KeyClass::System => {}
                 class => {
@@ -1591,6 +1596,29 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
         }
     }
     assert_eq!(buckets, (0..16).collect());
+    decoded_rows.sort();
+    assert_eq!(
+        decoded_rows
+            .iter()
+            .map(|row| row.logical_id)
+            .collect::<BTreeSet<_>>(),
+        (0..16).collect()
+    );
+    assert_eq!(
+        decoded_rows
+            .iter()
+            .map(|row| row.rowid)
+            .collect::<BTreeSet<_>>()
+            .len(),
+        16
+    );
+    for row in decoded_rows {
+        assert_eq!(
+            row.bucket,
+            crabka_pgkv::key::hash_bucket(&row.logical_id.to_be_bytes(), 16).unwrap()
+        );
+        assert_eq!(row.key_class, "hash_primary_version");
+    }
     system.shutdown().await;
 }
 
@@ -1823,6 +1851,80 @@ struct PhysicalPayloadRow {
     rowid: u64,
     seq: u64,
     checksum: String,
+}
+
+#[derive(Clone, Debug, Eq, Ord, PartialEq, PartialOrd, Serialize)]
+struct HashPhysicalPayloadRow {
+    range_id: u32,
+    table_id: u32,
+    logical_id: i32,
+    rowid: u64,
+    bucket: u32,
+    version: u64,
+    key_class: &'static str,
+    start_ts: u64,
+    commit_ts: u64,
+    seq: Option<i32>,
+    checksum: Option<String>,
+    raw_key: Vec<u8>,
+    raw_value: Vec<u8>,
+    source_offset: i64,
+    source_revision: u64,
+}
+
+fn decode_hash_physical_record(
+    range_id: u32,
+    record: &crabka_gres_ranges::DurableRecord,
+) -> Result<HashPhysicalPayloadRow, String> {
+    let crabka_pgkv::key::KeyClass::HashPrimaryVersion {
+        table_id,
+        bucket,
+        rowid,
+        version,
+    } = crabka_pgkv::key::classify_key(&record.key)
+    else {
+        return Err("durable record is not a hash primary version".into());
+    };
+    let tuple = crabka_pgmvcc::version::decode_ts_tuple(&record.value)
+        .map_err(|error| format!("decode timestamp tuple: {error}"))?;
+    let crabka_pgmvcc::version::TsVersionState::Committed { commit_ts } = tuple.state else {
+        return Err(format!(
+            "hash primary version is not committed: {:?}",
+            tuple.state
+        ));
+    };
+    let Some(crabka_pgtypes::Datum::Int4(logical_id)) = tuple.row.first() else {
+        return Err("hash tuple does not start with an int4 hash value".into());
+    };
+    let seq = tuple.row.get(1).and_then(|value| match value {
+        crabka_pgtypes::Datum::Int4(value) => Some(*value),
+        _ => None,
+    });
+    let checksum = tuple.row.get(2).and_then(|value| match value {
+        crabka_pgtypes::Datum::Text(value) => Some(value.clone()),
+        _ => None,
+    });
+    Ok(HashPhysicalPayloadRow {
+        range_id,
+        table_id,
+        logical_id: *logical_id,
+        rowid,
+        bucket,
+        version,
+        key_class: "hash_primary_version",
+        start_ts: tuple.start_ts,
+        commit_ts,
+        seq,
+        checksum,
+        raw_key: record.key.clone(),
+        raw_value: record.value.clone(),
+        source_offset: record
+            .source_offset
+            .ok_or_else(|| "durable record has no source offset".to_string())?,
+        source_revision: record
+            .source_revision
+            .ok_or_else(|| "durable record has no source revision".to_string())?,
+    })
 }
 
 #[derive(Clone, Debug, Eq, PartialEq, Serialize)]
