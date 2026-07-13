@@ -316,7 +316,7 @@ impl SqlEngine {
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv: Arc::clone(&kv),
-            kv,
+            kv: Arc::clone(&kv),
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Durable)),
             lockmgr: Arc::new(RowLockManager::new()),
@@ -332,7 +332,7 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
-            join_stats: Arc::new(plan_dist::SequenceCounters::default()),
+            join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&kv))),
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
         })
@@ -377,7 +377,7 @@ impl SqlEngine {
         Ok(Self {
             coordination: Arc::clone(&coordination),
             catalog_kv,
-            kv: sm_kv,
+            kv: Arc::clone(&sm_kv),
             procarray,
             seq: Arc::new(SequenceManager::new(PersistMode::Replicated)),
             lockmgr: Arc::new(RowLockManager::new()),
@@ -393,7 +393,7 @@ impl SqlEngine {
             clock: Arc::new(crate::clock::SystemClock),
             foreign_scanner: None,
             range_scanner: Arc::new(scanner::LocalRangeScanner),
-            join_stats: Arc::new(plan_dist::SequenceCounters::default()),
+            join_stats: Arc::new(plan_dist::DurableSequenceStats::new(Arc::clone(&sm_kv))),
             join_strategy_config: plan_dist::PlannerConfig::default(),
             timestamp_oracle: Arc::new(timestamp_txn::LocalTimestampOracle::default()),
         })
@@ -482,6 +482,12 @@ impl SqlEngine {
     /// Inject statistics used by distributed SQL join planning.
     pub fn set_join_stats(&mut self, stats: Arc<dyn plan_dist::Stats>) {
         self.join_stats = stats;
+    }
+
+    /// Return the live statistics source used by subsequently created sessions.
+    #[must_use]
+    pub fn join_stats(&self) -> Arc<dyn plan_dist::Stats> {
+        Arc::clone(&self.join_stats)
     }
 
     /// Configure distributed SQL join strategy thresholds.

@@ -2641,7 +2641,12 @@ impl RegistryRangeScanner {
         let right_table =
             crabka_pgcatalog::get_table(catalog.catalog_kv(), &request.right.table_name)?;
         if request.strategy == crabka_pgexec::JoinExecutionStrategy::CoPartitioned
-            && !crabka_pgexec::plan_dist::tables_are_co_partitioned(&left_table, &right_table)
+            && !crabka_pgexec::plan_dist::co_partitioned_join_keys_match(
+                &left_table,
+                &right_table,
+                &request.left_keys,
+                &request.right_keys,
+            )
         {
             request.strategy = crabka_pgexec::JoinExecutionStrategy::Gather;
         }
@@ -2670,6 +2675,28 @@ impl RegistryRangeScanner {
                 self.materialize_join_side(&request, &right_table, false)
                     .await?,
             );
+        }
+        if matches!(
+            request.strategy,
+            crabka_pgexec::JoinExecutionStrategy::BroadcastLeft
+                | crabka_pgexec::JoinExecutionStrategy::BroadcastRight
+        ) && self.registry.range_ids().await.into_iter().any(
+            |range_id| match encode_join_request(range_id, &request) {
+                Ok(wire) => !wire.fits_transport_frame(),
+                Err(_) => true,
+            },
+        ) {
+            // The estimate is only a planning hint. Exact encoded capacity is
+            // decided after row materialization, before any owner RPC is sent.
+            request.strategy = crabka_pgexec::JoinExecutionStrategy::Gather;
+            request.broadcast_rows = None;
+            let left = self
+                .materialize_join_side(&request, &left_table, true)
+                .await?;
+            let right = self
+                .materialize_join_side(&request, &right_table, false)
+                .await?;
+            return crabka_pgexec::scanner::execute_materialized_join(&request, &left, &right);
         }
         request
             .validate()
@@ -3149,10 +3176,15 @@ fn handle_join_range(
         ));
     }
     if matches!(request.strategy, WireJoinStrategy::CoPartitioned)
-        && !crabka_pgexec::plan_dist::tables_are_co_partitioned(&left_table, &right_table)
+        && !crabka_pgexec::plan_dist::co_partitioned_join_keys_match(
+            &left_table,
+            &right_table,
+            &request.left_keys,
+            &request.right_keys,
+        )
     {
         return Err(crabka_pgexec::ExecError::Unsupported(
-            "co-partitioned join requires identical proven hash co-location".into(),
+            "co-partitioned join requires exact hash-sharding columns".into(),
         ));
     }
     let scan = |table: &crabka_pgcatalog::Table, interval: &WireRowInterval| {
@@ -4840,6 +4872,63 @@ mod tests {
                 .unwrap()
                 .2,
             vec![Datum::Text("b".into()), Datum::Text("z".into())]
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn scan_range_service_rejects_copartitioned_join_on_non_hash_keys() {
+        let owner = crabka_pgexec::SqlEngine::new();
+        let mut session = owner.connect();
+        session.simple_query(
+            "CREATE TABLE cpl (id int4, v text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             CREATE TABLE cpr (id int4, v text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair",
+        ).await.unwrap();
+        let left = crabka_pgcatalog::get_table(owner.catalog_kv(), "cpl").unwrap();
+        let right = crabka_pgcatalog::get_table(owner.catalog_kv(), "cpr").unwrap();
+        let service =
+            RangeScanService::new(BTreeMap::from([(RangeId::new(1), owner.clone_handle())]));
+        let snapshot = WireSnapshot {
+            xmin: 1,
+            xmax: 100,
+            xip: vec![],
+        };
+        let response = service
+            .handle(RangeRequest::JoinRange(JoinRangeReq {
+                range_id: RangeId::new(1),
+                local_snapshot: snapshot.clone(),
+                global_snapshot: snapshot,
+                read_ts: 100,
+                own_xid: None,
+                own_start_ts: None,
+                kind: WireJoinKind::Inner,
+                left_keys: vec![1],
+                right_keys: vec![1],
+                strategy: WireJoinStrategy::CoPartitioned,
+                left: WireJoinTableInterval {
+                    table_id: u64::from(left.id),
+                    table_name: left.name,
+                    interval: WireRowInterval {
+                        start: None,
+                        end: None,
+                    },
+                },
+                right: WireJoinTableInterval {
+                    table_id: u64::from(right.id),
+                    table_name: right.name,
+                    interval: WireRowInterval {
+                        start: None,
+                        end: None,
+                    },
+                },
+                broadcast_rows: None,
+                left_filter: WirePredicatePushdown::FullScan,
+                right_filter: WirePredicatePushdown::FullScan,
+                projection: vec![1, 3],
+            }))
+            .await;
+        assert!(
+            matches!(&response, RangeResponse::ScanRangeError { message, .. } if message.contains("hash-sharding columns")),
+            "{response:?}"
         );
     }
 

@@ -752,6 +752,14 @@ impl JoinRangeReq {
         self.to_pgexec().validate()
     }
 
+    /// Whether the fully materialized request, including enum/request JSON
+    /// overhead, fits the production bounded frame.
+    #[must_use]
+    pub fn fits_transport_frame(&self) -> bool {
+        serde_json::to_vec(&RangeRequest::JoinRange(self.clone()))
+            .is_ok_and(|bytes| bytes.len() <= MAX_FRAME_BYTES)
+    }
+
     pub(crate) fn to_pgexec(&self) -> crabka_pgexec::JoinRangeRequest {
         use crabka_pgexec::{JoinExecutionStrategy as S, JoinKind as K};
         crabka_pgexec::JoinRangeRequest {
@@ -1843,6 +1851,31 @@ mod tests {
         let error = serialize_json_bounded(&RangeRequest::JoinRange(request), MAX_FRAME_BYTES)
             .expect_err("frame must be bounded");
         assert!(matches!(error, TransportError::FrameTooLarge { .. }));
+    }
+
+    #[test]
+    fn join_request_transport_capacity_has_exact_materialized_boundary() {
+        let mut request = join_request_fixture();
+        request.broadcast_rows = Some(vec![JoinRangeRow { tuple: vec![] }]);
+        let mut low = 0usize;
+        let mut high = MAX_FRAME_BYTES;
+        while low < high {
+            let mid = low + (high - low).div_ceil(2);
+            request.broadcast_rows.as_mut().unwrap()[0]
+                .tuple
+                .resize(mid, 0);
+            if request.fits_transport_frame() {
+                low = mid;
+            } else {
+                high = mid - 1;
+            }
+        }
+        request.broadcast_rows.as_mut().unwrap()[0]
+            .tuple
+            .resize(low, 0);
+        assert!(request.fits_transport_frame());
+        request.broadcast_rows.as_mut().unwrap()[0].tuple.push(0);
+        assert!(!request.fits_transport_frame());
     }
 
     #[test]

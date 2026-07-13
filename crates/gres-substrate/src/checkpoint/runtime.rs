@@ -68,6 +68,34 @@ pub struct CheckpointMetadata {
     pub total_bytes: u64,
 }
 
+/// Conservative read-only planner adapter over verified durable checkpoint
+/// metadata. Checkpoints are range/tenant scoped rather than per-table, so the
+/// verified total is an upper-bound estimate for any table in that range.
+impl crabka_pgexec::plan_dist::Stats for CheckpointMetadata {
+    fn estimated_bytes(&self, _table_id: u64) -> Option<u64> {
+        Some(self.total_bytes)
+    }
+}
+
+#[cfg(test)]
+mod planner_stats_tests {
+    use crabka_pgexec::plan_dist::Stats;
+
+    use super::CheckpointMetadata;
+
+    #[test]
+    fn verified_checkpoint_metadata_is_a_read_only_stats_source() {
+        let metadata = CheckpointMetadata {
+            tenant: "tenant-a".into(),
+            wal_generation: 3,
+            covered_offset: 17,
+            manifest_key: "checkpoint/MANIFEST".into(),
+            total_bytes: 4096,
+        };
+        assert_eq!(metadata.estimated_bytes(42), Some(4096));
+    }
+}
+
 /// Restore plus replay output.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RestorePlan {

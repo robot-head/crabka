@@ -4,6 +4,7 @@ use crabka_pgcatalog::Table;
 use crabka_pgparser::ast::{BinaryOp, Expr, FuncArgs, SelectItem};
 use crabka_pgtypes::{ColumnType, Datum};
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use crate::{
     ExecError,
@@ -35,6 +36,32 @@ impl SequenceCounters {
 impl Stats for SequenceCounters {
     fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
         self.0.get(&table_id).copied()
+    }
+}
+
+/// Read-only statistics adapter over the engine's authoritative durable
+/// per-table next-rowid keys. It deliberately reads the applied KV on every
+/// estimate so sessions observe commits and replicated apply without refresh.
+#[derive(Clone)]
+pub struct DurableSequenceStats {
+    kv: Arc<dyn crabka_pgkv::Kv>,
+}
+
+impl DurableSequenceStats {
+    #[must_use]
+    pub fn new(kv: Arc<dyn crabka_pgkv::Kv>) -> Self {
+        Self { kv }
+    }
+}
+
+impl Stats for DurableSequenceStats {
+    fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
+        let table_id = u32::try_from(table_id).ok()?;
+        let next = crate::exec::read_seq_kv(self.kv.as_ref(), table_id).ok()?;
+        // The counter is a row cardinality source, not a byte counter. Use a
+        // conservative encoded-row allowance; the gateway still checks the
+        // exact materialized wire request before broadcasting.
+        Some(next.saturating_sub(1).saturating_mul(256))
     }
 }
 
@@ -95,6 +122,36 @@ pub fn tables_are_co_partitioned(left: &Table, right: &Table) -> bool {
         && left_hash.columns == right_hash.columns
         && left_hash.co_location_group.is_some()
         && left_hash.co_location_group == right_hash.co_location_group
+}
+
+/// Prove that a co-partitioned join uses each table's complete hash key, in
+/// catalog order. Identical layouts alone are insufficient for range-local
+/// equality joins on some other column.
+#[must_use]
+pub fn co_partitioned_join_keys_match(
+    left: &Table,
+    right: &Table,
+    left_keys: &[usize],
+    right_keys: &[usize],
+) -> bool {
+    use crabka_pgcatalog::ShardingStrategy;
+
+    if !tables_are_co_partitioned(left, right) {
+        return false;
+    }
+    let (Some(ShardingStrategy::Hash(left_hash)), Some(ShardingStrategy::Hash(right_hash))) =
+        (&left.sharding, &right.sharding)
+    else {
+        return false;
+    };
+    let indexes = |table: &Table, columns: &[String]| {
+        columns
+            .iter()
+            .map(|name| table.columns.iter().position(|column| &column.name == name))
+            .collect::<Option<Vec<_>>>()
+    };
+    indexes(left, &left_hash.columns).as_deref() == Some(left_keys)
+        && indexes(right, &right_hash.columns).as_deref() == Some(right_keys)
 }
 
 #[must_use]
