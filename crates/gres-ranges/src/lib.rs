@@ -72,10 +72,11 @@ pub use self::{
         TableTransferRequest, ValidatedSplitTransferPlan,
     },
     transport::{
-        FramedTcpClient, RangeControlOperation, RangeControlReq, RangeControlResp, RangeRequest,
-        RangeResponse, RangeService, RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq,
-        ScanCursorResp, TransportError, TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind,
-        WireInDoubtMarker, WireRangeKey, serve_tls,
+        FramedTcpClient, JoinRangeReq, JoinRangeResp, JoinRangeRow, RangeControlOperation,
+        RangeControlReq, RangeControlResp, RangeRequest, RangeResponse, RangeService,
+        RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError,
+        TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker, WireJoinKind,
+        WireJoinStrategy, WireJoinTableInterval, WireRangeKey, serve_tls,
     },
     tso::{
         BatchedTsoClient, EpochHeartbeat, GrantLease, HeartbeatVerdict, MemoryTsoHorizon, TsoError,
