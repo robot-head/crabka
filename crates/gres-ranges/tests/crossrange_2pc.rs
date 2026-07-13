@@ -777,6 +777,7 @@ async fn restart_durably_aborts_matching_global_index_intents_without_touching_o
     };
     let matching_write = TimestampWrite {
         table_id: table.id,
+        bucket: None,
         rowid: 11,
         row: vec![crabka_pgtypes::Datum::Int4(11)],
         delete: false,
@@ -807,6 +808,7 @@ async fn restart_durably_aborts_matching_global_index_intents_without_touching_o
         TimestampTransactionId::new(start_ts.get() + 1_000).expect("distinct timestamp");
     let other_write = TimestampWrite {
         table_id: table.id,
+        bucket: None,
         rowid: 99,
         row: vec![crabka_pgtypes::Datum::Int4(99)],
         delete: false,

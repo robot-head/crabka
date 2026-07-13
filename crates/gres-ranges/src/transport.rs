@@ -533,6 +533,8 @@ pub struct WireTimestampIdentity {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WireTimestampWrite {
     pub table_id: u32,
+    #[serde(default)]
+    pub bucket: Option<u32>,
     pub rowid: u64,
     pub row: Vec<WireDatum>,
     pub delete: bool,
@@ -588,6 +590,8 @@ pub struct TimestampResolveReq {
 pub struct WireTimestampOperation {
     pub range_id: u32,
     pub table_id: u32,
+    #[serde(default)]
+    pub bucket: Option<u32>,
     pub rowid: u64,
     pub delete: bool,
 }
@@ -1824,6 +1828,72 @@ mod tests {
             serde_json::from_slice::<RangeResponse>(&encoded).expect("decode join response"),
             response
         );
+    }
+
+    #[test]
+    fn timestamp_bucket_wire_round_trip_distinguishes_absent_zero_and_max() {
+        for bucket in [None, Some(0), Some(u32::MAX)] {
+            let write = WireTimestampWrite {
+                table_id: 7,
+                bucket,
+                rowid: 11,
+                row: vec![WireDatum::Int4(42)],
+                delete: false,
+            };
+            let encoded = serde_json::to_vec(&write).expect("encode timestamp write");
+            assert_eq!(
+                serde_json::from_slice::<WireTimestampWrite>(&encoded)
+                    .expect("decode timestamp write"),
+                write
+            );
+
+            let operation = WireTimestampOperation {
+                range_id: 3,
+                table_id: 7,
+                bucket,
+                rowid: 11,
+                delete: false,
+            };
+            let encoded = serde_json::to_vec(&operation).expect("encode timestamp operation");
+            assert_eq!(
+                serde_json::from_slice::<WireTimestampOperation>(&encoded)
+                    .expect("decode timestamp operation"),
+                operation
+            );
+        }
+    }
+
+    #[test]
+    fn legacy_timestamp_wire_decodes_as_explicitly_bucketless() {
+        let write: WireTimestampWrite = serde_json::from_str(
+            r#"{"table_id":7,"rowid":11,"row":[],"delete":false}"#,
+        )
+        .expect("decode legacy timestamp write");
+        assert_eq!(write.bucket, None);
+
+        let operation: WireTimestampOperation = serde_json::from_str(
+            r#"{"range_id":3,"table_id":7,"rowid":11,"delete":false}"#,
+        )
+        .expect("decode legacy timestamp operation");
+        assert_eq!(operation.bucket, None);
+    }
+
+    #[test]
+    fn timestamp_request_encoding_distinguishes_absent_bucket_from_bucket_zero() {
+        let operation = WireTimestampOperation {
+            range_id: 3,
+            table_id: 7,
+            bucket: None,
+            rowid: 11,
+            delete: false,
+        };
+        let absent = serde_json::to_vec(&operation).expect("encode absent bucket");
+        let zero = serde_json::to_vec(&WireTimestampOperation {
+            bucket: Some(0),
+            ..operation
+        })
+        .expect("encode bucket zero");
+        assert_ne!(absent, zero);
     }
 
     #[test]

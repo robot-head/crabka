@@ -1469,6 +1469,7 @@ async fn recover_remote_timestamp_participant(
                 .map(|op| crate::transport::WireTimestampOperation {
                     range_id: op.range_id,
                     table_id: op.table_id,
+                    bucket: op.bucket,
                     rowid: op.rowid,
                     delete: op.delete,
                 })
@@ -4239,6 +4240,7 @@ impl GatewaySession {
             .map(|write| crabka_pgexec::TimestampTxnOperation {
                 range_id: participant_range.as_u32(),
                 table_id: write.table_id,
+                bucket: write.bucket,
                 rowid: write.rowid,
                 delete: write.delete,
             })
@@ -4315,6 +4317,7 @@ impl GatewaySession {
                     .map(|write| crabka_pgexec::TimestampTxnOperation {
                         range_id: range_id.as_u32(),
                         table_id: write.table_id,
+                        bucket: write.bucket,
                         rowid: write.rowid,
                         delete: write.delete,
                     })
@@ -5974,6 +5977,7 @@ mod tests {
                 RangeId::new(3),
                 vec![crabka_pgexec::TimestampWrite {
                     table_id: 50,
+                    bucket: None,
                     rowid: 1,
                     row: vec![Datum::Int4(1)],
                     delete: false,
@@ -5984,6 +5988,7 @@ mod tests {
                 RangeId::new(4),
                 vec![crabka_pgexec::TimestampWrite {
                     table_id: 50,
+                    bucket: None,
                     rowid: 2,
                     row: vec![Datum::Int4(2)],
                     delete: false,
@@ -6313,6 +6318,7 @@ mod tests {
                 &[1],
                 &[crabka_pgexec::TimestampWrite {
                     table_id: table.id,
+                    bucket: None,
                     rowid: 1,
                     row: vec![Datum::Int4(1)],
                     delete: false,
@@ -6686,6 +6692,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 11,
             row: vec![Datum::Int4(12)],
             delete: false,
@@ -6781,6 +6788,7 @@ mod tests {
         };
         let primary_write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 11,
             row: vec![Datum::Int4(1)],
             delete: false,
@@ -6788,6 +6796,7 @@ mod tests {
         };
         let secondary_write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 12,
             row: vec![Datum::Int4(2)],
             delete: false,
@@ -6855,6 +6864,7 @@ mod tests {
         };
         let primary_write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 1,
             row: vec![Datum::Int4(1)],
             delete: false,
@@ -6862,6 +6872,7 @@ mod tests {
         };
         let secondary_write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 2,
             row: vec![Datum::Int4(2)],
             delete: false,
@@ -7013,6 +7024,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 60,
             row: vec![Datum::Int4(1)],
             delete: false,
@@ -7070,6 +7082,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 61,
             row: vec![Datum::Int4(1)],
             delete: false,
@@ -7127,6 +7140,7 @@ mod tests {
         };
         let low = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 60,
             row: vec![Datum::Int4(1)],
             delete: false,
@@ -7142,6 +7156,7 @@ mod tests {
             .map(|write| crabka_pgexec::TimestampTxnOperation {
                 range_id: 1,
                 table_id: write.table_id,
+                bucket: write.bucket,
                 rowid: write.rowid,
                 delete: write.delete,
             })

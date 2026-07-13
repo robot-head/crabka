@@ -624,6 +624,40 @@ impl SqlEngine {
         crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).map_err(Into::into)
     }
 
+    /// Validate the physical bucket identity carried by a timestamp operation.
+    pub fn validate_timestamp_bucket(
+        &self,
+        table_id: u32,
+        bucket: Option<u32>,
+    ) -> Result<(), ExecError> {
+        let Some(table) = crabka_pgcatalog::list_tables(self.catalog_kv.as_ref())?
+            .into_iter()
+            .find(|table| table.id == table_id)
+        else {
+            return Ok(());
+        };
+        match (&table.sharding, bucket) {
+            (Some(crabka_pgcatalog::ShardingStrategy::Hash(spec)), Some(bucket))
+                if bucket < spec.buckets =>
+            {
+                Ok(())
+            }
+            (Some(crabka_pgcatalog::ShardingStrategy::Hash(_)), None) => Err(
+                ExecError::Unsupported("hash timestamp operation is missing its bucket".into()),
+            ),
+            (Some(crabka_pgcatalog::ShardingStrategy::Hash(spec)), Some(bucket)) => Err(
+                ExecError::Unsupported(format!(
+                    "hash timestamp bucket {bucket} is outside 0..{}",
+                    spec.buckets
+                )),
+            ),
+            (_, Some(_)) => Err(ExecError::Unsupported(
+                "non-hash timestamp operation carries a bucket".into(),
+            )),
+            (_, None) => Ok(()),
+        }
+    }
+
     /// Resolve a timestamp transaction's primary decision from this engine's store.
     pub fn primary_timestamp_decision(
         &self,
@@ -1735,6 +1769,36 @@ mod tests {
                     co_location_group: Some("users".into()),
                 }
             ))
+        );
+    }
+
+    #[tokio::test]
+    async fn timestamp_bucket_validation_rejects_missing_wrong_shape_and_out_of_range() {
+        let engine = SqlEngine::new();
+        let mut session = engine.connect();
+        session
+            .simple_query(
+                "CREATE TABLE h (id int4) SHARDED BY HASH (id) BUCKETS 16; \
+                 CREATE TABLE s (id int4) SHARDED",
+            )
+            .await
+            .expect("create tables");
+        let hash = engine.catalog_table("h").expect("hash table");
+        let ordinary = engine.catalog_table("s").expect("ordinary table");
+
+        assert!(engine.validate_timestamp_bucket(hash.id, Some(0)).is_ok());
+        assert!(engine.validate_timestamp_bucket(hash.id, Some(15)).is_ok());
+        assert!(engine.validate_timestamp_bucket(hash.id, None).is_err());
+        assert!(engine.validate_timestamp_bucket(hash.id, Some(16)).is_err());
+        assert!(
+            engine
+                .validate_timestamp_bucket(ordinary.id, Some(0))
+                .is_err()
+        );
+        assert!(
+            engine
+                .validate_timestamp_bucket(ordinary.id, None)
+                .is_ok()
         );
     }
 
