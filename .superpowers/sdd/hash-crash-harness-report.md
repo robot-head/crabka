@@ -69,3 +69,39 @@ remote transaction proof, schema-v3 validator negatives, and hash-family wrapper
 inferring durable facts from logical results.
 
 `crates/gres-ranges/src/control.rs` was not edited or staged.
+
+## Resume after durable-inspection prerequisite (`586a5648`)
+
+The authenticated `InspectDurableRecords` prerequisite is now present and the prior observability
+blocker is resolved. Commit `01826ef1` adds a focused real-child test using a real hash table and
+the pinned SQL values `0..15`.
+
+RED was an exact placement counterexample: inspecting only r1 returned buckets `1..15`; bucket 0
+was on r0 under the existing initial boundary. GREEN inspects the authoritative r0/r1 union and
+proves buckets `0..15` exactly once, every table record is `HashPrimaryVersion` (no legacy primary
+class), every record has a source WAL offset and journal revision, pagination is complete, and the
+sample provenance is valid:
+
+```text
+CRABKA_G9_HASH_INSPECT=1 timeout 120s cargo test --locked -p crabka-gres \
+  --test topology_process_split_crash \
+  -- --exact real_child_hash_durable_inspection_covers_pinned_bucket_corpus --nocapture
+# 1 passed; 2.06s live test time
+```
+
+The next strict RED remains in the ordinary-only payload model, not in child readiness. The live
+hash probe previously demonstrated `id = 4` and physical `rowid = 20`, while `PayloadEvent`,
+`PhysicalPayloadRow`, pre-split assertions, successor ownership, and the Python schema-v2 validator
+all require `id == rowid`. Hash schema-v3 must carry both logical hash value and physical rowid plus
+the independently decoded bucket/key class. It must replace those assumptions coherently before a
+kill run; selectively skipping them would weaken the authoritative gate.
+
+Remaining commands after that schema-v3 conversion are:
+
+```text
+python3 scripts/tests/validate-gres-split-crash-evidence.py --self-test
+cargo test --locked -p crabka-gres --test topology_process_split_crash
+CRABKA_G8_SPLIT_WORKLOAD=hash scripts/tests/gres-topology-process-split-source-restore-ci.sh
+CRABKA_G8_SPLIT_WORKLOAD=hash scripts/tests/gres-topology-process-split-publication-ci.sh
+CRABKA_G8_SPLIT_WORKLOAD=hash scripts/tests/gres-topology-process-split-retirement-ci.sh
+```
