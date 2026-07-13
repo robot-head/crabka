@@ -2162,7 +2162,9 @@ fn primary_versions(pairs: &crabka_pgkv::KvScan, table_id: u32) -> BTreeMap<Vec<
         .filter(|(key, _)| {
             matches!(
                 crabka_pgkv::key::classify_key(key),
-                crabka_pgkv::key::KeyClass::PrimaryVersion { table_id: found, .. } if found == table_id
+                crabka_pgkv::key::KeyClass::PrimaryVersion { table_id: found, .. }
+                | crabka_pgkv::key::KeyClass::HashPrimaryVersion { table_id: found, .. }
+                    if found == table_id
             )
         })
         .cloned()
@@ -2170,7 +2172,7 @@ fn primary_versions(pairs: &crabka_pgkv::KvScan, table_id: u32) -> BTreeMap<Vec<
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence() {
+async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
     let broker_dir = tempfile::tempdir().expect("broker tempdir");
     let broker = Broker::start(BrokerConfig::for_tests(broker_dir.path().to_path_buf()))
         .await
@@ -2199,7 +2201,7 @@ async fn live_populated_split_uses_physical_catalog_id_for_t10_rows_and_sequence
     .expect("open live multi-range runtime");
     let mut session = runtime.engine.connect();
     session
-        .simple_query("CREATE TABLE t10 (id int4)")
+        .simple_query("CREATE TABLE t10 (id int4) SHARDED BY HASH (id) BUCKETS 16")
         .await
         .expect("create t10");
     session

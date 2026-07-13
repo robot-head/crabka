@@ -1045,7 +1045,7 @@ impl MultiRangeTenant {
             .into_iter()
             .find(|table| routing_table_id(&table.name) == table_id)
             .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
-        if table.sharded || table.sharding.is_some() || table.foreign.is_some() {
+        if table.foreign.is_some() {
             return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
         }
         if !crabka_pgcatalog::list_table_indexes(coordinator.catalog_kv(), &table.name)?.is_empty()
@@ -1167,7 +1167,7 @@ impl MultiRangeTenant {
             .into_iter()
             .find(|table| routing_table_id(&table.name) == table_id)
             .ok_or(LocalSqlSplitError::MissingTable(table_id))?;
-        if table.sharded || table.sharding.is_some() || table.foreign.is_some() {
+        if table.foreign.is_some() {
             return Err(LocalSqlSplitError::UnsupportedTableKind(table_id));
         }
         if !crabka_pgcatalog::list_table_indexes(coordinator.catalog_kv(), &table.name)?.is_empty()
@@ -2097,7 +2097,11 @@ impl SplitHooks for LocalSqlSplitBridge<'_> {
         Ok(CheckpointManifest {
             range_id: state.predecessor,
             covered_offset: 0,
-            manifest_key: "local-empty-table-no-data-migration".to_owned(),
+            manifest_key: format!(
+                "local-split-migration/v1/empty/r{}/epoch{}",
+                state.predecessor,
+                u64::from(state.current_map.epoch())
+            ),
         })
     }
 
