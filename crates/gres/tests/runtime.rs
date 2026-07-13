@@ -2207,7 +2207,10 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         .await
         .expect("create t10");
     session
-        .simple_query("INSERT INTO t10 VALUES (10), (11)")
+        .simple_query(
+            "INSERT INTO t10 VALUES (0), (1), (2), (3), (4), (5), (6), (7), \
+             (8), (9), (10), (11), (12), (13), (14), (15)",
+        )
         .await
         .expect("insert t10 rows");
     let source_catalog = kv_from_pairs(
@@ -2224,7 +2227,7 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         .expect("inspect predecessor before split");
 
     let current_map = runtime.published_range_map().expect("current map");
-    let split_at = RangeKey::table_start(TableId::new(10));
+    let split_at = RangeKey::hash(TableId::new(10), 8, 0);
     let command = SplitCommand {
         current_map,
         predecessor: RangeId::new(1),
@@ -2258,22 +2261,50 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         .inspect_hosted_range_kv(RangeId::new(3))
         .expect("inspect published left successor");
     assert_eq!(
+        primary_versions(&left_successor, physical_table_id).len(),
+        8,
+        "the left successor contains exactly buckets 0 through 7"
+    );
+    assert_eq!(
         primary_versions(&successor, physical_table_id).len(),
-        2,
-        "the published successor contains t10's physical MVCC rows"
+        8,
+        "the right successor contains exactly buckets 8 through 15"
+    );
+    let successor_buckets = |pairs: &crabka_pgkv::KvScan| {
+        pairs
+            .iter()
+            .filter_map(|(key, _)| match crabka_pgkv::key::classify_key(key) {
+                crabka_pgkv::key::KeyClass::HashPrimaryVersion {
+                    table_id, bucket, ..
+                } if table_id == physical_table_id => Some(bucket),
+                _ => None,
+            })
+            .collect::<BTreeSet<_>>()
+    };
+    assert_eq!(
+        successor_buckets(&left_successor),
+        (0..8).collect(),
+        "left physical fold has no cross-bucket leakage"
+    );
+    assert_eq!(
+        successor_buckets(&successor),
+        (8..16).collect(),
+        "right physical fold has no cross-bucket leakage"
     );
     assert!(
-        successor
+        left_successor
             .iter()
-            .any(|(key, _)| *key == crabka_pgkv::key::seq_key(physical_table_id)),
-        "the physical table sequence is transferred with t10"
-    );
-    assert!(primary_versions(&left_successor, physical_table_id).is_empty());
-    assert!(
-        !left_successor
-            .iter()
-            .any(|(key, _)| *key == crabka_pgkv::key::seq_key(physical_table_id)),
-        "the left and right successor folds are disjoint"
+            .chain(successor.iter())
+            .filter(|(key, _)| {
+                matches!(
+                    crabka_pgkv::key::classify_key(key),
+                    crabka_pgkv::key::KeyClass::PrimaryVersion { table_id, .. }
+                        if table_id == physical_table_id
+                )
+            })
+            .next()
+            .is_none(),
+        "hash successors contain no ordinary primary keys"
     );
     let predecessor_versions = primary_versions(&predecessor_before, physical_table_id);
     let mut successor_versions = primary_versions(&left_successor, physical_table_id);
@@ -2283,6 +2314,24 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         predecessor_versions.keys().collect::<Vec<_>>(),
         "successor intervals partition every predecessor primary version key"
     );
+    let mut post_split = runtime.engine.connect();
+    let rows = post_split
+        .simple_query("SELECT id FROM t10 ORDER BY id")
+        .await
+        .expect("scan t10 after bucket midpoint split");
+    let [crabka_pgwire::engine::QueryResult::Rows { rows, .. }] = rows.as_slice() else {
+        panic!("expected one row result, got {rows:?}");
+    };
+    let ids = rows
+        .iter()
+        .map(|row| {
+            std::str::from_utf8(&row[0].as_ref().expect("id").text)
+                .expect("utf8 integer")
+                .parse::<i32>()
+                .expect("integer id")
+        })
+        .collect::<Vec<_>>();
+    assert_eq!(ids, (0..16).collect::<Vec<_>>(), "SQL union is unchanged");
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
