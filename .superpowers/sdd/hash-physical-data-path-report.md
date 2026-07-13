@@ -35,6 +35,13 @@ Verification for commit `59092d16`:
 - `cargo check -p crabka-pgexec --all-targets`: passed.
 - Changed-file `git diff --check`: passed.
 
+## Remaining executor audit
+
+- `ON CONFLICT` has no parser or executor AST seam in this repository, so there is no production call site to route.
+- `eval_plan_qual`, xid `version_key_xid` writes, and xid row-lock rechecks belong to the explicit/local xid path. Session routing rejects sharded explicit transactions and sends sharded autocommit DML through timestamp writes, so hash tables do not reach those legacy keys.
+- Local secondary-index equality lookup reconstructs rows with an ordinary `row_key`; sharded timestamp writes already fail closed when local indexes exist, pending the distributed-index work in Tasks 6/7.
+- The global-xid prepared-row adoption scan is also confined to the explicit xid participant path and is unreachable for timestamp hash-table writes.
+
 COPY remains separate: both session COPY entry points currently reject sharded tables before the xid-only COPY executor.
 
 ## COPY timestamp slice
