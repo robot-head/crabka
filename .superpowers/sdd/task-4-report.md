@@ -251,3 +251,18 @@ Status: COMPLETE.
 - This report is committed separately.
 
 The preserved dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were not staged, reverted, or included.
+
+## Production co-partition selection remediation
+
+Status: COMPLETE.
+
+- RED: `cargo test -p crabka-gres-substrate verified_checkpoint_publication_changes_next_join_plan --lib --no-run` failed because the requested table-aware API did not accept join keys; before the fix the same production `DurableSequenceStats` + `CheckpointPlannerStats` composition returned default `are_co_partitioned = false`, causing an exact catalog-proven pair to Gather.
+- GREEN: the executable integration passes. With large pinned estimates and broadcast disabled, matching real `Table` hash columns, bucket count, and co-location group plus exact join indexes select `CoPartitioned`; mismatched group and mismatched key indexes select `Gather`.
+- `plan_join_for_tables` now uses `Stats` only to select a broadcast side by size. If no side fits, `co_partitioned_join_keys_match` is the sole eligibility proof. Generic `plan_join` retains its fakeable compatibility seam, but production SQL calls `join_strategy_for_keys`, passing the resolved exact SQL column indexes.
+- `cargo test -p crabka-pgexec --test distributed_pushdown sql_copartitioned_join_uses_catalog_proof_when_stats_only_estimate_sizes -- --nocapture` passes and inspects the actual emitted `JoinRangeRequest` strategy. The stats source is `SequenceCounters`, whose co-partition answer is the default false, proving SQL dispatch is catalog-derived.
+- Minor disposition: checkpoint manifests expose only range/tenant `total_bytes`, not per-table bytes. `CheckpointPlannerStats` is now explicitly documented and tested as a conservative global upper bound: every table id receives the identical latest verified checkpoint total. No per-table metadata was invented.
+- GREEN: full `distributed_pushdown` passed 45/45; pgexec, gres-ranges, and gres-substrate all-target checks passed; `scripts/gres-sharded-conformance.sh` passed all four legs; changed-file rustfmt check and `git diff --check` passed with only repository stable-rustfmt nightly-option warnings.
+- Feature commit: `3c3f9c1b fix(gres): derive co-partition joins from catalog`.
+- This report is committed separately.
+
+The preserved dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` remain the only unstaged changes and were not modified or reverted.
