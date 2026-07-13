@@ -10,8 +10,10 @@ use crabka_gres_control::{
     RangeBoundary, RangeLayoutEntry, SqlUser, TENANT_REGISTRY_TOPIC, TenantId, TenantName,
     TenantRecord, TenantState, tenant_config_topic,
 };
-use crabka_security::ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert};
-use crabka_security::scram::PgScramVerifier;
+use crabka_security::{
+    ca::{SubjectAltName, generate_cluster_ca, issue_broker_cert},
+    scram::PgScramVerifier,
+};
 use futures::StreamExt as _;
 use k8s_openapi::{
     ByteString,
@@ -37,14 +39,14 @@ use kube::{
 use serde_json::json;
 use sha2::{Digest as _, Sha256};
 
-use crate::controller::gres_split_operation::{
-    MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
-    reconcile_one_rpc_phase, successors_may_be_deployed, verify_target_topology_ready,
-};
 use crate::{
     context::Context,
     controller::{
         common::{self, FIELD_MANAGER, ReconcileError, apply_object, condition, owner_ref},
+        gres_split_operation::{
+            MtlsRangeMutationClient, active_operations, reconcile_activated_cutover,
+            reconcile_one_rpc_phase, successors_may_be_deployed, verify_target_topology_ready,
+        },
         topic::internal_listener_bootstrap,
         user::{diff_acls, entry_to_exact_filter},
     },
@@ -65,6 +67,9 @@ const RANGE_TLS_HASH_ANNOTATION: &str = "crabka.io/range-tls-hash";
 const LIFECYCLE_REQUEUE: Duration = Duration::from_secs(5);
 
 /// Run the controller forever.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let tenant_api: Api<GresTenant> = Api::all(ctx.client.clone());
     let gres_api: Api<Gres> = Api::all(ctx.client.clone());
@@ -93,6 +98,9 @@ pub fn error_policy(_obj: Arc<GresTenant>, err: &ReconcileError, _ctx: Arc<Conte
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(kind = "GresTenant", name = %obj.name_any()))]
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn reconcile(obj: Arc<GresTenant>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     common::record_reconcile(
         &ctx,
@@ -815,6 +823,9 @@ where
     }
 }
 
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn reconcile_one_retiring_range_wal(
     control: &crate::context::GresControlHandle,
     admin: &mut (dyn RangeRetirementAdmin + Send),
@@ -1640,7 +1651,7 @@ fn range_layout_for_ranges(
                 obj.namespace().unwrap_or_else(|| "default".into())
             ),
             wal_generation: 0,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         })
         .collect()

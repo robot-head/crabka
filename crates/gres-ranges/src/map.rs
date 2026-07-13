@@ -57,6 +57,9 @@ pub struct HashShardSpec {
 }
 
 impl HashShardSpec {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(
         table_id: TableId,
         hash_columns: Vec<String>,
@@ -87,6 +90,9 @@ impl HashShardSpec {
     }
 
     #[must_use]
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn bucket_for_value(&self, value: impl AsRef<[u8]>) -> u32 {
         crabka_pgkv::key::hash_bucket(value.as_ref(), self.bucket_count)
             .expect("validated hash spec has a power-of-two bucket count")
@@ -256,6 +262,9 @@ pub enum MapValidationError {
 }
 
 impl RangeMap {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(
         tenant: TenantName,
         epoch: MapEpoch,
@@ -264,6 +273,9 @@ impl RangeMap {
         Self::new_with_co_location(tenant, epoch, ranges, Vec::new())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new_with_co_location(
         tenant: TenantName,
         epoch: MapEpoch,
@@ -301,6 +313,9 @@ impl RangeMap {
         self.co_location_groups.as_slice()
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn route_table(&self, table_id: TableId) -> Result<TableRoute, MapValidationError> {
         let route = self
             .range_for_key(table_id, 0)
@@ -312,6 +327,9 @@ impl RangeMap {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn range_for_key(
         &self,
         table_id: TableId,
@@ -330,6 +348,9 @@ impl RangeMap {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn range_for_hash_bucket(
         &self,
         table_id: TableId,
@@ -349,6 +370,9 @@ impl RangeMap {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn route_hash_equality(
         &self,
         spec: &HashShardSpec,
@@ -357,6 +381,9 @@ impl RangeMap {
         self.range_for_hash_bucket(spec.table_id, spec.bucket_for_value(value), 0)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn route_key(
         &self,
         table_id: TableId,
@@ -372,6 +399,9 @@ impl RangeMap {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn plan_split(
         &self,
         range_id: RangeId,
@@ -381,6 +411,9 @@ impl RangeMap {
         self.plan_split_at_key(range_id, RangeKey::table_start(split_at), new_range_id)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn plan_split_at_key(
         &self,
         range_id: RangeId,
@@ -405,6 +438,9 @@ impl RangeMap {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn plan_merge(
         &self,
         left: RangeId,
@@ -421,6 +457,9 @@ impl RangeMap {
         })
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn merge_adjacent_ranges(
         &self,
         epoch: MapEpoch,
@@ -455,6 +494,9 @@ impl RangeMap {
         )
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn scan_segments(
         &self,
         table_id: TableId,
@@ -490,6 +532,9 @@ impl RangeMap {
         Ok(segments)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn scan_hash_bucket_segments(
         &self,
         table_id: TableId,
@@ -542,6 +587,9 @@ pub enum RouteIntent {
 }
 
 impl RouteIntent {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn route(self, range_map: &RangeMap) -> Result<TableRoute, MapValidationError> {
         match self {
             Self::DataDefinition => Ok(TableRoute {
@@ -976,12 +1024,7 @@ mod tests {
     fn hash_spec_rejects_empty_column_and_group_names() {
         for result in [
             HashShardSpec::new(TableId::new(10), vec![String::new()], 4, None),
-            HashShardSpec::new(
-                TableId::new(10),
-                vec!["id".into()],
-                4,
-                Some(String::new()),
-            ),
+            HashShardSpec::new(TableId::new(10), vec!["id".into()], 4, Some(String::new())),
         ] {
             assert!(matches!(
                 result,

@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use bytes::{BufMut, BytesMut};
 use crabka_pgwire::{session::SessionConfig, stub::StubEngine};
+use rustls::pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
 use tokio::{
     io::{AsyncReadExt, AsyncWriteExt},
     net::{TcpListener, TcpStream},
@@ -13,13 +14,12 @@ fn frame_len(len: usize) -> i32 {
 }
 
 fn server_tls() -> TlsAcceptor {
-    let certs = rustls_pemfile::certs(&mut &include_bytes!("fixtures/test-server.pem")[..])
+    let certs = CertificateDer::pem_slice_iter(include_bytes!("fixtures/test-server.pem"))
         .collect::<Result<Vec<_>, _>>()
         .expect("certs");
-    let key = rustls_pemfile::private_key(&mut &include_bytes!("fixtures/test-server-key.pem")[..])
-        .expect("read key")
-        .expect("a key");
-    let provider = Arc::new(rustls_rustcrypto::provider());
+    let key = PrivateKeyDer::from_pem_slice(include_bytes!("fixtures/test-server-key.pem"))
+        .expect("read key");
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("versions")
@@ -31,10 +31,10 @@ fn server_tls() -> TlsAcceptor {
 
 fn client_tls() -> TlsConnector {
     let mut roots = rustls::RootCertStore::empty();
-    for cert in rustls_pemfile::certs(&mut &include_bytes!("fixtures/test-ca.pem")[..]) {
+    for cert in CertificateDer::pem_slice_iter(include_bytes!("fixtures/test-ca.pem")) {
         roots.add(cert.expect("ca cert")).expect("add root");
     }
-    let provider = Arc::new(rustls_rustcrypto::provider());
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ClientConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .expect("versions")

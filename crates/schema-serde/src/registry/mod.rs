@@ -115,6 +115,11 @@ impl RegistryClient {
     }
 
     /// Fetch a schema source by the subject and version named in a reference.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the registry request fails or its response cannot
+    /// be decoded.
     pub async fn schema_by_subject_version(
         &self,
         subject: &str,
@@ -133,6 +138,11 @@ impl RegistryClient {
     ///
     /// Resolution is bounded and detects subject-version cycles. It never uses
     /// the filesystem or any import mechanism beyond Schema Registry.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when a reference is cyclic, exceeds the depth limit,
+    /// or cannot be fetched or decoded from the registry.
     pub async fn reference_sources(
         &self,
         references: &[SchemaReference],

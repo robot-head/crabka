@@ -60,6 +60,9 @@ impl TableTransferSelector {
     ///
     /// Table ID zero is reserved for system data and cannot be transferred as
     /// an ordinary table.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(table_id: u32) -> Result<Self, SubstrateError> {
         if table_id == 0 {
             return Err(unsupported("system table ID 0"));
@@ -81,6 +84,9 @@ impl TableTransferSelector {
     ///
     /// The resulting selector retains the XID closure for subsequent in-order
     /// tail replay.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn materialize_checkpoint(
         &mut self,
         pairs: impl IntoIterator<Item = KvPair>,
@@ -149,6 +155,9 @@ impl TableTransferSelector {
     /// A newly retained tuple adds its XID dependencies before later operations,
     /// so later CLOG outcomes for those XIDs are retained. Earlier CLOG writes
     /// are intentionally not retroactively selected; WAL replay is in-order.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn select_tail_op(
         &mut self,
         operation: &WriteOp,

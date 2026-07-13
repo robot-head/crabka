@@ -35,7 +35,5 @@ subtle = { workspace = true }
 [dev-dependencies]
 tokio-postgres = { workspace = true }
 proptest = { workspace = true }
-rustls-rustcrypto = { workspace = true }
-rustls-pemfile = { workspace = true }
 tokio = { workspace = true, features = ["full"] }
 sqlx = { workspace = true }

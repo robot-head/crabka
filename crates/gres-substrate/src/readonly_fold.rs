@@ -105,6 +105,9 @@ pub struct FoldSnapshotRequest<'a> {
 }
 
 /// Build an isolated, authoritative fold without touching writer or retention state.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn committed_fold_snapshot(
     request: &FoldSnapshotRequest<'_>,
 ) -> Result<CommittedFoldSnapshot, SubstrateError> {
@@ -248,6 +251,9 @@ pub async fn committed_fold_snapshot(
 /// The committed end is sampled exactly once and the private Kafka reader is
 /// bounded to that sample, so callers cannot accidentally combine identities
 /// from different durable instants.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn committed_fold_snapshot_live(
     config: &LiveRecoveryConfig,
     generation_witness: &dyn GenerationWitness,
@@ -260,6 +266,9 @@ pub async fn committed_fold_snapshot_live(
 }
 
 /// Build a live fold at an already selected committed snapshot offset.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn committed_fold_snapshot_live_at(
     config: &LiveRecoveryConfig,
     sample: i64,

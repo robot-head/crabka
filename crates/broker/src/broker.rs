@@ -1666,6 +1666,7 @@ type BrokerCoordinatorSet = (
     Arc<crate::share_partition::manager::SharePartitionLeaderManager>,
 );
 
+#[allow(clippy::too_many_arguments)]
 async fn finish_broker_startup(
     mut config: BrokerConfig,
     data_listener: Option<TcpListener>,
@@ -1752,6 +1753,7 @@ async fn finish_broker_startup(
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn spawn_replicator_supervisor(
     config: &BrokerConfig,
     controller: &Arc<dyn crate::metadata_source::MetadataSource>,

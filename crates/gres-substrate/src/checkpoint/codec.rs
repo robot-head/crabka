@@ -1,9 +1,10 @@
 //! Checkpoint part wire format.
 
+use std::collections::BTreeMap;
+
 use crabka_gres_ranges::{RangeKey, RowInterval, TableId};
 use crabka_pgkv::key;
 use sha2::{Digest, Sha256};
-use std::collections::BTreeMap;
 
 use crate::{error::SubstrateError, frame::Reader};
 
@@ -64,6 +65,9 @@ impl CheckpointFilter {
     }
 
     /// Select and, when necessary, rewrite one checkpoint pair for this successor.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn filter_pair(&self, key: &[u8], value: &[u8]) -> Result<Option<Vec<u8>>, SubstrateError> {
         if key.starts_with(b"\0\0\0\0meta/ts_intent/") {
             if !self.contains_pair(key, Some(value))? {
@@ -138,13 +142,18 @@ impl CheckpointFilter {
     }
 
     /// Return true when a KV key belongs to this row interval.
-    #[must_use]
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn contains_key(&self, bytes: &[u8]) -> Result<bool, SubstrateError> {
         self.contains_pair(bytes, None)
     }
 
     /// Return true when a KV pair belongs to this interval, including timestamp metadata whose
     /// ownership is encoded in its key or descriptor value.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn contains_pair(
         &self,
         bytes: &[u8],
@@ -310,6 +319,9 @@ impl CheckpointPart {
     }
 
     /// Decode a bounds-checked part object.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decode(bytes: &[u8]) -> Result<Self, SubstrateError> {
         let mut reader = Reader { bytes, at: 0 };
         let mut pairs = Vec::new();
@@ -337,6 +349,9 @@ impl CheckpointPart {
     }
 
     /// Split key/value pairs into encoded parts capped by the target size when possible.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn split_at_target_size(
         pairs: impl IntoIterator<Item = PartPayload>,
         part_max_bytes: usize,

@@ -86,6 +86,12 @@ impl InMemoryRangeStatsProvider {
     ///
     /// Returns the rejected snapshot when its version is not newer than the
     /// currently published version or its sampling time regresses.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn publish(&self, snapshot: RangeStatsSnapshot) -> Result<(), RangeStatsSnapshot> {
         let mut current = self.snapshot.write().expect("range stats lock poisoned");
         if !snapshot.is_newer_than(current.version) || snapshot.sampled_at < current.sampled_at {

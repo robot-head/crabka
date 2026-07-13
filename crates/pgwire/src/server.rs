@@ -79,6 +79,11 @@ impl ActivityTracker {
     }
 
     /// Atomically stop admitting new sessions so a lifecycle monitor can suspend safely.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`AcceptingAlreadyClosed`] when session admission was already
+    /// closed.
     pub fn close_for_suspend(&self) -> Result<(), AcceptingAlreadyClosed> {
         self.accepting_sessions
             .compare_exchange(true, false, Ordering::SeqCst, Ordering::SeqCst)
@@ -179,6 +184,10 @@ pub struct CancelRegistry {
 impl CancelRegistry {
     /// Registers a new session; returns a guard that unregisters on drop,
     /// carrying the pid, secret, and a shared cancellation target.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session registry mutex is poisoned.
     pub fn register(self: &Arc<Self>) -> SessionCancel {
         let pid = NEXT_PID.fetch_add(1, Ordering::Relaxed);
         let secret = rand::rng().random::<i32>();
@@ -203,6 +212,10 @@ impl CancelRegistry {
     /// is not lost.
     ///
     /// Silently ignores unknown keys, matching Postgres behaviour.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the session registry or cancellation-token mutex is poisoned.
     pub fn cancel(&self, pid: i32, secret: i32) {
         if let Some(target) = self
             .sessions
@@ -236,6 +249,10 @@ impl SessionCancel {
     /// extended-batch window), the `pending` flag will be set; this method
     /// consumes it and immediately cancels the fresh token so the next
     /// `tokio::select!` sees `cancelled()` right away.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cancellation-token mutex is poisoned.
     #[must_use]
     pub fn begin_query(&self) -> CancellationToken {
         let fresh = CancellationToken::new();
@@ -258,6 +275,10 @@ impl Drop for SessionCancel {
 }
 
 /// Serve plaintext connections (no TLS). Convenience wrapper over [`serve_tls`].
+///
+/// # Errors
+///
+/// Returns an I/O error when accepting a connection fails.
 pub async fn serve<E: Engine>(
     listener: TcpListener,
     engine: Arc<E>,
@@ -273,6 +294,10 @@ pub async fn serve<E: Engine>(
 /// is `None`, an `SSLRequest` is answered with `'N'` (decline) and the
 /// connection continues in plaintext — matching the existing behaviour of
 /// [`serve`].
+///
+/// # Errors
+///
+/// Returns an I/O error when accepting a connection fails.
 pub async fn serve_tls<E: Engine>(
     listener: TcpListener,
     engine: Arc<E>,
@@ -290,6 +315,10 @@ pub async fn serve_tls<E: Engine>(
 }
 
 /// Serve connections with shared activity tracking.
+///
+/// # Errors
+///
+/// Returns an I/O error when accepting a connection fails.
 pub async fn serve_tls_with_activity<E: Engine>(
     listener: TcpListener,
     engine: Arc<E>,
@@ -309,6 +338,10 @@ pub async fn serve_tls_with_activity<E: Engine>(
 }
 
 /// Serve connections until `shutdown` is cancelled.
+///
+/// # Errors
+///
+/// Returns an I/O error when accepting a connection fails.
 pub async fn serve_tls_with_activity_until<E: Engine>(
     listener: TcpListener,
     engine: Arc<E>,
@@ -344,6 +377,10 @@ pub async fn serve_tls_with_activity_until<E: Engine>(
 /// layer) can serve a leader-local connection itself. `registry` is shared
 /// across a server's connections so a Postgres `CancelRequest` on a separate
 /// connection can find its target.
+///
+/// # Errors
+///
+/// Returns an I/O or protocol-handshake error while serving the connection.
 pub async fn serve_conn<E: Engine>(
     stream: TcpStream,
     engine: Arc<E>,
@@ -363,6 +400,10 @@ pub async fn serve_conn<E: Engine>(
 }
 
 /// Serve a single connection while updating a shared activity tracker.
+///
+/// # Errors
+///
+/// Returns an I/O or protocol-handshake error while serving the connection.
 pub async fn serve_conn_with_activity<E: Engine>(
     stream: TcpStream,
     engine: Arc<E>,

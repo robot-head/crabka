@@ -63,6 +63,12 @@ impl ReadOnlyRange0Follower {
     ///
     /// This API deliberately accepts a reader rather than a producer: follower construction
     /// cannot initialize transactions, fence a writer, or append a recovery barrier.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn bootstrap(
         config: &LiveRecoveryConfig,
         store: Arc<dyn RestoreKv>,
@@ -104,6 +110,9 @@ impl ReadOnlyRange0Follower {
     }
 
     /// Apply one record obtained from a `READ_COMMITTED` continuous tail.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn apply_committed(&self, item: &ReplayItem) -> Result<(), SubstrateError> {
         let frame = WalFrame::decode(&item.bytes)?;
         self.tail

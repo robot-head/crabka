@@ -126,6 +126,9 @@ impl EmptyTableSplitTestHook {
 
 impl MultiRangeTenantConfig {
     /// Build a config from comma-separated table-start boundaries.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn from_boundaries(tenant: TenantName, boundaries: &str) -> Result<Self, TenantError> {
         let range_map = range_map_from_boundaries(tenant.clone(), boundaries)?;
         Ok(Self {
@@ -143,6 +146,9 @@ impl MultiRangeTenantConfig {
     }
 
     /// Bind the initial serving map to the authoritative registry record version.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_map_epoch(mut self, epoch: MapEpoch) -> Result<Self, TenantError> {
         self.range_map =
             RangeMap::new(self.tenant.clone(), epoch, self.range_map.ranges().to_vec())?;
@@ -159,6 +165,9 @@ impl MultiRangeTenantConfig {
     /// Return a config that opens only the requested local ranges.
     ///
     /// An rN-only gateway requires [`Self::with_read_only_range0_replica`].
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_hosted_ranges(mut self, hosted_ranges: Vec<RangeId>) -> Result<Self, TenantError> {
         let hosted_ranges = normalize_hosted_ranges(&self.range_map, hosted_ranges)?;
         self.hosted_ranges = Some(hosted_ranges);
@@ -352,6 +361,9 @@ impl MultiRangeTenant {
     ///
     /// The returned physical-to-logical table mapping is authoritative for
     /// control-plane restores; callers must not synthesize it from routing IDs.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validated_control_transfer_plan(
         &self,
         state: SplitState,
@@ -371,6 +383,9 @@ impl MultiRangeTenant {
     }
 
     /// Snapshot pending timestamp descriptors as split-transfer in-doubt markers.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn control_in_doubt_markers(
         &self,
         interval_start: RangeKey,
@@ -401,6 +416,9 @@ impl MultiRangeTenant {
 }
 
 /// Snapshot pending timestamp descriptors from one non-serving staged engine.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn in_doubt_markers_for_engine(
     engine: &SqlEngine,
     interval_start: RangeKey,
@@ -443,6 +461,9 @@ pub fn in_doubt_markers_for_engine(
 
 impl MultiRangeTenant {
     /// Settle durable ordinary 2PC participants before publishing SQL readiness.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn recover_ordinary_globals_before_serving(&self) -> Result<(), ExecError> {
         let serving = self.inner.serving.load_full();
         let Some(coordinator) = serving.engine(RangeId::COORDINATOR) else {
@@ -473,6 +494,9 @@ impl MultiRangeTenant {
         Ok(())
     }
     /// Start N local range engines and return the gateway plus lifetime handles.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn start(
         config: MultiRangeTenantConfig,
     ) -> Result<(Self, MultiRangeTenantHandles), TenantError> {
@@ -484,6 +508,9 @@ impl MultiRangeTenant {
     /// The factory is called once for every hosted range. Production substrate callers should use
     /// this seam to pass engines recovered from each range's WAL instead of falling back to local
     /// in-process stores.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn start_with_engine_factory(
         config: MultiRangeTenantConfig,
         open_engine: impl FnMut(Option<&PathBuf>, RangeId) -> Result<SqlEngine, ExecError>,
@@ -492,6 +519,9 @@ impl MultiRangeTenant {
     }
 
     /// Start a tenant with an explicitly supplied timestamp oracle.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn start_with_engine_factory_and_timestamp_oracle(
         mut config: MultiRangeTenantConfig,
         mut open_engine: impl FnMut(Option<&PathBuf>, RangeId) -> Result<SqlEngine, ExecError>,
@@ -686,6 +716,9 @@ impl MultiRangeTenant {
     ///
     /// This first bridge intentionally performs no physical data migration. It accepts only a
     /// table boundary whose moved table has no rows and whose row-id allocator has not advanced.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn split_empty_successors(
         &self,
         operation_id: impl Into<String>,
@@ -744,6 +777,9 @@ impl MultiRangeTenant {
     /// This is intentionally limited to a target interval containing exactly one
     /// catalog-visible table.  The table gate and source WAL pause are held until
     /// the complete successor engine is atomically published with the new map.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn split_successors(
         &self,
         operation_id: impl Into<String>,
@@ -935,6 +971,9 @@ impl MultiRangeTenant {
     }
 
     /// Publish a fully restored, fenced control-plane successor as one atomic serving snapshot.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn publish_control_successors(
         &self,
         command: SplitCommand,
@@ -960,6 +999,9 @@ impl MultiRangeTenant {
 
     /// Publish control-plane successors through the same irreversible activation protocol used
     /// by locally initiated splits.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn publish_control_successors_with_transfer(
         &self,
         operation_id: String,
@@ -978,6 +1020,9 @@ impl MultiRangeTenant {
 
     /// Publish an already authorized one-or-two-successor mutation through the irreversible
     /// activation protocol. The sealed state is the sole topology authority.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn publish_control_mutation_with_transfer(
         &self,
         state: SplitState,
@@ -1206,16 +1251,12 @@ fn hosted_participant_requires_recovery(
     identity: crabka_pgexec::TimestampTxnIdentity,
     participant: RangeId,
     outstanding: &BTreeSet<crabka_pgexec::DurableTimestampIntentIdentity>,
-) -> Result<bool, ExecError> {
-    if descriptor.decision == crabka_pgexec::PrimaryTxnDecision::Pending
+) -> bool {
+    descriptor.decision == crabka_pgexec::PrimaryTxnDecision::Pending
         || outstanding.contains(&crabka_pgexec::DurableTimestampIntentIdentity {
             identity,
             participant_range: participant.as_u32(),
         })
-    {
-        return Ok(true);
-    }
-    Ok(false)
 }
 
 fn route_timestamp_descriptor_to_active_map(
@@ -1269,6 +1310,7 @@ fn route_timestamp_descriptor_to_active_map(
     Ok(descriptor)
 }
 
+#[allow(clippy::needless_pass_by_value, clippy::too_many_lines)]
 fn recover_durable_timestamp_transactions(
     engines: &BTreeMap<RangeId, SqlEngine>,
     range_map: &RangeMap,
@@ -1325,10 +1367,7 @@ fn recover_durable_timestamp_transactions(
                                     identity,
                                     range_id,
                                     &outstanding,
-                                )
-                                .map_err(|error| {
-                                    TenantError::TimestampRecovery(format!("{error:?}"))
-                                })? || !participant
+                                ) || !participant
                                     .timestamp_transaction_operations_are_resolved(
                                         range_id.as_u32(),
                                         identity,
@@ -1368,9 +1407,6 @@ fn recover_durable_timestamp_transactions(
                                         range_id,
                                         &outstanding,
                                     )
-                                    .map_err(|error| {
-                                        TenantError::TimestampRecovery(format!("{error:?}"))
-                                    })?
                                     && participant
                                         .timestamp_transaction_operations_are_resolved(
                                             range_id.as_u32(),
@@ -1772,6 +1808,12 @@ fn install_replica_catalog(
 }
 
 /// Build a pgexec timestamp oracle from a recovered range-0 TSO horizon.
+/// # Panics
+///
+/// Panics if an internal invariant is violated.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn pgexec_timestamp_oracle_from_horizon<C, H>(
     committer: C,
     heartbeat: H,
@@ -1806,6 +1848,12 @@ pub fn pgexec_timestamp_oracle_from_rpc(
 }
 
 /// Build the in-process RPC endpoint backed by a recovered durable horizon.
+/// # Panics
+///
+/// Panics if an internal invariant is violated.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn tso_rpc_from_horizon<C, H>(
     committer: C,
     heartbeat: H,
@@ -2622,11 +2670,11 @@ impl Session for GatewaySession {
     async fn close(&mut self, target: CloseTarget<'_>) -> Result<(), PgError> {
         match target {
             CloseTarget::Statement(name) => {
-                if let Some(prepared) = self.prepared.remove(name) {
-                    if let Some(route) = prepared.route {
-                        self.close_on_range(route.range_id, CloseTarget::Statement(name))
-                            .await?;
-                    }
+                if let Some(prepared) = self.prepared.remove(name)
+                    && let Some(route) = prepared.route
+                {
+                    self.close_on_range(route.range_id, CloseTarget::Statement(name))
+                        .await?;
                 }
             }
             CloseTarget::Portal(name) => {
@@ -2870,11 +2918,10 @@ impl GatewaySession {
         }
         if name.is_empty()
             && let Some(old) = self.prepared.remove(name)
+            && let Some(old_route) = old.route
         {
-            if let Some(old_route) = old.route {
-                self.close_on_range(old_route.range_id, CloseTarget::Statement(name))
-                    .await?;
-            }
+            self.close_on_range(old_route.range_id, CloseTarget::Statement(name))
+                .await?;
         }
         let route = match self.route_statement(sql) {
             Ok(route) => Some(route),
@@ -3415,7 +3462,7 @@ impl GatewaySession {
                 .engine(RangeId::COORDINATOR)
                 .ok_or_else(|| PgError::error("0A000", "range r0 is not hosted"))?;
             self.abort_timestamp_scatter(
-                &coordinator,
+                coordinator,
                 identity,
                 &participants.into_iter().collect::<Vec<_>>(),
             )
@@ -5057,8 +5104,7 @@ fn transaction_participants(
     transaction: GatewayTransaction,
 ) -> Option<(Vec<RangeId>, bool, Option<GlobalCommitRecovery>)> {
     match transaction {
-        GatewayTransaction::Idle => None,
-        GatewayTransaction::Timestamp { .. } => None,
+        GatewayTransaction::Idle | GatewayTransaction::Timestamp { .. } => None,
         GatewayTransaction::Open { touched, escalated } => Some((touched, escalated, None)),
         GatewayTransaction::Failed {
             touched,
@@ -5992,7 +6038,7 @@ fn routing_param_literal(param: &BoundParam, inferred_oid: u32) -> Result<String
         (21, 1) if value.len() == 2 => {
             Ok(i16::from_be_bytes(value.try_into().expect("length checked")).to_string())
         }
-        (23, 0) | (20, 0) => std::str::from_utf8(value)
+        (23 | 20, 0) => std::str::from_utf8(value)
             .ok()
             .and_then(|value| value.parse::<i64>().ok())
             .map(|value| value.to_string())
@@ -6216,35 +6262,26 @@ mod tests {
             participant_range: 1,
         }]);
 
-        assert!(
-            !hosted_participant_requires_recovery(
-                &descriptor,
-                identity,
-                RangeId::new(1),
-                &BTreeSet::new(),
-            )
-            .unwrap()
-        );
-        assert!(
-            hosted_participant_requires_recovery(
-                &descriptor,
-                identity,
-                RangeId::new(1),
-                &outstanding,
-            )
-            .unwrap()
-        );
+        assert!(!hosted_participant_requires_recovery(
+            &descriptor,
+            identity,
+            RangeId::new(1),
+            &BTreeSet::new(),
+        ));
+        assert!(hosted_participant_requires_recovery(
+            &descriptor,
+            identity,
+            RangeId::new(1),
+            &outstanding,
+        ));
 
         let pending = crabka_pgexec::TimestampTxnDescriptor::begun(start_ts, 7, vec![1]);
-        assert!(
-            hosted_participant_requires_recovery(
-                &pending,
-                identity,
-                RangeId::new(1),
-                &BTreeSet::new(),
-            )
-            .unwrap()
-        );
+        assert!(hosted_participant_requires_recovery(
+            &pending,
+            identity,
+            RangeId::new(1),
+            &BTreeSet::new(),
+        ));
     }
 
     #[test]
@@ -7217,7 +7254,7 @@ mod tests {
             end_key: None,
             endpoint: address.to_string(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         }])
         .expect("layout");

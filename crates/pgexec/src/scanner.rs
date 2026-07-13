@@ -374,6 +374,9 @@ pub enum JoinValidationError {
 }
 
 impl JoinRangeRequest {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), JoinValidationError> {
         if self.read_ts == 0 {
             return Err(JoinValidationError::MissingReadTimestamp);
@@ -473,6 +476,9 @@ impl JoinRangeRequest {
 }
 
 impl JoinRangeResult {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), JoinValidationError> {
         bound(self.rows.len(), MAX_JOIN_RESULT_ROWS, |actual, limit| {
             JoinValidationError::TooManyResultRows { actual, limit }
@@ -486,6 +492,9 @@ impl JoinRangeResult {
 /// Both inputs contain complete table tuples. Side predicates are evaluated
 /// before joining, projection indexes address the concatenated `[left, right]`
 /// row, and SQL NULL keys never compare equal.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn execute_materialized_join(
     request: &JoinRangeRequest,
     left: &[JoinRow],
@@ -606,10 +615,16 @@ fn bound<E>(actual: usize, limit: usize, error: impl FnOnce(usize, usize) -> E) 
 /// Seam for local or scatter-gather table scans.
 pub trait RangeScanner: Send + Sync + 'static {
     /// Return visible rows in deterministic `(rowid, xmin)` table order.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn scan(&self, request: ScanRequest<'_>) -> Result<Vec<ScannedRow>, ExecError>;
 
     /// Execute a validated distributed join fragment. Implementations which do
     /// not support owner-side joins fail explicitly and never synthesize rows.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn join(&self, request: JoinRangeRequest) -> Result<JoinRangeResult, ExecError> {
         request
             .validate()
@@ -639,6 +654,9 @@ pub trait RangeScanner: Send + Sync + 'static {
 
     /// Open a pull-based cursor. The default is a compatibility adapter which
     /// materializes through [`RangeScanner::scan`].
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn scan_cursor<'a>(
         &'a self,
         request: ScanRequest<'a>,
@@ -820,6 +838,9 @@ mod join_protocol_tests {
 pub const BLOCKING_QUERY_MEMORY_BYTES: usize = 16 * 1024 * 1024;
 
 /// Collect a cursor for a blocking operator while charging one central byte budget.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn collect_cursor_bounded(
     scanner: &dyn RangeScanner,
     request: ScanRequest<'_>,
@@ -1131,6 +1152,9 @@ impl RangeScanner for LocalRangeScanner {
 }
 
 /// Apply row-level pushdowns to visible rows returned by a backing scanner.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn apply_scan_pushdown(
     rows: Vec<ScannedRow>,
     predicate: &PredicatePushdown,
@@ -1143,6 +1167,9 @@ pub fn apply_scan_pushdown(
 }
 
 /// Apply all executable scanner pushdowns to visible rows returned by a backing scanner.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn apply_executable_scan_pushdown(
     rows: Vec<ScannedRow>,
     predicate: &PredicatePushdown,
@@ -1240,6 +1267,9 @@ fn apply_partial_aggregate_pushdown(
 }
 
 /// Merge per-range partial aggregate rows into one gateway-visible partial row.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn merge_partial_aggregate_rows(
     rows: Vec<ScannedRow>,
     spec: &PartialAggregateSpec,
@@ -1344,6 +1374,9 @@ pub fn merge_partial_aggregate_rows(
 }
 
 /// Merge range-local aggregate state and produce the SQL-visible aggregate value.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn finalize_partial_aggregate_rows(
     rows: Vec<ScannedRow>,
     spec: &PartialAggregateSpec,
@@ -1719,6 +1752,9 @@ fn ensure_partial_min_max_value_is_supported(
 }
 
 /// Apply a supported per-range top-K request in place.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn apply_top_k_pushdown(rows: &mut Vec<ScannedRow>, spec: &TopKSpec) -> Result<(), ExecError> {
     if spec.limit == 0 {
         rows.clear();
@@ -1740,6 +1776,9 @@ pub fn apply_top_k_pushdown(rows: &mut Vec<ScannedRow>, spec: &TopKSpec) -> Resu
 
 /// Merge already ordered range-local top-K streams without materializing or
 /// globally sorting their union. Only `limit` output rows are retained.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn merge_top_k_streams(
     streams: Vec<Vec<ScannedRow>>,
     spec: &TopKSpec,

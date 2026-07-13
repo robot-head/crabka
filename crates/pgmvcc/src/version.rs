@@ -50,6 +50,10 @@ pub fn hash_version_key_ts(table_id: u32, bucket: u32, rowid: u64, start_ts: u64
 }
 
 /// The row-key prefix of a version key (everything but the 8-byte xid suffix).
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the key is shorter than the xid suffix.
 pub fn row_prefix_of(key: &[u8]) -> Result<&[u8], KvError> {
     if key.len() < 8 {
         return Err(KvError::CorruptRow("version key too short".into()));
@@ -58,6 +62,10 @@ pub fn row_prefix_of(key: &[u8]) -> Result<&[u8], KvError> {
 }
 
 /// The creating xid encoded in a version key's 8-byte suffix.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the key is shorter than the xid suffix.
 pub fn xid_of_key(key: &[u8]) -> Result<u64, KvError> {
     let (_, xid) = U64::read_from_suffix(key)
         .map_err(|_| KvError::CorruptRow("version key too short".into()))?;
@@ -166,6 +174,11 @@ pub fn encode_ts_tuple(start_ts: u64, state: TsVersionState, row: &[Datum]) -> V
 }
 
 /// Decode a tuple version into `(xmin, xmax, row)`.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header or row payload is
+/// invalid.
 pub fn decode_tuple(bytes: &[u8]) -> Result<(u64, u64, Vec<Datum>), KvError> {
     let (header, rest) = TupleHeader::ref_from_prefix(bytes)
         .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
@@ -177,6 +190,11 @@ pub fn decode_tuple(bytes: &[u8]) -> Result<(u64, u64, Vec<Datum>), KvError> {
 }
 
 /// Decode a timestamp-transaction tuple version.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header, state transition, or
+/// row payload is invalid.
 pub fn decode_ts_tuple(bytes: &[u8]) -> Result<TsTupleVersion, KvError> {
     let (header, rest) = TsTupleHeader::ref_from_prefix(bytes)
         .map_err(|_| KvError::CorruptRow("bad timestamp tuple header".into()))?;
@@ -210,6 +228,10 @@ pub fn decode_ts_tuple(bytes: &[u8]) -> Result<TsTupleVersion, KvError> {
 ///
 /// This is the checkpoint/vacuum fast path: callers can freeze an old committed
 /// tuple without decoding and re-encoding its row payload.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header is invalid.
 pub fn rewrite_tuple_xmin(bytes: &[u8], xmin: Xid) -> Result<Vec<u8>, KvError> {
     let (header, _) = TupleHeader::ref_from_prefix(bytes)
         .map_err(|_| KvError::CorruptRow("bad tuple header".into()))?;
@@ -223,6 +245,10 @@ pub fn rewrite_tuple_xmin(bytes: &[u8], xmin: Xid) -> Result<Vec<u8>, KvError> {
 }
 
 /// Rewrite a tuple's `xmin` to [`FROZEN_XID`].
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when the tuple header is invalid.
 pub fn freeze_tuple_xmin(bytes: &[u8]) -> Result<Vec<u8>, KvError> {
     rewrite_tuple_xmin(bytes, FROZEN_XID)
 }

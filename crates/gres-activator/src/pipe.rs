@@ -3,6 +3,9 @@ use tokio::{io::AsyncWriteExt, net::TcpStream};
 use crate::ActivatorError;
 
 /// Connect the backend, replay the held startup, and pipe bytes bidirectionally.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn pipe_startup_and_session(
     mut frontend: TcpStream,
     backend_endpoint: &str,

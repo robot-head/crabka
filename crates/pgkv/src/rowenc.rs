@@ -24,6 +24,11 @@ mod tag {
     pub const BYTEA: u8 = 12;
 }
 
+/// Encode one row using the current storage format.
+///
+/// # Panics
+///
+/// Panics when a variable-width datum exceeds the format's 4 GiB field limit.
 #[must_use]
 pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
     let mut out = vec![ROW_VERSION];
@@ -96,6 +101,11 @@ pub fn encode_row(cols: &[Datum]) -> Vec<u8> {
 ///
 /// Returns [`KvError::CorruptRow`] when the version, field tag, field length, or
 /// encoded value is invalid.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding fixed-size array.
 pub fn decode_row(bytes: &[u8]) -> Result<Vec<Datum>, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;

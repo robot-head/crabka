@@ -23,6 +23,9 @@ pub struct RangeMapMetadata {
 
 impl RangeMapMetadata {
     /// Build a parsed metadata envelope.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(version: u64, map: RangeMap) -> Result<Self, RangeMapMetadataError> {
         if version == 0 {
             return Err(RangeMapMetadataError::InvalidVersion { version });
@@ -36,12 +39,18 @@ impl RangeMapMetadata {
     }
 
     /// Encode the metadata blob written to range 0.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn encode(&self) -> Result<Vec<u8>, RangeMapMetadataError> {
         self.ensure_current_format()?;
         Ok(serde_json::to_vec(self)?)
     }
 
     /// Decode and validate a metadata blob read from range 0.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decode(bytes: &[u8]) -> Result<Self, RangeMapMetadataError> {
         let metadata: Self = serde_json::from_slice(bytes)?;
         metadata.ensure_current_format()?;
@@ -68,6 +77,9 @@ impl RangeMapMetadata {
 /// Range-0 append seam used by tests and substrate-backed writers.
 pub trait RangeMapCommitter: Send + Sync {
     /// Commit an encoded metadata blob through range 0.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn commit_range_map_metadata(
         &self,
         metadata: &RangeMapMetadata,
@@ -77,6 +89,9 @@ pub trait RangeMapCommitter: Send + Sync {
 /// Loader seam for range-map readers.
 pub trait RangeMapLoader: Send + Sync {
     /// Load the latest metadata visible after a range-0 barrier.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn load_range_map_metadata(&self) -> Result<RangeMapMetadata, RangeMapMetadataError>;
 }
 
@@ -100,6 +115,9 @@ where
     }
 
     /// Commit a new map with `current_version + 1`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn commit_next(
         &mut self,
         map: RangeMap,
@@ -158,6 +176,9 @@ where
     }
 
     /// Refresh behind a range-0 barrier for a fresh snapshot statement.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn map_for_fresh_snapshot(
         &self,
         barrier: &dyn Linearizer,

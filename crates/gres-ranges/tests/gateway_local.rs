@@ -8,7 +8,9 @@ use std::{
 };
 
 use async_trait::async_trait;
-use crabka_gres_control::{RangeLayoutEntry, SqlUser, TenantId, TenantRecord, TenantState};
+use crabka_gres_control::{
+    RangeLayoutEntry, RangeLifecycle, SqlUser, TenantId, TenantRecord, TenantState,
+};
 use crabka_gres_ranges::{
     CheckpointManifest, ClaimedStagedSuccessor, ClaimedStagedSuccessors, CommittedTailRecord,
     FramedTcpClient, GatewayCommitFault, HostedRangeService, LocalSqlSplitError, MultiRangeTenant,
@@ -383,6 +385,7 @@ impl InProcessTransfer {
         }
     }
 
+    #[allow(clippy::unused_async)]
     async fn stage_range(
         &self,
         request: TableTransferRequest,
@@ -906,7 +909,7 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
             end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
             endpoint: "unhosted-r0-is-local".to_string(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -914,7 +917,7 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
             end_key: None,
             endpoint: remote_address.to_string(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
     ])
@@ -957,6 +960,7 @@ async fn gateway_forwards_remote_autocommit_over_tcp() {
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[allow(clippy::too_many_lines)]
 async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart() {
     let local_dir = tempfile::tempdir().expect("local durable ranges");
     let remote_dir = tempfile::tempdir().expect("remote durable range");
@@ -978,7 +982,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
             end_key: Some(crabka_gres_control::RangeBoundary::new(50, 0)),
             endpoint: "local-r0".into(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -986,7 +990,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
             end_key: Some(crabka_gres_control::RangeBoundary::new(50, 10)),
             endpoint: "local-r1".into(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -994,7 +998,7 @@ async fn ambiguous_remote_timestamp_commit_recovers_once_after_gateway_restart()
             end_key: None,
             endpoint: "127.0.0.1:1".into(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
     ])
@@ -1234,7 +1238,7 @@ async fn remote_extended_statement_participates_in_cross_range_commit() {
             end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
             endpoint: "local".to_string(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -1242,7 +1246,7 @@ async fn remote_extended_statement_participates_in_cross_range_commit() {
             end_key: None,
             endpoint: "127.0.0.1:1".to_string(),
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
     ])

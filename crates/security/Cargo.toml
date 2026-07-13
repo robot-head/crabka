@@ -26,7 +26,6 @@ strum.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 rustls.workspace = true
-rustls-pemfile.workspace = true
 rustls-pki-types.workspace = true
 rustls-webpki.workspace = true
 pbkdf2.workspace = true

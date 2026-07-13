@@ -95,6 +95,12 @@ pub fn command_complete(out: &mut BytesMut, tag: &str) {
     msg(out, b'C', |b| put_cstr(b, tag));
 }
 
+/// Encode a COPY-in response.
+///
+/// # Panics
+///
+/// Panics if `overall_format` does not fit in the protocol's one-byte format
+/// field or if the number of column formats exceeds the protocol limit.
 pub fn copy_in_response(out: &mut BytesMut, overall_format: i16, column_formats: &[i16]) {
     msg(out, b'G', |b| {
         b.put_u8(u8::try_from(overall_format).expect("COPY format code fits in u8"));

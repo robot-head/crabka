@@ -102,6 +102,9 @@ impl LocalCoordinator {
     }
 
     /// Begin a process-local coordinator record for an xid allocated by range 0's GTM.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn begin_existing_xid(
         &self,
         xid: u64,
@@ -113,6 +116,9 @@ impl LocalCoordinator {
     }
 
     /// Record that one participant reached the prepared phase.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prepare(&self, xid: u64, range_id: RangeId) -> Result<(), LocalCoordinatorError> {
         let mut state = self.state.lock().await;
         let record = state.record_mut(xid)?;
@@ -135,6 +141,9 @@ impl LocalCoordinator {
     }
 
     /// Record a terminal decision for an already-begun local transaction.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn decide_prepared(
         &self,
         xid: u64,
@@ -319,6 +328,9 @@ impl TxnRpc {
     }
 
     /// Send one transaction RPC to the range endpoint from registry discovery.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn call(&self, range_id: RangeId, request: TxnReq) -> Result<TxnResp, TxnRpcError> {
         let endpoint = self.registry.resolve(range_id).await?;
         match self
@@ -371,6 +383,9 @@ impl NetCoordinator {
     }
 
     /// Prepare every participant, then commit if all prepared or abort otherwise.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit(&self, gtid: u64, ranges: &[RangeId]) -> Result<NetDecision, TxnRpcError> {
         if ranges.is_empty() {
             return Ok(NetDecision::Commit);
@@ -551,7 +566,7 @@ mod tests {
                 }),
                 endpoint: addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             });
         }

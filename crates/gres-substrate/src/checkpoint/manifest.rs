@@ -60,12 +60,18 @@ impl Manifest {
     }
 
     /// Serialize the manifest as JSON bytes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn encode(&self) -> Result<Vec<u8>, SubstrateError> {
         self.validate_shape()?;
         serde_json::to_vec(self).map_err(|error| SubstrateError::Checkpoint(error.to_string()))
     }
 
     /// Decode JSON bytes and validate intrinsic manifest invariants.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decode(bytes: &[u8]) -> Result<Self, SubstrateError> {
         let manifest = serde_json::from_slice::<Self>(bytes)
             .map_err(|error| SubstrateError::Checkpoint(error.to_string()))?;
@@ -74,6 +80,9 @@ impl Manifest {
     }
 
     /// Validate this manifest for the expected tenant/generation and visible parts.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validate(
         &self,
         validation: &ManifestValidation<'_>,
@@ -223,6 +232,9 @@ pub struct PartEntry {
 
 impl PartEntry {
     /// Create an entry from a part object name and encoded part bytes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn from_encoded_part(name: String, bytes: &[u8]) -> Result<Self, SubstrateError> {
         let part = CheckpointPart::decode(bytes)?;
         Ok(Self {

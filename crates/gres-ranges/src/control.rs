@@ -25,6 +25,9 @@ pub struct AuthorizedSplitIntent {
 }
 
 impl AuthorizedSplitIntent {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn from_record(record: crabka_gres_control::SplitOperationRecord) -> Result<Self, String> {
         let plan = record
             .plan
@@ -81,12 +84,15 @@ impl AuthorizedSplitIntent {
         })
     }
 
+    #[must_use]
     pub fn record(&self) -> &crabka_gres_control::SplitOperationRecord {
         &self.record
     }
+    #[must_use]
     pub fn split(&self) -> &crate::SplitState {
         &self.split
     }
+    #[must_use]
     pub fn digest(&self) -> &str {
         &self.digest
     }
@@ -100,9 +106,7 @@ fn map_from_layout(
     let mut start = crate::RangeKey::MIN;
     let mut ranges = Vec::with_capacity(layout.len());
     for range in layout {
-        let end = range
-            .end_key
-            .map(boundary_to_range_key);
+        let end = range.end_key.map(boundary_to_range_key);
         ranges.push(crate::RangeSpec::for_interval(
             crate::RangeId::new(range.range_id),
             start,
@@ -126,12 +130,8 @@ fn successor_from_layout(
     let start = index
         .checked_sub(1)
         .and_then(|prior| layout[prior].end_key)
-        .map_or(crate::RangeKey::MIN, |start| {
-            boundary_to_range_key(start)
-        });
-    let end = entry
-        .end_key
-        .map(boundary_to_range_key);
+        .map_or(crate::RangeKey::MIN, boundary_to_range_key);
+    let end = entry.end_key.map(boundary_to_range_key);
     Ok(crate::SuccessorDescriptor {
         range_id: crate::RangeId::new(entry.range_id),
         endpoint: entry.endpoint.clone(),
@@ -642,6 +642,10 @@ impl GenerationFencedRangeControl {
                         (
                             RangeControlResp::Staged { tail_sha256: _ },
                             RangeControlResp::Staged { tail_sha256: _ },
+                        )
+                        | (
+                            RangeControlResp::Applied | RangeControlResp::AlreadyApplied,
+                            RangeControlResp::Applied | RangeControlResp::AlreadyApplied,
                         ) => true,
                         (
                             RangeControlResp::Paused {
@@ -688,10 +692,6 @@ impl GenerationFencedRangeControl {
                         {
                             true
                         }
-                        (
-                            RangeControlResp::Applied | RangeControlResp::AlreadyApplied,
-                            RangeControlResp::Applied | RangeControlResp::AlreadyApplied,
-                        ) => true,
                         _ => false,
                     };
                     if matches!(reconciled, RangeControlResp::Rejected { .. }) {
@@ -802,9 +802,8 @@ fn crash_after_effect_if_requested(request: &RangeControlReq, response: &RangeCo
     ) {
         return;
     }
-    let requested = match std::env::var("CRABKA_GRES_CONTROL_CRASH_AFTER_EFFECT") {
-        Ok(requested) => requested,
-        Err(_) => return,
+    let Ok(requested) = std::env::var("CRABKA_GRES_CONTROL_CRASH_AFTER_EFFECT") else {
+        return;
     };
     let step = match request.operation {
         RangeControlOperation::StageFilteredRestore { .. } => "stage",
@@ -819,8 +818,9 @@ fn crash_after_effect_if_requested(request: &RangeControlReq, response: &RangeCo
 }
 
 fn request_digest(request: &RangeControlReq) -> String {
-    use sha2::{Digest, Sha256};
     use std::fmt::Write as _;
+
+    use sha2::{Digest, Sha256};
     let bytes = serde_json::to_vec(request).expect("range control request serializes");
     Sha256::digest(bytes)
         .iter()
@@ -866,7 +866,7 @@ fn request_matches_split_operation(
     let predecessor_generation = operation.predecessor_generation();
     if operation.plan.is_none() {
         return false;
-    };
+    }
     if operation.tenant.as_str() != request.tenant
         || operation.operation_id != request.operation_id
         || !phase_authorizes_operation(operation.phase, &request.operation, context)
@@ -939,10 +939,8 @@ fn phase_authorizes_operation(
         RangeControlOperation::PauseAtCoveredOffset { .. } => {
             phase.is_between(Phase::Checkpointed, Phase::Resuming)
         }
-        RangeControlOperation::StageFilteredRestore { .. } => {
-            phase.is_between(Phase::Paused, Phase::Resuming)
-        }
-        RangeControlOperation::InheritMarkers { .. } => {
+        RangeControlOperation::StageFilteredRestore { .. }
+        | RangeControlOperation::InheritMarkers { .. } => {
             phase.is_between(Phase::Paused, Phase::Resuming)
         }
         RangeControlOperation::SuccessorFencePrologue { .. } => {
@@ -964,21 +962,29 @@ fn map_matches_layout(
     map.ranges().len() == layout.len()
         && map.ranges().iter().zip(layout).all(|(range, expected)| {
             range.range_id.as_u32() == expected.range_id
-                && range.end.map(|key| match expected.end_key.and_then(|end| end.bucket) {
-                    Some(_) => crabka_gres_control::RangeBoundary::hash(
-                        key.table_id.as_u64(), key.bucket, key.rowid,
-                    ),
-                    None => crabka_gres_control::RangeBoundary::new(
-                        key.table_id.as_u64(), key.rowid,
-                    ),
-                }) == expected.end_key
+                && range
+                    .end
+                    .map(|key| match expected.end_key.and_then(|end| end.bucket) {
+                        Some(_) => crabka_gres_control::RangeBoundary::hash(
+                            key.table_id.as_u64(),
+                            key.bucket,
+                            key.rowid,
+                        ),
+                        None => crabka_gres_control::RangeBoundary::new(
+                            key.table_id.as_u64(),
+                            key.rowid,
+                        ),
+                    })
+                    == expected.end_key
         })
 }
 
 fn boundary_to_range_key(boundary: crabka_gres_control::RangeBoundary) -> crate::RangeKey {
     match boundary.bucket {
         Some(bucket) => crate::RangeKey::hash(
-            crate::TableId::new(boundary.table_id), bucket, boundary.rowid,
+            crate::TableId::new(boundary.table_id),
+            bucket,
+            boundary.rowid,
         ),
         None => crate::RangeKey::new(crate::TableId::new(boundary.table_id), boundary.rowid),
     }
@@ -1076,6 +1082,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[allow(clippy::items_after_statements)]
     async fn registry_authority_binds_exact_journal_and_sealed_topology() {
         use crabka_gres_control::SplitOperationPhase as Phase;
 
@@ -1141,25 +1148,25 @@ mod tests {
         let mut changed = record.clone();
         match &mut changed.mutation {
             crabka_gres_control::RangeMutationPlan::Split { split } => {
-                split.predecessor_generation += 1
+                split.predecessor_generation += 1;
             }
-            _ => unreachable!(),
+            crabka_gres_control::RangeMutationPlan::Move { .. } => unreachable!(),
         }
         record_mutations.push(changed);
         let mut changed = record.clone();
         match &mut changed.mutation {
             crabka_gres_control::RangeMutationPlan::Split { split } => {
-                split.left.endpoint.push_str("-other")
+                split.left.endpoint.push_str("-other");
             }
-            _ => unreachable!(),
+            crabka_gres_control::RangeMutationPlan::Move { .. } => unreachable!(),
         }
         record_mutations.push(changed);
         let mut changed = record.clone();
         match &mut changed.mutation {
             crabka_gres_control::RangeMutationPlan::Split { split } => {
-                split.right.wal_generation += 1
+                split.right.wal_generation += 1;
             }
-            _ => unreachable!(),
+            crabka_gres_control::RangeMutationPlan::Move { .. } => unreachable!(),
         }
         record_mutations.push(changed);
         let mut changed = record.clone();
@@ -1503,7 +1510,10 @@ mod tests {
             allow_authority(),
         )
         .with_receipt_store(store.clone());
-        assert_eq!(before.handle(original.clone()).await, RangeControlResp::Applied);
+        assert_eq!(
+            before.handle(original.clone()).await,
+            RangeControlResp::Applied
+        );
         assert_eq!(
             before.handle(original.clone()).await,
             RangeControlResp::AlreadyApplied,
@@ -1540,11 +1550,14 @@ mod tests {
             RangeControlResp::Rejected { code, .. } if code == "wrong_range"
         ));
 
-        for result in [None, Some(RangeControlResp::Checkpoint {
-            generation: 7,
-            covered_offset: 1,
-            manifest_key: "wrong-result".into(),
-        })] {
+        for result in [
+            None,
+            Some(RangeControlResp::Checkpoint {
+                generation: 7,
+                covered_offset: 1,
+                manifest_key: "wrong-result".into(),
+            }),
+        ] {
             let store = Arc::new(MemoryRangeControlReceiptStore::default());
             let mut request = request("tenant-a", 7, "not-completed-applied");
             request.operation = RangeControlOperation::RetirePredecessor;

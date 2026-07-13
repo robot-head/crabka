@@ -1,5 +1,6 @@
 use std::{
     collections::{BTreeMap, BTreeSet},
+    fmt::Write as _,
     io::Write as _,
     path::{Path, PathBuf},
     sync::{
@@ -161,8 +162,7 @@ fn append_payload_event(file: &mut tempfile::NamedTempFile, event: &PayloadEvent
 fn successor_partition(table_id: u64, rowid: u64) -> Result<u32, String> {
     match (table_id, rowid) {
         (50, 0..10) => Ok(0),
-        (50, 10..) => Ok(2),
-        (51, 0..16) => Ok(2),
+        (50, 10..) | (51, 0..16) => Ok(2),
         (51, 16..) => Ok(3),
         _ => Err(format!(
             "physical key ({table_id},{rowid}) is outside the two active post-split streams"
@@ -250,15 +250,14 @@ impl WorkloadChild {
 
     async fn shutdown(&mut self) {
         std::fs::write(&self.stop_path, b"stop").expect("signal workload stop");
-        match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
-            Ok(status) => assert!(status.expect("wait workload child").success()),
-            Err(_) => {
-                terminate_process_group(self.process_group);
-                tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-                    .await
-                    .expect("terminated workload timeout")
-                    .expect("wait terminated workload");
-            }
+        if let Ok(status) = tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
+            assert!(status.expect("wait workload child").success());
+        } else {
+            terminate_process_group(self.process_group);
+            tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+                .await
+                .expect("terminated workload timeout")
+                .expect("wait terminated workload");
         }
         self.stopped = true;
         wait_for_process_group_exit(self.process_group).await;
@@ -762,6 +761,7 @@ impl SplitKillPoint {
         }
     }
 
+    #[allow(clippy::unused_self)]
     const fn operation_bound_ms(self) -> u128 {
         240_000
     }
@@ -1153,9 +1153,8 @@ fn every_split_predicate_field_fails_closed_on_a_near_miss() {
         near_misses.push(changed);
         let mut changed = exact.clone();
         changed.sidecar = match exact.sidecar {
-            Sidecar::None => Sidecar::Parking,
+            Sidecar::None | Sidecar::Parked => Sidecar::Parking,
             Sidecar::Parking => Sidecar::Parked,
-            Sidecar::Parked => Sidecar::Parking,
         };
         near_misses.push(changed);
         let mut changed = exact.clone();
@@ -1510,17 +1509,17 @@ fn publication_and_early_retirement_predicates_retain_prologue_receipt() {
 #[test]
 fn marker_session_lifecycle_preserves_pending_state_until_prologue_or_crash() {
     assert_eq!(
-        marker_session_action(true, false, false, &SplitOperationPhase::Paused),
+        marker_session_action(true, false, false, SplitOperationPhase::Paused),
         MarkerSessionAction::Keep,
         "Markers response alone must leave the Pending session live"
     );
     assert_eq!(
-        marker_session_action(true, true, false, &SplitOperationPhase::Paused),
+        marker_session_action(true, true, false, SplitOperationPhase::Paused),
         MarkerSessionAction::DropAfterCrash,
         "a pre-Prologue crash closes the dead connection without issuing SQL"
     );
     assert_eq!(
-        marker_session_action(true, false, true, &SplitOperationPhase::Restored),
+        marker_session_action(true, false, true, SplitOperationPhase::Restored),
         MarkerSessionAction::RollbackAfterPrologue,
         "authenticated Prologue permits an explicit rollback"
     );
@@ -1580,8 +1579,8 @@ fn split_workload_mode_is_explicit_and_fail_closed() {
 fn hash_schema_v3_pins_algorithm_corpus_and_boundary() {
     let evidence = HashAlgorithmEvidence::pinned();
     assert_eq!(evidence.name, "fnv1a64-int4-be");
-    assert_eq!(evidence.offset_basis, 0xcbf29ce484222325);
-    assert_eq!(evidence.prime, 0x100000001b3);
+    assert_eq!(evidence.offset_basis, 0xcbf2_9ce4_8422_2325);
+    assert_eq!(evidence.prime, 0x0100_0000_01b3);
     assert_eq!(evidence.bucket_count, 16);
     assert_eq!(evidence.corpus.len(), 16);
     assert_eq!(
@@ -1605,7 +1604,7 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
     let sql = system.sql(0).await;
     let mut ddl = String::new();
     for table in 1..50 {
-        ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
+        write!(&mut ddl, "CREATE TABLE filler_{table} (id int4);").expect("write DDL to string");
     }
     ddl.push_str("CREATE TABLE hash_probe50 (id int4 NOT NULL) SHARDED BY HASH (id) BUCKETS 16;");
     sql.simple_query(&ddl).await.expect("create hash probe");
@@ -1695,10 +1694,12 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                         if descriptor.operations.len() == 2 {
                             match descriptor.decision {
                                 crabka_pgexec::PrimaryTxnDecision::Committed(_) => {
-                                    assert!(cross_boundary_descriptor.replace(descriptor).is_none())
+                                    assert!(
+                                        cross_boundary_descriptor.replace(descriptor).is_none()
+                                    );
                                 }
                                 crabka_pgexec::PrimaryTxnDecision::Aborted => {
-                                    assert!(rolled_back_descriptor.replace(descriptor).is_none())
+                                    assert!(rolled_back_descriptor.replace(descriptor).is_none());
                                 }
                                 crabka_pgexec::PrimaryTxnDecision::Pending => {
                                     panic!("terminal inspection retained a pending descriptor")
@@ -2090,8 +2091,8 @@ impl HashAlgorithmEvidence {
             .collect();
         Self {
             name: "fnv1a64-int4-be",
-            offset_basis: 0xcbf29ce484222325,
-            prime: 0x100000001b3,
+            offset_basis: 0xcbf2_9ce4_8422_2325,
+            prime: 0x0100_0000_01b3,
             bucket_count: 16,
             corpus,
         }
@@ -2642,6 +2643,7 @@ async fn direct_hash_payload_rows(
 }
 
 #[derive(Debug, Serialize)]
+#[allow(clippy::struct_excessive_bools)]
 struct SplitCrashEvidence {
     schema_version: u32,
     evidence_id: String,
@@ -2724,6 +2726,7 @@ struct TerminalOperationEvidence {
     marker_digest: String,
 }
 
+#[allow(clippy::too_many_arguments, clippy::too_many_lines)]
 async fn verify_completed_split_case(
     system: &ProcessHarness,
     workload_mode: SplitWorkload,
@@ -2801,7 +2804,7 @@ async fn verify_completed_split_case(
         })
         .collect::<BTreeSet<_>>();
     for row in &expected {
-        assert_eq!(successor_partition(row.table_id, row.rowid).is_ok(), true);
+        assert!(successor_partition(row.table_id, row.rowid).is_ok());
     }
     let mut direct_physical_rows = Vec::new();
     for (range_id, table_id) in [(0, 50), (0, 51), (2, 50), (2, 51), (3, 50), (3, 51)] {
@@ -3301,8 +3304,10 @@ fn sha256_bytes(bytes: &[u8]) -> String {
     use sha2::{Digest as _, Sha256};
     Sha256::digest(bytes)
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            write!(&mut text, "{byte:02x}").expect("write to string");
+            text
+        })
 }
 
 fn control_operation_name(operation: &RangeControlOperation) -> Option<&'static str> {
@@ -3614,7 +3619,7 @@ const fn marker_session_action(
     has_session: bool,
     compute_killed: bool,
     authenticated_prologue: bool,
-    phase: &SplitOperationPhase,
+    phase: SplitOperationPhase,
 ) -> MarkerSessionAction {
     if !has_session {
         MarkerSessionAction::Keep
@@ -3628,15 +3633,13 @@ const fn marker_session_action(
 }
 
 async fn close_marker_session(marker: MarkerSession, rollback: bool) {
-    if rollback {
-        if let Err(error) = marker.client.simple_query("ROLLBACK").await {
-            assert!(
-                error.as_db_error().is_some_and(|db| {
-                    is_expected_marker_rollback_rejection(db.code().code(), db.message())
-                }),
-                "release marker session publication guard: {error}"
-            );
-        }
+    if rollback && let Err(error) = marker.client.simple_query("ROLLBACK").await {
+        assert!(
+            error.as_db_error().is_some_and(|db| {
+                is_expected_marker_rollback_rejection(db.code().code(), db.message())
+            }),
+            "release marker session publication guard: {error}"
+        );
     }
     let MarkerSession { client, mut driver } = marker;
     drop(client);
@@ -3688,6 +3691,7 @@ async fn reconcile_rpc_with_diagnostics(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWorkload) {
     use std::os::unix::process::CommandExt as _;
 
@@ -3742,7 +3746,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
 
     let mut ddl = String::new();
     for table in 1..50 {
-        ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
+        write!(&mut ddl, "CREATE TABLE filler_{table} (id int4);").expect("write DDL to string");
     }
     match workload_mode {
         SplitWorkload::Ordinary => {
@@ -3777,11 +3781,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
         );
         system.clear_commit_fault();
     }
-    let seed_start = if workload_mode == SplitWorkload::Hash {
-        0
-    } else {
-        1
-    };
+    let seed_start = i32::from(workload_mode != SplitWorkload::Hash);
     for rowid in seed_start..16_i32 {
         for table in [50, 51] {
             let sql = system.sql(0).await;
@@ -4008,16 +4008,15 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
     loop {
         assert!(started.elapsed().as_millis() < point.operation_bound_ms());
         let operation = load_operation(&system, &operation_id).await;
-        if let Some(expectation) = journal_receipt_expectation(&operation) {
-            if let Some(previous) = journal_receipt_expectations
+        if let Some(expectation) = journal_receipt_expectation(&operation)
+            && let Some(previous) = journal_receipt_expectations
                 .insert(expectation.operation.clone(), expectation.clone())
-            {
-                assert_eq!(
-                    serde_json::to_value(previous).unwrap(),
-                    serde_json::to_value(&expectation).unwrap(),
-                    "durable receipt expectation changed before replay"
-                );
-            }
+        {
+            assert_eq!(
+                serde_json::to_value(previous).unwrap(),
+                serde_json::to_value(&expectation).unwrap(),
+                "durable receipt expectation changed before replay"
+            );
         }
         if last_reported_phase.as_ref() != Some(&operation.phase) {
             eprintln!(
@@ -4025,7 +4024,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
                 timestamp_ms(),
                 operation.phase
             );
-            last_reported_phase = Some(operation.phase.clone());
+            last_reported_phase = Some(operation.phase);
         }
         let tenant = load_tenant(&system).await;
         let obs = observations.lock().await.clone();
@@ -4048,7 +4047,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
             marker_session.is_some(),
             false,
             authenticated_prologue,
-            &operation.phase,
+            operation.phase,
         ) == MarkerSessionAction::RollbackAfterPrologue
             && !marker_session_released
         {
@@ -4128,7 +4127,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWo
                 system.set_commit_fault_for_next_child(timestamp_fault);
             }
             system.kill(0).await;
-            if marker_session_action(marker_session.is_some(), true, false, &operation.phase)
+            if marker_session_action(marker_session.is_some(), true, false, operation.phase)
                 == MarkerSessionAction::DropAfterCrash
             {
                 close_marker_session(
@@ -4288,5 +4287,5 @@ async fn real_process_split_crash_anywhere() {
     .expect("known Split kill point");
     let workload = SplitWorkload::parse(std::env::var("CRABKA_G8_SPLIT_WORKLOAD").ok().as_deref())
         .expect("known Split workload");
-    run_real_split_crash_case(point, workload).await;
+    Box::pin(run_real_split_crash_case(point, workload)).await;
 }

@@ -89,6 +89,10 @@ pub enum DecodedValue {
 ///   from the registry by schema id, builds a `prost_reflect::MessageDescriptor`
 ///   for the indexed message, and decodes the body via
 ///   `prost_reflect::DynamicMessage::decode`.
+///
+/// # Errors
+///
+/// Returns [`KafkaFdwError`] when the wire envelope, registry schema, or payload cannot be decoded.
 pub async fn decode_value(
     cache: &Arc<SchemaCache>,
     fmt: Wire,
@@ -157,6 +161,10 @@ pub async fn decode_value(
 /// When Schema Registry supplies `messageType`, that fully-qualified name is
 /// selected exactly. Otherwise the descriptor for the schema's first top-level
 /// message is selected, matching Confluent's single-message convention.
+///
+/// # Errors
+///
+/// Returns an error when the schema cannot be compiled or its message cannot be resolved.
 pub fn build_message_descriptor(
     schema_text: &str,
     message_type: Option<&str>,
@@ -169,6 +177,10 @@ pub fn build_message_descriptor(
 /// The frame's index is authoritative. Registry `messageType` metadata, when
 /// present, is constrained to identify that same message rather than overriding
 /// the producer-selected path.
+///
+/// # Errors
+///
+/// Returns an error for invalid schemas, message indexes, or conflicting message metadata.
 pub fn build_message_descriptor_for_index_with_references<S: std::hash::BuildHasher>(
     schema_text: &str,
     references: &HashMap<String, String, S>,
@@ -198,6 +210,10 @@ pub fn build_message_descriptor_for_index_with_references<S: std::hash::BuildHas
 /// Build a descriptor from a root source and the exact import-name-to-source
 /// mapping returned by Schema Registry. The resolver has no filesystem or
 /// network fallback: imports absent from `references` fail at compile time.
+///
+/// # Errors
+///
+/// Returns an error when imports, descriptors, or the requested message cannot be resolved.
 pub fn build_message_descriptor_with_references<S: std::hash::BuildHasher>(
     schema_text: &str,
     references: &HashMap<String, String, S>,

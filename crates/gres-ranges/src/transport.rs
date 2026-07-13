@@ -815,6 +815,9 @@ pub struct JoinRangeResp {
 }
 
 impl JoinRangeReq {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validate(&self) -> Result<(), crabka_pgexec::JoinValidationError> {
         self.to_pgexec().validate()
     }
@@ -1005,7 +1008,7 @@ pub enum TransportError {
         kind: WireErrorKind,
         message: String,
     },
-    /// The remote SQL engine returned a PostgreSQL error.
+    /// The remote SQL engine returned a `PostgreSQL` error.
     #[error("remote SQL error {code}: {message}")]
     Sql { code: String, message: String },
     /// The peer returned the wrong response variant.
@@ -1033,6 +1036,9 @@ pub struct RangeTlsClientConfig {
 
 impl RangeTlsClientConfig {
     /// Build a client configuration that cannot use plaintext or anonymous TLS.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn build_connector(&self) -> Result<TlsConnector, TransportError> {
         if self.tls.trust_roots_path.is_none() {
             return Err(TransportError::Tls(
@@ -1066,6 +1072,9 @@ pub struct RangeTlsServerConfig {
 
 impl RangeTlsServerConfig {
     /// Parse and validate the listener security boundary before binding a socket.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn build_acceptor(&self) -> Result<TlsAcceptor, TransportError> {
         if self.tenant.trim().is_empty() {
             return Err(TransportError::Tls(
@@ -1143,6 +1152,9 @@ impl Default for FramedTcpClient {
 }
 
 impl FramedTcpClient {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_tls_pem(
         cert_chain_pem: &[u8],
         private_key_pem: &[u8],
@@ -1181,6 +1193,9 @@ impl FramedTcpClient {
 
     /// Build a TLS-only forwarding client. This path always presents a client
     /// identity and validates the remote certificate and SNI name.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_tls(config: RangeTlsClientConfig) -> Result<Self, TransportError> {
         config.build_connector()?;
         Ok(Self {
@@ -1190,6 +1205,9 @@ impl FramedTcpClient {
     }
 
     /// Send one request and await one response.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn call(
         &self,
         endpoint: &str,
@@ -1233,6 +1251,9 @@ impl FramedTcpClient {
     }
 
     /// Send one SQL request and forward bounded result pages as they arrive.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn call_sql_into(
         &self,
         endpoint: &str,
@@ -1358,6 +1379,10 @@ fn wire_chunk_to_result_page(chunk: WireSqlResultChunk) -> Result<ResultPage, Tr
 /// Production range listeners must use [`serve_tls`]. This symbol is omitted
 /// from non-test builds so a production binary cannot accidentally expose a
 /// [`RangeService`] without mTLS authorization.
+///
+/// # Errors
+///
+/// Returns an error when the listener cannot accept or serve a connection.
 #[cfg(test)]
 pub async fn serve_tcp(
     listener: TcpListener,
@@ -1375,6 +1400,9 @@ pub async fn serve_tcp(
 }
 
 /// Serve TLS-only, mutually-authenticated range RPCs for one immutable tenant.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn serve_tls(
     listener: TcpListener,
     service: Arc<dyn RangeService>,
@@ -1441,6 +1469,10 @@ fn principal_authorized_for_request(
 }
 
 /// Bind a plaintext loopback server for unit tests only.
+///
+/// # Errors
+///
+/// Returns an error when the loopback listener cannot be bound.
 #[cfg(test)]
 pub async fn spawn_loopback(service: Arc<dyn RangeService>) -> Result<SocketAddr, TransportError> {
     let listener = TcpListener::bind("127.0.0.1:0").await?;
@@ -2190,7 +2222,8 @@ mod tests {
                 | RangeRequest::TimestampPrewrite(_)
                 | RangeRequest::TimestampPrimaryAck(_)
                 | RangeRequest::TimestampResolve(_)
-                | RangeRequest::TimestampRecover(_) => RangeResponse::Error {
+                | RangeRequest::TimestampRecover(_)
+                | RangeRequest::Control(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".into(),
                 },
@@ -2223,10 +2256,6 @@ mod tests {
                         },
                     })
                 }
-                RangeRequest::Control(_) => RangeResponse::Error {
-                    error: WireErrorKind::Failed,
-                    message: "wrong rpc".into(),
-                },
             }
         }
     }
@@ -2400,7 +2429,8 @@ mod tests {
             Arc::new(AllowControlIntent),
         ));
         let service =
-            crate::forward::HostedRangeService::new(Default::default()).with_range_control(control);
+            crate::forward::HostedRangeService::new(std::collections::BTreeMap::default())
+                .with_range_control(control);
         let address = spawn_tls(Arc::new(service), fixture.server).await;
         let client = FramedTcpClient::with_tls(fixture.client).expect("mTLS client");
 

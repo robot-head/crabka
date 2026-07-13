@@ -297,15 +297,24 @@ impl Default for SqlEngine {
 
 impl SqlEngine {
     /// Ephemeral in-memory engine (tests, default when no --data-dir).
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
     pub fn new() -> Self {
         Self::with_kv(Arc::new(MemKv::new())).expect("in-memory engine never fails to open")
     }
 
     /// Durable engine backed by a fjall store at `path`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, ExecError> {
         Self::with_kv(Arc::new(FjallKv::open(path)?))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_kv(kv: Arc<dyn Kv>) -> Result<Self, ExecError> {
         let coordination = coordination_for(&kv);
         let procarray = Arc::new(ProcArray::open(Arc::clone(&kv), PersistMode::Durable)?);
@@ -343,6 +352,9 @@ impl SqlEngine {
     /// The active-snapshot xmin is capped by the first non-terminal clog entry
     /// at or above the durable recovery scan watermark, so prepared/in-progress
     /// state can never be pruned or frozen past.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn checkpoint_garbage_horizon(&self) -> Result<u64, ExecError> {
         checkpoint_garbage_horizon(self.procarray.as_ref(), self.kv.as_ref())
     }
@@ -363,6 +375,9 @@ impl SqlEngine {
     /// `catalog_kv` is the store catalog (schema) lookups resolve through. For a
     /// single-range node it is the same `Arc` as `sm_kv`; a multi-range data
     /// node passes range 0's applied store here while `sm_kv` holds its own rows.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn replicated(
         catalog_kv: Arc<dyn Kv>,
         sm_kv: Arc<dyn Kv>,
@@ -400,6 +415,9 @@ impl SqlEngine {
     }
 
     /// Reseed counters from the applied store (call when this node becomes leader).
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn reseed_counters(&self) -> Result<(), ExecError> {
         self.procarray.reseed_from_applied()?;
         self.seq.reseed_from_applied();
@@ -510,6 +528,9 @@ impl SqlEngine {
     /// Scan only this engine's local MVCC store for a table interval. Range-aware
     /// scanners use this to make the owning range evaluate visibility against its
     /// own local clog while sharing the caller's global snapshot.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn scan_local_visible(
         &self,
         table: &crabka_pgcatalog::Table,
@@ -531,6 +552,12 @@ impl SqlEngine {
     }
 
     /// Scan local visibility while exposing pending intents owned by `own_start_ts`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an execution error when timestamp metadata is missing or the
+    /// underlying visibility scan fails.
+    #[allow(clippy::too_many_arguments)]
     pub fn scan_local_visible_with_timestamp_owner(
         &self,
         table: &crabka_pgcatalog::Table,
@@ -568,6 +595,9 @@ impl SqlEngine {
     }
 
     /// Snapshot the exclusive terminal rowid for a local table cursor.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn scan_local_terminal(&self, table: &crabka_pgcatalog::Table) -> Result<u64, ExecError> {
         let sequence = crate::exec::read_seq_kv(self.kv.as_ref(), table.id)?;
         let physical_max =
@@ -591,12 +621,18 @@ impl SqlEngine {
     }
 
     /// Return whether a catalog table uses global visibility semantics.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn table_uses_global_visibility(&self, name: &str) -> Result<bool, ExecError> {
         let table = crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name)?;
         Ok(crate::exec::table_uses_global_visibility(&table))
     }
 
     /// Return a catalog table's optional sharding strategy.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn table_sharding(
         &self,
         name: &str,
@@ -606,6 +642,9 @@ impl SqlEngine {
     }
 
     /// Atomically flip an ordinary table to timestamp-sharded catalog metadata.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn convert_table_to_sharded_metadata(
         &self,
         name: &str,
@@ -627,11 +666,17 @@ impl SqlEngine {
     }
 
     /// Return catalog metadata for a table.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn catalog_table(&self, name: &str) -> Result<crabka_pgcatalog::Table, ExecError> {
         crabka_pgcatalog::get_table(self.catalog_kv.as_ref(), name).map_err(Into::into)
     }
 
     /// Validate the physical bucket identity carried by a timestamp operation.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validate_timestamp_bucket(
         &self,
         table_id: u32,
@@ -666,6 +711,9 @@ impl SqlEngine {
     }
 
     /// Resolve a timestamp transaction's primary decision from this engine's store.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn primary_timestamp_decision(
         &self,
         start_ts: TimestampTransactionId,
@@ -679,6 +727,9 @@ impl SqlEngine {
     }
 
     /// Build sharded timestamp write operations for one autocommit DML statement.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn plan_timestamp_write_sql(
         &self,
         sql: &str,
@@ -713,6 +764,9 @@ impl SqlEngine {
     }
 
     /// Build a timestamp write plan using TSO-leased hidden row IDs.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn plan_timestamp_write_sql_with_rowids(
         &self,
         sql: &str,
@@ -731,6 +785,9 @@ impl SqlEngine {
         Ok(plan)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn allocate_timestamp_write_lease(
         &self,
         hidden_rowid_count: usize,
@@ -755,6 +812,9 @@ impl SqlEngine {
     }
 
     /// Allocate a timestamp transaction id from this engine's configured oracle.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn allocate_timestamp_transaction_id(
         &self,
     ) -> Result<TimestampTransactionId, ExecError> {
@@ -768,6 +828,9 @@ impl SqlEngine {
     }
 
     /// Allocate the read point shared by every scan in one SQL statement.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn allocate_timestamp_read_timestamp(&self) -> Result<ReadTimestamp, ExecError> {
         self.timestamp_oracle
             .allocate_read_timestamp_after(timestamp_txn::durable_timestamp_horizon_with_catalog(
@@ -779,6 +842,9 @@ impl SqlEngine {
     }
 
     /// Allocate a commit timestamp after the supplied transaction id.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn allocate_commit_timestamp_after(
         &self,
         start_ts: TimestampTransactionId,
@@ -797,6 +863,9 @@ impl SqlEngine {
 
     /// Persist a range-0 timestamp transaction descriptor before participant
     /// prewrite begins.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn begin_timestamp_transaction(
         &self,
         descriptor: &TimestampTxnDescriptor,
@@ -837,6 +906,9 @@ impl SqlEngine {
 
     /// Persist one participant's durable prewrite acknowledgement and its physical
     /// row operations so a committed descriptor can be replayed after a restart.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn acknowledge_timestamp_participant_operations(
         &self,
         start_ts: TimestampTransactionId,
@@ -875,6 +947,9 @@ impl SqlEngine {
     }
 
     /// Fence primary mutations against the complete immutable transaction identity.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn validate_timestamp_primary_identity(
         &self,
         identity: TimestampTxnIdentity,
@@ -893,6 +968,9 @@ impl SqlEngine {
     }
 
     /// Durably expand a pending descriptor's participant set with CAS fencing.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn add_timestamp_transaction_participant(
         &self,
         start_ts: TimestampTransactionId,
@@ -932,6 +1010,9 @@ impl SqlEngine {
     /// Make range 0's timestamp decision durable. Commit is refused unless all
     /// participant acknowledgements are already durable. The descriptor is the
     /// sole write-once primary record and includes the exact commit timestamp.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn decide_timestamp_transaction(
         &self,
         start_ts: TimestampTransactionId,
@@ -976,6 +1057,9 @@ impl SqlEngine {
     /// Recover a descriptor that has no terminal range-0 decision by choosing
     /// durable abort.  A delayed coordinator subsequently attempting commit is
     /// fenced by the GTM's write-once global decision.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn recover_timestamp_transaction(
         &self,
         start_ts: TimestampTransactionId,
@@ -986,6 +1070,9 @@ impl SqlEngine {
 
     /// Enumerate every durable timestamp descriptor in range 0. Recovery uses this
     /// authoritative log rather than an in-memory list of recently coordinated work.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn timestamp_transaction_descriptors(
         &self,
     ) -> Result<Vec<TimestampTxnDescriptor>, ExecError> {
@@ -993,6 +1080,9 @@ impl SqlEngine {
     }
 
     /// Read one durable range-control receipt from the range-0 system keyspace.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn range_control_receipt(
         &self,
         tenant: &str,
@@ -1006,6 +1096,9 @@ impl SqlEngine {
     }
 
     /// Enumerate this tenant's durable range-control receipts before SQL readiness.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn range_control_receipts(&self, tenant: &str) -> Result<Vec<Vec<u8>>, ExecError> {
         self.kv
             .scan_prefix(&crabka_pgkv::key::range_control_receipt_prefix(tenant))
@@ -1014,6 +1107,9 @@ impl SqlEngine {
     }
 
     /// Compare-and-swap one range-control receipt through this engine's durable committer.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn compare_and_swap_range_control_receipt(
         &self,
         tenant: &str,
@@ -1041,6 +1137,9 @@ impl SqlEngine {
     }
 
     /// Read one durable topology-activation receipt from range zero.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn topology_activation_receipt(
         &self,
         tenant: &str,
@@ -1055,6 +1154,9 @@ impl SqlEngine {
     }
 
     /// Enumerate topology activations that startup must reconcile before readiness.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn topology_activation_receipts(&self, tenant: &str) -> Result<Vec<Vec<u8>>, ExecError> {
         self.kv
             .scan_prefix(&crabka_pgkv::key::topology_activation_receipt_prefix(
@@ -1065,6 +1167,9 @@ impl SqlEngine {
     }
 
     /// CAS one topology activation phase through range zero's durable committer.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn compare_and_swap_topology_activation_receipt(
         &self,
         tenant: &str,
@@ -1091,12 +1196,18 @@ impl SqlEngine {
         Ok(self.kv.get(&key)? == Some(value))
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn durable_timestamp_intent_identities(
         &self,
     ) -> Result<Vec<crate::timestamp_txn::DurableTimestampIntentIdentity>, ExecError> {
         crate::timestamp_txn::timestamp_intent_identities(self.kv.as_ref()).map_err(Into::into)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn timestamp_transaction_operations_are_resolved(
         &self,
         range_id: u32,
@@ -1116,6 +1227,9 @@ impl SqlEngine {
 
     /// Idempotently abort every timestamp intent owned by this range for `start_ts`.
     /// The range-0 descriptor is the logical decision; physical cleanup can be retried.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn abort_timestamp_transaction_intents(
         &self,
         start_ts: TimestampTransactionId,
@@ -1130,6 +1244,9 @@ impl SqlEngine {
     /// Idempotently resolve this range's operations using range 0's terminal
     /// descriptor decision. Global-index intents are discovered from durable local
     /// state, while delete-vs-put semantics come from the descriptor operations.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve_timestamp_transaction_operations(
         &self,
         range_id: u32,
@@ -1153,6 +1270,9 @@ impl SqlEngine {
     }
 
     /// Commit statement bookkeeping only after the timestamp primary is durable.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit_timestamp_statement_ops(
         &self,
         ops: Vec<crabka_pgkv::WriteOp>,
@@ -1164,6 +1284,9 @@ impl SqlEngine {
     }
 
     /// Advance local scan terminals to include recovered timestamp operations.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn recover_timestamp_scan_terminals(
         &self,
         operations: &[TimestampTxnOperation],
@@ -1220,6 +1343,9 @@ impl SqlEngine {
     /// the GTM coordinator. Called once on range 0's engine by the cluster during
     /// construction, before `share_gtm_to` distributes the same `Arc` to every
     /// other range engine.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn init_gtm_coordinator(&mut self) -> Result<(), ExecError> {
         let g = Arc::new(gtm::Gtm::open(Arc::clone(&self.kv))?);
         self.gtm = Some(g);
@@ -1249,6 +1375,9 @@ impl SqlEngine {
     }
 
     /// Allocate a global (cross-range) txn id. Coordinator-only (range 0's engine).
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
     pub fn begin_global(&self) -> u64 {
         self.gtm
             .as_ref()
@@ -1261,6 +1390,12 @@ impl SqlEngine {
     /// range-0 leader reseeds past `g` and a global xid is never reused across a
     /// range-0 leader change. Only succeeds on range 0's leader (the committer
     /// rejects non-leaders -> ExecError::NotLeader).
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn begin_global_durable(&self) -> Result<u64, ExecError> {
         let gtm = self
             .gtm
@@ -1276,6 +1411,12 @@ impl SqlEngine {
     /// Durably lease a contiguous block of global xids from range 0. The in-memory
     /// allocator advances past the whole block before `next_global` is persisted,
     /// so a later leader reseed starts after every xid the lease may hand out.
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn lease_global_xid_block(&self, count: u64) -> Result<GlobalXidLease, ExecError> {
         let gtm = self
             .gtm
@@ -1290,6 +1431,9 @@ impl SqlEngine {
 
     /// Lift the GTM's in-memory `next_global` to the durable value (never
     /// regresses). Called on the range-0 leadership rising edge.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn reseed_gtm(&self) -> Result<(), ExecError> {
         if let Some(gtm) = self.gtm.as_ref() {
             gtm.reseed_from_applied()?;
@@ -1299,6 +1443,12 @@ impl SqlEngine {
 
     /// Durably record the global decision (Committed/Aborted) for `g` in range 0's
     /// group, folding the global next-id advance. The atomic commit instant.
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit_global_decision(
         &self,
         g: u64,
@@ -1334,6 +1484,9 @@ impl SqlEngine {
     /// `g` to range 0, and the decision is WRITE-ONCE — racing an already-terminal `g`
     /// is a no-op against the real decision. Do not "fix" this by routing through the
     /// barrier; the staleness is intentional and adds no latency to the hot path.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn in_doubt_globals_from(&self, scan_lo: u64) -> Result<(Vec<u64>, u64), ExecError> {
         use std::collections::BTreeSet;
         let mut gs: BTreeSet<u64> = BTreeSet::new();
@@ -1369,6 +1522,9 @@ impl SqlEngine {
     }
 
     /// Back-compat: the full-scan in-doubt set (callers that don't track a watermark).
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn in_doubt_globals(&self) -> Result<Vec<u64>, ExecError> {
         Ok(self.in_doubt_globals_from(0).await?.0)
     }
@@ -1376,6 +1532,9 @@ impl SqlEngine {
     /// List every local prepared participant marker, including markers whose
     /// range-0 decision is already terminal. Recovery uses this to release
     /// abandoned live owner sessions after a coordinator restart.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn prepared_globals(&self) -> Result<Vec<u64>, ExecError> {
         let mut globals = std::collections::BTreeSet::new();
         for (key, value) in self.kv.scan_range(
@@ -1417,6 +1576,9 @@ impl SqlEngine {
     /// the `(Li, g)` pairs so the rise sweep can release each `Li`'s lock the moment its
     /// `g` is driven terminal (the abort-race), so the lock is NEVER freed while its `g`
     /// is still in-doubt. Idempotent (a re-scan re-acquires the same locks).
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn reacquire_in_doubt_locks(&self) -> Result<Vec<(u64, u64)>, ExecError> {
         use std::collections::BTreeMap;
         // 1) In-doubt `(Li -> g)` markers on this range (those whose `g` is not terminal).
@@ -1492,6 +1654,9 @@ impl SqlEngine {
     /// that entry in its log — finds it here and the retry becomes a no-op. Bounded by the
     /// watermark: an in-doubt `g`'s marker is never below `clog_scan_lo` (the watermark never
     /// advances past a non-terminal `g`).
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn staged_local_for(&self, g: u64) -> Result<Option<u64>, ExecError> {
         let scan_lo = self.clog_scan_lo()?;
         for (k, v) in self.kv.scan_range(
@@ -1511,6 +1676,12 @@ impl SqlEngine {
     }
 
     /// Read this range's durable recovery-scan watermark (`0` if absent/unset).
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn clog_scan_lo(&self) -> Result<u64, ExecError> {
         match self.kv.get(&crabka_pgkv::key::clog_scan_lo_key())? {
             Some(b) if b.len() == 8 => Ok(u64::from_be_bytes(b[..8].try_into().expect("8 bytes"))),
@@ -1526,6 +1697,9 @@ impl SqlEngine {
     /// time). Even a hypothetical interleaving that regressed the value low is
     /// correctness-preserving — a lower watermark only enlarges the next scan, never skips
     /// an in-doubt marker.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn advance_clog_scan_lo(&self, lo: u64) -> Result<(), ExecError> {
         if lo <= self.clog_scan_lo()? {
             return Ok(());
@@ -1539,6 +1713,9 @@ impl SqlEngine {
     }
 
     /// Deregister a decided global txn from the in-memory running-set.
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
     pub fn finish_global(&self, g: u64) {
         self.gtm
             .as_ref()
@@ -1695,6 +1872,9 @@ fn timestamp_conversion_ops(
 
 /// Field descriptions for `sql` resolving schema from `catalog_kv`, without a
 /// data store or execution (the gateway's Describe only needs the catalog).
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn describe_fields(
     catalog_kv: &dyn Kv,
     sql: &str,

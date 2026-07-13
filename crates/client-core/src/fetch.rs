@@ -190,6 +190,11 @@ pub async fn fetch_partition_with_isolation(
 /// In `READ_COMMITTED` mode this applies the response's
 /// `aborted_transactions` metadata client-side because Crabka brokers return
 /// the underlying record batches verbatim.
+///
+/// # Errors
+///
+/// Returns [`ClientError`] when the fetch request fails or the broker response
+/// is malformed.
 #[allow(clippy::too_many_arguments)]
 pub async fn fetch_partition_with_isolation_progress(
     conn: &Connection,

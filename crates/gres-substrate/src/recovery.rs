@@ -182,6 +182,9 @@ impl LiveRecoveryConfig {
 }
 
 /// Recover a tenant from a live Kafka-backed substrate WAL.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn recover_live(
     bootstrap: &str,
     tenant: &str,
@@ -198,6 +201,9 @@ pub async fn recover_live(
 }
 
 /// Recover a tenant range from a live Kafka-backed substrate WAL.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn recover_live_for_range(
     config: LiveRecoveryConfig,
     store: &dyn Kv,
@@ -211,6 +217,9 @@ pub async fn recover_live_for_range(
 }
 
 /// Recover a tenant range from a live Kafka-backed substrate WAL, restoring a checkpoint first if configured.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn recover_live_for_range_with_restore(
     config: LiveRecoveryConfig,
     store: &dyn RestoreKv,
@@ -255,6 +264,9 @@ pub async fn read_live_committed_tail(
 }
 
 /// Read all committed frames still retained in the selected generation topic.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn read_live_retained_committed(
     config: &LiveRecoveryConfig,
     barrier_offset: i64,
@@ -277,6 +289,9 @@ pub async fn read_live_retained_committed(
 }
 
 /// Return the last offset visible under broker `READ_COMMITTED` isolation.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let topic = config.wal_topic();
@@ -321,6 +336,9 @@ pub async fn live_committed_end(config: &LiveRecoveryConfig) -> Result<i64, Subs
 
 /// Ensure the selected range-generation WAL topic exists without constructing
 /// or initializing a transactional producer.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn ensure_live_wal_topic(config: &LiveRecoveryConfig) -> Result<String, SubstrateError> {
     let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
     let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
@@ -330,6 +348,9 @@ pub async fn ensure_live_wal_topic(config: &LiveRecoveryConfig) -> Result<String
 }
 
 /// Restore and catch up a read-only range-zero follower without fencing a writer.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn bootstrap_live_range0_follower(
     config: &LiveRecoveryConfig,
     store: Arc<dyn RestoreKv>,
@@ -937,6 +958,9 @@ pub async fn bounded_committed_tail(
 }
 
 /// Fence, replay committed records through the new barrier, and return the next sequence.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn recover_after_barrier(
     kv: &dyn Kv,
     fencer: &dyn RecoveryFencer,
@@ -977,6 +1001,9 @@ impl InMemoryWalLog {
     }
 
     /// Append records that are not visible to committed replay.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn append_unacked(
         &self,
         generation: WriterGeneration,

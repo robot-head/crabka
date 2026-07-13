@@ -111,6 +111,9 @@ pub enum SettleOutcome {
 }
 
 /// Run the fence → barrier → replay → reseed → settle → serve prologue.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn recover_range(input: RecoverRange<'_>) -> Result<ServingRange, PrologueError> {
     let epoch = input.substrate.fence_epoch(input.range).await?;
     let barrier = input.substrate.produce_barrier(input.range, epoch).await?;

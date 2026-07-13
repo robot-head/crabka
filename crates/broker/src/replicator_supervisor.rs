@@ -72,6 +72,7 @@ pub(crate) fn desired_local_set(node_id: NodeId, image: &MetadataImage) -> HashS
 ///
 /// Returns `Ok(())` if the partition is already present (no-op) or was
 /// successfully opened. Returns `Err(String)` on I/O failure.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn materialize_partition(
     partitions: &PartitionRegistry,
     topic: &str,

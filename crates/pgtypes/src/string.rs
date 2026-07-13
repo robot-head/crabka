@@ -3,11 +3,21 @@
 use crate::TypeError;
 
 /// Apply a `varchar(n)` modifier to a text value.
+///
+/// # Errors
+///
+/// Returns an error when a value exceeds the limit and the excess characters
+/// are not all spaces.
 pub fn apply_varchar_typmod(value: &str, limit: Option<u16>) -> Result<String, TypeError> {
     apply_string_typmod(value, limit, false)
 }
 
 /// Apply a `char(n)`/`character(n)` modifier to a text value.
+///
+/// # Errors
+///
+/// Returns an error when a value exceeds the limit and the excess characters
+/// are not all spaces.
 pub fn apply_char_typmod(value: &str, limit: Option<u16>) -> Result<String, TypeError> {
     apply_string_typmod(value, limit, true)
 }

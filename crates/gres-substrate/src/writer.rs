@@ -110,6 +110,9 @@ impl CheckpointSnapshotSource {
     }
 
     /// Install the engine's active-snapshot/recovery-watermark horizon callback.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn set_garbage_horizon_provider(&self, provider: GarbageHorizonProvider) {
         *self
             .garbage_horizon
@@ -118,6 +121,9 @@ impl CheckpointSnapshotSource {
     }
 
     /// Install the writer lease checked again after upload and before WAL truncation.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn set_fence_lease(&self, lease: Arc<dyn FenceLease>, generation: WriterGeneration) {
         *self.fence_lease.lock().expect("checkpoint fence lease") = Some((lease, generation));
     }
@@ -244,6 +250,9 @@ impl<W> DeferredWalWriter<W> {
 
 impl DeferredWalWriter<ProducerWalWriter> {
     /// Pause the activated producer, rejecting staged handles fail-closed.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn pause_and_barrier(
         &self,
         generation: WriterGeneration,
@@ -563,6 +572,9 @@ impl ProducerWalWriter {
     /// no later commit can be acknowledged until the guard is resumed or
     /// dropped. The permit is a semaphore permit, not a mutex guard; no mutex
     /// is held across broker awaits.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn pause_and_barrier(
         &self,
         generation: WriterGeneration,
@@ -821,6 +833,9 @@ impl FenceLease for ProducerWalWriter {
 }
 
 /// Chunk a logical operation batch into monotone `GRW1` frames.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn chunk_wal_batch(
     ops: Vec<WriteOp>,
     first_journal_seq: u64,
@@ -935,6 +950,9 @@ impl SubstrateTsoHorizon {
     }
 
     /// Load the recovered inclusive durable timestamp horizon.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn load_max_ts(&self) -> Result<u64, TsoError> {
         self.store
             .get(MAX_TS_KEY)?
@@ -1090,8 +1108,11 @@ where
 }
 
 impl SubstrateCommitter<DeferredWalWriter<ProducerWalWriter>> {
-    /// Copy the predecessor's exact MustActivate anchor into a newly initialized canonical
+    /// Copy the predecessor's exact `MustActivate` anchor into a newly initialized canonical
     /// producer before the deferred engine handle is bound.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit_activation_anchor_before_bind(
         &self,
         canonical: Arc<ProducerWalWriter>,
@@ -1144,7 +1165,13 @@ impl SubstrateCommitter<DeferredWalWriter<ProducerWalWriter>> {
         Ok(self.kv.get(&key).map_err(SubstrateError::from)? == Some(value))
     }
 
-    /// Commit exactly one validated MustActivate receipt while the predecessor writer is paused.
+    /// Commit exactly one validated `MustActivate` receipt while the predecessor writer is paused.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit_activation_receipt_cas(
         &self,
         authorization: &PausedWalAuthorization,
@@ -1221,6 +1248,9 @@ impl SubstrateCommitter<DeferredWalWriter<ProducerWalWriter>> {
     }
 
     /// Commit one range-control receipt while the matching predecessor pause is held.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit_range_control_receipt_cas(
         &self,
         authorization: &PausedWalAuthorization,
@@ -1321,14 +1351,15 @@ fn validate_paused_control_receipt_transition(
     let immutable = prior.request == next.request
         && prior.request_digest == next.request_digest
         && prior.generation == next.generation
-        && next.revision == prior.revision.checked_add(1).unwrap_or(u64::MAX);
+        && next.revision == prior.revision.saturating_add(1);
     if !immutable {
         return Err(SubstrateError::Frame(
             "paused control receipt changed immutable request evidence or revision".into(),
         ));
     }
     match (&prior.result, &next.result) {
-        (None, Some(_)) => Ok(()),
+        (None, Some(_))
+        | (Some(RangeControlResp::Staged { .. }), Some(RangeControlResp::Staged { .. })) => Ok(()),
         (
             Some(RangeControlResp::Paused {
                 barrier_offset: old,
@@ -1337,7 +1368,6 @@ fn validate_paused_control_receipt_transition(
                 barrier_offset: new,
             }),
         ) if new >= old => Ok(()),
-        (Some(RangeControlResp::Staged { .. }), Some(RangeControlResp::Staged { .. })) => Ok(()),
         _ => Err(SubstrateError::Frame(
             "paused control receipt transition is not an allowed completion or reconciliation"
                 .into(),
@@ -1690,19 +1720,19 @@ mod tests {
         let state = Arc::new(Mutex::new(WriterPauseState::Idle));
         let mut first = PauseReservation::reserve(Arc::clone(&state)).expect("first pause");
         first.mark_paused(7);
-        let stale = PausedWalAuthorization {
+        let authorization = PausedWalAuthorization {
             state: Arc::clone(&state),
             nonce: first.nonce,
             barrier_offset: 7,
         };
-        assert!(stale.matches_writer(&state, 7));
+        assert!(authorization.matches_writer(&state, 7));
         first.release();
-        assert!(!stale.matches_writer(&state, 7));
+        assert!(!authorization.matches_writer(&state, 7));
 
         let mut second = PauseReservation::reserve(Arc::clone(&state)).expect("second pause");
         second.mark_paused(7);
         assert_ne!(first.nonce, second.nonce);
-        assert!(!stale.matches_writer(&state, 7));
+        assert!(!authorization.matches_writer(&state, 7));
         second.release();
     }
 

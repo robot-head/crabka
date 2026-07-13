@@ -33,9 +33,15 @@ const REGISTRY_TRANSACTIONAL_ID: &str = "__gres_tenants.writer";
 /// Pure tenant-registry store seam for operator and CLI code.
 pub trait TenantRegistryStore {
     /// Upsert one whole tenant snapshot.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn upsert(&mut self, record: TenantRecord) -> Result<(), ControlError>;
     /// Create a tenant when absent or replace its whole snapshot only when the
     /// observed version still matches. `None` is the create-only precondition.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn replace_if_version(
         &mut self,
         record: TenantRecord,
@@ -75,12 +81,18 @@ pub trait TenantRegistryStore {
         }
     }
     /// Tombstone one tenant by name. Idempotent when the tenant is already absent.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn delete(&mut self, tenant: &TenantName) -> Result<(), ControlError>;
     /// Return one tenant by name.
     fn get(&self, tenant: &TenantName) -> Option<TenantRecord>;
     /// Return all tenants ordered by name.
     fn list(&self) -> Vec<TenantRecord>;
     /// Apply a versioned split/merge mutation without overwriting concurrent changes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn mutate_range_layout_if_version(
         &mut self,
         tenant: &TenantName,
@@ -88,6 +100,9 @@ pub trait TenantRegistryStore {
         mutation: RangeLayoutMutation,
     ) -> Result<Option<TenantRecord>, ControlError>;
     /// Split one tenant range layout when the tenant is still at `expected_record_version`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn split_range_layout_if_version(
         &mut self,
         tenant: &TenantName,
@@ -97,10 +112,13 @@ pub trait TenantRegistryStore {
         self.mutate_range_layout_if_version(
             tenant,
             expected_record_version,
-            RangeLayoutMutation::Split(split),
+            RangeLayoutMutation::Split(Box::new(split)),
         )
     }
     /// Merge two adjacent tenant ranges when the tenant is still at `expected_record_version`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn merge_range_layout_if_version(
         &mut self,
         tenant: &TenantName,
@@ -115,6 +133,9 @@ pub trait TenantRegistryStore {
     }
 
     /// Idempotently create a durable split-operation initiation record.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn begin_split_operation(
         &mut self,
         _operation: SplitOperationRecord,
@@ -140,6 +161,9 @@ pub trait TenantRegistryStore {
     }
 
     /// Persist one exact monotone split-operation revision with CAS semantics.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn compare_and_swap_split_operation(
         &mut self,
         _expected_revision: Option<u64>,
@@ -439,6 +463,9 @@ pub struct Registry {
 
 impl Registry {
     /// Connect producer-side registry resources. Call [`Self::ensure_topic`] before writes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn connect(bootstrap: &str) -> Result<Self, ControlError> {
         let producer = Producer::builder()
             .bootstrap(bootstrap.to_string())
@@ -462,6 +489,9 @@ impl Registry {
     }
 
     /// Ensure `__gres_tenants` exists as a compacted, one-partition topic.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn ensure_topic(&mut self, replicas: i32) -> Result<(), ControlError> {
         let topic_id = ensure_registry_topic(&self.bootstrap, replicas).await?;
         if self.reader_started {
@@ -483,6 +513,9 @@ impl Registry {
     /// Replacing an existing snapshot through this unversioned API is rejected:
     /// callers must use a semantic mutation so the writer can derive the next
     /// version from its fenced, read-committed image.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn upsert(&mut self, record: &TenantRecord) -> Result<(), ControlError> {
         record.ensure_valid()?;
         let record = record.clone();
@@ -503,6 +536,9 @@ impl Registry {
     /// Create a tenant when absent or replace its snapshot only when the
     /// caller's observed version still matches the fenced, read-committed
     /// image. Exact retries are no-ops.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn replace_if_version(
         &mut self,
         record: &TenantRecord,
@@ -547,12 +583,18 @@ impl Registry {
     }
 
     /// Request resume for a suspended tenant. No-op unless the current state is `Suspended`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn request_resume(&mut self, tenant: &str) -> Result<(), ControlError> {
         self.transform_tenant(tenant, TenantRecord::request_resume)
             .await
     }
 
     /// Mark a tenant active and publish the endpoint activators should dial.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn mark_active(
         &mut self,
         tenant: &str,
@@ -564,12 +606,18 @@ impl Registry {
     }
 
     /// Mark a tenant suspended after its final checkpoint is durable.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn mark_suspended(&mut self, tenant: &str) -> Result<(), ControlError> {
         self.transform_tenant(tenant, TenantRecord::mark_suspended)
             .await
     }
 
     /// Mark a tenant suspended after recording the durable final checkpoint that permits parking.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn mark_suspended_after_checkpoint(
         &mut self,
         tenant: &str,
@@ -582,6 +630,9 @@ impl Registry {
     }
 
     /// Monotonically advance the WAL generation for a tenant.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn bump_wal_generation(
         &mut self,
         tenant: &str,
@@ -592,6 +643,9 @@ impl Registry {
     }
 
     /// Apply a versioned range-layout mutation through the fenced registry writer.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn mutate_range_layout_if_version(
         &mut self,
         tenant: &str,
@@ -611,6 +665,9 @@ impl Registry {
         .map(|_| ())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn split_range_layout_if_version(
         &mut self,
         tenant: &str,
@@ -620,11 +677,14 @@ impl Registry {
         self.mutate_range_layout_if_version(
             tenant,
             expected_record_version,
-            RangeLayoutMutation::Split(split),
+            RangeLayoutMutation::Split(Box::new(split)),
         )
         .await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn merge_range_layout_if_version(
         &mut self,
         tenant: &str,
@@ -640,6 +700,9 @@ impl Registry {
     }
 
     /// Produce the per-tenant runtime snapshot consumed by substrate computes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn upsert_tenant_config(
         &self,
         record: &TenantRecord,
@@ -662,12 +725,18 @@ impl Registry {
     }
 
     /// Produce a tombstone for one tenant and wait until it is locally applied.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn delete(&mut self, tenant: &str) -> Result<(), ControlError> {
         let tenant = TenantName::try_from(tenant)?;
         self.delete_after_fencing(&tenant).await
     }
 
     /// Return the locally applied image for one tenant.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn get(&mut self, tenant: &str) -> Result<Option<TenantRecord>, ControlError> {
         let tenant = TenantName::try_from(tenant)?;
         self.refresh().await?;
@@ -675,12 +744,18 @@ impl Registry {
     }
 
     /// Return all locally applied tenants ordered by tenant name.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn list(&mut self) -> Result<Vec<TenantRecord>, ControlError> {
         self.refresh().await?;
         Ok(read_tenants(&self.tenants).values().cloned().collect())
     }
 
     /// Idempotently persist one immutable split-operation intent.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn begin_split_operation(
         &mut self,
         operation: &SplitOperationRecord,
@@ -720,6 +795,9 @@ impl Registry {
     }
 
     /// Load one durable split operation after refreshing the committed registry image.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn load_split_operation(
         &mut self,
         tenant: &str,
@@ -733,6 +811,9 @@ impl Registry {
     }
 
     /// List one tenant's durable split operations in operation-id order.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn list_split_operations(
         &mut self,
         tenant: &str,
@@ -747,6 +828,9 @@ impl Registry {
     }
 
     /// Persist one exact monotone split-operation revision with fenced CAS semantics.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn compare_and_swap_split_operation(
         &mut self,
         expected_revision: Option<u64>,
@@ -1437,7 +1521,7 @@ mod tests {
 
     use super::*;
     use crate::record::{
-        RangeBoundary, SplitOperationPhase, SqlUser, TenantId, TenantState,
+        RangeBoundary, RangeLifecycle, SplitOperationPhase, SqlUser, TenantId, TenantState,
         decode_tenant_config_record,
     };
 
@@ -1465,7 +1549,7 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                 wal_generation: 7,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             }])
             .unwrap()
@@ -1480,7 +1564,7 @@ mod tests {
                 end_key: Some(split_key),
                 endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                 wal_generation: 8,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             },
             right: crate::record::RangeLayoutEntry {
@@ -1488,7 +1572,7 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                 wal_generation: 8,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             },
         }
@@ -1581,7 +1665,7 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
             wal_generation: 9,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         }];
         let mut newer_version = record("tenant-a", 5, TenantState::Active);
@@ -1590,7 +1674,7 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r1-new.gres.svc:7432".to_string(),
             wal_generation: 3,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         }];
 

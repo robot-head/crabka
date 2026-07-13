@@ -243,6 +243,9 @@ pub struct TimestampTransactionId(NonZeroU64);
 
 impl TimestampTransactionId {
     /// Parse a durable/wire timestamp into the typed transaction id space.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(raw: u64) -> Result<Self, TimestampTxnError> {
         let Some(value) = NonZeroU64::new(raw) else {
             return Err(TimestampTxnError::ZeroTimestamp);
@@ -277,6 +280,9 @@ pub struct CommitTimestamp(NonZeroU64);
 
 impl CommitTimestamp {
     /// Parse a durable/wire timestamp into the typed commit timestamp space.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(raw: u64) -> Result<Self, TimestampTxnError> {
         let Some(value) = NonZeroU64::new(raw) else {
             return Err(TimestampTxnError::ZeroTimestamp);
@@ -285,6 +291,9 @@ impl CommitTimestamp {
     }
 
     /// Parse and prove that `raw` can commit the transaction named by `start_ts`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn after_start(
         start_ts: TimestampTransactionId,
         raw: u64,
@@ -329,6 +338,9 @@ impl ReadTimestamp {
     pub const MAX: Self = Self(NonZeroU64::MAX);
 
     /// Parse a durable/wire timestamp into the typed read timestamp space.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(raw: u64) -> Result<Self, TimestampTxnError> {
         let Some(value) = NonZeroU64::new(raw) else {
             return Err(TimestampTxnError::ZeroTimestamp);
@@ -373,6 +385,9 @@ impl Default for MonotonicTimestampAllocator {
 
 impl MonotonicTimestampAllocator {
     /// Create an allocator whose next grant is `first`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn starting_at(first: u64) -> Result<Self, TimestampTxnError> {
         let Some(next) = NonZeroU64::new(first) else {
             return Err(TimestampTxnError::ZeroTimestamp);
@@ -387,18 +402,30 @@ impl MonotonicTimestampAllocator {
     }
 
     /// Allocate a start timestamp for a timestamp transaction.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn allocate_transaction_id(&mut self) -> Result<TimestampTransactionId, TimestampTxnError> {
         let timestamp = self.allocate_raw()?;
         TimestampTransactionId::new(timestamp)
     }
 
     /// Allocate a read timestamp.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn allocate_read_timestamp(&mut self) -> Result<ReadTimestamp, TimestampTxnError> {
         let timestamp = self.allocate_raw()?;
         ReadTimestamp::new(timestamp)
     }
 
     /// Allocate a commit timestamp that is strictly greater than `start_ts`.
+    /// # Panics
+    ///
+    /// Panics if an internal execution invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn allocate_commit_after(
         &mut self,
         start_ts: TimestampTransactionId,
@@ -416,6 +443,9 @@ impl MonotonicTimestampAllocator {
 
     /// Advance the next grant beyond a durable timestamp without regressing an
     /// allocator that has already issued a newer grant.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn advance_past(&mut self, durable_horizon: u64) -> Result<(), TimestampTxnError> {
         if self.next.get() > durable_horizon {
             return Ok(());
@@ -585,6 +615,12 @@ pub struct DurableTimestampIntentIdentity {
     pub participant_range: u32,
 }
 
+/// # Panics
+///
+/// Panics if an internal execution invariant is violated.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn timestamp_intent_identities(
     kv: &dyn crabka_pgkv::Kv,
 ) -> Result<Vec<DurableTimestampIntentIdentity>, crabka_pgkv::KvError> {
@@ -630,6 +666,9 @@ impl TimestampTxnDescriptor {
     }
 
     /// Record a participant acknowledgement and the exact local operations it prewrote.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn acknowledge_operations(
         &mut self,
         participant: u32,
@@ -681,6 +720,9 @@ impl TimestampTxnDescriptor {
     }
 
     /// Add a participant while the primary decision is still pending.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn add_participant(&mut self, participant: u32) -> Result<(), TimestampTxnError> {
         if self.decision != PrimaryTxnDecision::Pending {
             return Err(TimestampTxnError::MissingIntent {
@@ -702,6 +744,9 @@ impl TimestampTxnDescriptor {
     }
 
     /// Advance the descriptor to a terminal decision exactly once.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decide(&mut self, decision: PrimaryTxnDecision) -> Result<(), TimestampTxnError> {
         if self.decision != PrimaryTxnDecision::Pending {
             if self.decision == decision {
@@ -811,6 +856,9 @@ fn encode_timestamp_txn_descriptor(descriptor: &TimestampTxnDescriptor) -> Vec<u
 }
 
 /// Read a range-0 timestamp descriptor, if the transaction was distributed.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn read_timestamp_txn_descriptor(
     kv: &dyn crabka_pgkv::Kv,
     start_ts: TimestampTransactionId,
@@ -822,6 +870,12 @@ pub fn read_timestamp_txn_descriptor(
 }
 
 /// Decode one durable timestamp transaction descriptor value for its key timestamp.
+/// # Panics
+///
+/// Panics if an internal execution invariant is violated.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn decode_timestamp_txn_descriptor_value(
     start_ts: TimestampTransactionId,
     value: &[u8],
@@ -956,6 +1010,9 @@ pub fn decode_timestamp_txn_descriptor_value(
 
 /// Enumerate all durable range-0 timestamp descriptors. Malformed keys and values
 /// are corruption: recovery must stop rather than guess a transaction decision.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn timestamp_txn_descriptors(
     kv: &dyn crabka_pgkv::Kv,
 ) -> Result<Vec<TimestampTxnDescriptor>, crabka_pgkv::KvError> {
@@ -989,6 +1046,9 @@ pub fn timestamp_txn_descriptors(
 
 /// Return the largest timestamp represented by durable timestamp tuple versions
 /// and range-0 transaction descriptors on this store.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn durable_timestamp_horizon(kv: &dyn crabka_pgkv::Kv) -> Result<u64, crabka_pgkv::KvError> {
     let start = crabka_pgkv::key::table_prefix(crabka_pgkv::key::SYSTEM_TABLE_ID + 1);
     let end = [0xFF_u8; 5];
@@ -1018,6 +1078,9 @@ pub fn durable_timestamp_horizon(kv: &dyn crabka_pgkv::Kv) -> Result<u64, crabka
 
 /// Return the greatest durable timestamp known to either the local range or the
 /// range-0 catalog/descriptor store.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn durable_timestamp_horizon_with_catalog(
     local_kv: &dyn crabka_pgkv::Kv,
     catalog_kv: &dyn crabka_pgkv::Kv,
@@ -1028,6 +1091,9 @@ pub fn durable_timestamp_horizon_with_catalog(
 /// Build idempotent physical-abort operations for every timestamp intent on this
 /// range. It deliberately discovers intents from durable MVCC state so crash
 /// recovery does not depend on a coordinator's volatile write list.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn abort_timestamp_intent_ops(
     kv: &dyn crabka_pgkv::Kv,
     start_ts: TimestampTransactionId,
@@ -1179,6 +1245,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Prewrite durable intents after first-committer-wins conflict checks.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prewrite(
         &self,
         start_ts: TimestampTransactionId,
@@ -1192,6 +1261,9 @@ impl TimestampTxnParticipant {
     /// Prewrite intents for a transaction whose authoritative decision is the
     /// primary-range descriptor. The descriptor already contains the complete
     /// participant set, so no per-intent sidecar is needed for recovery.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prewrite_with_primary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1217,6 +1289,9 @@ impl TimestampTxnParticipant {
 
     /// Atomically persist the pending primary record and the primary range's
     /// intents. The transaction's first write range calls this exactly once.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prewrite_as_primary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1259,6 +1334,9 @@ impl TimestampTxnParticipant {
 
     /// Persist secondary intents carrying the immutable primary identity. The
     /// authenticated gateway updates the primary descriptor after this returns.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prewrite_as_secondary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1275,6 +1353,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Add another primary-range write to an existing explicit transaction.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prewrite_on_primary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1314,6 +1395,9 @@ impl TimestampTxnParticipant {
 
     /// Resolve a secondary after an authenticated gateway has read the terminal
     /// decision from the immutable primary range.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve_as_secondary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1338,6 +1422,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Write the primary decision and resolve local intents to committed versions.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit(
         &self,
         start_ts: TimestampTransactionId,
@@ -1350,6 +1437,9 @@ impl TimestampTxnParticipant {
 
     /// Write the primary decision, resolve local intents, and fold extra durable
     /// operations into the same atomic commit batch.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn commit_with_ops(
         &self,
         start_ts: TimestampTransactionId,
@@ -1372,6 +1462,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Abort the primary decision and resolve local intents to aborted versions.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn abort(
         &self,
         start_ts: TimestampTransactionId,
@@ -1392,6 +1485,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Idempotently apply a local decision without a distributed primary.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve(
         &self,
         start_ts: TimestampTransactionId,
@@ -1408,6 +1504,9 @@ impl TimestampTxnParticipant {
 
     /// Idempotently apply a decision already made by the primary range after
     /// proving the durable primary identity and intent fence.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve_with_primary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1439,6 +1538,9 @@ impl TimestampTxnParticipant {
 
     /// Atomically choose the write-once terminal decision on the primary range
     /// and resolve that range's own intents.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve_as_primary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1492,6 +1594,9 @@ impl TimestampTxnParticipant {
     /// Idempotently settle durable operations after recovering a terminal range-0
     /// descriptor. Unlike normal resolution, restart recovery has no volatile
     /// `TimestampWrite` list to reconstruct global-index keys from.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve_operations_with_primary(
         &self,
         identity: TimestampTxnIdentity,
@@ -1575,6 +1680,9 @@ impl TimestampTxnParticipant {
     }
 
     /// Read the durable primary decision for resolver RPC handlers.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn primary_decision(
         &self,
         start_ts: TimestampTransactionId,
@@ -2015,6 +2123,9 @@ pub(crate) fn local_terminal_operation_matches_descriptor(
 
 /// Build prewrite intent operations, failing before any write if the row has a
 /// conflicting intent or a version committed after `start_ts`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn prewrite_ops(
     kv: &dyn crabka_pgkv::Kv,
     start_ts: TimestampTransactionId,
@@ -2062,6 +2173,9 @@ pub fn base_index_intents_match(writes: &[TimestampWrite]) -> bool {
 }
 
 /// Build operations that resolve existing intents locally.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn resolve_ops(
     kv: &dyn crabka_pgkv::Kv,
     start_ts: TimestampTransactionId,
@@ -2263,6 +2377,9 @@ fn resolve_recovered_global_index_intents(
 
 /// Read the newest visible timestamp version for one row at `read_ts`, excluding
 /// unresolved or aborted intents and honoring delete tombstones.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn read_visible_ts_row(
     kv: &dyn crabka_pgkv::Kv,
     table_id: u32,
@@ -2301,6 +2418,9 @@ pub fn read_visible_ts_row(
 
 /// Read visible non-unique global-index entries for an exact index key at
 /// `read_ts`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn read_visible_global_index_entries(
     kv: &dyn crabka_pgkv::Kv,
     index_id: u32,
@@ -2347,6 +2467,9 @@ pub fn primary_decision_op(
 }
 
 /// Read the primary decision, returning pending when no record exists yet.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn read_primary_decision(
     kv: &dyn crabka_pgkv::Kv,
     start_ts: TimestampTransactionId,
@@ -2560,6 +2683,9 @@ impl TimestampVersionState {
     }
 
     /// Build a committed version state after proving commit order.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn committed(
         start_ts: TimestampTransactionId,
         commit_ts: CommitTimestamp,
@@ -2577,6 +2703,9 @@ impl TimestampVersionState {
     }
 
     /// Resolve this intent to a committed version.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn commit(self, commit_ts: CommitTimestamp) -> Result<Self, TimestampTxnError> {
         Self::committed(self.start_ts, commit_ts)
     }

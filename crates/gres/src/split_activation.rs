@@ -161,7 +161,7 @@ impl ActivationDiscovery {
             let mut entry = if let Some(target) = self.receipt.targets.get(&spec.range_id) {
                 let mut entry = predecessor.clone();
                 entry.range_id = target.range_id.as_u32();
-                entry.endpoint = target.endpoint.clone();
+                entry.endpoint.clone_from(&target.endpoint);
                 entry.wal_generation = target.wal_generation;
                 entry.retirement = None;
                 entry
@@ -981,11 +981,7 @@ pub(super) async fn discover_activation_receipt(
         })
         .unwrap_or_default();
     let mut visited = std::collections::BTreeSet::from([generation]);
-    loop {
-        let Some(next_generation) = next_replacement_generation(generation, receipts.values())?
-        else {
-            break;
-        };
+    while let Some(next_generation) = next_replacement_generation(generation, receipts.values())? {
         let edge_operation = receipts
             .values()
             .find(|receipt| {
@@ -1471,7 +1467,7 @@ fn validate_receipt_shape(receipt: &TopologyActivationReceipt) -> std::io::Resul
                     .bootstrap_checkpoint
                     .as_ref()
                     .is_none_or(|checkpoint| checkpoint.range_id == *range_id)
-                && (!target.bootstrap_checkpoint.is_some() || target.writer_activated)
+                && (target.bootstrap_checkpoint.is_none() || target.writer_activated)
         });
     let source_identity = receipt.source_checkpoint.as_ref().is_none_or(|checkpoint| {
         checkpoint.range_id == receipt.split.predecessor
@@ -1663,7 +1659,7 @@ pub(super) async fn reconcile_before_readiness(
             TopologyActivationPhase::SourceCheckpoint
                 if control_recovery_operations.contains(&receipt.operation_id) => {}
             TopologyActivationPhase::Prepared | TopologyActivationPhase::SourceCheckpoint => {
-                abort_pre_activation(&source_store, receipt).await?
+                abort_pre_activation(&source_store, receipt).await?;
             }
             TopologyActivationPhase::MustActivate
             | TopologyActivationPhase::WriterActivated
@@ -2803,7 +2799,7 @@ mod tests {
                 }),
                 endpoint: format!("source-r{}", spec.range_id.as_u32()),
                 wal_generation: 0,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             })
             .collect();

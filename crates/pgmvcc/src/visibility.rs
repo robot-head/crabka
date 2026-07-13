@@ -55,6 +55,10 @@ fn committed_visible(
 /// Postgres `HeapTupleSatisfiesMVCC` for a tuple with header `(xmin, xmax)`:
 /// visible iff its creator is visible to the snapshot AND it has not been
 /// deleted/superseded by a transaction also visible to the snapshot.
+///
+/// # Errors
+///
+/// Returns [`KvError`] when commit-status lookup for either transaction fails.
 pub fn satisfies_mvcc(
     xmin: u64,
     xmax: u64,

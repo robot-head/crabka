@@ -508,7 +508,8 @@ fn k_way_top_k_merge_matches_global_order_and_bounds_output_for_random_streams()
         let mut streams = vec![Vec::new(), Vec::new(), Vec::new()];
         for index in 0_u64..31 {
             let value = ((seed.wrapping_mul(17) + index.wrapping_mul(23)) % 41) as i32;
-            streams[index as usize % 3].push(ScannedRow {
+            let stream = usize::try_from(index % 3).expect("stream index fits usize");
+            streams[stream].push(ScannedRow {
                 rowid: seed * 100 + index,
                 xmin: 1,
                 row: vec![Datum::Int4(value)],
@@ -1127,7 +1128,7 @@ async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
         (0..64)
             .map(|seed| {
                 let random = (seed * 1_103_515_245 + salt) % 17;
-                let key = if random % 7 == 0 {
+                let key = if random.is_multiple_of(7) {
                     Datum::Null
                 } else {
                     Datum::Int4(i32::try_from(random % 9).expect("small key"))

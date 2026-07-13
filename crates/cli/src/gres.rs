@@ -146,13 +146,13 @@ struct RenderPgdogArgs {
     /// Suspended-tenant activator route as host:port.
     #[arg(long, value_parser = parse_activator)]
     activator: Option<(String, u16)>,
-    /// Client-facing PgDog listen port.
+    /// Client-facing `PgDog` listen port.
     #[arg(long, default_value_t = 6432)]
     listen_port: u16,
-    /// Client-facing TLS certificate path as visible inside the PgDog runtime.
+    /// Client-facing TLS certificate path as visible inside the `PgDog` runtime.
     #[arg(long, requires = "tls_private_key")]
     tls_certificate: Option<PathBuf>,
-    /// Client-facing TLS private-key path as visible inside the PgDog runtime.
+    /// Client-facing TLS private-key path as visible inside the `PgDog` runtime.
     #[arg(long, requires = "tls_certificate")]
     tls_private_key: Option<PathBuf>,
 }
@@ -476,9 +476,9 @@ async fn split_range(args: SplitRangeArgs) -> Result<(), String> {
     let boundary = split_boundary(&record, args.table, args.bucket, args.rowid)?;
     let source = source_range_for_key(&record, boundary)?;
     let first_free = next_range_id(&record);
-    let left_range_id = args
-        .left_range_id
-        .unwrap_or_else(|| if source.range_id == 0 { 0 } else { first_free });
+    let left_range_id =
+        args.left_range_id
+            .unwrap_or(if source.range_id == 0 { 0 } else { first_free });
     let successor_range_id = args
         .successor_range_id
         .unwrap_or_else(|| first_free.max(left_range_id.saturating_add(1)));
@@ -617,7 +617,7 @@ fn build_move_operation(
         endpoint: args
             .replacement_endpoint
             .clone()
-            .unwrap_or_else(|| range_endpoint(&tenant_name, args.replacement_range_id)),
+            .unwrap_or_else(|| range_endpoint(tenant_name, args.replacement_range_id)),
         wal_generation: args
             .replacement_wal_generation
             .unwrap_or_else(|| source.wal_generation.saturating_add(1)),
@@ -913,7 +913,7 @@ fn parse_range_layout(
                 end_key: boundaries.get(index + 1).copied(),
                 endpoint: range_endpoint(tenant, range_id),
                 wal_generation: 0,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             })
         })
@@ -1228,7 +1228,7 @@ mod tests {
                 end_key: Some(RangeBoundary::new(10, 50)),
                 endpoint: "tenant-a-gres-r0.gres.svc:5432".into(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             },
             RangeLayoutEntry {
@@ -1236,7 +1236,7 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-gres-r1.gres.svc:5432".into(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             },
         ];

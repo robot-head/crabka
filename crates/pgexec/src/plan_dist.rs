@@ -286,6 +286,9 @@ pub fn plan_scan(
 
 /// Parse a filter into a pushdown predicate, failing when any conjunct is not in
 /// the supported equality/range subset.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn strict_predicate_for_filter(
     table: &Table,
     filter: Option<&Expr>,

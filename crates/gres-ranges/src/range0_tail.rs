@@ -24,6 +24,12 @@ impl Range0Frame {
     }
 
     /// Decode the current `GRW1` frame payload.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decode(offset: i64, bytes: &[u8]) -> Result<Self, Range0TailError> {
         let mut reader = FrameReader { bytes, at: 0 };
         let version = reader.u8()?;
@@ -92,6 +98,9 @@ impl Range0Tail {
     }
 
     /// Apply a committed frame with G-2 merge rules and publish its offset.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn apply_committed(&self, frame: &Range0Frame) -> Result<(), Range0TailError> {
         if frame.offset <= *self.applied_offset_tx.borrow() {
             return Err(Range0TailError::NonMonotoneOffset {
@@ -128,6 +137,9 @@ impl Range0Tail {
     }
 
     /// Wait until the local tail has applied at least `target_offset`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn wait_until_applied(&self, target_offset: i64) -> Result<(), Range0TailError> {
         if self.applied_offset() >= target_offset {
             return Ok(());

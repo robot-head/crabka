@@ -49,6 +49,9 @@ pub struct WakeRequest {
 
 impl WakeRequest {
     /// Parse a wake request from a tenant database name.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_database(database: &str) -> Result<Self, ActivatorError> {
         let tenant = TenantName::try_from(database).map_err(ActivatorError::Control)?;
         Ok(Self { tenant })
@@ -94,6 +97,9 @@ where
     R: WakeRegistry,
 {
     /// Request resume once per tenant and wait for an active backend endpoint.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn wake_and_wait(
         &self,
         request: &WakeRequest,
@@ -145,6 +151,9 @@ where
 }
 
 /// Serve one frontend connection through the activator.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn serve_conn<R>(
     mut stream: TcpStream,
     coordinator: &WakeCoordinator<R>,

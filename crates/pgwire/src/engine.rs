@@ -84,6 +84,12 @@ impl CollectingResultSink {
         &self.pages
     }
 
+    /// Assemble collected pages into complete query results.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when pages are missing, duplicated, or arrive out of
+    /// result order.
     pub fn finish(self) -> Result<Vec<QueryResult>, PgError> {
         let mut results = Vec::new();
         for page in self.pages {
@@ -294,7 +300,7 @@ pub trait Session: Send {
                         }
                     }
                     QueryResult::Command { tag } => {
-                        sink.send(ResultPage::Command { result_index, tag }).await?
+                        sink.send(ResultPage::Command { result_index, tag }).await?;
                     }
                     QueryResult::Empty => sink.send(ResultPage::Empty { result_index }).await?,
                 }

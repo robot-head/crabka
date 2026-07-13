@@ -99,7 +99,7 @@ struct HostedSession {
     last_used: Instant,
 }
 
-const REMOTE_SESSION_IDLE: Duration = Duration::from_secs(60);
+const REMOTE_SESSION_IDLE: Duration = Duration::from_mins(1);
 const MAX_REMOTE_SESSIONS: usize = 1024;
 #[cfg(not(test))]
 const EXPLICIT_GATE_LEASE: Duration = Duration::from_secs(2);
@@ -188,6 +188,7 @@ impl HostedRangeService {
         self
     }
 
+    #[allow(clippy::result_large_err)]
     fn hosted_engine(&self, range_id: RangeId) -> Result<&crabka_pgexec::SqlEngine, RangeResponse> {
         self.engines
             .get(&range_id)
@@ -197,6 +198,7 @@ impl HostedRangeService {
             })
     }
 
+    #[allow(clippy::result_large_err)]
     fn hosted_timestamp_primary_engine(
         &self,
         range_id: RangeId,
@@ -230,7 +232,8 @@ impl HostedRangeService {
                         });
                         return ExplicitGateResp::Acquired {
                             token,
-                            lease_millis: EXPLICIT_GATE_LEASE.as_millis() as u64,
+                            lease_millis: u64::try_from(EXPLICIT_GATE_LEASE.as_millis())
+                                .unwrap_or(u64::MAX),
                         };
                     }
                     state
@@ -259,7 +262,8 @@ impl HostedRangeService {
                 }
                 owner.deadline = now + EXPLICIT_GATE_LEASE;
                 ExplicitGateResp::Renewed {
-                    lease_millis: EXPLICIT_GATE_LEASE.as_millis() as u64,
+                    lease_millis: u64::try_from(EXPLICIT_GATE_LEASE.as_millis())
+                        .unwrap_or(u64::MAX),
                 }
             }
             ExplicitGateReq::Release { token } => {
@@ -354,6 +358,7 @@ impl HostedRangeService {
 
 #[async_trait]
 impl RangeService for HostedRangeService {
+    #[allow(clippy::too_many_lines)]
     async fn handle(&self, request: RangeRequest) -> RangeResponse {
         match request {
             RangeRequest::InspectDurableRecords(request) => {
@@ -475,15 +480,7 @@ impl RangeService for HostedRangeService {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
-                let status = match decode_global_status(status) {
-                    Ok(status) => status,
-                    Err(error) => {
-                        return RangeResponse::SqlError {
-                            code: error.code,
-                            message: error.message,
-                        };
-                    }
-                };
+                let status = decode_global_status(status);
                 match engine.commit_global_decision(global_xid, status).await {
                     Ok(status) => RangeResponse::GlobalStatus {
                         status: encode_global_status(status),
@@ -595,7 +592,7 @@ impl RangeService for HostedRangeService {
                     Ok(engine) => engine,
                     Err(response) => return response,
                 };
-                match handle_join_range(engine, request) {
+                match handle_join_range(engine, &request) {
                     Ok(response) => RangeResponse::JoinRange(response),
                     Err(error) => RangeResponse::Error {
                         error: WireErrorKind::Failed,
@@ -944,16 +941,14 @@ impl RangeService for HostedRangeService {
                         message: error.into_pg().message,
                     };
                 }
-                let (decision, primary_operations) =
-                    match self.authenticated_primary_outcome(identity).await {
-                        Ok(outcome) => outcome,
-                        Err(_) => {
-                            return RangeResponse::SqlError {
-                                code: "40001".into(),
-                                message: "timestamp recovery primary identity is fenced".into(),
-                            };
-                        }
+                let Ok((decision, primary_operations)) =
+                    self.authenticated_primary_outcome(identity).await
+                else {
+                    return RangeResponse::SqlError {
+                        code: "40001".into(),
+                        message: "timestamp recovery primary identity is fenced".into(),
                     };
+                };
                 if decision == crabka_pgexec::PrimaryTxnDecision::Pending {
                     return RangeResponse::SqlError {
                         code: "40001".into(),
@@ -1238,17 +1233,15 @@ fn encode_global_status(status: crabka_pgmvcc::clog::XidStatus) -> WireGlobalSta
     }
 }
 
-fn decode_global_status(
-    status: WireGlobalStatus,
-) -> Result<crabka_pgmvcc::clog::XidStatus, PgError> {
-    Ok(match status {
+fn decode_global_status(status: WireGlobalStatus) -> crabka_pgmvcc::clog::XidStatus {
+    match status {
         WireGlobalStatus::InProgress => crabka_pgmvcc::clog::XidStatus::InProgress,
         WireGlobalStatus::Prepared { global_xid } => {
             crabka_pgmvcc::clog::XidStatus::Prepared(global_xid)
         }
         WireGlobalStatus::Committed => crabka_pgmvcc::clog::XidStatus::Committed,
         WireGlobalStatus::Aborted => crabka_pgmvcc::clog::XidStatus::Aborted,
-    })
+    }
 }
 
 struct RangeFrameSink<'a> {
@@ -1521,6 +1514,9 @@ pub struct RemoteExplicitGateLease {
 }
 
 impl RemoteExplicitGateLease {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn renew(&self) -> Result<(), ForwardError> {
         let token = self.token.ok_or(ForwardError::UnexpectedResponse)?;
         match self.call(ExplicitGateReq::Renew { token }).await? {
@@ -1533,6 +1529,9 @@ impl RemoteExplicitGateLease {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn release(&mut self) -> Result<(), ForwardError> {
         let Some(token) = self.token.take() else {
             return Ok(());
@@ -1838,6 +1837,9 @@ pub struct RemoteRangeSession {
 }
 
 impl RemoteRangeSession {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_primary_inspect(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -1906,6 +1908,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn set_timestamp_own_start_ts(
         &mut self,
         start_ts: Option<crabka_pgexec::TimestampTransactionId>,
@@ -1921,6 +1926,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_prewrite(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -1940,6 +1948,9 @@ impl RemoteRangeSession {
         self.call_timestamp_participant(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_prewrite_as_primary(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -1960,6 +1971,9 @@ impl RemoteRangeSession {
         self.call_timestamp_participant(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_prewrite_as_secondary(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -1979,6 +1993,9 @@ impl RemoteRangeSession {
         self.call_timestamp_participant(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_prewrite_on_primary(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -1998,6 +2015,9 @@ impl RemoteRangeSession {
         self.call_timestamp_participant(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_primary_add_participant(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -2013,6 +2033,9 @@ impl RemoteRangeSession {
         self.call_timestamp_participant(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_primary_ack(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -2038,6 +2061,9 @@ impl RemoteRangeSession {
         self.call_timestamp_participant(request).await
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_resolve(
         &self,
         identity: crabka_pgexec::TimestampTxnIdentity,
@@ -2094,6 +2120,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn timestamp_primary_decision(
         &self,
         start_ts: crabka_pgexec::TimestampTransactionId,
@@ -2132,6 +2161,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn begin_global(&mut self) -> Result<u64, PgError> {
         let endpoint = self
             .registry
@@ -2193,6 +2225,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn simple_query(&mut self, sql: String) -> Result<Vec<QueryResult>, PgError> {
         match self.call(WireSessionOperation::SimpleQuery { sql }).await? {
             WireSessionResult::Query { results } => {
@@ -2202,6 +2237,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn parse(
         &mut self,
         name: String,
@@ -2227,6 +2265,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn bind(
         &mut self,
         portal: String,
@@ -2258,6 +2299,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn describe_statement(
         &mut self,
         name: String,
@@ -2277,6 +2321,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn describe_portal(
         &mut self,
         name: String,
@@ -2292,6 +2339,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn execute(
         &mut self,
         portal: String,
@@ -2318,6 +2368,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn prepare_global(&mut self, global_xid: u64) -> Result<u64, PgError> {
         match self
             .call(WireSessionOperation::PrepareGlobal { global_xid })
@@ -2328,6 +2381,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn release_global(&mut self, global_xid: u64, commit: bool) -> Result<(), PgError> {
         let operation = if commit {
             WireSessionOperation::CommitGlobal { global_xid }
@@ -2340,6 +2396,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn record_global_decision(
         &mut self,
         global_xid: u64,
@@ -2363,7 +2422,7 @@ impl RemoteRangeSession {
             .await
             .map_err(|error| ForwardError::Transport(error).into_pg())?
         {
-            RangeResponse::GlobalStatus { status } => decode_global_status(status),
+            RangeResponse::GlobalStatus { status } => Ok(decode_global_status(status)),
             RangeResponse::SqlError { code, message } => Err(PgError::error(&code, message)),
             RangeResponse::Error { error, message } => Err(ForwardError::Remote {
                 kind: error,
@@ -2374,6 +2433,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn close(&mut self, target: CloseTarget<'_>) -> Result<(), PgError> {
         let operation = match target {
             CloseTarget::Statement(name) => WireSessionOperation::CloseStatement {
@@ -2389,6 +2451,9 @@ impl RemoteRangeSession {
         }
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn sync(&mut self) -> Result<TxStatus, PgError> {
         match self.call(WireSessionOperation::Sync).await? {
             WireSessionResult::Synced { tx_status } => match tx_status {
@@ -2787,7 +2852,7 @@ impl RegistryRangeScanner {
         let mut rows = Vec::new();
         for range_id in self.registry.range_ids().await {
             let response = if let Some(engine) = self.local_engines.get(&range_id) {
-                handle_join_range(engine, encode_join_request(range_id, &request)?)?
+                handle_join_range(engine, &encode_join_request(range_id, &request)?)?
             } else {
                 self.join_remote_range(range_id, encode_join_request(range_id, &request)?)
                     .await?
@@ -3222,7 +3287,7 @@ impl RangeService for RangeScanService {
                 handle_scan_cursor(engine, request).map(RangeResponse::ScanCursor)
             }
             (None, Some(request)) => {
-                handle_join_range(engine, request).map(RangeResponse::JoinRange)
+                handle_join_range(engine, &request).map(RangeResponse::JoinRange)
             }
             (None, None) => handle_scan_range(engine, scan_request.expect("scan request present"))
                 .map(RangeResponse::ScanRange),
@@ -3243,7 +3308,7 @@ impl RangeService for RangeScanService {
 
 fn handle_join_range(
     engine: &crabka_pgexec::SqlEngine,
-    request: JoinRangeReq,
+    request: &JoinRangeReq,
 ) -> Result<JoinRangeResp, crabka_pgexec::ExecError> {
     request
         .validate()
@@ -3387,17 +3452,16 @@ fn handle_scan_cursor(
         ));
     }
     let table = crabka_pgcatalog::get_table(engine.catalog_kv(), &request.scan.table_name)?;
-    let (next, terminal) = match request.token.as_deref() {
-        Some(token) => decode_owner_cursor_token(token)?,
-        None => {
-            let start = request.scan.interval.start.unwrap_or(0);
-            let terminal = request
-                .scan
-                .interval
-                .end
-                .unwrap_or(engine.scan_local_terminal(&table)?);
-            (start, terminal)
-        }
+    let (next, terminal) = if let Some(token) = request.token.as_deref() {
+        decode_owner_cursor_token(token)?
+    } else {
+        let start = request.scan.interval.start.unwrap_or(0);
+        let terminal = request
+            .scan
+            .interval
+            .end
+            .unwrap_or(engine.scan_local_terminal(&table)?);
+        (start, terminal)
     };
     if next >= terminal {
         return Ok(ScanCursorResp {
@@ -3865,7 +3929,7 @@ mod tests {
                 .handle_explicit_gate(ExplicitGateReq::Renew { token: second })
                 .await,
             ExplicitGateResp::Renewed {
-                lease_millis: EXPLICIT_GATE_LEASE.as_millis() as u64,
+                lease_millis: u64::try_from(EXPLICIT_GATE_LEASE.as_millis()).unwrap_or(u64::MAX),
             }
         );
         assert_eq!(
@@ -4011,7 +4075,7 @@ mod tests {
             end_key: None,
             endpoint,
             wal_generation: 1,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         }])
     }
@@ -4251,7 +4315,7 @@ mod tests {
                 end_key: None,
                 endpoint: address.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             }]))
             .expect("registry");
@@ -4481,7 +4545,7 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
                 endpoint: left_addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
             RangeLayoutEntry {
@@ -4489,7 +4553,7 @@ mod tests {
                 end_key: None,
                 endpoint: right_addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
         ]))
@@ -4579,7 +4643,7 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
                 endpoint: left_addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
             RangeLayoutEntry {
@@ -4587,7 +4651,7 @@ mod tests {
                 end_key: None,
                 endpoint: right_addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
         ]))
@@ -4659,7 +4723,7 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::table_start(100)),
                 endpoint: left_addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
             RangeLayoutEntry {
@@ -4667,7 +4731,7 @@ mod tests {
                 end_key: None,
                 endpoint: right_addr.to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
         ]))

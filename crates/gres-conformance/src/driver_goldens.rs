@@ -106,6 +106,11 @@ where
     deserializer.deserialize_map(UniqueMapVisitor)
 }
 
+/// Parse a driver fixture and validate its provenance and dependency pins.
+///
+/// # Errors
+///
+/// Returns [`FixtureError`] when JSON decoding or fixture validation fails.
 pub fn parse_and_validate(
     text: &str,
     cargo_lock: &str,
@@ -116,6 +121,11 @@ pub fn parse_and_validate(
     Ok(fixture)
 }
 
+/// Validate a serialized driver fixture.
+///
+/// # Errors
+///
+/// Returns [`FixtureError`] when JSON decoding or fixture validation fails.
 pub fn validate(
     text: &str,
     cargo_lock: &str,
@@ -398,6 +408,12 @@ fn is_iso_date(value: &str) -> bool {
         })
 }
 
+/// Encode a `PostgreSQL` startup packet.
+///
+/// # Errors
+///
+/// Returns an error when a field contains NUL or the packet exceeds the
+/// protocol length limit.
 pub fn startup_packet(
     user: &str,
     dbname: &str,
@@ -433,6 +449,12 @@ fn append_startup_field(out: &mut Vec<u8>, name: &str, value: &str) -> io::Resul
     Ok(())
 }
 
+/// Replay a startup packet against a live PostgreSQL-compatible endpoint.
+///
+/// # Errors
+///
+/// Returns an I/O error for connection failures, malformed backend messages,
+/// or an error response from the endpoint.
 pub async fn replay_startup(
     host: &str,
     port: u16,

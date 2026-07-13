@@ -128,6 +128,9 @@ pub struct RestoreTail {
 }
 
 /// Stream a KV snapshot into checkpoint parts and write the manifest last.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn write_checkpoint(
     store: &dyn CheckpointStore,
     tenant: &str,
@@ -281,6 +284,9 @@ fn checkpoint_failure(
 }
 
 /// Restore the newest valid checkpoint for `tenant`, skipping incomplete attempts.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_latest(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -292,6 +298,9 @@ pub async fn restore_latest(
 }
 
 /// Restore the newest valid checkpoint subset for `tenant`, skipping incomplete attempts.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_latest_filtered(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -315,6 +324,9 @@ pub async fn restore_latest_filtered(
 ///
 /// This deliberately does not publish a serving range. Callers must replay the
 /// ordered WAL tail with the same `selector` before using the restored KV.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_latest_table_transfer(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -470,6 +482,9 @@ async fn restore_latest_with_filter(
 }
 
 /// Return the newest manifest whose parts are present and checksummed.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn latest_checkpoint_metadata(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -539,6 +554,9 @@ pub async fn latest_checkpoint_metadata(
 }
 
 /// Restore the latest checkpoint and replay committed WAL frames after it.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_latest_and_replay_tail(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -571,6 +589,9 @@ pub async fn restore_latest_and_replay_tail(
 }
 
 /// Restore a checkpoint subset and replay only tail mutations in that same interval.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_latest_filtered_and_replay_tail(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -603,7 +624,7 @@ pub async fn restore_latest_filtered_and_replay_tail(
         tail.barrier_offset,
         replay_start,
         expected,
-        filter,
+        &filter,
     )?;
     Ok(RestorePlan {
         restored_from,
@@ -615,6 +636,9 @@ pub async fn restore_latest_filtered_and_replay_tail(
 ///
 /// The selector state established from the checkpoint is carried into replay,
 /// preserving the closure when tail tuples introduce new XID dependencies.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_latest_table_transfer_and_replay_tail(
     objects: &dyn CheckpointStore,
     tenant: &str,
@@ -661,6 +685,9 @@ pub async fn restore_latest_table_transfer_and_replay_tail(
 /// never lists checkpoint objects. The manifest key and covered offset form a
 /// transfer boundary selected by the caller; a later checkpoint must not
 /// change that boundary.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_table_transfer_from_manifest_and_replay_tail(
     objects: &dyn CheckpointStore,
     manifest_key: &str,
@@ -713,6 +740,9 @@ pub async fn restore_table_transfer_from_manifest_and_replay_tail(
 
 /// Restore one exact interval from a caller-selected manifest and replay the
 /// same interval from its bounded committed tail.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn restore_filtered_from_manifest_and_replay_tail(
     objects: &dyn CheckpointStore,
     manifest_key: &str,
@@ -757,7 +787,7 @@ pub async fn restore_filtered_from_manifest_and_replay_tail(
         tail.barrier_offset,
         restored.covered_offset.saturating_add(1),
         restored.journal_seq,
-        filter,
+        &filter,
     )?;
     Ok(RestorePlan {
         restored_from: Some(restored),
@@ -766,6 +796,9 @@ pub async fn restore_filtered_from_manifest_and_replay_tail(
 }
 
 /// Build prune requests and checkpoint-object deletions after a durable checkpoint.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn plan_prune(
     store: &dyn CheckpointStore,
     tenant: &str,

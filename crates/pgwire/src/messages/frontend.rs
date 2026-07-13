@@ -26,6 +26,17 @@ pub enum StartupPacket {
     CancelRequest { process_id: i32, secret_key: i32 },
 }
 
+/// Decode one startup packet from `buf` when enough bytes are available.
+///
+/// # Errors
+///
+/// Returns a protocol error for malformed lengths, unsupported protocol
+/// versions, or invalid startup fields.
+///
+/// # Panics
+///
+/// Panics only on a platform where a positive protocol `i32` length cannot be
+/// represented as `usize`.
 pub fn decode_startup(buf: &mut BytesMut) -> Result<Option<StartupPacket>, PgError> {
     if buf.len() < 4 {
         return Ok(None);
@@ -140,10 +151,16 @@ pub enum FrontendMessage {
     Terminate,
 }
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "decoder mirrors PostgreSQL message tags"
-)]
+/// Decode one regular frontend message from `buf` when complete.
+///
+/// # Errors
+///
+/// Returns a protocol error for malformed lengths, tags, fields, or payloads.
+///
+/// # Panics
+///
+/// Panics only on a platform where a positive protocol `i32` length cannot be
+/// represented as `usize`.
 pub fn decode_message(buf: &mut BytesMut) -> Result<Option<FrontendMessage>, PgError> {
     if buf.len() < 5 {
         return Ok(None);

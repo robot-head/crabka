@@ -157,11 +157,17 @@ impl RawKvSplitRuntime {
     }
 
     /// Return a range's local KV object for raw assertions.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn kv(&self, range: RangeId) -> Result<Arc<MemKv>, SplitError> {
         self.range(range)?.kv()
     }
 
     /// Return whether a range has completed prologue and remains serving.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn is_serving(&self, range: RangeId) -> Result<bool, SplitError> {
         Ok(self
             .range(range)?
@@ -170,6 +176,9 @@ impl RawKvSplitRuntime {
     }
 
     /// Return whether the supplied checkpoint manifest object is durable.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn has_checkpoint_manifest(&self, key: &str) -> Result<bool, SplitError> {
         Ok(self.checkpoints.get(key).await.is_ok_and(|_| true))
     }

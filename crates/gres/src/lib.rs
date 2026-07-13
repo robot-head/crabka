@@ -293,6 +293,9 @@ pub enum CheckpointObjectStoreConfig {
 
 impl SubstrateRuntimeConfig {
     /// Parse substrate settings from serve arguments.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn from_args(args: &ServeArgs) -> std::io::Result<Option<Self>> {
         use std::io::{Error, ErrorKind};
 
@@ -613,6 +616,9 @@ fn resolve_s3_credentials(
 }
 
 /// Build the checkpoint object-store adapter selected by validated CLI settings.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn build_checkpoint_store(
     config: &CheckpointRuntimeConfig,
 ) -> std::io::Result<Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>> {
@@ -863,6 +869,9 @@ impl GresRuntime {
     ///
     /// This only publishes to the in-process serving map. It deliberately does not
     /// mutate the control registry or coordinate a distributed operator workflow.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn split_successors(
         &self,
         operation_id: impl Into<String>,
@@ -942,7 +951,7 @@ pub enum RuntimeSession {
     /// Single-engine session.
     Single(Box<crabka_pgexec::SqlSession>),
     /// Multi-range gateway session.
-    Multi(crabka_gres_ranges::tenant::GatewaySession),
+    Multi(Box<crabka_gres_ranges::tenant::GatewaySession>),
 }
 
 impl Engine for RuntimeEngine {
@@ -951,7 +960,7 @@ impl Engine for RuntimeEngine {
     fn connect(&self) -> Self::Session {
         match self {
             Self::Single(engine) => RuntimeSession::Single(Box::new(engine.connect())),
-            Self::Multi(engine) => RuntimeSession::Multi(engine.connect()),
+            Self::Multi(engine) => RuntimeSession::Multi(Box::new(engine.connect())),
         }
     }
 }
@@ -1142,6 +1151,9 @@ impl SuspendPolicy {
 }
 
 /// Run one suspend attempt if the activity state is eligible.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn try_suspend_idle_tenant(
     policy: &SuspendPolicy,
     activity: &crabka_pgwire::server::ActivityTracker,
@@ -1448,17 +1460,23 @@ fn invalid_input<T>(message: impl Into<String>) -> std::io::Result<T> {
 }
 
 /// Build the TLS acceptor used for `PostgreSQL` `SSLRequest` upgrades.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn tls_acceptor(
     cert_path: &std::path::Path,
     key_path: &std::path::Path,
 ) -> std::io::Result<tokio_rustls::TlsAcceptor> {
     use std::io::{BufReader, Error, ErrorKind};
 
-    let certs = rustls_pemfile::certs(&mut BufReader::new(std::fs::File::open(cert_path)?))
-        .collect::<Result<Vec<_>, _>>()?;
-    let key = rustls_pemfile::private_key(&mut BufReader::new(std::fs::File::open(key_path)?))?
-        .ok_or_else(|| Error::new(ErrorKind::InvalidInput, "no private key in file"))?;
-    let provider = Arc::new(rustls_rustcrypto::provider());
+    use rustls_pki_types::{CertificateDer, PrivateKeyDer, pem::PemObject};
+
+    let certs = CertificateDer::pem_reader_iter(BufReader::new(std::fs::File::open(cert_path)?))
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+    let key = PrivateKeyDer::from_pem_reader(BufReader::new(std::fs::File::open(key_path)?))
+        .map_err(|error| Error::new(ErrorKind::InvalidInput, error))?;
+    let provider = Arc::new(rustls::crypto::ring::default_provider());
     let config = rustls::ServerConfig::builder_with_provider(provider)
         .with_safe_default_protocol_versions()
         .map_err(|e| Error::new(ErrorKind::InvalidInput, e))?
@@ -1469,6 +1487,9 @@ pub fn tls_acceptor(
 }
 
 /// Run the single-node pgwire service, binding the configured listener address.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
     let listener = TcpListener::bind(&args.listen).await?;
     tracing::info!(listen = %listener.local_addr()?, "crabka-gres listening");
@@ -1476,11 +1497,22 @@ pub async fn run_serve(args: ServeArgs) -> std::io::Result<()> {
 }
 
 /// Run the single-node pgwire service on an already-bound listener.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn serve_listener(listener: TcpListener, args: ServeArgs) -> std::io::Result<()> {
-    serve_listener_with_tenant_config_loader(listener, args, &LiveTenantConfigLoader).await
+    Box::pin(serve_listener_with_tenant_config_loader(
+        listener,
+        args,
+        &LiveTenantConfigLoader,
+    ))
+    .await
 }
 
 /// Run the pgwire service with an injected tenant-config loader for tests.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn serve_listener_with_tenant_config_loader(
     listener: TcpListener,
     args: ServeArgs,
@@ -1512,8 +1544,11 @@ pub async fn serve_listener_with_tenant_config_loader(
         lifecycle_registry = Some(registry);
     }
     let effective_args = apply_tenant_runtime_defaults(args, tenant_record.as_ref())?;
-    let mut runtime =
-        open_runtime_with_tenant_record(&effective_args, tenant_record.as_ref()).await?;
+    let mut runtime = Box::pin(open_runtime_with_tenant_record(
+        &effective_args,
+        tenant_record.as_ref(),
+    ))
+    .await?;
     register_kafka_scanner_with_default_bootstrap(
         &mut runtime.engine,
         kafka_scanner_default_bootstrap(&effective_args),
@@ -1762,6 +1797,7 @@ struct LiveSplitIntentAuthority {
 
 /// Build the production registry-backed split authority for integration verification.
 #[doc(hidden)]
+#[must_use]
 pub fn live_split_intent_authority(
     bootstrap: String,
     tenant: crabka_gres_control::TenantName,
@@ -2251,7 +2287,11 @@ async fn open_runtime_with_tenant_record(
     tenant_record: Option<&TenantRecord>,
 ) -> std::io::Result<GresRuntime> {
     if let Some(config) = SubstrateRuntimeConfig::from_args(args)? {
-        return open_substrate_runtime_with_tenant_record(&config, tenant_record).await;
+        return Box::pin(open_substrate_runtime_with_tenant_record(
+            &config,
+            tenant_record,
+        ))
+        .await;
     }
 
     let engine = match args.data_dir.as_deref() {
@@ -2266,8 +2306,11 @@ async fn open_runtime_with_tenant_record(
 }
 
 /// Construct a substrate-mode engine from a disposable cache store and WAL seam.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn open_substrate_engine(config: &SubstrateRuntimeConfig) -> std::io::Result<SqlEngine> {
-    match open_substrate_runtime(config).await?.engine {
+    match Box::pin(open_substrate_runtime(config)).await?.engine {
         RuntimeEngine::Single(engine) => Ok(*engine),
         RuntimeEngine::Multi(_) => {
             invalid_input("--ranges constructs a multi-range gateway, not a SqlEngine")
@@ -2276,10 +2319,13 @@ pub async fn open_substrate_engine(config: &SubstrateRuntimeConfig) -> std::io::
 }
 
 /// Construct substrate-mode runtime resources from a cache store and WAL seam.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn open_substrate_runtime(
     config: &SubstrateRuntimeConfig,
 ) -> std::io::Result<GresRuntime> {
-    open_substrate_runtime_with_tenant_record(config, None).await
+    Box::pin(open_substrate_runtime_with_tenant_record(config, None)).await
 }
 
 async fn open_substrate_runtime_with_tenant_record(
@@ -2289,7 +2335,7 @@ async fn open_substrate_runtime_with_tenant_record(
     use std::io::Error;
 
     if let Some(boundaries) = config.ranges.as_deref() {
-        return open_multirange_runtime(config, boundaries, tenant_record).await;
+        return Box::pin(open_multirange_runtime(config, boundaries, tenant_record)).await;
     }
 
     let store = open_substrate_cache(config.cache_dir.as_deref())?;
@@ -2375,6 +2421,7 @@ where
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn open_multirange_runtime(
     config: &SubstrateRuntimeConfig,
     boundaries: &str,
@@ -2505,7 +2552,7 @@ async fn open_multirange_runtime(
                                 }
                             }
                             Err(error) => {
-                                tracing::warn!(%error, "range-0 follower tail read failed")
+                                tracing::warn!(%error, "range-0 follower tail read failed");
                             }
                         }
                     }
@@ -3090,6 +3137,7 @@ fn range_pause_lock_error(
     }
 }
 
+#[allow(clippy::too_many_lines)]
 async fn open_live_multirange_tenant(
     tenant_config: crabka_gres_ranges::MultiRangeTenantConfig,
     mut live_engines: LiveMultirangeEngines,
@@ -3482,6 +3530,8 @@ impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
         &self,
         request: crabka_gres_ranges::InspectDurableRecordsReq,
     ) -> Result<crabka_gres_ranges::InspectDurableRecordsResp, String> {
+        use std::fmt::Write as _;
+
         use crabka_pgkv::key::KeyClass;
         use sha2::{Digest, Sha256};
 
@@ -3518,8 +3568,10 @@ impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
         );
         let digest = digest
             .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect::<String>();
+            .fold(String::with_capacity(64), |mut text, byte| {
+                write!(&mut text, "{byte:02x}").expect("write to string");
+                text
+            });
         let cursor = request
             .cursor
             .as_deref()
@@ -4808,8 +4860,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             let left_id = left_request.target_range;
             let right_id = right_request.target_range;
             match try_join_stages_with_cleanup(
-                stage_range(left_request),
-                stage_range(right_request),
+                Box::pin(stage_range(left_request)),
+                Box::pin(stage_range(right_request)),
                 || {
                     let mut staged = self
                         .staged
@@ -4992,6 +5044,8 @@ fn validate_staged_transfer_boundary(
 }
 
 fn committed_tail_sha256(tail: &[crabka_gres_ranges::CommittedTailRecord]) -> String {
+    use std::fmt::Write as _;
+
     use sha2::Digest;
     let mut digest = sha2::Sha256::new();
     for record in tail {
@@ -5006,8 +5060,10 @@ fn committed_tail_sha256(tail: &[crabka_gres_ranges::CommittedTailRecord]) -> St
     digest
         .finalize()
         .iter()
-        .map(|byte| format!("{byte:02x}"))
-        .collect()
+        .fold(String::with_capacity(64), |mut text, byte| {
+            write!(&mut text, "{byte:02x}").expect("write to string");
+            text
+        })
 }
 
 #[async_trait::async_trait]
@@ -5431,11 +5487,17 @@ fn kafka_scanner_default_bootstrap(args: &ServeArgs) -> Option<String> {
 }
 
 /// Build pgwire session authentication and startup configuration.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn build_session_config(args: &ServeArgs) -> std::io::Result<SessionConfig> {
     build_session_config_from_tenant(args, None)
 }
 
 /// Build pgwire session config after optional substrate tenant config has been loaded.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn build_session_config_from_tenant(
     args: &ServeArgs,
     tenant_record: Option<&TenantRecord>,
@@ -5712,7 +5774,7 @@ mod tests {
             end_key: None,
             endpoint: endpoint.into(),
             wal_generation: u64::from(range_id),
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         }
     }
@@ -6818,7 +6880,7 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::hash(50, 4, 0)),
                 endpoint: "127.0.0.1:1".into(),
                 wal_generation: 0,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
             crabka_gres_control::RangeLayoutEntry {
@@ -6826,7 +6888,7 @@ mod tests {
                 end_key: None,
                 endpoint: "127.0.0.1:2".into(),
                 wal_generation: 0,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
         ];

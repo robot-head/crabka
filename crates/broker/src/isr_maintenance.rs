@@ -179,7 +179,7 @@ async fn send_alter_partition(
     let mut last_err = String::new();
     for (target_id, addr) in targets {
         match send_alter_partition_to(broker_id, &addr, req.clone()).await {
-            Ok(_) => {
+            Ok(()) => {
                 debug!(
                     topic = topic,
                     partition = partition,

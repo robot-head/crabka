@@ -356,6 +356,10 @@ fn read_options(cur: &mut &[u8]) -> Result<Vec<(String, String)>, KvError> {
 /// Always writes version byte `5`, then the column list, table option flags, and
 /// a foreign flag: `0` for an ordinary table, `1` for a foreign table followed
 /// by the foreign metadata payload.
+///
+/// # Panics
+///
+/// Panics when a catalog collection or string exceeds its `u32` wire limit.
 #[must_use]
 pub fn serialize_schema(
     table_id: u32,
@@ -407,6 +411,12 @@ fn read_table_options(flags: u8) -> Result<TableOptions, KvError> {
     })
 }
 
+/// Serialize a table's sharding strategy.
+///
+/// # Panics
+///
+/// Panics when the sharding column list or a string exceeds its `u32` wire
+/// limit.
 #[must_use]
 pub fn serialize_sharding(sharding: Option<&ShardingStrategy>) -> Vec<u8> {
     let mut out = vec![SHARDING_VERSION];
@@ -435,6 +445,17 @@ pub fn serialize_sharding(sharding: Option<&ShardingStrategy>) -> Vec<u8> {
     out
 }
 
+/// Deserialize a table's sharding strategy.
+///
+/// # Errors
+///
+/// Returns catalog corruption errors for truncated, unsupported, or invalid
+/// sharding bytes.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding array or `usize`.
 pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
@@ -497,7 +518,7 @@ pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, Kv
         tag => {
             return Err(KvError::CorruptRow(format!(
                 "unknown sharding strategy tag {tag}"
-            )))
+            )));
         }
     };
     if !cur.is_empty() {
@@ -509,6 +530,10 @@ pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, Kv
 }
 
 /// Serialize an index catalog record.
+///
+/// # Panics
+///
+/// Panics when the index column list or a string exceeds its `u32` wire limit.
 #[must_use]
 pub fn serialize_index(index: &Index) -> Vec<u8> {
     let mut out = vec![INDEX_VERSION];
@@ -542,6 +567,11 @@ pub fn serialize_index(index: &Index) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns catalog corruption errors for truncated or invalid record bytes.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding array or `usize`.
 pub fn deserialize_index(bytes: &[u8]) -> Result<Index, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
@@ -628,6 +658,11 @@ pub fn serialize_sequence(sequence: Sequence) -> Vec<u8> {
 /// # Errors
 ///
 /// Returns catalog corruption errors for truncated or invalid record bytes.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding array.
 pub fn deserialize_sequence(bytes: &[u8]) -> Result<Sequence, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;
@@ -689,6 +724,11 @@ pub fn deserialize_sequence(bytes: &[u8]) -> Result<Sequence, KvError> {
 ///
 /// Returns catalog corruption errors for truncated, unsupported, or invalid
 /// schema bytes.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding array or `usize`.
 pub fn deserialize_schema(
     bytes: &[u8],
 ) -> Result<(u32, Vec<Column>, TableOptions, Option<ForeignTableMeta>), KvError> {
@@ -822,6 +862,10 @@ pub fn deserialize_user_mapping(bytes: &[u8]) -> Result<UserMapping, KvError> {
 const VIEW_VERSION: u8 = 1;
 
 /// Serialize a view definition and its resolved output schema.
+///
+/// # Panics
+///
+/// Panics when the view column list or a string exceeds its `u32` wire limit.
 #[must_use]
 pub fn serialize_view(view: &View) -> Vec<u8> {
     let mut out = vec![VIEW_VERSION];
@@ -845,6 +889,11 @@ pub fn serialize_view(view: &View) -> Vec<u8> {
 ///
 /// Returns catalog corruption errors for truncated, unsupported, or invalid view
 /// bytes.
+///
+/// # Panics
+///
+/// Panics only if a fixed-width slice validated by the decoder cannot be
+/// converted to its corresponding array or `usize`.
 pub fn deserialize_view(bytes: &[u8]) -> Result<View, KvError> {
     let mut cur = bytes;
     let version = take_u8(&mut cur)?;

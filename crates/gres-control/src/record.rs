@@ -153,6 +153,9 @@ pub struct MoveRangeState {
 
 impl SplitOperationRecord {
     /// Construct a revision-zero initiation record.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(
         tenant: TenantName,
         operation_id: impl Into<String>,
@@ -173,6 +176,9 @@ impl SplitOperationRecord {
         Ok(record)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new_move(
         tenant: TenantName,
         operation_id: impl Into<String>,
@@ -201,6 +207,9 @@ impl SplitOperationRecord {
         Ok(record)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_plan(mut self, plan: SplitOperationPlan) -> Result<Self, crate::ControlError> {
         if self.revision != 0 || self.phase != SplitOperationPhase::Initiated {
             return Err(crate::ControlError::invalid_field(
@@ -215,6 +224,9 @@ impl SplitOperationRecord {
     }
 
     /// Build the next revision while preserving monotone progress.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn advance(
         &self,
         phase: SplitOperationPhase,
@@ -224,6 +236,9 @@ impl SplitOperationRecord {
         self.advance_with_evidence(phase, attempts, error, self.evidence.clone())
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn advance_with_evidence(
         &self,
         phase: SplitOperationPhase,
@@ -246,6 +261,9 @@ impl SplitOperationRecord {
     }
 
     /// Validate the complete durable operation shape and phase invariants.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn ensure_valid(&self) -> Result<(), crate::ControlError> {
         if self.operation_id.is_empty() {
             return Err(crate::ControlError::invalid_field(
@@ -294,6 +312,9 @@ impl SplitOperationRecord {
     }
 
     /// Validate that this record is the next monotone revision of `prior`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn ensure_monotone_extension(&self, prior: &Self) -> Result<(), crate::ControlError> {
         self.ensure_valid()?;
         let revision = prior.revision.checked_add(1);
@@ -472,16 +493,14 @@ impl SplitOperationEvidence {
     }
 
     fn extends(&self, prior: &Self) -> bool {
-        fn field_extends<T: PartialEq>(next: &Option<T>, prior: &Option<T>) -> bool {
-            prior
-                .as_ref()
-                .is_none_or(|prior| next.as_ref() == Some(prior))
+        fn field_extends<T: PartialEq>(next: Option<&T>, prior: Option<&T>) -> bool {
+            prior.is_none_or(|prior| next == Some(prior))
         }
-        field_extends(&self.manifest_key, &prior.manifest_key)
-            && field_extends(&self.covered_offset, &prior.covered_offset)
-            && field_extends(&self.barrier_offset, &prior.barrier_offset)
-            && field_extends(&self.tail_sha256, &prior.tail_sha256)
-            && field_extends(&self.marker_digest, &prior.marker_digest)
+        field_extends(self.manifest_key.as_ref(), prior.manifest_key.as_ref())
+            && field_extends(self.covered_offset.as_ref(), prior.covered_offset.as_ref())
+            && field_extends(self.barrier_offset.as_ref(), prior.barrier_offset.as_ref())
+            && field_extends(self.tail_sha256.as_ref(), prior.tail_sha256.as_ref())
+            && field_extends(self.marker_digest.as_ref(), prior.marker_digest.as_ref())
     }
 }
 
@@ -754,6 +773,9 @@ pub enum RangeRetirementPhase {
 }
 
 impl RangeLayoutEntry {
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn begin_parking(
         &self,
         operation_id: impl Into<String>,
@@ -782,6 +804,9 @@ impl RangeLayoutEntry {
         Ok(next)
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn confirm_parked(
         &self,
         operation_id: &str,
@@ -907,7 +932,7 @@ pub struct RangeLayoutMerge {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RangeLayoutMutation {
     /// Split one existing range into a source and successor.
-    Split(RangeLayoutSplit),
+    Split(Box<RangeLayoutSplit>),
     /// Merge two adjacent ranges into the left range id.
     Merge(RangeLayoutMerge),
 }
@@ -961,6 +986,9 @@ pub struct FinalCheckpoint {
 
 impl TenantRecord {
     /// Build a validated tenant record from already-parsed identity fields.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn new(
         record_version: u64,
         id: TenantId,
@@ -995,6 +1023,9 @@ impl TenantRecord {
     }
 
     /// Parse and validate every cross-field invariant.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn ensure_valid(&self) -> Result<(), ControlError> {
         parse_dns_label(self.id.as_str(), "tenant id")?;
         parse_dns_label(self.name.as_str(), "tenant name")?;
@@ -1068,6 +1099,9 @@ impl TenantRecord {
     }
 
     /// Return a record advanced to `next` with a bumped record version.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn transition_to(mut self, next: TenantState) -> Result<Self, ControlError> {
         if !self.state.can_transition_to(next) {
             return Err(ControlError::InvalidLifecycleTransition {
@@ -1086,6 +1120,9 @@ impl TenantRecord {
     }
 
     /// Return a record marked active, including the endpoint activators should dial.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn mark_active(mut self, endpoint: impl Into<String>) -> Result<Self, ControlError> {
         let endpoint = endpoint.into();
         if endpoint.is_empty() {
@@ -1106,6 +1143,9 @@ impl TenantRecord {
     }
 
     /// Return a record marked suspended.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn mark_suspended(mut self) -> Result<Self, ControlError> {
         let clearing_endpoint_without_state_change =
             self.state == TenantState::Suspended && self.endpoint.is_some();
@@ -1118,6 +1158,9 @@ impl TenantRecord {
     }
 
     /// Return a record marked suspended with the durable checkpoint that permits parking.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn mark_suspended_after_checkpoint(
         mut self,
         checkpoint: FinalCheckpoint,
@@ -1134,6 +1177,9 @@ impl TenantRecord {
     }
 
     /// Return a record with an activator resume request, or unchanged unless parking is complete.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn request_resume(self) -> Result<Self, ControlError> {
         if self.state != TenantState::Suspended {
             return Ok(self);
@@ -1143,6 +1189,9 @@ impl TenantRecord {
     }
 
     /// Return a record with WAL generation advanced monotonically.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_wal_generation(mut self, generation: u64) -> Result<Self, ControlError> {
         let next_generation = self.wal_generation.max(generation);
         if next_generation == self.wal_generation {
@@ -1154,6 +1203,9 @@ impl TenantRecord {
     }
 
     /// Return a record with the full range layout replaced.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_range_layout(
         mut self,
         ranges: Vec<RangeLayoutEntry>,
@@ -1169,6 +1221,9 @@ impl TenantRecord {
     }
 
     /// Atomically publish an exact successor layout and a predecessor-retirement intent.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn publish_split_target_with_retirement(
         mut self,
         operation_id: impl Into<String>,
@@ -1223,6 +1278,9 @@ impl TenantRecord {
     }
 
     /// Confirm that one exact predecessor WAL generation is absent.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn confirm_split_predecessor_parked(
         mut self,
         operation_id: &str,
@@ -1250,6 +1308,9 @@ impl TenantRecord {
     }
 
     /// Return a record with hash placement/co-location metadata replaced.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_hash_placements(
         mut self,
         placements: Vec<HashPlacement>,
@@ -1265,6 +1326,9 @@ impl TenantRecord {
     }
 
     /// Return a record with one range WAL generation advanced monotonically.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn with_range_wal_generation(
         mut self,
         range_id: u32,
@@ -1297,6 +1361,9 @@ impl TenantRecord {
     }
 
     /// Persist a generation-fenced parking intent for one range.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn begin_range_parking(
         mut self,
         range_id: u32,
@@ -1316,6 +1383,9 @@ impl TenantRecord {
     }
 
     /// Confirm one range parked after its retiring WAL generation is absent.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn confirm_range_parked(
         mut self,
         range_id: u32,
@@ -1334,6 +1404,9 @@ impl TenantRecord {
     }
 
     /// Return a record whose layout splits one row-key interval into two ranges.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn split_range_layout(mut self, split: RangeLayoutSplit) -> Result<Self, ControlError> {
         if split.left.range_id == split.right.range_id
             || (split.source_range_id == split.left.range_id && split.source_range_id != 0)
@@ -1417,6 +1490,9 @@ impl TenantRecord {
     }
 
     /// Return a record whose layout merges adjacent ranges into the left id.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn merge_range_layout(mut self, merge: RangeLayoutMerge) -> Result<Self, ControlError> {
         if merge.merged_endpoint.is_empty() {
             return Err(ControlError::invalid_field(
@@ -1464,9 +1540,12 @@ impl TenantRecord {
     }
 
     /// Return a record with one range-layout mutation applied.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn mutate_range_layout(self, mutation: RangeLayoutMutation) -> Result<Self, ControlError> {
         match mutation {
-            RangeLayoutMutation::Split(split) => self.split_range_layout(split),
+            RangeLayoutMutation::Split(split) => self.split_range_layout(*split),
             RangeLayoutMutation::Merge(merge) => self.merge_range_layout(merge),
         }
     }
@@ -1652,6 +1731,9 @@ fn ensure_boundaries_match_hash_placements(
 
 impl FinalCheckpoint {
     /// Validate checkpoint marker invariants.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn ensure_valid(&self) -> Result<(), ControlError> {
         if self.covered_offset < 0 {
             return Err(ControlError::invalid_field(
@@ -1698,6 +1780,9 @@ impl RegistryKey {
     }
 
     /// Parse and validate raw key bytes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decode(bytes: &[u8]) -> Result<Self, ControlError> {
         let key: Self =
             serde_json::from_slice(bytes).map_err(|e| ControlError::InvalidKey(e.to_string()))?;
@@ -1719,6 +1804,9 @@ impl RegistryKey {
     }
 
     /// Encode the key to bytes.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn encode(&self) -> Result<Vec<u8>, ControlError> {
         Ok(serde_json::to_vec(self)?)
     }
@@ -1731,6 +1819,9 @@ struct TenantRecordEnvelope {
 }
 
 /// Build the registry key bytes for a tenant name.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn tenant_registry_key(name: &TenantName) -> Result<Vec<u8>, ControlError> {
     RegistryKey::new(name.clone()).encode()
 }
@@ -1742,6 +1833,9 @@ pub fn tenant_config_topic(name: &TenantName) -> String {
 }
 
 /// Encode a whole tenant record as bytes for `__gres_cfg.<tenant>`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn encode_tenant_config_record(record: &TenantRecord) -> Result<Vec<u8>, ControlError> {
     record.ensure_valid()?;
     let envelope = TenantRecordEnvelope {
@@ -1752,11 +1846,17 @@ pub fn encode_tenant_config_record(record: &TenantRecord) -> Result<Vec<u8>, Con
 }
 
 /// Decode a per-tenant config topic value.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn decode_tenant_config_record(value: &[u8]) -> Result<TenantRecord, ControlError> {
     decode_registry_record(value)
 }
 
 /// Encode a whole tenant record as `(key, value)` bytes for `__gres_tenants`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn encode_registry_record(record: &TenantRecord) -> Result<(Vec<u8>, Vec<u8>), ControlError> {
     record.ensure_valid()?;
     let key = tenant_registry_key(&record.name)?;
@@ -1768,6 +1868,9 @@ pub fn encode_registry_record(record: &TenantRecord) -> Result<(Vec<u8>, Vec<u8>
 }
 
 /// Decode a registry value. Tombstones are represented outside the value as `None`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn decode_registry_record(value: &[u8]) -> Result<TenantRecord, ControlError> {
     let envelope: TenantRecordEnvelope =
         serde_json::from_slice(value).map_err(|e| ControlError::InvalidValue(e.to_string()))?;
@@ -2317,7 +2420,7 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
             wal_generation: 0,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         }];
         let placements = vec![HashPlacement {
@@ -2365,7 +2468,7 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
             wal_generation: 5,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         }];
         input.suspend_max_checkpoint_bytes = Some(1_048_576);
@@ -2462,7 +2565,7 @@ mod tests {
                     end_key: Some(RangeBoundary::new(10, 55)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 RangeLayoutEntry {
@@ -2470,7 +2573,7 @@ mod tests {
                     end_key: None,
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 2,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
             ])
@@ -2490,7 +2593,7 @@ mod tests {
                     end_key: None,
                     endpoint: String::new(),
                     wal_generation: 0,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 }])
                 .is_err()
@@ -2505,7 +2608,7 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                 wal_generation: 7,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             }])
             .unwrap();
@@ -2525,7 +2628,7 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                 wal_generation: 7,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             }])
             .unwrap()
@@ -2545,7 +2648,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(10)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 RangeLayoutEntry {
@@ -2553,7 +2656,7 @@ mod tests {
                     end_key: None,
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 2,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
             ])
@@ -2568,7 +2671,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(20)),
                     endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                     wal_generation: 5,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 right: RangeLayoutEntry {
@@ -2576,7 +2679,7 @@ mod tests {
                     end_key: None,
                     endpoint: "tenant-a-r3.gres.svc:7432".to_string(),
                     wal_generation: 6,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
             })
@@ -2591,7 +2694,7 @@ mod tests {
                         end_key: Some(RangeBoundary::table_start(10)),
                         endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                         wal_generation: 1,
-                        lifecycle: Default::default(),
+                        lifecycle: RangeLifecycle::default(),
                         retirement: None,
                     },
                     RangeLayoutEntry {
@@ -2599,7 +2702,7 @@ mod tests {
                         end_key: Some(RangeBoundary::table_start(20)),
                         endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                         wal_generation: 5,
-                        lifecycle: Default::default(),
+                        lifecycle: RangeLifecycle::default(),
                         retirement: None,
                     },
                     RangeLayoutEntry {
@@ -2607,7 +2710,7 @@ mod tests {
                         end_key: None,
                         endpoint: "tenant-a-r3.gres.svc:7432".to_string(),
                         wal_generation: 6,
-                        lifecycle: Default::default(),
+                        lifecycle: RangeLifecycle::default(),
                         retirement: None,
                     },
                 ]
@@ -2622,7 +2725,7 @@ mod tests {
                 end_key: None,
                 endpoint: "tenant-a-r0.gres.svc:7432".into(),
                 wal_generation: 2,
-                lifecycle: Default::default(),
+                lifecycle: RangeLifecycle::default(),
                 retirement: None,
             }])
             .unwrap();
@@ -2636,7 +2739,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(20)),
                     endpoint: "tenant-a-r0.gres.svc:7432".into(),
                     wal_generation: 3,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 right: RangeLayoutEntry {
@@ -2644,7 +2747,7 @@ mod tests {
                     end_key: None,
                     endpoint: "tenant-a-r1.gres.svc:7432".into(),
                     wal_generation: 3,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
             })
@@ -2665,7 +2768,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(10)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 RangeLayoutEntry {
@@ -2673,7 +2776,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(20)),
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 7,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 RangeLayoutEntry {
@@ -2681,7 +2784,7 @@ mod tests {
                     end_key: None,
                     endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                     wal_generation: 5,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
             ])
@@ -2705,7 +2808,7 @@ mod tests {
                         end_key: Some(RangeBoundary::table_start(10)),
                         endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                         wal_generation: 1,
-                        lifecycle: Default::default(),
+                        lifecycle: RangeLifecycle::default(),
                         retirement: None,
                     },
                     RangeLayoutEntry {
@@ -2713,7 +2816,7 @@ mod tests {
                         end_key: None,
                         endpoint: "tenant-a-r1-merged.gres.svc:7432".to_string(),
                         wal_generation: 7,
-                        lifecycle: Default::default(),
+                        lifecycle: RangeLifecycle::default(),
                         retirement: None,
                     },
                 ]
@@ -2729,7 +2832,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(10)),
                     endpoint: "tenant-a-r0.gres.svc:7432".to_string(),
                     wal_generation: 1,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 RangeLayoutEntry {
@@ -2737,7 +2840,7 @@ mod tests {
                     end_key: Some(RangeBoundary::table_start(20)),
                     endpoint: "tenant-a-r1.gres.svc:7432".to_string(),
                     wal_generation: 2,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
                 RangeLayoutEntry {
@@ -2745,7 +2848,7 @@ mod tests {
                     end_key: None,
                     endpoint: "tenant-a-r2.gres.svc:7432".to_string(),
                     wal_generation: 3,
-                    lifecycle: Default::default(),
+                    lifecycle: RangeLifecycle::default(),
                     retirement: None,
                 },
             ])

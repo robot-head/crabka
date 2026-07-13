@@ -52,6 +52,9 @@ impl RangeRegistry {
     }
 
     /// Build a registry snapshot from one control-plane tenant record.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn from_tenant_record(record: &TenantRecord) -> Result<Self, RegistryError> {
         let ranges = range_endpoints_from_layout(&record.ranges);
         Ok(Self {
@@ -68,6 +71,9 @@ impl RangeRegistry {
     }
 
     /// Refresh this registry from its authoritative source.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn refresh_authoritatively(&self) -> Result<(), RegistryError> {
         let Some(source) = &self.authoritative_source else {
             return Err(RegistryError::NoAuthoritativeSource);
@@ -77,6 +83,9 @@ impl RangeRegistry {
     }
 
     /// Refresh this registry from a control-plane tenant record.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn refresh_from_tenant_record(
         &self,
         record: &TenantRecord,
@@ -87,6 +96,9 @@ impl RangeRegistry {
     }
 
     /// Refresh this registry from a [`TenantRegistryStore`] lookup.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn refresh_from_store<S>(
         &self,
         store: &S,
@@ -102,6 +114,9 @@ impl RangeRegistry {
     }
 
     /// Resolve the current endpoint for one range.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn resolve(&self, range_id: RangeId) -> Result<RangeEndpoint, RegistryError> {
         let Some(endpoint) = self.ranges.read().await.get(&range_id).cloned() else {
             return Err(RegistryError::RangeMissing(range_id));
@@ -184,7 +199,7 @@ mod tests {
                 end_key: Some(crabka_gres_control::RangeBoundary::new(10, 25)),
                 endpoint: "127.0.0.1:7000".to_string(),
                 wal_generation: 1,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
             RangeLayoutEntry {
@@ -192,7 +207,7 @@ mod tests {
                 end_key: None,
                 endpoint: "127.0.0.1:7001".to_string(),
                 wal_generation: 4,
-                lifecycle: Default::default(),
+                lifecycle: crabka_gres_control::RangeLifecycle::default(),
                 retirement: None,
             },
         ])

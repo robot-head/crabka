@@ -8,6 +8,9 @@ use crabka_pgexec::SqlEngine;
 use crate::{CheckpointManifest, RangeId, RangeMap, RangeSpec, RowInterval, SplitState, TableId};
 
 /// Select authoritative catalog identities whose logical row space intersects a predecessor.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn predecessor_table_mapping(
     range_map: &RangeMap,
     predecessor: RangeId,
@@ -125,6 +128,9 @@ impl ValidatedSplitTransferPlan {
     }
 
     /// Build an authenticated control-plane plan after validating complete successor intent.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn from_control(
         state: SplitState,
         physical_to_logical: BTreeMap<TableId, TableId>,
@@ -153,6 +159,7 @@ impl ValidatedSplitTransferPlan {
 
 /// Exact key interval staged into one successor.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct TableTransferRequest {
     /// The unhosted range that will eventually own the table.
     pub target_range: RangeId,
@@ -164,7 +171,6 @@ pub struct TableTransferRequest {
     pub wal_generation: u64,
     /// Source generation fenced by this transfer.
     pub predecessor_generation: u64,
-    _sealed: (),
 }
 
 impl TableTransferRequest {
@@ -178,7 +184,6 @@ impl TableTransferRequest {
             endpoint: successor.endpoint.clone(),
             wal_generation: successor.wal_generation,
             predecessor_generation,
-            _sealed: (),
         }
     }
 
@@ -341,6 +346,9 @@ pub trait RangeTransferCapability: Send + Sync {
     }
 
     /// Validate placement descriptors before the source writer is paused.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn validate_successors(
         &self,
         _plan: &ValidatedSplitTransferPlan,
@@ -349,6 +357,9 @@ pub trait RangeTransferCapability: Send + Sync {
     }
 
     /// Atomically refresh runtime control paths from the newly configured serving engines.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn publish_serving_topology(
         &self,
         _engines: &BTreeMap<RangeId, SqlEngine>,

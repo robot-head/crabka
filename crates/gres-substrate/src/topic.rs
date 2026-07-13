@@ -110,6 +110,9 @@ where
 }
 
 /// Ensure a tenant WAL topic exists.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn ensure_wal_topic(
     admin: &mut dyn TopicAdmin,
     tenant: &str,
@@ -123,6 +126,9 @@ pub async fn ensure_wal_topic(
 }
 
 /// Ensure a G-7 tenant-range WAL topic exists.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn ensure_wal_topic_for_range(
     admin: &mut dyn TopicAdmin,
     tenant: &TenantName,
@@ -137,6 +143,9 @@ pub async fn ensure_wal_topic_for_range(
 }
 
 /// Ensure an already-derived immutable physical WAL topic exists.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn ensure_wal_topic_name(
     admin: &mut dyn TopicAdmin,
     topic: &str,

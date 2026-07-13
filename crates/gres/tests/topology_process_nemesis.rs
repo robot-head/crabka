@@ -5,6 +5,7 @@ mod process;
 
 use std::{
     collections::BTreeMap,
+    fmt::Write as _,
     io::Write as _,
     os::unix::process::CommandExt as _,
     path::{Path, PathBuf},
@@ -63,6 +64,7 @@ enum SourceKillPoint {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(clippy::struct_excessive_bools)]
 struct RetirementPredicateState {
     journal_phase: SplitOperationPhase,
     target_layout: bool,
@@ -297,7 +299,7 @@ impl SourceKillPoint {
         match self {
             Self::Running => {
                 record.phase == SplitOperationPhase::Running
-                    && record.evidence == Default::default()
+                    && record.evidence == crabka_gres_control::SplitOperationEvidence::default()
             }
             Self::Checkpointed => {
                 record.phase == SplitOperationPhase::Checkpointed
@@ -383,6 +385,7 @@ struct KillInjection<'a> {
     point: SourceKillPoint,
 }
 
+#[allow(clippy::struct_excessive_bools)]
 struct KillObservation {
     old_pid: u32,
     new_pid: u32,
@@ -511,18 +514,18 @@ struct WorkloadChild {
 impl WorkloadChild {
     async fn shutdown(&mut self) {
         std::fs::write(&self.stop_path, b"stop").expect("signal workload child stop");
-        let (status, forced) =
-            match tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await {
-                Ok(status) => (status.expect("wait workload child"), false),
-                Err(_) => {
-                    terminate_process_group(self.process_group);
-                    let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
-                        .await
-                        .expect("terminated workload child stop timeout")
-                        .expect("wait terminated workload child");
-                    (status, true)
-                }
-            };
+        let (status, forced) = if let Ok(status) =
+            tokio::time::timeout(Duration::from_secs(5), self.child.wait()).await
+        {
+            (status.expect("wait workload child"), false)
+        } else {
+            terminate_process_group(self.process_group);
+            let status = tokio::time::timeout(Duration::from_secs(5), self.child.wait())
+                .await
+                .expect("terminated workload child stop timeout")
+                .expect("wait terminated workload child");
+            (status, true)
+        };
         assert!(forced || status.success(), "workload child failed");
         self.stopped = true;
         wait_for_process_group_exit(self.process_group).await;
@@ -1383,7 +1386,7 @@ async fn real_process_move_cli_operator_and_wal_retirement() {
         ProcessHarness::start_all_on_zero(&format!("tenant-g8-live-move-{identity}")).await;
     let mut ddl = String::new();
     for table in 1..50 {
-        ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
+        write!(&mut ddl, "CREATE TABLE filler_{table} (id int4);").expect("write DDL to string");
     }
     ddl.push_str("CREATE TABLE live_ledger (seq int4) SHARDED");
     let source = system.sql(0).await;
@@ -1469,7 +1472,7 @@ async fn real_process_split_two_successor_foundation() {
                 name: sentinel_topic.clone(),
                 partitions: 1,
                 replicas: 1,
-                configs: Default::default(),
+                configs: BTreeMap::default(),
             }],
             30_000,
         )
@@ -1834,7 +1837,7 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
                 name: sentinel_topic.clone(),
                 partitions: 1,
                 replicas: 1,
-                configs: Default::default(),
+                configs: BTreeMap::default(),
             }],
             30_000,
         )
@@ -1847,7 +1850,7 @@ async fn real_process_move_source_phase_sigkill_with_exact_ack_ledger() {
     );
     let mut ddl = String::new();
     for table in 1..50 {
-        ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
+        write!(&mut ddl, "CREATE TABLE filler_{table} (id int4);").expect("write DDL to string");
     }
     ddl.push_str("CREATE TABLE live_ledger (id int4, checksum text NOT NULL) SHARDED");
     let ddl_client = system.sql(0).await;
@@ -1969,13 +1972,13 @@ done
             acknowledgements_at_completion,
         )
     };
-    let case = run_with_workload_cleanup(&mut workload, case).await;
-    let (completed, restart, operation_elapsed_ms, acknowledgements_at_completion) = match case {
-        Ok(result) => result,
-        Err(_) => panic!(
+    let case = Box::pin(run_with_workload_cleanup(&mut workload, case)).await;
+    let Ok((completed, restart, operation_elapsed_ms, acknowledgements_at_completion)) = case
+    else {
+        panic!(
             "workload case failed; psql errors: {}",
             std::fs::read_to_string(&workload_error_path).unwrap_or_default()
-        ),
+        );
     };
     let restart = restart.expect("configured source-phase SIGKILL occurred");
     let old_pid = restart.old_pid;
@@ -2001,15 +2004,15 @@ done
         "at least one write must be acknowledged after Completed is durable"
     );
     let max_observed_safe_ack_gap_ms = match kill_point {
-        SourceKillPoint::PausedBeforeStage => 20_000,
-        SourceKillPoint::Running => 12_000,
-        SourceKillPoint::Checkpointed => 12_000,
-        SourceKillPoint::PausedAfterStage => 20_000,
-        SourceKillPoint::Restored => 20_000,
-        SourceKillPoint::ActivatedBeforeCutover
+        SourceKillPoint::PausedBeforeStage
+        | SourceKillPoint::PausedAfterStage
+        | SourceKillPoint::Restored => 20_000,
+        SourceKillPoint::Running
+        | SourceKillPoint::Checkpointed
+        | SourceKillPoint::ActivatedBeforeCutover
         | SourceKillPoint::ActivatedAfterTenantCas
-        | SourceKillPoint::LayoutPublished => 12_000,
-        SourceKillPoint::RetiringBeforeDelete
+        | SourceKillPoint::LayoutPublished
+        | SourceKillPoint::RetiringBeforeDelete
         | SourceKillPoint::RetiringAfterDelete
         | SourceKillPoint::RetiringParked
         | SourceKillPoint::Resuming => 12_000,
@@ -2125,7 +2128,8 @@ done
     let delete_ledger = restart
         .delete_ledger
         .lock()
-        .expect("final retirement delete ledger");
+        .expect("final retirement delete ledger")
+        .clone();
     if retirement_kill {
         assert_eq!(delete_ledger.exact_delete_calls, 1);
         assert!(!delete_ledger.unrelated_delete_attempted);
@@ -2211,7 +2215,6 @@ done
         )
         .expect("write kill evidence");
     }
-    drop(delete_ledger);
     system.shutdown().await;
 }
 

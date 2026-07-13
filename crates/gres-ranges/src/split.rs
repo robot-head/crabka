@@ -238,6 +238,9 @@ pub struct SplitState {
 
 impl SplitState {
     /// Build the initial durable split state.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_split(
         operation_id: impl Into<String>,
         command: SplitCommand,
@@ -290,6 +293,9 @@ impl SplitState {
     }
 
     /// Build the initial durable move state as a degenerate split.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_move(
         operation_id: impl Into<String>,
         command: MoveRangeCommand,
@@ -308,7 +314,7 @@ impl SplitState {
             &command.current_map,
             command.current_map.epoch().next()?,
             command.range_id,
-            &[command.replacement.interval.clone()],
+            std::slice::from_ref(&command.replacement.interval),
         )?;
 
         let operation_id = operation_id.into();
@@ -340,6 +346,9 @@ impl SplitState {
     }
 
     /// Build the initial durable merge state.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_merge(
         operation_id: impl Into<String>,
         command: MergeRangeCommand,
@@ -387,6 +396,9 @@ impl SplitState {
     }
 
     /// Build the initial durable online conversion state.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn for_conversion(
         operation_id: impl Into<String>,
         command: ConvertTableCommand,
@@ -469,6 +481,9 @@ impl SplitState {
     }
 
     /// Derive the only valid one-or-two transfer requests from durable mutation state.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn transfer_requests(&self) -> Result<Vec<crate::TableTransferRequest>, SplitError> {
         let mut requests = vec![crate::TableTransferRequest::from_successor(
             &self.left,
@@ -558,6 +573,9 @@ impl<'a> SplitOrchestrator<'a> {
     }
 
     /// Run until the split state reaches [`SplitStep::Complete`].
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn run(&self, initial_state: SplitState) -> Result<SplitState, SplitError> {
         let mut state = if let Some(stored) = self
             .store
@@ -701,6 +719,9 @@ impl<'a> SplitOrchestrator<'a> {
 }
 
 /// Convenience runner for a split command.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run_split(
     operation_id: impl Into<String>,
     command: SplitCommand,
@@ -712,6 +733,9 @@ pub async fn run_split(
 }
 
 /// Convenience runner for a move command.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run_move(
     operation_id: impl Into<String>,
     command: MoveRangeCommand,
@@ -723,6 +747,9 @@ pub async fn run_move(
 }
 
 /// Convenience runner for a merge command.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run_merge(
     operation_id: impl Into<String>,
     command: MergeRangeCommand,
@@ -734,6 +761,9 @@ pub async fn run_merge(
 }
 
 /// Convenience runner for a table conversion command.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run_conversion(
     operation_id: impl Into<String>,
     command: ConvertTableCommand,

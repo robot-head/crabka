@@ -305,10 +305,6 @@ impl Parser {
     }
 
     /// Pratt expression parser. `min_bp` is the minimum left binding power.
-    #[expect(
-        clippy::too_many_lines,
-        reason = "Pratt parser keeps operator precedence decisions in one behavior-preserving loop"
-    )]
     pub(crate) fn expr(&mut self, min_bp: u8) -> Result<Expr, ParseError> {
         // Mode-1 guard: every recursive expression production (parens, NOT, unary
         // minus, CASE, CAST, IN-list, BETWEEN, LIKE, function args, subqueries)
@@ -477,10 +473,6 @@ impl Parser {
         Ok(lhs)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "prefix grammar alternatives are clearer when kept beside their token matches"
-    )]
     fn prefix(&mut self) -> Result<Expr, ParseError> {
         match self.peek().clone() {
             Token::Keyword(Keyword::Not) => {
@@ -894,10 +886,6 @@ impl Parser {
         Ok(stmts)
     }
 
-    #[expect(
-        clippy::too_many_lines,
-        reason = "statement dispatch keeps top-level SQL forms in one exhaustive match"
-    )]
     fn statement(&mut self) -> Result<ParsedStatement, ParseError> {
         use crate::command::CommandIdentity as I;
 
@@ -3226,6 +3214,10 @@ impl Parser {
 
 /// Test-support entry: parse a bare expression. `pub` (not cfg(test)) so the
 /// executor crate's tests can reuse it; `doc(hidden)` keeps it out of the API.
+///
+/// # Errors
+///
+/// Returns a parse error when `sql` is not exactly one valid expression.
 #[doc(hidden)]
 pub fn parse_expr_for_test(sql: &str) -> Result<Expr, ParseError> {
     let mut p = Parser::new(lex(sql)?, sql.to_string());
@@ -3240,6 +3232,10 @@ pub fn parse_expr_for_test(sql: &str) -> Result<Expr, ParseError> {
 }
 
 /// Public statement entry — implemented in Task 12.
+///
+/// # Errors
+///
+/// Returns a parse error when the SQL text cannot be tokenized or parsed.
 pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
     if let Some((statement, _identity)) = bounded_non_goal_refusal(sql) {
         return Ok(vec![statement]);
@@ -3253,6 +3249,11 @@ pub fn parse(sql: &str) -> Result<Vec<crate::ast::Statement>, ParseError> {
 
 /// Parse statements and return the parser-owned accepted command identity for
 /// each one. Identity classification is the same mandatory gate used by [`parse`].
+///
+/// # Errors
+///
+/// Returns a parse error when the SQL text cannot be tokenized, parsed, or
+/// classified.
 pub fn parse_with_command_identities(
     sql: &str,
 ) -> Result<Vec<(crate::ast::Statement, crate::command::CommandIdentity)>, ParseError> {
@@ -3272,6 +3273,10 @@ pub fn parse_with_command_identities(
 /// multi-range gateway uses this to forward an INDIVIDUAL statement (not the whole
 /// `;`-separated simple-query frame) to a remote range's leader, so a frame mixing a
 /// local and a remote range never re-runs the local statement on the remote node.
+///
+/// # Errors
+///
+/// Returns a parse error when the SQL text cannot be tokenized or parsed.
 pub fn parse_with_source(sql: &str) -> Result<Vec<(crate::ast::Statement, String)>, ParseError> {
     if let Some((statement, _identity)) = bounded_non_goal_refusal(sql) {
         return Ok(vec![(

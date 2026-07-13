@@ -202,6 +202,7 @@ pub(crate) async fn run_produce_append_batch_at(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn handle_produce(
     identity: (&str, PartitionIndex),
     first: ProduceJob,
@@ -475,6 +476,7 @@ async fn handle_trim(
 
 /// Loop on the receive side of the partition's `WriterMessage` channel.
 /// Exits when the channel closes (every sender dropped).
+#[allow(dead_code)]
 pub async fn run(
     identity: (String, PartitionIndex),
     storage: (Arc<Mutex<Log>>, Arc<ArcSwap<PathBuf>>),

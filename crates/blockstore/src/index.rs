@@ -1591,6 +1591,6 @@ mod tests {
         let Err(BlockStoreError::ObjectStore(msg)) = got else {
             panic!("expected ObjectStore error for missing index snapshot");
         };
-        assert!(msg == expected);
+        assert_eq!(msg, expected);
     }
 }

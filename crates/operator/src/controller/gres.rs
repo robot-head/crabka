@@ -50,6 +50,9 @@ const PGDOG_ADMIN_OPERATION_TIMEOUT: Duration = Duration::from_secs(20);
 const PGDOG_DIRECT_BOOTSTRAP_MS: u64 = 4_000;
 
 /// Run the controller forever.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn run(ctx: Context) -> anyhow::Result<()> {
     let gres_api: Api<Gres> = Api::all(ctx.client.clone());
     let tenant_api: Api<GresTenant> = Api::all(ctx.client.clone());
@@ -74,6 +77,9 @@ pub fn error_policy(_obj: Arc<Gres>, err: &ReconcileError, _ctx: Arc<Context>) -
 }
 
 #[tracing::instrument(level = "info", skip_all, fields(kind = "Gres", name = %obj.name_any()))]
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn reconcile(obj: Arc<Gres>, ctx: Arc<Context>) -> Result<Action, ReconcileError> {
     common::record_reconcile(&ctx, "Gres", Box::pin(reconcile_inner(obj, ctx.clone()))).await
 }

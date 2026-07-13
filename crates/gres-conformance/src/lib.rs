@@ -94,6 +94,12 @@ pub struct SubjectDdlTransformError {
     message: String,
 }
 
+/// Rewrite one subject `CREATE TABLE` statement to use sharding.
+///
+/// # Errors
+///
+/// Returns [`SubjectDdlTransformError`] when a candidate statement cannot be
+/// parsed or the rewritten statement is invalid.
 pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransformError> {
     let statements = match crabka_pgparser::parse(sql) {
         Ok(statements) => statements,
@@ -141,6 +147,12 @@ pub fn subject_sharded_statement(sql: &str) -> Result<String, SubjectDdlTransfor
     Ok(transformed)
 }
 
+/// Rewrite the setup statements for one extended conformance case.
+///
+/// # Errors
+///
+/// Returns [`SubjectDdlTransformError`] when a setup statement cannot be
+/// transformed safely.
 pub fn subject_sharded_extended_case(
     case: &ExtendedCase,
 ) -> Result<ExtendedCase, SubjectDdlTransformError> {
@@ -302,6 +314,10 @@ impl Report {
     /// Gate this report against a recorded baseline.
     ///
     /// `Err` carries a human-readable failure for CI logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when corpus size changes or matched parity regresses.
     pub fn check_baseline(&self, baseline: &Baseline) -> Result<(), String> {
         if self.total != baseline.total {
             return Err(format!(
@@ -324,6 +340,15 @@ impl RegressBaseline {
     /// Gate a report against per-file `pg_regress` ratchets.
     ///
     /// `Err` carries a human-readable failure for CI logs.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the file set or corpus size changes, or matched
+    /// parity regresses.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if equal file-name sets unexpectedly fail a map lookup.
     pub fn check_report(&self, report: &Report) -> Result<(), String> {
         let baseline_files: BTreeMap<_, _> = self.files.iter().map(|f| (&f.file, f)).collect();
         let report_summaries = report.file_summaries();
@@ -358,6 +383,11 @@ impl RegressBaseline {
     }
 }
 
+/// Discover SQL corpus files in deterministic path order.
+///
+/// # Errors
+///
+/// Returns an I/O error when a corpus directory cannot be read.
 pub fn discover_sql_files(corpus: &Path, recursive: bool) -> Result<Vec<PathBuf>, io::Error> {
     let mut files = Vec::new();
     collect_sql_files(corpus, recursive, &mut files)?;
@@ -365,6 +395,11 @@ pub fn discover_sql_files(corpus: &Path, recursive: bool) -> Result<Vec<PathBuf>
     Ok(files)
 }
 
+/// Discover extended-case JSON files in deterministic path order.
+///
+/// # Errors
+///
+/// Returns an I/O error when a corpus directory cannot be read.
 pub fn discover_extended_case_files(corpus: &Path) -> Result<Vec<PathBuf>, io::Error> {
     let mut files = Vec::new();
     collect_files_with_extension(corpus, true, "json", &mut files)?;
@@ -417,6 +452,10 @@ fn collect_files_with_extension(
 /// Each `.json` file except the reserved `baseline.json` metadata file contains
 /// an array of [`ExtendedCase`] values. Files are discovered recursively so
 /// feature areas can grow independently.
+///
+/// # Errors
+///
+/// Returns an error when corpus discovery, file reads, or JSON decoding fails.
 pub fn load_extended_case_files(
     corpus: &Path,
 ) -> Result<Vec<ExtendedCaseFile>, Box<dyn std::error::Error>> {

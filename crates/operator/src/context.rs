@@ -973,6 +973,9 @@ impl Context {
             .insert(endpoint.to_string(), client);
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn gres_control_for(
         &self,
         cluster: &str,
@@ -1057,7 +1060,7 @@ mod tests {
             end_key: None,
             endpoint: "tenant-a-gres.default.svc:5432".into(),
             wal_generation: 0,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         }])
         .unwrap();

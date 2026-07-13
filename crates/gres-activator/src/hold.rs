@@ -38,6 +38,9 @@ pub struct WaitForReadyConfig {
 }
 
 /// Wait until a tenant is active, or fail when the configured timeout elapses.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn wait_for_ready<R>(
     registry: &R,
     tenant: &TenantName,

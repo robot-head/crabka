@@ -280,7 +280,7 @@ fn tenant_record(state: TenantState, generation: u64) -> TenantRecord {
         end_key: None,
         endpoint: "tenant-a-gres.ns.svc.cluster.local:7432".into(),
         wal_generation: generation,
-        lifecycle: Default::default(),
+        lifecycle: crabka_gres_control::RangeLifecycle::default(),
         retirement: None,
     }];
     record
@@ -840,7 +840,7 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
             end_key: Some(RangeBoundary::table_start(10)),
             endpoint: "tenant-a-gres.ns.svc.cluster.local:7432".into(),
             wal_generation: 4,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -848,7 +848,7 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
             end_key: Some(RangeBoundary::table_start(20)),
             endpoint: "tenant-a-gres-r1.ns.svc.cluster.local:7432".into(),
             wal_generation: 4,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -856,7 +856,7 @@ async fn range_parking_deletes_only_predecessor_generation_and_keeps_tenant_acti
             end_key: None,
             endpoint: "tenant-a-gres-r2.ns.svc.cluster.local:7432".into(),
             wal_generation: 4,
-            lifecycle: Default::default(),
+            lifecycle: crabka_gres_control::RangeLifecycle::default(),
             retirement: None,
         },
     ];

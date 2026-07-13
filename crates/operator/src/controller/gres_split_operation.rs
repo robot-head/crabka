@@ -67,6 +67,9 @@ pub enum SplitReconcileError {
 
 /// Advance at most one durable range-RPC phase. Ambiguous responses leave the journal
 /// unchanged, so the receipt-keyed request is replayed verbatim after restart.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn reconcile_one_rpc_phase(
     control: &crate::context::GresControlHandle,
     client: &dyn RangeMutationClient,
@@ -126,6 +129,9 @@ pub async fn reconcile_one_rpc_phase(
 
 /// Perform or acknowledge the exact atomic topology cutover. The tenant CAS and journal CAS
 /// happen on separate reconciles, making an ambiguous registry acknowledgement restart-safe.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn reconcile_activated_cutover(
     control: &crate::context::GresControlHandle,
     record: &SplitOperationRecord,
@@ -195,6 +201,9 @@ pub async fn reconcile_activated_cutover(
 }
 
 /// Authenticate both exact successor generations and require their serving status before cutover.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn verify_target_topology_ready(
     client: &dyn RangeMutationClient,
     record: &SplitOperationRecord,

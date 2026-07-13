@@ -26,6 +26,11 @@ pub struct ScramVerifier {
 }
 
 impl ScramVerifier {
+    /// Build a verifier from precomputed SCRAM fields.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the salt is empty or the iteration count is zero.
     pub fn from_parts(
         salt: Vec<u8>,
         iterations: u32,
@@ -48,6 +53,12 @@ impl ScramVerifier {
     }
 
     #[must_use]
+    /// Derive a verifier from a plaintext password.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the SHA-256 HMAC implementation returns a digest with an
+    /// unexpected length.
     pub fn from_password(password: &str, salt: Vec<u8>, iterations: u32) -> Self {
         let mut salted = [0u8; 32];
         pbkdf2::pbkdf2_hmac::<Sha256>(password.as_bytes(), &salt, iterations, &mut salted);
@@ -66,6 +77,12 @@ impl ScramVerifier {
 
     /// Deterministic fake verifier for an unknown user (mock authentication).
     #[must_use]
+    /// Derive a deterministic mock verifier for an unknown user.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the SHA-256 HMAC implementation returns a digest with an
+    /// unexpected length.
     pub fn mock(server_secret: &[u8; 32], user: &str) -> Self {
         let salt = hmac(server_secret, format!("mock-salt:{user}").as_bytes())[..SALT_LEN].to_vec();
         let stored_key: [u8; 32] = hmac(server_secret, format!("mock-stored:{user}").as_bytes())
@@ -119,6 +136,12 @@ impl ScramServer {
         )
     }
 
+    /// Process a SCRAM client-first message.
+    ///
+    /// # Errors
+    ///
+    /// Returns a protocol error for invalid state, encoding, channel-binding
+    /// headers, or missing attributes.
     pub fn handle_client_first(&mut self, msg: &[u8]) -> Result<Vec<u8>, PgError> {
         if !matches!(self.state, State::Initial) {
             return Err(PgError::protocol("SCRAM: unexpected client-first message"));
@@ -155,6 +178,17 @@ impl ScramServer {
         Ok(server_first.into_bytes())
     }
 
+    /// Process and authenticate a SCRAM client-final message.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error for invalid state or encoding, malformed attributes,
+    /// mismatched nonces or channel binding, or failed authentication.
+    ///
+    /// # Panics
+    ///
+    /// Panics only if the SHA-256 HMAC implementation returns a digest with an
+    /// unexpected length.
     pub fn handle_client_final(&mut self, msg: &[u8]) -> Result<Vec<u8>, PgError> {
         let State::SentServerFirst {
             client_first_bare,

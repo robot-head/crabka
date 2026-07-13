@@ -19,6 +19,11 @@ pub fn put_u64(out: &mut Vec<u8>, v: u64) {
     out.extend_from_slice(U64::new(v).as_bytes());
 }
 
+/// Decode and consume one big-endian `u32` key component.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when fewer than four bytes remain.
 pub fn take_u32(cur: &mut &[u8]) -> Result<u32, KvError> {
     let (v, rest) = U32::read_from_prefix(cur)
         .map_err(|_| KvError::CorruptRow("truncated u32 key component".into()))?;
@@ -26,6 +31,11 @@ pub fn take_u32(cur: &mut &[u8]) -> Result<u32, KvError> {
     Ok(v.get())
 }
 
+/// Decode and consume one big-endian `u64` key component.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] when fewer than eight bytes remain.
 pub fn take_u64(cur: &mut &[u8]) -> Result<u64, KvError> {
     let (v, rest) = U64::read_from_prefix(cur)
         .map_err(|_| KvError::CorruptRow("truncated u64 key component".into()))?;

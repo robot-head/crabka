@@ -177,6 +177,11 @@ pub fn hash_row_key(table_id: u32, bucket: u32, rowid: u64) -> Vec<u8> {
 }
 
 /// Bytes shared by every entry in one local secondary index.
+///
+/// # Panics
+///
+/// Panics when `index_id` cannot be shifted into the secondary-index storage
+/// namespace without overflowing `u32`.
 #[must_use]
 pub fn secondary_index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
     let mut k = Vec::with_capacity(8);
@@ -189,6 +194,11 @@ pub fn secondary_index_prefix(table_id: u32, index_id: u32) -> Vec<u8> {
 }
 
 /// Prefix for a local secondary-index equality probe over an encoded key tuple.
+///
+/// # Panics
+///
+/// Panics when the encoded tuple exceeds 4 GiB or `index_id` overflows the
+/// secondary-index storage namespace.
 #[must_use]
 pub fn secondary_index_entry_prefix(
     table_id: u32,
@@ -250,6 +260,10 @@ pub fn secondary_index_rowid_of(table_id: u32, index_id: u32, key: &[u8]) -> Res
 }
 
 /// Deterministically map value bytes to a power-of-two bucket count.
+///
+/// # Panics
+///
+/// Panics only if a valid bucket index cannot be represented as `u32`.
 #[must_use]
 pub fn hash_bucket(value: &[u8], bucket_count: u32) -> Option<u32> {
     if bucket_count == 0 || !bucket_count.is_power_of_two() {
@@ -409,6 +423,11 @@ pub fn clog_scan_lo_key() -> Vec<u8> {
 
 /// Exclusive upper bound for a scan over the whole `/0/clog/` keyspace: the clog
 /// prefix with its trailing byte incremented (the prefix's successor).
+///
+/// # Panics
+///
+/// Panics if the internal clog prefix invariant unexpectedly produces an empty
+/// prefix.
 #[must_use]
 pub fn clog_scan_end() -> Vec<u8> {
     let mut p = clog_prefix();

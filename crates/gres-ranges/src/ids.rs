@@ -23,6 +23,9 @@ impl TenantName {
         self.0.as_str()
     }
 
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn parse(value: impl Into<String>) -> Result<Self, TenantNameError> {
         let value = value.into();
 

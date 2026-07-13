@@ -94,6 +94,12 @@ pub struct CrabkaSubmitChangeResponse {
 }
 
 impl CrabkaSubmitChangeResponse {
+    /// Encode this response using wire version zero.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the response payload exceeds the protocol's
+    /// signed 32-bit length field.
     pub fn encode_v0(&self, out: &mut Vec<u8>) -> Result<(), ProtocolError> {
         out.put_i16(self.error_code);
         out.put_i64(self.leader_hint);

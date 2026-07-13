@@ -63,6 +63,9 @@ impl GrantLease {
     }
 
     /// Last timestamp in the lease.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn last_ts(self) -> Result<TsoTimestamp, TsoError> {
         let last = self
             .first_ts
@@ -143,6 +146,9 @@ where
     H: EpochHeartbeat,
 {
     /// Recover an oracle from an already-replayed durable horizon.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn recover(
         committer: C,
         heartbeat: H,
@@ -208,6 +214,9 @@ where
     }
 
     /// Grant a non-empty contiguous timestamp lease.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn grant(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
         let mut state = self.state.lock().await;
         let first_ts = state.next_ts;
@@ -266,6 +275,9 @@ impl MemoryTsoHorizon {
     }
 
     /// Load the durable inclusive `max_ts` horizon.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn load_max_ts(&self) -> Result<u64, TsoError> {
         self.store
             .get(MAX_TS_KEY)?

@@ -464,6 +464,16 @@ where
 /// by `server::handle_conn`). Any bytes the client pipelined immediately after
 /// the startup packet are already in `inbuf`; passing it here avoids silently
 /// dropping those bytes.
+///
+/// # Errors
+///
+/// Returns an I/O error when reading, writing, authenticating, or processing a
+/// protocol message fails.
+///
+/// # Panics
+///
+/// Panics if an internal COPY state or cancellation-registry invariant is
+/// violated.
 #[expect(
     clippy::too_many_lines,
     reason = "session loop mirrors the protocol state machine"

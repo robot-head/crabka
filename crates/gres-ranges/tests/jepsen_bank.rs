@@ -44,12 +44,17 @@ async fn real_process_bank_history_preserves_exact_balances_across_writer_kill()
         .await
         .expect("seed bank");
 
-    let a = real_transfer(system.sql(0).await, true, 7);
-    let b = real_transfer(system.sql(0).await, false, 3);
-    let c = real_transfer(system.sql(0).await, true, 5);
-    let d = real_transfer(system.sql(0).await, false, 11);
-    let (a, b, c, d) = tokio::join!(a, b, c, d);
-    for result in [a, b, c, d] {
+    let debit_seven = real_transfer(system.sql(0).await, true, 7);
+    let credit_three = real_transfer(system.sql(0).await, false, 3);
+    let debit_five = real_transfer(system.sql(0).await, true, 5);
+    let credit_eleven = real_transfer(system.sql(0).await, false, 11);
+    let concurrent_results = tokio::join!(debit_seven, credit_three, debit_five, credit_eleven);
+    for result in [
+        concurrent_results.0,
+        concurrent_results.1,
+        concurrent_results.2,
+        concurrent_results.3,
+    ] {
         result.expect("concurrent transfer");
     }
 
@@ -57,11 +62,12 @@ async fn real_process_bank_history_preserves_exact_balances_across_writer_kill()
     assert!(real_transfer(system.sql(0).await, true, 13).await.is_err());
     system.restart(1).await;
 
-    let e = real_transfer(system.sql(0).await, true, 2);
-    let f = real_transfer(system.sql(0).await, false, 4);
-    let (e, f) = tokio::join!(e, f);
-    e.expect("post-recovery debit");
-    f.expect("post-recovery credit");
+    let post_recovery_debit = real_transfer(system.sql(0).await, true, 2);
+    let post_recovery_credit = real_transfer(system.sql(0).await, false, 4);
+    let (post_recovery_debit, post_recovery_credit) =
+        tokio::join!(post_recovery_debit, post_recovery_credit);
+    post_recovery_debit.expect("post-recovery debit");
+    post_recovery_credit.expect("post-recovery credit");
 
     let client = system.sql(0).await;
     let left: i32 = client

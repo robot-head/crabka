@@ -31,6 +31,9 @@ pub struct ReplayOutcome {
 /// Barriers never consume journal sequence numbers. Foreign barriers before
 /// `own_barrier_offset` are skipped; the barrier at or after `own_barrier_offset`
 /// terminates replay.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn replay_committed_frames(
     kv: &dyn Kv,
     frames: impl IntoIterator<Item = ReplayItem>,
@@ -41,6 +44,9 @@ pub fn replay_committed_frames(
 
 /// Decode and apply committed frames starting at `replay_start_offset` with an
 /// already-restored expected journal sequence.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn replay_committed_frames_from(
     kv: &dyn Kv,
     frames: impl IntoIterator<Item = ReplayItem>,
@@ -59,13 +65,16 @@ pub fn replay_committed_frames_from(
 }
 
 /// Decode committed frames while applying only mutations inside `filter`.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn replay_committed_frames_from_filtered(
     kv: &dyn Kv,
     frames: impl IntoIterator<Item = ReplayItem>,
     own_barrier_offset: i64,
     replay_start_offset: i64,
     first_expected_journal_seq: u64,
-    filter: CheckpointFilter,
+    filter: &CheckpointFilter,
 ) -> Result<ReplayOutcome, SubstrateError> {
     replay_committed_frames_from_with_filter(
         kv,
@@ -81,6 +90,9 @@ pub fn replay_committed_frames_from_filtered(
 ///
 /// Unlike a range filter, selecting an MVCC tuple changes the selector state:
 /// CLOG operations later in the WAL for its xmin/xmax become required input.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn replay_committed_frames_from_table_transfer(
     kv: &dyn Kv,
     frames: impl IntoIterator<Item = ReplayItem>,
@@ -135,7 +147,7 @@ fn replay_committed_frames_from_with_filter(
     own_barrier_offset: i64,
     replay_start_offset: i64,
     first_expected_journal_seq: u64,
-    filter: Option<CheckpointFilter>,
+    filter: Option<&CheckpointFilter>,
 ) -> Result<ReplayOutcome, SubstrateError> {
     let mut expected = first_expected_journal_seq;
 
@@ -163,7 +175,7 @@ fn replay_committed_frames_from_with_filter(
 
         let filtered_ops;
         let ops = match filter {
-            Some(ref filter) => {
+            Some(filter) => {
                 filtered_ops = filter_write_ops(&frame.ops, filter)?;
                 filtered_ops.as_slice()
             }
@@ -472,7 +484,7 @@ mod tests {
             TableId::new(7),
         )]));
 
-        let outcome = replay_committed_frames_from_filtered(&kv, frames, 1, 0, 0, filter)
+        let outcome = replay_committed_frames_from_filtered(&kv, frames, 1, 0, 0, &filter)
             .expect("filtered replay");
 
         assert!(outcome.next_journal_seq == 1);

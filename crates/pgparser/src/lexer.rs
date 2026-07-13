@@ -6,10 +6,12 @@ use crate::{
     token::{Keyword, Token},
 };
 
-#[expect(
-    clippy::too_many_lines,
-    reason = "single-pass lexer keeps PostgreSQL tokenization behavior local and predictable"
-)]
+/// Tokenize SQL text and preserve each token's byte offset.
+///
+/// # Errors
+///
+/// Returns a parse error for malformed literals, identifiers, comments, or
+/// unsupported token forms.
 pub fn lex(sql: &str) -> Result<Vec<(Token, usize)>, ParseError> {
     let bytes = sql.as_bytes();
     let mut out = Vec::new();

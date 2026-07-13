@@ -37,16 +37,44 @@ pub enum WriteOp {
 /// boundary. All methods are fallible because a durable backend can hit I/O
 /// errors.
 pub trait Kv: Send + Sync {
+    /// Read one value by key.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot complete the read.
     fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>, KvError>;
+    /// Insert or replace one key-value pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot persist the write.
     fn put(&self, key: Vec<u8>, value: Vec<u8>) -> Result<(), KvError>;
+    /// Delete one key-value pair.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot persist the deletion.
     fn delete(&self, key: &[u8]) -> Result<(), KvError>;
     /// All (key, value) pairs whose key starts with `prefix`, in key order.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot complete the scan.
     fn scan_prefix(&self, prefix: &[u8]) -> Result<KvScan, KvError>;
     /// All (key, value) pairs with `start <= key < end`, in key order
     /// (inclusive start, exclusive end).
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when the backing store cannot complete the scan.
     fn scan_range(&self, start: &[u8], end: &[u8]) -> Result<KvScan, KvError>;
     /// Apply all ops atomically and durably (fsync on a durable backend).
     /// All-or-nothing across a crash.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`KvError`] when validation fails or the backing store cannot
+    /// persist the complete batch.
     fn write_batch(&self, ops: &[WriteOp]) -> Result<(), KvError>;
 }
 

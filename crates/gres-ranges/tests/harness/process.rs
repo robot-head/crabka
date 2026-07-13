@@ -12,8 +12,8 @@ use std::{
 use crabka_broker::{Broker, BrokerConfig, BrokerHandle};
 use crabka_client_admin::{AdminClient, CreateTopicSpec};
 use crabka_gres_control::{
-    RangeBoundary, RangeLayoutEntry, Registry, SqlUser, TenantId, TenantName, TenantRecord,
-    TenantState,
+    RangeBoundary, RangeLayoutEntry, RangeLifecycle, Registry, SqlUser, TenantId, TenantName,
+    TenantRecord, TenantState,
 };
 use tokio::{
     io::{AsyncBufReadExt as _, AsyncWriteExt as _, BufReader, copy_bidirectional},
@@ -26,7 +26,7 @@ use tokio::{
 const PASSWORD: &str = "process-secret";
 
 pub struct ProcessHarness {
-    _root: tempfile::TempDir,
+    root: tempfile::TempDir,
     _broker: BrokerHandle,
     bootstrap: String,
     tenant: String,
@@ -57,6 +57,7 @@ struct ProcessReady {
     range: Option<SocketAddr>,
 }
 
+#[allow(dead_code)]
 impl ProcessHarness {
     pub async fn start(name: &str) -> Self {
         Self::start_inner(name, None).await
@@ -93,7 +94,7 @@ impl ProcessHarness {
         );
         let r1 = spawn_node(root.path(), &bootstrap, &tenant, 1, "r1", &tls, None);
         let mut harness = Self {
-            _root: root,
+            root,
             _broker: broker,
             bootstrap,
             tenant,
@@ -144,7 +145,7 @@ impl ProcessHarness {
             commit_fault.as_deref(),
         );
         let mut harness = Self {
-            _root: root,
+            root,
             _broker: broker,
             bootstrap,
             tenant,
@@ -377,7 +378,7 @@ impl ProcessHarness {
             node.range
         };
         let replacement = spawn_node(
-            self._root.path(),
+            self.root.path(),
             &self.bootstrap,
             &self.tenant,
             node_range,
@@ -469,6 +470,7 @@ fn kill_process_group(process_group: u32) {
 }
 
 #[cfg(test)]
+#[allow(clippy::items_after_test_module)]
 mod process_group_tests {
     use super::*;
 
@@ -514,6 +516,7 @@ struct TlsPaths {
 struct RangeProxy {
     port: u16,
     backend: watch::Sender<Option<u16>>,
+    #[allow(dead_code)]
     commands: mpsc::Sender<ProxyCommand>,
     task: JoinHandle<()>,
 }
@@ -552,7 +555,7 @@ impl RangeProxy {
                             };
                             tokio::select! {
                                 _ = copy_bidirectional(&mut frontend, &mut backend) => {}
-                                _ = wait_until_disabled(&mut enabled) => {}
+                                () = wait_until_disabled(&mut enabled) => {}
                             }
                         });
                     }
@@ -580,6 +583,7 @@ impl RangeProxy {
         self.backend.send_replace(Some(port));
     }
 
+    #[allow(dead_code)]
     async fn set_enabled(&self, enabled: bool) {
         let (acknowledged, wait) = oneshot::channel();
         self.commands
@@ -649,13 +653,14 @@ fn spawn_node(
     let checkpoint_dir = root.join("checkpoints");
     std::fs::create_dir_all(&cache_dir).expect("cache dir");
     std::fs::create_dir_all(&checkpoint_dir).expect("checkpoint dir");
-    let log_path = std::env::var_os("CRABKA_G8_PROCESS_LOG_DIR")
-        .map(PathBuf::from)
-        .map(|directory| {
+    let log_path = std::env::var_os("CRABKA_G8_PROCESS_LOG_DIR").map_or_else(
+        || root.join(format!("r{range}.log")),
+        |directory| {
+            let directory = PathBuf::from(directory);
             std::fs::create_dir_all(&directory).expect("durable process log directory");
             directory.join(format!("{tenant}-r{range}.log"))
-        })
-        .unwrap_or_else(|| root.join(format!("r{range}.log")));
+        },
+    );
     let stderr = File::create(&log_path).expect("node log");
     let binary = gres_binary();
     let mut command = Command::new(binary);
@@ -728,11 +733,9 @@ fn spawn_node(
                     .next()
                     .and_then(|sql| sql.parse().ok())
                     .zip(addresses.next())
-                    .and_then(|(sql, range)| {
-                        Some(ProcessReady {
-                            sql,
-                            range: (range != "-").then(|| range.parse().ok()).flatten(),
-                        })
+                    .map(|(sql, range)| ProcessReady {
+                        sql,
+                        range: (range != "-").then(|| range.parse().ok()).flatten(),
                     });
                 if let (Some(event), Some(sender)) = (event, ready_tx.take()) {
                     let _ = sender.send(event);
@@ -796,7 +799,7 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
             end_key: Some(RangeBoundary::new(50, 10)),
             endpoint: format!("127.0.0.1:{r0_port}"),
             wal_generation: 0,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
         RangeLayoutEntry {
@@ -804,7 +807,7 @@ async fn provision_control(bootstrap: &str, tenant: &str, r0_port: u16, r1_port:
             end_key: None,
             endpoint: format!("127.0.0.1:{r1_port}"),
             wal_generation: 0,
-            lifecycle: Default::default(),
+            lifecycle: RangeLifecycle::default(),
             retirement: None,
         },
     ])
@@ -852,8 +855,7 @@ async fn connect(port: u16, database: &str) -> tokio_postgres::Client {
 fn gres_binary() -> PathBuf {
     let workspace = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../..");
     let configured = std::env::var_os("CRABKA_GRES_TEST_BINARY")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| workspace.join("target/debug/crabka-gres"));
+        .map_or_else(|| workspace.join("target/debug/crabka-gres"), PathBuf::from);
     let candidate = configured
         .canonicalize()
         .or_else(|_| workspace.join(&configured).canonicalize())

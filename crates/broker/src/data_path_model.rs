@@ -502,8 +502,8 @@ impl Model for DpModel {
                     let off = s.wal_acked.len();
                     s.wal_acked.push(leader_log[off]);
                 }
-                s.hwm = real_wal_hwm(s.leader, s.wal_acked.len() as i64, self.base);
-                while (s.committed.len() as i64) < s.hwm {
+                s.hwm = real_wal_hwm(s.leader, model_offset(s.wal_acked.len()), self.base);
+                while model_offset(s.committed.len()) < s.hwm {
                     let off = s.committed.len();
                     s.committed.push(leader_log[off]);
                 }
@@ -567,7 +567,7 @@ impl Model for DpModel {
         if self.diskless {
             props.extend([
                 Property::always("diskless_hw_released_by_wal_sync", |_, s: &DpState| {
-                    s.hwm == s.wal_acked.len() as i64
+                    s.hwm == model_offset(s.wal_acked.len())
                 }),
                 Property::sometimes("wal_acked_progress", |_, s: &DpState| {
                     !s.wal_acked.is_empty()

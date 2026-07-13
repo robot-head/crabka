@@ -1154,6 +1154,7 @@ async fn live_authority_allows_exact_target_status_at_activated_before_layout_cu
     );
 }
 
+#[allow(clippy::too_many_lines)]
 async fn drive_live_control_split(
     runtime: &crabka_gres::GresRuntime,
     bootstrap: &str,
@@ -1408,7 +1409,7 @@ async fn drive_live_control_split(
     .await;
     assert!(matches!(pause, RangeControlResp::Paused { .. }));
     let (journal_revision, journal_digest) = stage_binding.clone();
-    let stage = control_request(
+    let stage_response = control_request(
         runtime,
         tenant,
         operation_id,
@@ -1420,8 +1421,8 @@ async fn drive_live_control_split(
     )
     .await;
     assert!(
-        matches!(stage, RangeControlResp::Staged { .. }),
-        "stage: {stage:?}"
+        matches!(stage_response, RangeControlResp::Staged { .. }),
+        "stage: {stage_response:?}"
     );
     advance_control_operation(
         bootstrap,
@@ -1431,25 +1432,24 @@ async fn drive_live_control_split(
         None,
     )
     .await;
-    let (journal_revision, journal_digest) = match post_stage_binding.take() {
-        Some(binding) => binding,
-        None => {
-            let binding = control_binding(bootstrap, tenant, operation_id).await;
-            std::fs::write(
-                state_path,
-                serde_json::to_vec(&serde_json::json!({
-                    "split": split,
-                    "manifest_key": manifest_key,
-                    "covered_offset": covered_offset,
-                    "barrier_offset": barrier_offset,
-                    "stage_binding": stage_binding,
-                    "post_stage_binding": binding,
-                }))
-                .expect("encode post-stage driver state"),
-            )
-            .expect("persist post-stage control binding");
-            binding
-        }
+    let (journal_revision, journal_digest) = if let Some(binding) = post_stage_binding.take() {
+        binding
+    } else {
+        let binding = control_binding(bootstrap, tenant, operation_id).await;
+        std::fs::write(
+            state_path,
+            serde_json::to_vec(&serde_json::json!({
+                "split": split,
+                "manifest_key": manifest_key,
+                "covered_offset": covered_offset,
+                "barrier_offset": barrier_offset,
+                "stage_binding": stage_binding,
+                "post_stage_binding": binding,
+            }))
+            .expect("encode post-stage driver state"),
+        )
+        .expect("persist post-stage control binding");
+        binding
     };
     let markers = control_request(
         runtime,
@@ -2326,18 +2326,16 @@ async fn live_populated_hash_split_partitions_physical_rows_and_sequence() {
         "right physical fold has no cross-bucket leakage"
     );
     assert!(
-        left_successor
+        !left_successor
             .iter()
             .chain(successor.iter())
-            .filter(|(key, _)| {
+            .any(|(key, _)| {
                 matches!(
                     crabka_pgkv::key::classify_key(key),
                     crabka_pgkv::key::KeyClass::PrimaryVersion { table_id, .. }
                         if table_id == physical_table_id
                 )
-            })
-            .next()
-            .is_none(),
+            }),
         "hash successors contain no ordinary primary keys"
     );
     let predecessor_versions = primary_versions(&predecessor_before, physical_table_id);

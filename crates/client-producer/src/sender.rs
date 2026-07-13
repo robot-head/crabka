@@ -2659,7 +2659,7 @@ mod harness {
             acknowledgement,
             Err(ProducerError::RecoveryRequired)
         ));
-        assert!(transport.applied.load(Ordering::Acquire) == 0);
+        assert_eq!(transport.applied.load(Ordering::Acquire), 0);
 
         shutdown(h).await;
     }

@@ -153,6 +153,9 @@ struct CheckpointCounters {
 
 impl CheckpointStats {
     /// Record one or more committed frames.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn record_committed(&self, frames: u64, bytes: u64) {
         let mut counters = self.counters.lock().expect("checkpoint stats lock");
         counters.frames = counters.frames.wrapping_add(frames);
@@ -161,6 +164,9 @@ impl CheckpointStats {
 
     /// Return the current `(frames, bytes)` counters.
     #[must_use]
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn snapshot(&self) -> (u64, u64) {
         let counters = self.counters.lock().expect("checkpoint stats lock");
         (counters.frames, counters.bytes)
@@ -210,6 +216,9 @@ pub struct CheckpointPlannerStats {
 
 impl CheckpointPlannerStats {
     /// Publish metadata returned by the verified checkpoint loader/completer.
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn publish_verified(&self, metadata: CheckpointMetadata) {
         *self.latest.write().expect("checkpoint planner stats lock") = Some(metadata);
     }
@@ -616,6 +625,9 @@ impl CheckpointHandle {
     }
 
     /// Atomically capture the matching WAL metadata and KV snapshot between commit groups.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn checkpoint_from_source(
         &self,
         source: Arc<CheckpointSnapshotSource>,

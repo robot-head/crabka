@@ -59,6 +59,10 @@ pub enum ScramError {
 
 impl PgScramVerifier {
     /// Generate a fresh `PostgreSQL` SCRAM-SHA-256 verifier for `password`.
+    ///
+    /// # Errors
+    ///
+    /// Returns [`ScramError::InvalidIterations`] when `iterations` is zero.
     pub fn generate(password: &str, iterations: u32) -> Result<Self, ScramError> {
         if iterations == 0 {
             return Err(ScramError::InvalidIterations);
@@ -70,6 +74,10 @@ impl PgScramVerifier {
     }
 
     /// Generate a deterministic `PostgreSQL` SCRAM-SHA-256 verifier with `salt`.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when `iterations` is zero or `salt` is empty.
     pub fn generate_with_salt(
         password: &str,
         iterations: u32,
@@ -92,6 +100,11 @@ impl PgScramVerifier {
     }
 
     /// Parse a `PostgreSQL` `pg_authid.rolpassword` SCRAM-SHA-256 verifier.
+    ///
+    /// # Errors
+    ///
+    /// Returns an error when the verifier is malformed, uses an unsupported
+    /// mechanism, or contains invalid iteration, salt, or key fields.
     pub fn parse(verifier: &str) -> Result<Self, ScramError> {
         verifier.parse()
     }

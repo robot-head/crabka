@@ -28,6 +28,9 @@ pub struct WalFrame {
 impl WalFrame {
     /// Serialize to the `GRW1` byte layout.
     #[must_use]
+    /// # Panics
+    ///
+    /// Panics if an internal invariant is violated.
     pub fn encode(&self) -> Vec<u8> {
         let mut out = Vec::with_capacity(self.encoded_len());
         out.push(GRW1_VERSION);
@@ -70,6 +73,9 @@ impl WalFrame {
     }
 
     /// Parse a `GRW1` frame; every length is validated before use.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub fn decode(bytes: &[u8]) -> Result<Self, SubstrateError> {
         let mut reader = Reader { bytes, at: 0 };
         let version = reader.u8()?;

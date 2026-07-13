@@ -81,6 +81,9 @@ pub trait ForeignScanner: Send + Sync {
     ///
     /// Each returned row MUST have exactly `table.columns.len()` datums in
     /// column order.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn scan(
         &self,
         table: &Table,
@@ -101,6 +104,9 @@ pub trait ForeignScanner: Send + Sync {
     /// topic and derives `value_columns` from the topic's Schema Registry
     /// `"<topic>-value"` subject, falling back to a single raw `value bytea`
     /// column (and `value_format=raw`) when no subject is registered.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     fn import_schema(
         &self,
         server: &ForeignServer,

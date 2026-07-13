@@ -14,6 +14,9 @@ use crabka_pgmvcc::clog;
 
 /// Apply one journaled batch to `kv` with max-merge counters and write-once
 /// clog, folding duplicates within the batch.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub fn apply_frame(kv: &dyn Kv, ops: &[WriteOp]) -> Result<(), KvError> {
     let mut counters: HashMap<Vec<u8>, u64> = HashMap::new();
     let mut decided: HashSet<Vec<u8>> = HashSet::new();

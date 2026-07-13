@@ -25,11 +25,17 @@ impl fmt::Debug for Prelude {
 }
 
 /// Read the frontend prelude from a TCP stream.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn peek_prelude(stream: &mut tokio::net::TcpStream) -> Result<Prelude, ActivatorError> {
     peek_prelude_from(stream).await
 }
 
 /// Read the frontend prelude from an async stream.
+/// # Errors
+///
+/// Returns an error when the requested operation cannot be completed.
 pub async fn peek_prelude_from<S>(stream: &mut S) -> Result<Prelude, ActivatorError>
 where
     S: AsyncRead + AsyncWrite + Unpin,

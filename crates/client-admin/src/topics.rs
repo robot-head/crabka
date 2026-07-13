@@ -557,8 +557,9 @@ mod tests {
             5_000,
         );
 
-        assert!(
-            req == DeleteRecordsRequest {
+        assert_eq!(
+            req,
+            DeleteRecordsRequest {
                 topics: vec![
                     DeleteRecordsTopic {
                         name: "alpha".to_string(),
@@ -621,22 +622,22 @@ mod tests {
         };
 
         let outcomes = parse_delete_records(resp);
-        assert!(
-            outcomes
-                == vec![
-                    DeleteRecordsOutcome {
-                        topic: "wal".to_string(),
-                        partition: 0,
-                        error_code: 0,
-                        low_watermark: 50,
-                    },
-                    DeleteRecordsOutcome {
-                        topic: "wal".to_string(),
-                        partition: 1,
-                        error_code: 1,
-                        low_watermark: -1,
-                    },
-                ]
+        assert_eq!(
+            outcomes,
+            vec![
+                DeleteRecordsOutcome {
+                    topic: "wal".to_string(),
+                    partition: 0,
+                    error_code: 0,
+                    low_watermark: 50,
+                },
+                DeleteRecordsOutcome {
+                    topic: "wal".to_string(),
+                    partition: 1,
+                    error_code: 1,
+                    low_watermark: -1,
+                },
+            ]
         );
     }
 

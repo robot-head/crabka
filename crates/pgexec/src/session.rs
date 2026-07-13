@@ -1224,6 +1224,9 @@ impl SqlSession {
     }
 
     /// Execute one already-parsed statement (the router parses once, then routes).
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn run(&mut self, stmt: &Statement) -> Result<QueryResult, ExecError> {
         self.run_one(stmt).await
     }
@@ -2441,6 +2444,9 @@ impl SqlSession {
     /// COMMIT/ROLLBACK and the `Prepared` marker is written before any of its rows
     /// become eligible to commit on their own. Idempotent (no-op if already in a
     /// txn). Reuses `begin`.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn ensure_began(&mut self) -> Result<(), ExecError> {
         if matches!(self.state, TxnState::Idle) {
             self.begin(None).await?;
@@ -5235,14 +5241,15 @@ mod tests {
             .await
             .expect("create");
 
+        let copy_rows = (0..16).fold(String::new(), |mut rows, id| {
+            use std::fmt::Write as _;
+            writeln!(&mut rows, "{id}\tv{id}").expect("writing to String cannot fail");
+            rows
+        });
         session
             .copy_in(
                 "COPY hc (id, value) FROM STDIN",
-                vec![bytes::Bytes::from(
-                    (0..16)
-                        .map(|id| format!("{id}\tv{id}\n"))
-                        .collect::<String>(),
-                )],
+                vec![bytes::Bytes::from(copy_rows)],
             )
             .await
             .expect("copy hash rows");

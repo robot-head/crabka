@@ -1914,20 +1914,20 @@ mod tests {
 
         let appended = log.append_verbatim_at(&vb, Offset(1)).unwrap();
 
-        assert!(appended == Offset(1));
-        assert!(log.log_end_offset() == Offset(2));
-        assert!(
-            log.epoch_checkpoint().entries()
-                == &[
-                    EpochEntry {
-                        epoch: LeaderEpoch(2),
-                        start_offset: Offset(0),
-                    },
-                    EpochEntry {
-                        epoch: LeaderEpoch(4),
-                        start_offset: Offset(1),
-                    },
-                ]
+        assert_eq!(appended, Offset(1));
+        assert_eq!(log.log_end_offset(), Offset(2));
+        assert_eq!(
+            log.epoch_checkpoint().entries(),
+            &[
+                EpochEntry {
+                    epoch: LeaderEpoch(2),
+                    start_offset: Offset(0),
+                },
+                EpochEntry {
+                    epoch: LeaderEpoch(4),
+                    start_offset: Offset(1),
+                },
+            ]
         );
 
         let mut expected_wire = bytes::BytesMut::new();
@@ -1940,8 +1940,9 @@ mod tests {
         let r = log
             .read_raw(Offset(0), log.log_end_offset(), 10 * 1024 * 1024)
             .unwrap();
-        assert!(
-            &r.bytes[..] == &expected_wire[..],
+        assert_eq!(
+            r.bytes[..],
+            expected_wire[..],
             "verbatim append_at must be byte-exact after supplied base+epoch stamping"
         );
         drop(dir);
@@ -1966,7 +1967,7 @@ mod tests {
             ),
             "non-LEO append_verbatim_at must report OffsetMismatch"
         );
-        assert!(log.log_end_offset() == Offset(0));
+        assert_eq!(log.log_end_offset(), Offset(0));
         assert!(
             log.read_raw(Offset(0), Offset(0), 1024)
                 .unwrap()
@@ -1995,7 +1996,7 @@ mod tests {
         ));
 
         log.append_at(&mut gap_batch, Offset(3)).unwrap();
-        assert!(log.log_end_offset() == Offset(4));
+        assert_eq!(log.log_end_offset(), Offset(4));
         drop(dir);
     }
 
@@ -2009,8 +2010,8 @@ mod tests {
 
         let appended = log.append_verbatim_at(&vb, Offset(5)).unwrap();
 
-        assert!(appended == Offset(5));
-        assert!(log.log_end_offset() == Offset(6));
+        assert_eq!(appended, Offset(5));
+        assert_eq!(log.log_end_offset(), Offset(6));
         drop(dir);
     }
 
@@ -2399,7 +2400,7 @@ mod tests {
                 .total;
             let mut torn = sample_batch_with_epoch(1, 7);
             log.append(&mut torn).unwrap();
-            assert!(log.epoch_checkpoint().latest_epoch() == Some(LeaderEpoch(7)));
+            assert_eq!(log.epoch_checkpoint().latest_epoch(), Some(LeaderEpoch(7)));
             first_batch_len
         };
 
@@ -2416,7 +2417,7 @@ mod tests {
         };
         let reopened = Log::open(dir.path(), cfg).unwrap();
 
-        assert!(reopened.log_end_offset() == Offset(1));
+        assert_eq!(reopened.log_end_offset(), Offset(1));
         assert!(
             reopened
                 .epoch_checkpoint()
@@ -2424,7 +2425,10 @@ mod tests {
                 .iter()
                 .all(|entry| entry.start_offset < reopened.log_end_offset())
         );
-        assert!(reopened.epoch_checkpoint().latest_epoch() == Some(LeaderEpoch(1)));
+        assert_eq!(
+            reopened.epoch_checkpoint().latest_epoch(),
+            Some(LeaderEpoch(1))
+        );
     }
 
     #[test]

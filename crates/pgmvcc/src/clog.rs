@@ -21,6 +21,11 @@ const S_PREPARED: u8 = 3;
 
 /// Read an xid's status. An absent entry is treated as `InProgress`
 /// (aborted-equivalent once the xid is in no live snapshot — see recovery).
+///
+/// # Errors
+///
+/// Returns [`KvError`] when storage access fails or the stored status is
+/// corrupt.
 pub fn get(kv: &dyn Kv, xid: u64) -> Result<XidStatus, KvError> {
     decode(
         &kv.get(&crabka_pgkv::key::clog_key(xid))?
@@ -31,6 +36,16 @@ pub fn get(kv: &dyn Kv, xid: u64) -> Result<XidStatus, KvError> {
 /// Decode a clog entry's bytes. An EMPTY slice (an absent key, via
 /// `kv.get(...)?.unwrap_or_default()`) is `InProgress` — preserving `get`'s
 /// absent-key semantics. A non-empty value decodes its status byte.
+///
+/// # Errors
+///
+/// Returns [`KvError::CorruptRow`] for an unknown status or truncated prepared
+/// transaction identifier.
+///
+/// # Panics
+///
+/// Panics only if a slice already validated as eight bytes cannot be converted
+/// to an eight-byte array.
 pub fn decode(value: &[u8]) -> Result<XidStatus, KvError> {
     match value.first() {
         None | Some(&S_IN_PROGRESS) => Ok(XidStatus::InProgress),

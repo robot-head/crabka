@@ -200,6 +200,7 @@ impl LiveRangeControlExecutor {
         }
     }
 
+    #[allow(clippy::too_many_lines)]
     async fn apply(
         &self,
         request: &RangeControlReq,
@@ -625,6 +626,7 @@ impl RangeControlExecutor for LiveRangeControlExecutor {
     }
 }
 
+#[allow(clippy::needless_pass_by_value)]
 fn transfer_error(error: crabka_gres_ranges::RangeTransferError) -> RangeControlResp {
     rejected("transfer_failed", error.to_string())
 }
@@ -688,7 +690,10 @@ fn verify_marker_partition(
 }
 
 fn marker_digest(markers: &[crabka_gres_ranges::transport::WireInDoubtMarker]) -> String {
+    use std::fmt::Write as _;
+
     use sha2::{Digest as _, Sha256};
+
     let mut digest = Sha256::new();
     for marker in markers {
         digest.update(marker.transaction_id.to_be_bytes());
@@ -699,7 +704,6 @@ fn marker_digest(markers: &[crabka_gres_ranges::transport::WireInDoubtMarker]) -
         }
         digest.update(marker.key.rowid.to_be_bytes());
     }
-    use std::fmt::Write as _;
     digest
         .finalize()
         .iter()
@@ -750,8 +754,8 @@ fn recovery_extension_is_structural(
         let offending = frame.ops.iter().enumerate().find_map(|(op_index, op)| {
             let key = match op {
                 crabka_pgkv::WriteOp::Put { key, .. }
-                | crabka_pgkv::WriteOp::ConditionalPut { key, .. } => key,
-                crabka_pgkv::WriteOp::Delete { key } => key,
+                | crabka_pgkv::WriteOp::ConditionalPut { key, .. }
+                | crabka_pgkv::WriteOp::Delete { key } => key,
             };
             (!key.starts_with(&control_prefix) && !key.starts_with(&activation_prefix))
                 .then(|| (op_index, recovery_key_class(key)))

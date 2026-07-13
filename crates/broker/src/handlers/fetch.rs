@@ -1040,6 +1040,7 @@ enum ReadPlan {
     },
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn do_read(
     part: &Partition,
     topic_id: Option<uuid::Uuid>,
@@ -1479,10 +1480,10 @@ async fn long_poll_then_reread(
         // Re-attempt the remote-tier read on the re-read pass
         // so a long-poll that fires on a non-tiered partition doesn't
         // clobber the remote batch we'd already served on this one.
-        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE {
-            if try_remote_read(broker, p, &part).await.is_none() {
-                let _ = crate::diskless::read::try_diskless_read(broker, p, &part).await;
-            }
+        if p.out.error_code == codes::OFFSET_OUT_OF_RANGE
+            && try_remote_read(broker, p, &part).await.is_none()
+        {
+            let _ = crate::diskless::read::try_diskless_read(broker, p, &part).await;
         }
     }
     Ok(())

@@ -1841,10 +1841,10 @@ mod tests {
         });
 
         let values = to_kraft_values(&rec, &img()).unwrap();
-        assert!(values.len() == 1);
+        assert_eq!(values.len(), 1);
         let back = from_kraft_value(&values[0], &img()).unwrap();
 
-        assert!(back == rec);
+        assert_eq!(back, rec);
     }
 
     #[test]

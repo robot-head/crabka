@@ -486,13 +486,13 @@ mod tests {
         // hinted voter and drop the fallbacks, leaving no peer to retry when the
         // hint is stale.
         let order = build_forward_order(&voters(), Some(crabka_audit::NodeId(2)));
-        assert!(
-            order
-                == vec![
-                    (crabka_raft::NodeId(2), "h2:9093".to_string()),
-                    (crabka_raft::NodeId(1), "h1:9093".to_string()),
-                    (crabka_raft::NodeId(3), "h3:9093".to_string()),
-                ]
+        assert_eq!(
+            order,
+            vec![
+                (crabka_raft::NodeId(2), "h2:9093".to_string()),
+                (crabka_raft::NodeId(1), "h1:9093".to_string()),
+                (crabka_raft::NodeId(3), "h3:9093".to_string()),
+            ]
         );
     }
 
@@ -501,7 +501,7 @@ mod tests {
         // No leader hint → fall back to trying every voter. A flipped predicate
         // (`== None`) would push nothing, so the forward could reach no peer.
         let order = build_forward_order(&voters(), None);
-        assert!(order == voters());
+        assert_eq!(order, voters());
     }
 
     #[test]
@@ -509,7 +509,7 @@ mod tests {
         // Hint names a voter not in the set → no leader-first entry, but every
         // voter is still tried (hint 9 != each id).
         let order = build_forward_order(&voters(), Some(crabka_audit::NodeId(9)));
-        assert!(order == voters());
+        assert_eq!(order, voters());
     }
 
     #[tokio::test]
@@ -562,14 +562,14 @@ mod tests {
         });
         let source = ObserverSource::new(observer.clone(), writer.clone());
 
-        assert!(source.current_image().cluster_id() == cluster_id);
+        assert_eq!(source.current_image().cluster_id(), cluster_id);
         source
             .submit_change(vec![topic_record("forwarded-topic")])
             .await
             .expect("submit via writer");
         {
             let calls = writer.calls.lock().unwrap();
-            assert!(calls.len() == 1);
+            assert_eq!(calls.len(), 1);
             assert!(
                 matches!(&calls[0][0], MetadataRecord::V1Topic(t) if t.name == "forwarded-topic")
             );
@@ -606,7 +606,7 @@ mod tests {
             .await
             .expect("applied");
 
-        assert!(submit_requests.load(Ordering::SeqCst) == 1);
+        assert_eq!(submit_requests.load(Ordering::SeqCst), 1);
         assert!(
             client_ids
                 .lock()

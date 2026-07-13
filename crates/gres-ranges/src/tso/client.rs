@@ -42,6 +42,9 @@ where
     }
 
     /// Grant `count` contiguous timestamps, batched with concurrent callers.
+    /// # Errors
+    ///
+    /// Returns an error when the requested operation cannot be completed.
     pub async fn grant(&self, count: NonZeroU64) -> Result<GrantLease, TsoError> {
         let (sender, receiver) = oneshot::channel();
         let should_spawn = {

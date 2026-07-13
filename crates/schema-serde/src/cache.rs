@@ -261,6 +261,16 @@ impl SchemaCache {
     /// Synchronous hot-path read of a writer schema and all registry-provided
     /// reference sources. A cold read starts one bounded background fetch and
     /// returns [`SchemaSerdeError::WriterSchemaPending`].
+    ///
+    /// # Errors
+    ///
+    /// Returns an unavailable or pending error when the schema cannot be
+    /// served from the cache immediately.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned or this is called outside a
+    /// Tokio runtime while a background fetch must be started.
     pub fn writer_schema_with_references(
         self: &Arc<Self>,
         id: u32,
@@ -328,6 +338,10 @@ impl SchemaCache {
     }
 
     /// Test/seed hook: install an id→root schema mapping and named sources.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the cache mutex is poisoned.
     pub fn seed_writer_schema_with_references(
         &self,
         id: u32,
