@@ -28,6 +28,67 @@ def fail(message: str) -> None: raise ValidationError(message)
 def compact(value: Any) -> bytes: return json.dumps(value, separators=(",", ":"), ensure_ascii=False).encode()
 def digest(value: bytes) -> str: return hashlib.sha256(value).hexdigest()
 
+FNV_OFFSET = 0xCBF29CE484222325
+FNV_PRIME = 0x100000001B3
+HASH_EVIDENCE_KEYS = {"algorithm", "boundary", "corpus", "snapshots", "sql_rows", "transactions", "folds"}
+
+def hash_bucket(raw: bytes, count: int) -> int:
+    value = FNV_OFFSET
+    for byte in raw:
+        value = ((value ^ byte) * FNV_PRIME) & ((1 << 64) - 1)
+    return value & (count - 1)
+
+def decode_hash_row(raw_key: str, raw_value: str, label: str) -> dict[str, Any]:
+    try: key=bytes.fromhex(raw_key); value=bytes.fromhex(raw_value)
+    except ValueError: fail(f"{label}: raw hex is malformed")
+    if len(key)!=28: fail(f"{label}: hash primary version key must be 28 bytes")
+    table,index,bucket=struct.unpack(">III",key[:12]); rowid,version=struct.unpack(">QQ",key[12:])
+    if table not in {50,51} or index!=1 or bucket>=16: fail(f"{label}: raw hash key class is invalid")
+    if len(value)<24 or value[0]!=2 or value[1] not in {2,3}: fail(f"{label}: raw timestamp value header is invalid")
+    start_ts,commit_ts=struct.unpack(">QQ",value[2:18])
+    if value[1]==2 and commit_ts<=start_ts: fail(f"{label}: committed timestamp is invalid")
+    if value[1]==3 and commit_ts!=0: fail(f"{label}: aborted timestamp is invalid")
+    row=value[18:]
+    if len(row)<6 or row[0]!=1 or row[1]!=2: fail(f"{label}: raw row lacks logical int4")
+    logical_id=struct.unpack(">i",row[2:6])[0]; cur=6; seq=None; checksum=None
+    if cur<len(row):
+        if row[cur]!=2 or cur+5>len(row): fail(f"{label}: raw row has malformed seq")
+        seq=struct.unpack(">i",row[cur+1:cur+5])[0]; cur+=5
+    if cur<len(row):
+        if row[cur]!=4 or cur+5>len(row): fail(f"{label}: raw row has malformed checksum")
+        length=struct.unpack(">I",row[cur+1:cur+5])[0]; cur+=5
+        if cur+length!=len(row): fail(f"{label}: raw row checksum length differs")
+        try: checksum=row[cur:].decode()
+        except UnicodeDecodeError: fail(f"{label}: raw row checksum is not UTF-8")
+    if logical_id<0 or hash_bucket(struct.pack(">i",logical_id),16)!=bucket: fail(f"{label}: logical hash bucket mismatch")
+    return {"table_id":table,"logical_id":logical_id,"rowid":rowid,"bucket":bucket,"version":version,"start_ts":start_ts,"commit_ts":commit_ts,"state":"committed" if value[1]==2 else "aborted","key_class":"hash_primary_version","seq":seq,"checksum":checksum}
+
+def decode_txd2(raw_key: str, raw_value: str, label: str) -> dict[str, Any]:
+    try: key=bytes.fromhex(raw_key); value=bytes.fromhex(raw_value)
+    except ValueError: fail(f"{label}: transaction raw hex is malformed")
+    prefix=b"\0\0\0\0meta/ts_txn/"
+    if not key.startswith(prefix) or len(key)!=len(prefix)+8 or not value.startswith(b"TXD2"): fail(f"{label}: not a TXD2 record")
+    start_ts=struct.unpack(">Q",key[-8:])[0]; cur=4
+    def take(fmt: str) -> tuple[int,...]:
+        nonlocal cur
+        size=struct.calcsize(fmt)
+        if cur+size>len(value): fail(f"{label}: short TXD2 record")
+        result=struct.unpack(fmt,value[cur:cur+size]); cur+=size; return result
+    global_xid,generation=take(">QQ")
+    participants=[take(">I")[0] for _ in range(take(">I")[0])]
+    prepared=[take(">I")[0] for _ in range(take(">I")[0])]
+    operations=[]
+    for _ in range(take(">I")[0]):
+        range_id,table_id=take(">II"); tag=take(">B")[0]; bucket=take(">I")[0]; rowid=take(">Q")[0]; delete=take(">B")[0]
+        if tag!=1 or bucket>=16 or delete not in {0,1}: fail(f"{label}: malformed hash TXD2 operation")
+        operations.append((range_id,table_id,bucket,rowid,bool(delete)))
+    remaining=value[cur:]
+    if remaining==b"\0": decision="pending"
+    elif remaining==b"\1": decision="aborted"
+    elif len(remaining)==9 and remaining[0]==2 and struct.unpack(">Q",remaining[1:])[0]>start_ts: decision="committed"
+    else: fail(f"{label}: malformed TXD2 decision")
+    return {"start_ts":start_ts,"global_xid":global_xid,"generation":generation,"participants":participants,"prepared":prepared,"operations":operations,"decision":decision}
+
 def load(path: Path) -> dict[str, Any]:
     try: value = json.loads(path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error: fail(f"{path}: unreadable JSON: {error}")
@@ -96,7 +157,7 @@ def expected_predicate(case: str) -> dict[str, Any]:
     phase,receipt,sidecar,topic,deletes=target[case]
     return {"phase":phase,"receipt":receipt,"evidence":15,"layout":"target","sidecar":sidecar,"predecessor_topic_present":topic,"delete_count":deletes,"successors_serving":True}
 
-def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> None:
+def validate_record_v2(r: dict[str, Any], family: str, case: str, source: str) -> None:
     if set(r) != KEYS: fail(f"{source}: schema keys differ: missing={sorted(KEYS-set(r))} extra={sorted(set(r)-KEYS)}")
     for key in INTS:
         if type(r[key]) is not int: fail(f"{source}: {key} must be integer")
@@ -232,6 +293,67 @@ def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> N
     expected_topics = sorted({f"__gres_wal.{r['tenant_id']}.r0", f"__gres_wal.{r['tenant_id']}.r2.g0000000001", f"__gres_wal.{r['tenant_id']}.r3.g0000000001", r["sentinel_topic"]})
     if not r["sentinel_topic"].startswith("g8-sentinel-") or r["topology_topics"] != expected_topics: fail(f"{source}: exact topology topics differ")
 
+def validate_hash_evidence(value: Any, record: dict[str, Any], source: str) -> None:
+    evidence=exact_object(value,HASH_EVIDENCE_KEYS,"hash evidence")
+    algorithm=exact_object(evidence["algorithm"],{"name","offset_basis","prime","bucket_count"},"hash algorithm")
+    if algorithm!={"name":"fnv1a64-int4-be","offset_basis":FNV_OFFSET,"prime":FNV_PRIME,"bucket_count":16}: fail(f"{source}: hash algorithm differs")
+    boundary=exact_object(evidence["boundary"],{"table_id","bucket","rowid","request_bucket","receipt_bucket"},"hash boundary")
+    if boundary!={"table_id":50,"bucket":8,"rowid":0,"request_bucket":8,"receipt_bucket":8}: fail(f"{source}: hash boundary differs")
+    corpus=[]
+    for item in evidence["corpus"]:
+        item=exact_object(item,{"logical_id","bytes_hex","bucket"},"hash corpus")
+        if type(item["logical_id"]) is not int or item["bytes_hex"]!=struct.pack(">i",item["logical_id"]).hex() or item["bucket"]!=hash_bucket(bytes.fromhex(item["bytes_hex"]),16): fail(f"{source}: pinned hash corpus differs")
+        corpus.append((item["logical_id"],item["bucket"]))
+    if corpus!=[(logical_id,hash_bucket(struct.pack(">i",logical_id),16)) for logical_id in range(16)] or len({bucket for _,bucket in corpus})!=16: fail(f"{source}: pinned hash corpus is not the 0..15 bijection")
+    snapshots=evidence["snapshots"]
+    if not isinstance(snapshots,list): fail(f"{source}: snapshots must be list")
+    if [(item.get("stage"),item.get("range_id")) for item in snapshots] != [(stage,range_id) for stage in ["before","after"] for range_id in range(4)]: fail(f"{source}: r0/r1/r2/r3 before/after coverage differs")
+    decoded=[]
+    for snapshot in snapshots:
+        snapshot=exact_object(snapshot,{"stage","range_id","generation","sample_offset","records"},"hash snapshot")
+        if snapshot["stage"] not in {"before","after"} or type(snapshot["range_id"]) is not int or type(snapshot["generation"]) is not int or type(snapshot["sample_offset"]) is not int or not isinstance(snapshot["records"],list): fail(f"{source}: malformed hash snapshot provenance")
+        for item in snapshot["records"]:
+            item=exact_object(item,{"raw_key_hex","raw_value_hex","source_offset","source_revision","corpus","summary"},"hash raw record")
+            if type(item["source_offset"]) is not int or type(item["source_revision"]) is not int or item["source_offset"]<0 or item["source_revision"]<1 or type(item["corpus"]) is not bool: fail(f"{source}: malformed raw provenance")
+            summary=decode_hash_row(item["raw_key_hex"],item["raw_value_hex"],"hash raw record")
+            if item["summary"]!=summary: fail(f"{source}: raw row summary differs")
+            decoded.append((snapshot["stage"],snapshot["range_id"],item["corpus"],summary))
+    after=[summary for stage,_range,_corpus,summary in decoded if stage=="after" and summary["state"]=="committed"]
+    if len({(row["table_id"],row["rowid"],row["version"]) for row in after})!=len(after): fail(f"{source}: raw hash rows are not unique")
+    folds=exact_object(evidence["folds"],{"left_corpus","right_corpus","raw_after_sha256","sql_sha256","ack_sha256"},"hash folds")
+    corpus_after=[summary for stage,_range,is_corpus,summary in decoded if stage=="after" and is_corpus and summary["table_id"]==50 and summary["state"]=="committed"]
+    left=sum(row["bucket"]<8 for row in corpus_after); right=sum(row["bucket"]>=8 for row in corpus_after)
+    if (left,right)!=(8,8) or (folds["left_corpus"],folds["right_corpus"])!=(8,8): fail(f"{source}: bucket-8 corpus fold differs")
+    raw_projection=sorted((row["table_id"],row["logical_id"],row["rowid"],row["seq"],row["checksum"]) for row in after if row["seq"] is not None)
+    sql=[]
+    for item in evidence["sql_rows"]:
+        item=exact_object(item,{"table_id","logical_id","rowid","seq","checksum"},"hash SQL row")
+        sql.append(tuple(item[key] for key in ["table_id","logical_id","rowid","seq","checksum"]))
+    if sql!=sorted(sql) or sql!=raw_projection: fail(f"{source}: SQL/raw hash equality differs")
+    ack=sorted((event["table_id"],event["rowid"],event["seq"],event["checksum"]) for event in record["payload_events"] if event["kind"] in {"ack","recovered_ack"})
+    raw_ack=sorted((table,logical,seq,checksum) for table,logical,_rowid,seq,checksum in raw_projection)
+    if ack!=raw_ack: fail(f"{source}: ACK/raw logical equality differs")
+    encoded=lambda value:digest(compact(value))
+    if folds["raw_after_sha256"]!=encoded(raw_projection) or folds["sql_sha256"]!=encoded(sql) or folds["ack_sha256"]!=encoded(ack): fail(f"{source}: physical/SQL/ACK fold digest differs")
+    decisions=[]
+    for item in evidence["transactions"]:
+        item=exact_object(item,{"raw_key_hex","raw_value_hex","source_offset","source_revision","summary"},"hash transaction")
+        if type(item["source_offset"]) is not int or type(item["source_revision"]) is not int or item["source_revision"]<1: fail(f"{source}: malformed transaction provenance")
+        summary=decode_txd2(item["raw_key_hex"],item["raw_value_hex"],"hash transaction")
+        normalized={**summary,"operations":[list(operation) for operation in summary["operations"]]}
+        if item["summary"]!=normalized: fail(f"{source}: raw transaction summary differs")
+        decisions.append(summary["decision"])
+    if sorted(decisions)!=["aborted","committed"] or "pending" in decisions: fail(f"{source}: terminal transaction decisions differ")
+
+def validate_record(r: dict[str, Any], family: str, case: str, source: str) -> None:
+    if r.get("schema_version")==2:
+        if "hash_evidence" in r: fail(f"{source}: schema-v2 cannot carry hash evidence")
+        validate_record_v2(r,family,case,source); return
+    if r.get("schema_version")!=3 or set(r)!=KEYS|{"hash_evidence"}: fail(f"{source}: schema-v3 keys differ")
+    base=copy.deepcopy(r); evidence=base.pop("hash_evidence"); base["schema_version"]=2
+    validate_record_v2(base,family,case,source)
+    validate_hash_evidence(evidence,r,source)
+
 def require_family(family: str) -> None:
     if family not in EXPECTED: fail(f"unknown family {family!r}")
 def validate_file(family: str, case: str, path: Path) -> dict[str, Any]:
@@ -278,6 +400,58 @@ def synthetic(family: str, case: str, index: int) -> dict[str, Any]:
     checkpoint=next(item for item in result["authenticated_receipts"] if item["operation"]=="checkpoint"); checkpoint["response"].update(manifest_key="manifest",covered_offset=1); checkpoint["response_sha256"]=digest(compact(checkpoint["response"]))
     stage=next(item for item in result["authenticated_receipts"] if item["operation"]=="stage"); stage["response"]["tail_sha256"]="1"*64; stage["response_sha256"]=digest(compact(stage["response"]))
     pause=next(item for item in result["authenticated_receipts"] if item["operation"]=="pause"); pause["response"]["barrier_offset"]=1; pause["response_sha256"]=digest(compact(pause["response"]))
+    return result
+
+def encode_hash_row(table_id:int,logical_id:int,rowid:int,version:int,start_ts:int,commit_ts:int,seq:int|None=None,checksum:str|None=None,state:int=2)->tuple[str,str,dict[str,Any]]:
+    bucket=hash_bucket(struct.pack(">i",logical_id),16)
+    key=struct.pack(">IIIQQ",table_id,1,bucket,rowid,version)
+    row=bytearray([1,2]); row.extend(struct.pack(">i",logical_id))
+    if seq is not None:
+        row.append(2); row.extend(struct.pack(">i",seq)); raw=checksum.encode() if checksum is not None else b""
+        row.append(4); row.extend(struct.pack(">I",len(raw))); row.extend(raw)
+    value=bytes([2,state])+struct.pack(">QQ",start_ts,commit_ts if state==2 else 0)+row
+    return key.hex(),value.hex(),decode_hash_row(key.hex(),value.hex(),"synthetic hash row")
+
+def encode_txd2(start_ts:int,decision:str)->tuple[str,str,dict[str,Any]]:
+    key=b"\0\0\0\0meta/ts_txn/"+struct.pack(">Q",start_ts)
+    operations=[(0,50,0,100,False),(1,50,8,200,False)]
+    value=bytearray(b"TXD2"+struct.pack(">QQI",start_ts+100,2,2)+struct.pack(">II",0,1)+struct.pack(">I",2)+struct.pack(">II",0,1)+struct.pack(">I",2))
+    for range_id,table_id,bucket,rowid,delete in operations:
+        value.extend(struct.pack(">IIBIQB",range_id,table_id,1,bucket,rowid,delete))
+    value.extend(b"\1" if decision=="aborted" else b"\2"+struct.pack(">Q",start_ts+1))
+    summary=decode_txd2(key.hex(),value.hex(),"synthetic TXD2")
+    summary={**summary,"operations":[list(operation) for operation in summary["operations"]]}
+    return key.hex(),value.hex(),summary
+
+def synthetic_v3(family:str,case:str,index:int)->dict[str,Any]:
+    result=synthetic(family,case,index); result["schema_version"]=3
+    records=[]
+    for logical_id in range(16):
+        key,value,summary=encode_hash_row(50,logical_id,1000+logical_id,2000+logical_id,3000+logical_id,4000+logical_id)
+        records.append({"raw_key_hex":key,"raw_value_hex":value,"source_offset":logical_id,"source_revision":logical_id+1,"corpus":True,"summary":summary})
+    physical_sql=[]
+    for offset,row in enumerate(result["reopened_oracle_rows"],100):
+        key,value,summary=encode_hash_row(row["table_id"],row["rowid"],9000+offset,8000+offset,7000+offset,7100+offset,row["seq"],row["checksum"])
+        records.append({"raw_key_hex":key,"raw_value_hex":value,"source_offset":offset,"source_revision":offset+1,"corpus":False,"summary":summary})
+        physical_sql.append({"table_id":summary["table_id"],"logical_id":summary["logical_id"],"rowid":summary["rowid"],"seq":summary["seq"],"checksum":summary["checksum"]})
+    snapshots=[]
+    for stage in ["before","after"]:
+        for range_id in range(4):
+            assigned=[] if stage=="before" else [item for item in records if item["summary"]["bucket"]%4==range_id]
+            snapshots.append({"stage":stage,"range_id":range_id,"generation":0 if range_id<2 else 1,"sample_offset":999,"records":copy.deepcopy(assigned)})
+    transactions=[]
+    for offset,decision in enumerate(["committed","aborted"],500):
+        key,value,summary=encode_txd2(offset,decision)
+        transactions.append({"raw_key_hex":key,"raw_value_hex":value,"source_offset":offset,"source_revision":offset+1,"summary":summary})
+    raw_projection=sorted((item["table_id"],item["logical_id"],item["rowid"],item["seq"],item["checksum"]) for item in physical_sql)
+    ack=sorted((event["table_id"],event["rowid"],event["seq"],event["checksum"]) for event in result["payload_events"] if event["kind"] in {"ack","recovered_ack"})
+    result["hash_evidence"]={
+        "algorithm":{"name":"fnv1a64-int4-be","offset_basis":FNV_OFFSET,"prime":FNV_PRIME,"bucket_count":16},
+        "boundary":{"table_id":50,"bucket":8,"rowid":0,"request_bucket":8,"receipt_bucket":8},
+        "corpus":[{"logical_id":logical_id,"bytes_hex":struct.pack(">i",logical_id).hex(),"bucket":hash_bucket(struct.pack(">i",logical_id),16)} for logical_id in range(16)],
+        "snapshots":snapshots,"sql_rows":sorted(physical_sql,key=lambda item:tuple(item[key] for key in ["table_id","logical_id","rowid","seq","checksum"])),"transactions":transactions,
+        "folds":{"left_corpus":8,"right_corpus":8,"raw_after_sha256":digest(compact(raw_projection)),"sql_sha256":digest(compact(sorted(tuple(item[key] for key in ["table_id","logical_id","rowid","seq","checksum"]) for item in physical_sql))),"ack_sha256":digest(compact(ack))},
+    }
     return result
 
 def expect_bad(record: dict[str,Any], family:str, case:str, mutate:Callable[[dict[str,Any]],None], label:str) -> None:
@@ -331,6 +505,34 @@ def self_test() -> None:
         ])
         validate_record(good,family,case,"operation-specific replay positive")
         for label,mutation in negatives: expect_bad(good,family,case,mutation,label)
+        hash_good=synthetic_v3(family,case,1001)
+        validate_record(hash_good,family,case,"schema-v3 positive")
+        first_record=lambda r:r["hash_evidence"]["snapshots"][4]["records"][0]
+        hash_negatives=[
+            ("hash missing logical id",lambda r:first_record(r)["summary"].pop("logical_id")),
+            ("hash wrong logical id",lambda r:first_record(r)["summary"].__setitem__("logical_id",99)),
+            ("hash wrong rowid",lambda r:first_record(r)["summary"].__setitem__("rowid",99)),
+            ("hash wrong bucket",lambda r:first_record(r)["summary"].__setitem__("bucket",9)),
+            ("hash wrong class",lambda r:first_record(r)["summary"].__setitem__("key_class","primary_version")),
+            ("hash wrong raw key",lambda r:first_record(r).__setitem__("raw_key_hex","01"+first_record(r)["raw_key_hex"][2:])),
+            ("hash wrong raw value",lambda r:first_record(r).__setitem__("raw_value_hex","00"+first_record(r)["raw_value_hex"][2:])),
+            ("hash wrong fold",lambda r:r["hash_evidence"]["folds"].__setitem__("left_corpus",7)),
+            ("hash wrong transaction state",lambda r:r["hash_evidence"]["transactions"][0].__setitem__("raw_value_hex",r["hash_evidence"]["transactions"][0]["raw_value_hex"][:-18]+"00")),
+            ("hash missing provenance",lambda r:first_record(r).pop("source_revision")),
+            ("hash bad provenance",lambda r:first_record(r).__setitem__("source_offset",-1)),
+            ("hash wrong boundary",lambda r:r["hash_evidence"]["boundary"].__setitem__("receipt_bucket",7)),
+            ("hash missing stage",lambda r:r["hash_evidence"]["snapshots"].pop()),
+            ("hash wrong schema",lambda r:r.__setitem__("schema_version",2)),
+        ]
+        for label,mutation in hash_negatives: expect_bad(hash_good,family,case,mutation,label)
+        cross=copy.deepcopy(good); cross["schema_version"]=3
+        try: validate_record(cross,family,case,"v2-as-v3")
+        except ValidationError: pass
+        else: fail("schema-v2 record unexpectedly accepted as v3")
+        cross=copy.deepcopy(hash_good); cross["schema_version"]=2
+        try: validate_record(cross,family,case,"v3-as-v2")
+        except ValidationError: pass
+        else: fail("schema-v3 record unexpectedly accepted as v2")
         for key in ["tenant_id","operation_id","sentinel_topic","evidence_id"]:
             duplicate=copy.deepcopy(all_records); duplicate[-1][key]=duplicate[0][key]
             try: require_unique(duplicate,"cross-family")
