@@ -23,6 +23,39 @@ pub trait Stats: Send + Sync + 'static {
     }
 }
 
+/// Compose live sources conservatively. A table estimate is the maximum value
+/// currently published by either authoritative source.
+pub struct CombinedStats {
+    first: Arc<dyn Stats>,
+    second: Arc<dyn Stats>,
+}
+
+impl CombinedStats {
+    #[must_use]
+    pub fn new(first: Arc<dyn Stats>, second: Arc<dyn Stats>) -> Self {
+        Self { first, second }
+    }
+}
+
+impl Stats for CombinedStats {
+    fn estimated_bytes(&self, table_id: u64) -> Option<u64> {
+        match (
+            self.first.estimated_bytes(table_id),
+            self.second.estimated_bytes(table_id),
+        ) {
+            (Some(first), Some(second)) => Some(first.max(second)),
+            (first, second) => first.or(second),
+        }
+    }
+
+    fn are_co_partitioned(&self, left_table_id: u64, right_table_id: u64) -> bool {
+        self.first.are_co_partitioned(left_table_id, right_table_id)
+            || self
+                .second
+                .are_co_partitioned(left_table_id, right_table_id)
+    }
+}
+
 /// Live per-table byte estimates derived from monotonic sequence counters.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct SequenceCounters(BTreeMap<u64, u64>);

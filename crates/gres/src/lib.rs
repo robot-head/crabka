@@ -2315,6 +2315,9 @@ async fn open_substrate_runtime_with_tenant_record(
         None,
         || Ok(GresCheckpointWalPruner::in_memory()),
     )?;
+    if let Some(checkpoint) = &checkpoint {
+        seed_checkpoint_planner_stats(checkpoint).await?;
+    }
     let engine = build_replicated_substrate_engine(
         &store,
         log,
@@ -2324,6 +2327,9 @@ async fn open_substrate_runtime_with_tenant_record(
         checkpoint
             .as_ref()
             .map(|checkpoint| Arc::clone(&checkpoint.stats)),
+        checkpoint.as_ref().map(|checkpoint| {
+            Arc::clone(&checkpoint.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
+        }),
     )?;
     Ok(match checkpoint {
         Some(checkpoint) => GresRuntime::with_checkpoint_runtime(engine, checkpoint),
@@ -2796,6 +2802,9 @@ async fn open_live_range_substrate_engine(
         checkpoint_store,
     )?
     .map(Arc::new);
+    if let Some(checkpoint) = &checkpoint {
+        seed_checkpoint_planner_stats(checkpoint).await?;
+    }
     let (engine, committer) = build_replicated_substrate_engine_with_committer(
         &store,
         Arc::clone(&writer),
@@ -2805,6 +2814,9 @@ async fn open_live_range_substrate_engine(
         checkpoint
             .as_ref()
             .map(|runtime| Arc::clone(&runtime.stats)),
+        checkpoint.as_ref().map(|runtime| {
+            Arc::clone(&runtime.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
+        }),
     )?;
     let tso_horizon = if range_id == crabka_gres_ranges::RangeId::COORDINATOR {
         let tso_store: Arc<dyn Kv> = store.clone();
@@ -3271,10 +3283,27 @@ fn parse_host_ranges(
 struct StartedCheckpointRuntime {
     handle: crabka_gres_substrate::CheckpointHandle,
     stats: Arc<crabka_gres_substrate::CheckpointStats>,
+    planner_stats: Arc<crabka_gres_substrate::CheckpointPlannerStats>,
     snapshot_source: Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     store: Arc<dyn crabka_gres_substrate::checkpoint::CheckpointStore>,
     tenant: String,
     latest_checkpoint_bytes: std::sync::atomic::AtomicU64,
+}
+
+async fn seed_checkpoint_planner_stats(runtime: &StartedCheckpointRuntime) -> std::io::Result<()> {
+    let snapshot = runtime.snapshot_source.snapshot();
+    let metadata = crabka_gres_substrate::latest_checkpoint_metadata(
+        runtime.store.as_ref(),
+        &runtime.tenant,
+        snapshot.wal_generation,
+        None,
+    )
+    .await
+    .map_err(|error| std::io::Error::other(format!("load checkpoint planner stats: {error}")))?;
+    if let Some(metadata) = metadata {
+        runtime.planner_stats.publish_verified(metadata);
+    }
+    Ok(())
 }
 
 impl Clone for LiveRangeResources {
@@ -4184,9 +4213,11 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     request.target_range,
                     local_checkpoint_root(&self.config),
                 )
-                .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
-                    range_id: request.target_range,
-                    reason: format!("reset disposable successor cache: {error}"),
+                .map_err(|error| {
+                    crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id: request.target_range,
+                        reason: format!("reset disposable successor cache: {error}"),
+                    }
                 })?;
                 let target_store =
                     open_substrate_range_cache(staged_cache_dir.as_deref(), request.target_range)
@@ -4276,6 +4307,12 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                         reason: "successor staging requires checkpoint configuration".to_owned(),
                     }
                 })?;
+                seed_checkpoint_planner_stats(&checkpoint)
+                    .await
+                    .map_err(|error| crabka_gres_ranges::RangeTransferError::Runtime {
+                        range_id: request.target_range,
+                        reason: format!("load successor checkpoint planner stats: {error}"),
+                    })?;
                 let (mut engine, committer) = build_replicated_substrate_engine_with_committer(
                     &target_store,
                     Arc::clone(&writer),
@@ -4283,6 +4320,8 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
                     restore_plan.replay.next_journal_seq,
                     &snapshot_source,
                     Some(Arc::clone(&checkpoint.stats)),
+                    Some(Arc::clone(&checkpoint.planner_stats)
+                        as Arc<dyn crabka_pgexec::plan_dist::Stats>),
                 )
                 .map_err(|error| {
                     crabka_gres_ranges::RangeTransferError::Runtime {
@@ -4359,12 +4398,13 @@ impl crabka_gres_ranges::RangeTransferCapability for LiveMultiRangeTransfer {
             }
         };
         let mut requests = requests.into_iter();
-        let left_request = requests.next().ok_or_else(|| {
-            crabka_gres_ranges::RangeTransferError::Boundary {
-                range_id: state.predecessor,
-                reason: "mutation has no successor".into(),
-            }
-        })?;
+        let left_request =
+            requests
+                .next()
+                .ok_or_else(|| crabka_gres_ranges::RangeTransferError::Boundary {
+                    range_id: state.predecessor,
+                    reason: "mutation has no successor".into(),
+                })?;
         let right_request = requests.next();
         if requests.next().is_some() {
             return Err(crabka_gres_ranges::RangeTransferError::Boundary {
@@ -4658,9 +4698,11 @@ fn build_checkpoint_runtime(
         Arc::clone(&stats),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
+    let planner_stats = service.planner_stats();
     Ok(Some(StartedCheckpointRuntime {
         handle: Arc::new(service).spawn(),
         stats,
+        planner_stats,
         snapshot_source,
         store: checkpoint_store,
         tenant: checkpoint_namespace,
@@ -4707,9 +4749,11 @@ fn build_range_checkpoint_runtime(
         Arc::clone(&stats),
     )
     .map_err(|error| std::io::Error::other(format!("checkpoint service: {error}")))?;
+    let planner_stats = service.planner_stats();
     Ok(Some(StartedCheckpointRuntime {
         handle: Arc::new(service).spawn(),
         stats,
+        planner_stats,
         snapshot_source,
         store: checkpoint_store,
         tenant: namespace,
@@ -4757,6 +4801,9 @@ async fn open_live_substrate_runtime(
         checkpoint_store,
         || GresCheckpointWalPruner::kafka(&config.bootstrap, config.kafka_security.clone()),
     )?;
+    if let Some(checkpoint) = &checkpoint {
+        seed_checkpoint_planner_stats(checkpoint).await?;
+    }
     let engine = build_replicated_substrate_engine(
         &store,
         writer,
@@ -4766,6 +4813,9 @@ async fn open_live_substrate_runtime(
         checkpoint
             .as_ref()
             .map(|checkpoint| Arc::clone(&checkpoint.stats)),
+        checkpoint.as_ref().map(|checkpoint| {
+            Arc::clone(&checkpoint.planner_stats) as Arc<dyn crabka_pgexec::plan_dist::Stats>
+        }),
     )?;
     Ok(match checkpoint {
         Some(checkpoint) => GresRuntime::with_checkpoint_runtime(engine, checkpoint),
@@ -4790,6 +4840,7 @@ fn build_replicated_substrate_engine<W>(
     next_journal_seq: u64,
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
+    checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
 ) -> std::io::Result<SqlEngine>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
@@ -4801,6 +4852,7 @@ where
         next_journal_seq,
         snapshot_source,
         checkpoint_stats,
+        checkpoint_planner_stats,
     )
     .map(|(engine, _committer)| engine)
 }
@@ -4812,6 +4864,7 @@ fn build_replicated_substrate_engine_with_committer<W>(
     next_journal_seq: u64,
     snapshot_source: &Arc<crabka_gres_substrate::CheckpointSnapshotSource>,
     checkpoint_stats: Option<Arc<crabka_gres_substrate::CheckpointStats>>,
+    checkpoint_planner_stats: Option<Arc<dyn crabka_pgexec::plan_dist::Stats>>,
 ) -> std::io::Result<(SqlEngine, Arc<crabka_gres_substrate::SubstrateCommitter<W>>)>
 where
     W: crabka_gres_substrate::TransactionalWalWriter + crabka_gres_substrate::FenceLease + 'static,
@@ -4837,13 +4890,19 @@ where
     };
     let committer = Arc::new(committer);
     let linearizer = crabka_gres_substrate::SubstrateLinearizer::new(writer, generation);
-    let engine = SqlEngine::replicated(
+    let mut engine = SqlEngine::replicated(
         engine_read_store,
         engine_write_store,
         committer.clone(),
         Arc::new(linearizer),
     )
     .map_err(|error| std::io::Error::other(format!("engine: {error:?}")))?;
+    if let Some(checkpoint_stats) = checkpoint_planner_stats {
+        engine.set_join_stats(Arc::new(crabka_pgexec::plan_dist::CombinedStats::new(
+            engine.join_stats(),
+            checkpoint_stats,
+        )));
+    }
     engine
         .reseed_counters()
         .map_err(|error| std::io::Error::other(format!("reseed counters: {error:?}")))?;
@@ -6284,6 +6343,7 @@ mod tests {
             crabka_gres_substrate::WriterGeneration(0),
             0,
             &source,
+            None,
             None,
         )
         .expect("substrate engine");

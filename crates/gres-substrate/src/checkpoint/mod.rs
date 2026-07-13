@@ -28,8 +28,9 @@ pub use self::{
         restore_table_transfer_from_manifest_and_replay_tail, write_checkpoint,
     },
     service::{
-        CheckpointConfig, CheckpointHandle, CheckpointRun, CheckpointService, CheckpointStats,
-        CheckpointTrigger, CheckpointWalPruner, DEFAULT_CHECKPOINT_RETAIN,
+        CheckpointConfig, CheckpointHandle, CheckpointPlannerStats, CheckpointRun,
+        CheckpointService, CheckpointStats, CheckpointTrigger, CheckpointWalPruner,
+        DEFAULT_CHECKPOINT_RETAIN,
     },
     store::{CheckpointObject, CheckpointStore, InMemoryCheckpointStore, ObjectOpsCheckpointStore},
 };

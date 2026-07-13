@@ -197,6 +197,31 @@ pub struct CheckpointRun {
     pub metadata: CheckpointMetadata,
 }
 
+/// Shared latest verified checkpoint metadata consumed by SQL planning.
+/// Publication clones the authoritative metadata only after verification; reads
+/// are synchronous and never retain the lock across an await point.
+#[derive(Debug, Default)]
+pub struct CheckpointPlannerStats {
+    latest: std::sync::RwLock<Option<CheckpointMetadata>>,
+}
+
+impl CheckpointPlannerStats {
+    /// Publish metadata returned by the verified checkpoint loader/completer.
+    pub fn publish_verified(&self, metadata: CheckpointMetadata) {
+        *self.latest.write().expect("checkpoint planner stats lock") = Some(metadata);
+    }
+}
+
+impl crabka_pgexec::plan_dist::Stats for CheckpointPlannerStats {
+    fn estimated_bytes(&self, _table_id: u64) -> Option<u64> {
+        self.latest
+            .read()
+            .expect("checkpoint planner stats lock")
+            .as_ref()
+            .map(|metadata| metadata.total_bytes)
+    }
+}
+
 /// Checkpoint service that snapshots KV state, writes parts and manifest, truncates WAL, then prunes objects.
 pub struct CheckpointService<P> {
     config: CheckpointConfig,
@@ -204,6 +229,7 @@ pub struct CheckpointService<P> {
     store: Arc<dyn CheckpointStore>,
     pruner: Arc<P>,
     stats: Arc<CheckpointStats>,
+    planner_stats: Arc<CheckpointPlannerStats>,
     attempt_lock: AsyncMutex<()>,
     #[cfg(feature = "checkpoint-test-hooks")]
     failpoint: Option<CheckpointFailpoint>,
@@ -232,6 +258,7 @@ where
             store,
             pruner,
             stats,
+            planner_stats: Arc::new(CheckpointPlannerStats::default()),
             attempt_lock: AsyncMutex::new(()),
             #[cfg(feature = "checkpoint-test-hooks")]
             failpoint: None,
@@ -274,6 +301,17 @@ where
     #[must_use]
     pub fn stats(&self) -> Arc<CheckpointStats> {
         self.stats.clone()
+    }
+
+    /// Return the shared latest-verified checkpoint source for SQL engines.
+    #[must_use]
+    pub fn planner_stats(&self) -> Arc<CheckpointPlannerStats> {
+        self.planner_stats.clone()
+    }
+
+    /// Seed planning from metadata loaded and verified during recovery.
+    pub fn publish_planner_metadata(&self, metadata: CheckpointMetadata) {
+        self.planner_stats.publish_verified(metadata);
     }
 
     /// Return the trigger whose threshold has crossed, if any.
@@ -373,6 +411,7 @@ where
         )
         .await?
         .unwrap_or_else(|| checkpoint_metadata_from_manifest(&manifest));
+        self.planner_stats.publish_verified(metadata.clone());
         self.stats.discard_checkpointed(checkpointed_stats);
         Ok(CheckpointRun {
             trigger,
@@ -472,6 +511,7 @@ where
         )
         .await?
         .unwrap_or_else(|| checkpoint_metadata_from_manifest(&manifest));
+        self.planner_stats.publish_verified(metadata.clone());
         self.stats.discard_checkpointed(checkpointed_stats);
         Ok(CheckpointRun {
             trigger,
@@ -649,7 +689,7 @@ mod tests {
     use std::sync::atomic::{AtomicBool, Ordering};
 
     use assert2::assert;
-    use crabka_pgkv::MemKv;
+    use crabka_pgkv::{Kv, MemKv};
     use tokio::sync::Notify;
 
     use super::*;
@@ -691,7 +731,7 @@ mod tests {
     async fn thresholds_trigger_checkpoint_and_reset_after_truncate() {
         let kv: Arc<dyn SnapshotKv> = Arc::new(MemKv::default());
         kv.put(b"k".to_vec(), b"v".to_vec()).expect("put");
-        let store = InMemoryCheckpointStore::shared();
+        let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
         let pruner = Arc::new(FakePruner::default());
         let stats = Arc::new(CheckpointStats::default());
         let service =
@@ -764,6 +804,79 @@ mod tests {
 
         assert!(stats.snapshot() == (1, 10));
         assert!(service.threshold_trigger() == Some(CheckpointTrigger::Bytes));
+    }
+
+    #[tokio::test]
+    async fn verified_checkpoint_publication_changes_next_join_plan() {
+        use crabka_pgexec::plan_dist::{
+            CombinedStats, JoinInputs, JoinStrategy, PlannerConfig, plan_join,
+        };
+
+        let concrete_kv = Arc::new(MemKv::default());
+        concrete_kv
+            .put(crabka_pgkv::key::seq_key(1), 1_u64.to_be_bytes().to_vec())
+            .expect("left sequence");
+        concrete_kv
+            .put(crabka_pgkv::key::seq_key(2), 100_u64.to_be_bytes().to_vec())
+            .expect("right sequence");
+        concrete_kv
+            .put(b"large-checkpoint-key".to_vec(), vec![7; 512])
+            .expect("put");
+        let kv: Arc<dyn SnapshotKv> = concrete_kv.clone();
+        let store: Arc<dyn CheckpointStore> = InMemoryCheckpointStore::shared();
+        let service = CheckpointService::new(
+            config(1, 0),
+            kv,
+            Arc::clone(&store),
+            Arc::new(FakePruner::default()),
+            Arc::new(CheckpointStats::default()),
+        )
+        .expect("service");
+        let engine_kv: Arc<dyn crabka_pgkv::Kv> = concrete_kv;
+        let mut engine = crabka_pgexec::SqlEngine::with_kv(engine_kv).expect("engine");
+        engine.set_join_stats(Arc::new(CombinedStats::new(
+            engine.join_stats(),
+            service.planner_stats(),
+        )));
+        let planner_config = PlannerConfig {
+            broadcast_threshold_bytes: 64,
+        };
+        let inputs = JoinInputs {
+            left_table_id: 1,
+            right_table_id: 2,
+        };
+        assert_eq!(
+            plan_join(engine.join_stats().as_ref(), planner_config, inputs),
+            JoinStrategy::Broadcast { small_table_id: 1 }
+        );
+
+        service
+            .checkpoint(snapshot(3), CheckpointTrigger::Manual)
+            .await
+            .expect("checkpoint");
+
+        assert_eq!(
+            plan_join(engine.join_stats().as_ref(), planner_config, inputs),
+            JoinStrategy::Gather
+        );
+
+        let restarted = CheckpointService::new(
+            config(1, 0),
+            Arc::new(MemKv::default()),
+            Arc::clone(&store),
+            Arc::new(FakePruner::default()),
+            Arc::new(CheckpointStats::default()),
+        )
+        .expect("restarted service");
+        let restored = latest_checkpoint_metadata(store.as_ref(), "tenant", 0, None)
+            .await
+            .expect("load metadata")
+            .expect("verified checkpoint");
+        restarted.publish_planner_metadata(restored);
+        assert!(
+            crabka_pgexec::plan_dist::Stats::estimated_bytes(restarted.planner_stats().as_ref(), 1)
+                .is_some_and(|bytes| bytes > 64)
+        );
     }
 
     fn config(frames_threshold: u64, bytes_threshold: u64) -> CheckpointConfig {
