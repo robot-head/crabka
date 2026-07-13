@@ -20,4 +20,19 @@ Timestamp writes and durable descriptor operations now carry `Option<u32>` bucke
 
 ## Remaining work
 
-This is not the complete Task 5 data path. UPDATE bucket moves, broader DELETE coverage, xid/COPY/eval-plan-qual/index paths, checkpoint/restore/tail filtering, marker preservation, and the runtime midpoint split gate remain for later slices.
+This is not the complete Task 5 data path. xid/COPY/eval-plan-qual/index paths, checkpoint/restore/tail filtering, marker preservation, and the runtime midpoint split gate remain for later slices.
+
+## UPDATE DELETE slice
+
+Cross-bucket hash-key UPDATE now stages two bucket-distinct timestamp operations in one transaction: a delete tombstone in the old bucket and the replacement value in the new bucket. Same-rowid sidecar and prewrite reservation keys include the bucket only for hash writes, so old/new operations cannot collide while bucketless sharded keys remain byte-identical. DELETE derives and resolves the exact catalog hash bucket.
+
+The production SQL regression moves a row across buckets, proves exactly one visible result, proves every physical row is `HashPrimaryVersion`, proves the old bucket is a committed delete, then deletes the moved row and proves the new bucket is a committed delete with no visible row.
+
+Verification for commit `59092d16`:
+
+- `cargo test -p crabka-pgexec --test transactions --no-fail-fast`: 38 passed.
+- `cargo test -p crabka-pgexec timestamp_txn --lib --no-fail-fast`: 21 passed.
+- `cargo check -p crabka-pgexec --all-targets`: passed.
+- Changed-file `git diff --check`: passed.
+
+COPY remains separate: both session COPY entry points currently reject sharded tables before the xid-only COPY executor.
