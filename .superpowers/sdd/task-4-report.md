@@ -156,3 +156,46 @@ Status: OWNER_AND_GATEWAY_EXECUTION_COMPLETE; SQL_DISPATCH_PENDING.
 - The 1 MiB bounded frame remains stricter than aggregate row-count limits, so large broadcast/result payloads still require future paging/streaming work.
 - The preserved dirty `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` were not staged, reverted, or included in the feature commit.
 - The full gres-ranges all-target test retains the same unrelated process-test failure already documented by the GROUP BY slice; focused join tests, all library tests, and all-target compilation are green.
+
+## Join SQL dispatch completion
+
+Status: COMPLETE_WITH_DOCUMENTED_FALLBACKS.
+
+### RED/GREEN evidence
+
+- RED: `cargo test -p crabka-pgexec --test distributed_pushdown sql_inner_equi_join_dispatches_selected_broadcast_request --no-run` failed with `E0599` because `SqlEngine` had no injected join statistics/configuration seam (exit 101).
+- RED: after adding the seam, `cargo test -p crabka-pgexec --test distributed_pushdown sql_inner_equi_join_dispatches_selected_broadcast_request -- --nocapture` reached SQL execution and failed because the recorded join request count was zero (exit 101).
+- GREEN: the same focused broadcast SQL dispatch test passed 1/1 after executor dispatch was added.
+- RED: `cargo test -p crabka-pgexec --test distributed_pushdown sql_copartitioned_join_requires_the_join_key_to_match_hash_metadata -- --nocapture` failed because the request selected `CoPartitioned` instead of `Gather` (exit 101).
+- GREEN: the same exact-key eligibility test passed 1/1 after requiring each SQL join key to equal its table's exact hash-sharding column list.
+- GREEN: `cargo test -p crabka-pgexec --test distributed_pushdown -- --nocapture` passed 42/42 before the final exact-key regression was added; the final all-target run passed the resulting 43-test distributed-pushdown target.
+- GREEN: `cargo test -p crabka-pgexec --lib join_protocol_tests -- --nocapture` passed 5/5.
+- GREEN: `cargo test -p crabka-gres-ranges registry_range_scanner_executes_sql_join_end_to_end --lib -- --nocapture` passed 1/1 and exercised SQL planning through `RegistryRangeScanner` into production owner/gateway join execution.
+- RED/GREEN compatibility correction: the first `cargo test -p crabka-pgexec --all-targets -q` exposed an existing `pg_catalog` join as `42P01`, because the new pre-pass attempted a physical-table lookup before virtual-catalog fallback. `cargo test -p crabka-pgexec --test introspection pg_catalog_exposes_user_tables_columns_types_and_indexes -- --nocapture` reproduced it; treating non-physical relations as ineligible restored that test and the full all-target gate.
+
+### Commit and implementation
+
+- `fa55a0ac feat(gres): dispatch distributed SQL joins`.
+- `SqlEngine` owns an `Arc<dyn Stats>` and `PlannerConfig`, clones them into sessions, and binds them to the statement-scoped timestamp scanner. There is no mutable global planner state.
+- Eligible plans are direct, physical, sharded, non-foreign inner joins with one qualified column-equality `ON` predicate. The executor calls the existing validated planner, maps its answer to `BroadcastLeft`, `BroadcastRight`, `CoPartitioned`, or `Gather`, constructs a snapshot-bound `JoinRangeRequest`, and calls the production `RangeScanner::join` seam.
+- The timestamp decorator overwrites the request's read timestamp and optional own transaction start timestamp with the single statement read point before dispatch. Local/global MVCC snapshots and own xid are copied exactly into the owned request.
+- Co-partitioned dispatch requires both the prior identical hash layout/co-location proof and exact equality between the SQL join keys and each side's hash column list. Any missing proof selects gather.
+- Successful RPC rows decode into the original `[left..., right...]` relation scope, so the unchanged executor retains residual `WHERE`, SQL projection, aliases, ordering, aggregate, and error behavior. NULL join keys remain non-matching in the shared owner primitive.
+- Unsupported join kinds, USING/NATURAL/cross joins, derived/CTE/view/virtual relations, unqualified or non-simple predicates, mixed sharded/unsharded joins, and scanner `Unsupported` responses use the existing recursive local join deterministically. Non-`Unsupported` remote errors remain errors.
+- Golden SQL tests inspect the actual `JoinRangeRequest` for every selected strategy. A deterministic 64-row-per-side generated corpus, including NULL keys and duplicate matches, compares whole SQL results for broadcast, co-partitioned, and gather against the unoptimized local engine.
+
+### Final Task 4 verification checklist
+
+- `cargo test -p crabka-pgexec --all-targets -q`: passed every pgexec target (347 library tests and all integration targets, including the final 43-test distributed pushdown target).
+- `cargo check -p crabka-gres-ranges --all-targets`: passed.
+- `cargo test -p crabka-gres-ranges --lib -q`: passed 165/165.
+- `./scripts/gres-sharded-conformance.sh`: passed all four legs and wrote `target/gres-sharded-conformance-artifacts/sharded-conformance.json`.
+- Changed-file `rustfmt --edition 2024 --check` and `git diff --check`: passed; stable rustfmt emitted only the repository's existing nightly-option warnings.
+- Predicate/projection/scalar and grouped partial aggregation/top-K pushdowns, statistics selection, typed bounded join protocol, owner/gateway join execution, and SQL strategy dispatch are now implemented and covered.
+- `.superpowers/sdd/progress.md` and `crates/gres-ranges/src/control.rs` remained unstaged and were excluded from the feature and report commits.
+
+### Remaining concerns
+
+- SQL distributed dispatch intentionally recognizes only the narrow directly-provable equi-join shape described above; all other correct SQL shapes retain the local executor rather than risking semantic drift.
+- Join RPC framing remains capped at 1 MiB. Large broadcast inputs/results fail through the existing bounded framing/row validation path; paging/streaming remains future work.
+- The previously documented dirty `control.rs` process-test concern is unchanged. The affected library and all-target compile gates, production registry SQL integration, and authoritative sharding conformance gate are green.
