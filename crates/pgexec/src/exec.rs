@@ -3035,7 +3035,8 @@ fn try_distributed_inner_equi_join(
     else {
         return Ok(None);
     };
-    let planned = range_scanner.join_strategy(&left_table, &right_table);
+    let planned =
+        range_scanner.join_strategy_for_keys(&left_table, &right_table, &[left_key], &[right_key]);
     let strategy = match planned {
         crate::plan_dist::JoinStrategy::Broadcast { small_table_id }
             if small_table_id == u64::from(left_table.id) =>

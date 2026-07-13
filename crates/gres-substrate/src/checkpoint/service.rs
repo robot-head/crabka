@@ -198,6 +198,9 @@ pub struct CheckpointRun {
 }
 
 /// Shared latest verified checkpoint metadata consumed by SQL planning.
+/// Checkpoint manifests are range/tenant scoped and expose no per-table byte
+/// breakdown, so `total_bytes` is intentionally a conservative global upper
+/// bound returned for every table in that range.
 /// Publication clones the authoritative metadata only after verification; reads
 /// are synchronous and never retain the lock across an await point.
 #[derive(Debug, Default)]
@@ -809,7 +812,7 @@ mod tests {
     #[tokio::test]
     async fn verified_checkpoint_publication_changes_next_join_plan() {
         use crabka_pgexec::plan_dist::{
-            CombinedStats, JoinInputs, JoinStrategy, PlannerConfig, plan_join,
+            CombinedStats, JoinInputs, JoinStrategy, PlannerConfig, plan_join, plan_join_for_tables,
         };
 
         let concrete_kv = Arc::new(MemKv::default());
@@ -876,6 +879,71 @@ mod tests {
         assert!(
             crabka_pgexec::plan_dist::Stats::estimated_bytes(restarted.planner_stats().as_ref(), 1)
                 .is_some_and(|bytes| bytes > 64)
+        );
+        assert_eq!(
+            crabka_pgexec::plan_dist::Stats::estimated_bytes(restarted.planner_stats().as_ref(), 1,),
+            crabka_pgexec::plan_dist::Stats::estimated_bytes(
+                restarted.planner_stats().as_ref(),
+                999,
+            ),
+            "range checkpoint bytes are a global upper bound, not per-table metadata",
+        );
+
+        let table = |id, name: &str, group: &str| crabka_pgcatalog::Table {
+            id,
+            name: name.into(),
+            columns: vec![crabka_pgcatalog::Column::new(
+                "id",
+                crabka_pgtypes::ColumnType::Int4,
+            )],
+            sharded: true,
+            sharding: Some(crabka_pgcatalog::ShardingStrategy::Hash(
+                crabka_pgcatalog::HashSharding {
+                    columns: vec!["id".into()],
+                    buckets: 4,
+                    co_location_group: Some(group.into()),
+                },
+            )),
+            foreign: None,
+        };
+        let left = table(1, "left", "pair");
+        let right = table(2, "right", "pair");
+        let no_broadcast = PlannerConfig {
+            broadcast_threshold_bytes: 0,
+        };
+        assert_eq!(
+            plan_join_for_tables(
+                engine.join_stats().as_ref(),
+                no_broadcast,
+                &left,
+                &right,
+                &[0],
+                &[0],
+            ),
+            JoinStrategy::CoPartitioned,
+        );
+        let wrong_group = table(2, "right", "other");
+        assert_eq!(
+            plan_join_for_tables(
+                engine.join_stats().as_ref(),
+                no_broadcast,
+                &left,
+                &wrong_group,
+                &[0],
+                &[0],
+            ),
+            JoinStrategy::Gather,
+        );
+        assert_eq!(
+            plan_join_for_tables(
+                engine.join_stats().as_ref(),
+                no_broadcast,
+                &left,
+                &right,
+                &[1],
+                &[1],
+            ),
+            JoinStrategy::Gather,
         );
     }
 

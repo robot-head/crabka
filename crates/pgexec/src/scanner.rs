@@ -627,6 +627,16 @@ pub trait RangeScanner: Send + Sync + 'static {
         crate::plan_dist::JoinStrategy::Gather
     }
 
+    fn join_strategy_for_keys(
+        &self,
+        left: &crabka_pgcatalog::Table,
+        right: &crabka_pgcatalog::Table,
+        _left_keys: &[usize],
+        _right_keys: &[usize],
+    ) -> crate::plan_dist::JoinStrategy {
+        self.join_strategy(left, right)
+    }
+
     /// Open a pull-based cursor. The default is a compatibility adapter which
     /// materializes through [`RangeScanner::scan`].
     fn scan_cursor<'a>(
@@ -960,7 +970,27 @@ impl RangeScanner for TimestampedRangeScanner {
         let Some((stats, config)) = &self.join_planner else {
             return crate::plan_dist::JoinStrategy::Gather;
         };
-        crate::plan_dist::plan_join_for_tables(stats.as_ref(), *config, left, right)
+        crate::plan_dist::plan_join_for_tables(stats.as_ref(), *config, left, right, &[], &[])
+    }
+
+    fn join_strategy_for_keys(
+        &self,
+        left: &crabka_pgcatalog::Table,
+        right: &crabka_pgcatalog::Table,
+        left_keys: &[usize],
+        right_keys: &[usize],
+    ) -> crate::plan_dist::JoinStrategy {
+        let Some((stats, config)) = &self.join_planner else {
+            return crate::plan_dist::JoinStrategy::Gather;
+        };
+        crate::plan_dist::plan_join_for_tables(
+            stats.as_ref(),
+            *config,
+            left,
+            right,
+            left_keys,
+            right_keys,
+        )
     }
 }
 

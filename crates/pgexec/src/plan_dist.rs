@@ -223,6 +223,8 @@ pub fn plan_join_for_tables(
     config: PlannerConfig,
     left: &Table,
     right: &Table,
+    left_keys: &[usize],
+    right_keys: &[usize],
 ) -> JoinStrategy {
     let selected = plan_join(
         stats,
@@ -232,10 +234,13 @@ pub fn plan_join_for_tables(
             right_table_id: u64::from(right.id),
         },
     );
-    if selected == JoinStrategy::CoPartitioned && !tables_are_co_partitioned(left, right) {
-        JoinStrategy::Gather
+    if let JoinStrategy::Broadcast { .. } = selected {
+        return selected;
+    }
+    if co_partitioned_join_keys_match(left, right, left_keys, right_keys) {
+        JoinStrategy::CoPartitioned
     } else {
-        selected
+        JoinStrategy::Gather
     }
 }
 

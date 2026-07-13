@@ -65,6 +65,8 @@ fn selected_copartitioned_join_falls_back_when_catalog_proof_is_missing() {
             },
             &left,
             &right,
+            &[0],
+            &[0],
         ),
         JoinStrategy::Gather
     );
@@ -1068,6 +1070,31 @@ async fn sql_copartitioned_join_requires_the_join_key_to_match_hash_metadata() {
     assert_eq!(scanner.joins()[0].strategy, JoinExecutionStrategy::Gather);
 }
 
+#[tokio::test]
+async fn sql_copartitioned_join_uses_catalog_proof_when_stats_only_estimate_sizes() {
+    let scanner = Arc::new(RecordingScanner::default());
+    let mut engine = SqlEngine::new();
+    engine.set_range_scanner(scanner.clone());
+    engine.set_join_stats(Arc::new(SequenceCounters::new([(1, 100), (2, 100)])));
+    engine.set_join_strategy_config(PlannerConfig {
+        broadcast_threshold_bytes: 0,
+    });
+    engine
+        .connect()
+        .simple_query(
+            "CREATE TABLE left_t (id int4, value text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             CREATE TABLE right_t (id int4, value text) SHARDED BY HASH (id) BUCKETS 4 COLOCATED WITH pair; \
+             SELECT * FROM left_t JOIN right_t ON left_t.id = right_t.id",
+        )
+        .await
+        .expect("unsupported scanner falls back locally");
+
+    assert_eq!(
+        scanner.joins()[0].strategy,
+        JoinExecutionStrategy::CoPartitioned
+    );
+}
+
 #[derive(Debug)]
 struct MaterializedJoinScanner {
     left: Vec<crabka_pgexec::JoinRow>,
@@ -1147,7 +1174,7 @@ async fn sql_join_strategies_dispatch_and_match_local_whole_rows() {
                 co_partitioned: false,
             },
             0,
-            JoinExecutionStrategy::Gather,
+            JoinExecutionStrategy::CoPartitioned,
         ),
     ];
     for (stats, threshold, expected_strategy) in cases {
