@@ -1317,6 +1317,72 @@ pub(crate) fn execute_copy_write(
     Ok((command(&format!("COPY {n_rows}")), ops))
 }
 
+pub(crate) fn execute_timestamp_copy_write(
+    catalog_kv: &dyn Kv,
+    kv: &dyn Kv,
+    seq: &crate::seq::SequenceManager,
+    copy: &crabka_pgparser::ast::CopyStmt,
+    rows: &[Vec<Option<String>>],
+    ctx: &crate::clock::EvalCtx,
+) -> Result<TimestampWritePlan, ExecError> {
+    let table = crabka_pgcatalog::get_table(catalog_kv, &copy.table)?;
+    if !table_uses_global_visibility(&table) {
+        return Err(ExecError::Unsupported(
+            "timestamp COPY requires a sharded table".into(),
+        ));
+    }
+    let indexes = crabka_pgcatalog::list_table_indexes(catalog_kv, &table.name)?;
+    if indexes.iter().any(|index| {
+        index.placement == crabka_pgcatalog::IndexPlacement::Local
+            || (index.placement == crabka_pgcatalog::IndexPlacement::Global && index.unique)
+    }) {
+        return Err(ExecError::Unsupported(
+            "COPY index maintenance for sharded tables is not supported".into(),
+        ));
+    }
+    let global_indexes = indexes
+        .iter()
+        .filter(|index| index.placement == crabka_pgcatalog::IndexPlacement::Global)
+        .collect::<Vec<_>>();
+    let target_idx = resolve_targets(&table, &copy.columns)?;
+    let n_rows = rows.len() as u64;
+    if n_rows == 0 {
+        return Ok(TimestampWritePlan {
+            result: command("COPY 0"),
+            writes: Vec::new(),
+            commit_ops: Vec::new(),
+        });
+    }
+    let (start, seq_op) = seq.alloc(kv, table.id, n_rows)?;
+    let mut writes = Vec::with_capacity(rows.len());
+    for (rowid, row_values) in (start..).zip(rows.iter()) {
+        if row_values.len() != target_idx.len() {
+            return Err(ExecError::TypeMismatch(
+                "COPY row has the wrong number of fields for the target columns".into(),
+            ));
+        }
+        let row = build_copy_row(&table, &target_idx, row_values, ctx)?;
+        writes.push(TimestampWrite {
+            table_id: table.id,
+            bucket: hash_bucket_for_row(&table, &row)?,
+            rowid,
+            global_index_intents: global_index_intents_for_row(
+                &table,
+                &global_indexes,
+                rowid,
+                &row,
+            )?,
+            row,
+            delete: false,
+        });
+    }
+    Ok(TimestampWritePlan {
+        result: command(&format!("COPY {n_rows}")),
+        writes,
+        commit_ops: seq_op.into_iter().collect(),
+    })
+}
+
 fn writable_local_indexes(
     catalog_kv: &dyn Kv,
     table: &Table,
