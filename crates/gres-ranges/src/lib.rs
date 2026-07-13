@@ -31,8 +31,8 @@ pub use self::{
         TxnRpcError,
     },
     forward::{
-        ForwardError, HostedRangeService, RangeScanService, RegistryRangeScanner,
-        RegistryRemoteForward, RemoteForward,
+        DurableRecordInspector, ForwardError, HostedRangeService, RangeScanService,
+        RegistryRangeScanner, RegistryRemoteForward, RemoteForward,
     },
     ids::{KeyHash, MapEpoch, RangeId, ShardId, TableId, TenantName},
     lifecycle::{
@@ -72,7 +72,9 @@ pub use self::{
         TableTransferRequest, ValidatedSplitTransferPlan,
     },
     transport::{
-        FramedTcpClient, JoinRangeReq, JoinRangeResp, JoinRangeRow, RangeControlOperation,
+        DurableInspectProvenance, DurableRecord, FramedTcpClient, InspectDurableRecordsReq,
+        InspectDurableRecordsResp, JoinRangeReq, JoinRangeResp, JoinRangeRow,
+        MAX_DURABLE_INSPECT_BYTES, MAX_DURABLE_INSPECT_RECORDS, RangeControlOperation,
         RangeControlReq, RangeControlResp, RangeRequest, RangeResponse, RangeService,
         RangeTlsClientConfig, RangeTlsServerConfig, ScanCursorReq, ScanCursorResp, TransportError,
         TsoReq, TsoResp, TxnReq, TxnResp, WireErrorKind, WireInDoubtMarker, WireJoinKind,

@@ -553,6 +553,26 @@ struct KafkaCommittedWalReader {
     security: Option<ClientSecurity>,
 }
 
+/// Construct the private Kafka reader for one already-sampled committed end.
+pub(crate) async fn live_committed_reader(
+    config: &LiveRecoveryConfig,
+    sample_offset: i64,
+) -> Result<impl CommittedWalReader + use<>, SubstrateError> {
+    let bootstrap_addrs = parse_bootstrap_addrs(&config.bootstrap)?;
+    let topic = config.wal_topic();
+    let mut admin = AdminClient::connect_secured(&bootstrap_addrs, config.security.clone())
+        .await
+        .map_err(|error| SubstrateError::Unavailable(format!("admin connect: {error}")))?;
+    let topic_uuid = resolve_topic_uuid(&mut admin, &topic).await?;
+    Ok(KafkaCommittedWalReader::new(
+        bootstrap_addrs,
+        topic,
+        topic_uuid,
+        sample_offset,
+        config.security.clone(),
+    ))
+}
+
 impl KafkaCommittedWalReader {
     fn new(
         bootstrap_addrs: Vec<String>,

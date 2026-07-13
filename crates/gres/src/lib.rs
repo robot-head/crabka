@@ -3230,7 +3230,8 @@ async fn open_live_multirange_tenant(
     let mut controlled_service =
         crabka_gres_ranges::HostedRangeService::new(gateway.hosted_range_engines())
             .with_timestamp_primary_aliases(timestamp_primary_aliases.clone())
-            .with_range_control(control);
+            .with_range_control(control)
+            .with_durable_inspector(transfer.clone());
     if let Some((registry, client)) = gateway.timestamp_primary_remote() {
         controlled_service = controlled_service.with_timestamp_primary_remote(registry, client);
     }
@@ -3365,6 +3366,301 @@ struct LiveMultiRangeTransfer {
     prepare_fault: std::sync::atomic::AtomicU8,
     activation_fault: std::sync::atomic::AtomicU8,
     irreversible_activations: IrreversibleActivations,
+}
+
+struct LiveRangeGenerationWitness<'a> {
+    transfer: &'a LiveMultiRangeTransfer,
+    range_id: crabka_gres_ranges::RangeId,
+}
+
+#[async_trait::async_trait]
+impl crabka_gres_substrate::GenerationWitness for LiveRangeGenerationWitness<'_> {
+    async fn current_generation(&self) -> Result<u64, crabka_gres_substrate::SubstrateError> {
+        self.transfer
+            .range(self.range_id)
+            .map(|resources| resources.generation.0)
+            .map_err(|error| crabka_gres_substrate::SubstrateError::Unavailable(error.to_string()))
+    }
+}
+
+#[async_trait::async_trait]
+impl crabka_gres_ranges::DurableRecordInspector for LiveMultiRangeTransfer {
+    async fn inspect(
+        &self,
+        request: crabka_gres_ranges::InspectDurableRecordsReq,
+    ) -> Result<crabka_gres_ranges::InspectDurableRecordsResp, String> {
+        use crabka_pgkv::key::KeyClass;
+        use sha2::{Digest, Sha256};
+
+        if request.tenant != self.config.tenant {
+            return Err("durable inspection tenant does not match this compute".into());
+        }
+        let resources = self
+            .range(request.range_id)
+            .map_err(|error| error.to_string())?;
+        if resources.generation.0 != request.generation {
+            return Err("durable inspection generation is fenced".into());
+        }
+        let prefix = crabka_pgkv::key::table_prefix(request.table_id);
+        let mut prefix_end = prefix.clone();
+        let last = prefix_end.last_mut().expect("table prefix is non-empty");
+        *last = last
+            .checked_add(1)
+            .ok_or_else(|| "table prefix has no successor".to_string())?;
+        if request.start_key >= request.end_key
+            || !request.start_key.starts_with(&prefix)
+            || !(request.end_key.starts_with(&prefix) || request.end_key == prefix_end)
+        {
+            return Err(
+                "durable inspection interval is outside the table primary namespace".into(),
+            );
+        }
+        let digest_request = crabka_gres_ranges::InspectDurableRecordsReq {
+            cursor: None,
+            ..request.clone()
+        };
+        let digest = Sha256::digest(
+            serde_json::to_vec(&digest_request)
+                .map_err(|error| format!("encode inspection digest: {error}"))?,
+        );
+        let digest = digest
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect::<String>();
+        let cursor = request
+            .cursor
+            .as_deref()
+            .map(|cursor| decode_durable_cursor(cursor, &digest))
+            .transpose()?;
+        if let (Some(requested), Some((cursor_sample, _))) =
+            (request.snapshot_offset, cursor.as_ref())
+            && requested != *cursor_sample
+        {
+            return Err("durable inspection cursor snapshot does not match request".into());
+        }
+        let snapshot_offset = request
+            .snapshot_offset
+            .or_else(|| cursor.as_ref().map(|(sample, _)| *sample));
+        let witness = LiveRangeGenerationWitness {
+            transfer: self,
+            range_id: request.range_id,
+        };
+        let fold = tokio::time::timeout(std::time::Duration::from_secs(4), async {
+            let projection = crabka_gres_substrate::FoldProjection::All;
+            let limits = crabka_gres_substrate::FoldLimits {
+                max_records: 1_000_000,
+                max_bytes: 256 * 1024 * 1024,
+            };
+            match snapshot_offset {
+                Some(sample) => {
+                    crabka_gres_substrate::committed_fold_snapshot_live_at(
+                        &resources.recovery_config,
+                        sample,
+                        &witness,
+                        projection,
+                        limits,
+                    )
+                    .await
+                }
+                None => {
+                    crabka_gres_substrate::committed_fold_snapshot_live(
+                        &resources.recovery_config,
+                        &witness,
+                        projection,
+                        limits,
+                    )
+                    .await
+                }
+            }
+        })
+        .await
+        .map_err(|_| "durable inspection deadline exceeded".to_string())?
+        .map_err(|error| format!("durable committed fold: {error}"))?;
+
+        let mut selected = Vec::new();
+        for ((key, value), source) in fold.records.into_iter().zip(fold.record_sources) {
+            let include = match crabka_pgkv::key::classify_key(&key) {
+                KeyClass::PrimaryRow { table_id, .. }
+                | KeyClass::PrimaryVersion { table_id, .. }
+                | KeyClass::HashPrimaryRow { table_id, .. }
+                | KeyClass::HashPrimaryVersion { table_id, .. } => {
+                    table_id == request.table_id
+                        && request.start_key <= key
+                        && key < request.end_key
+                }
+                KeyClass::System => timestamp_metadata_in_interval(
+                    &key,
+                    &value,
+                    request.table_id,
+                    &request.start_key,
+                    &request.end_key,
+                )?,
+                KeyClass::SecondaryIndex { table_id, .. } if table_id == request.table_id => {
+                    return Err("durable inspection encountered a non-primary table record".into());
+                }
+                KeyClass::Unknown if key.starts_with(&prefix) => {
+                    return Err("durable inspection encountered a malformed table record".into());
+                }
+                _ => false,
+            };
+            if include && cursor.as_ref().is_none_or(|(_, after)| key > *after) {
+                selected.push(crabka_gres_ranges::DurableRecord {
+                    key,
+                    value,
+                    source_offset: Some(source.offset),
+                    source_revision: Some(source.journal_seq),
+                });
+            }
+        }
+        selected.sort_by(|left, right| left.key.cmp(&right.key));
+        let mut records = Vec::new();
+        let mut bytes = 0_u32;
+        let mut more = false;
+        for record in selected {
+            let record_bytes = u32::try_from(record.key.len() + record.value.len())
+                .map_err(|_| "durable record size overflow".to_string())?;
+            if records.len() >= request.max_records as usize
+                || bytes
+                    .checked_add(record_bytes)
+                    .is_none_or(|next| next > request.max_bytes)
+            {
+                more = true;
+                break;
+            }
+            bytes += record_bytes;
+            records.push(record);
+        }
+        if records.is_empty() && more {
+            return Err("one durable record exceeds the requested byte cap".into());
+        }
+        let next_cursor = more.then(|| {
+            encode_durable_cursor(
+                &digest,
+                fold.sample_offset,
+                &records.last().expect("non-empty limited page").key,
+            )
+        });
+        let checkpoint = fold.checkpoint.as_ref();
+        Ok(crabka_gres_ranges::InspectDurableRecordsResp {
+            records,
+            next_cursor,
+            provenance: crabka_gres_ranges::DurableInspectProvenance {
+                sample_offset: fold.sample_offset,
+                wal_generation: fold.provenance.wal_generation,
+                replay_start_offset: fold.provenance.replay_start_offset,
+                replayed_records: fold.provenance.replayed_records,
+                checkpoint_pairs: fold.provenance.checkpoint_pairs,
+                checkpoint_manifest_key: checkpoint.map(|value| value.manifest_key.clone()),
+                checkpoint_covered_offset: checkpoint.map(|value| value.covered_offset),
+                checkpoint_journal_seq: checkpoint.map(|value| value.journal_seq),
+            },
+        })
+    }
+}
+
+fn encode_durable_cursor(digest: &str, sample: i64, key: &[u8]) -> String {
+    use std::fmt::Write as _;
+    let mut cursor = String::with_capacity(digest.len() + 1 + key.len() * 2);
+    cursor.push_str(digest);
+    cursor.push(':');
+    write!(&mut cursor, "{sample}:").expect("write to string");
+    for byte in key {
+        write!(&mut cursor, "{byte:02x}").expect("write to string");
+    }
+    cursor
+}
+
+fn decode_durable_cursor(cursor: &str, digest: &str) -> Result<(i64, Vec<u8>), String> {
+    let Some((found, rest)) = cursor.split_once(':') else {
+        return Err("malformed durable inspection cursor".into());
+    };
+    let Some((sample, raw)) = rest.split_once(':') else {
+        return Err("malformed durable inspection cursor".into());
+    };
+    if found != digest || raw.len() % 2 != 0 {
+        return Err("durable inspection cursor does not match request".into());
+    }
+    let key = (0..raw.len())
+        .step_by(2)
+        .map(|offset| {
+            u8::from_str_radix(&raw[offset..offset + 2], 16)
+                .map_err(|_| "malformed durable inspection cursor".into())
+        })
+        .collect::<Result<Vec<_>, String>>()?;
+    Ok((
+        sample
+            .parse()
+            .map_err(|_| "malformed durable inspection cursor".to_string())?,
+        key,
+    ))
+}
+
+fn timestamp_metadata_in_interval(
+    key: &[u8],
+    value: &[u8],
+    table_id: u32,
+    start: &[u8],
+    end: &[u8],
+) -> Result<bool, String> {
+    const INTENT: &[u8] = b"\0\0\0\0meta/ts_intent/";
+    const PREWRITE: &[u8] = b"\0\0\0\0meta/ts_prewrite/";
+    const DESCRIPTOR: &[u8] = b"\0\0\0\0meta/ts_txn/";
+    if let Some(tail) = key
+        .strip_prefix(INTENT)
+        .or_else(|| key.strip_prefix(PREWRITE))
+    {
+        let suffix = usize::from(key.starts_with(INTENT)) * 8;
+        if !matches!(tail.len(), 12 | 17 | 20 | 25) || tail.len() < suffix + 12 {
+            return Err("malformed timestamp metadata key".into());
+        }
+        let row = &tail[..tail.len() - suffix];
+        let found_table = u32::from_be_bytes(row[..4].try_into().expect("4 bytes"));
+        if found_table != table_id {
+            return Ok(false);
+        }
+        let physical = match row.len() {
+            12 => crabka_pgkv::key::row_key(
+                table_id,
+                u64::from_be_bytes(row[4..12].try_into().expect("8 bytes")),
+            ),
+            17 if row[4] == 1 => crabka_pgkv::key::hash_row_key(
+                table_id,
+                u32::from_be_bytes(row[5..9].try_into().expect("4 bytes")),
+                u64::from_be_bytes(row[9..17].try_into().expect("8 bytes")),
+            ),
+            _ => return Err("malformed timestamp metadata bucket tag".into()),
+        };
+        return Ok(start <= physical.as_slice() && physical.as_slice() < end);
+    }
+    if let Some(raw) = key.strip_prefix(DESCRIPTOR) {
+        if raw.len() != 8 {
+            return Err("malformed timestamp descriptor key".into());
+        }
+        let start_ts = crabka_pgexec::TimestampTransactionId::new(u64::from_be_bytes(
+            raw.try_into().expect("8 bytes"),
+        ))
+        .map_err(|error| format!("malformed timestamp descriptor timestamp: {error}"))?;
+        let descriptor = crabka_pgexec::decode_timestamp_txn_descriptor_value(start_ts, value)
+            .map_err(|error| format!("malformed timestamp descriptor: {error}"))?;
+        let mut matches = false;
+        let mut crosses_table = false;
+        for operation in descriptor.operations {
+            if operation.table_id != table_id {
+                crosses_table = true;
+                continue;
+            }
+            let physical = operation.bucket.map_or_else(
+                || crabka_pgkv::key::row_key(table_id, operation.rowid),
+                |bucket| crabka_pgkv::key::hash_row_key(table_id, bucket, operation.rowid),
+            );
+            matches |= start <= physical.as_slice() && physical.as_slice() < end;
+        }
+        if matches && crosses_table {
+            return Err("timestamp descriptor crosses requested table namespace".into());
+        }
+        return Ok(matches);
+    }
+    Ok(false)
 }
 
 impl LiveMultiRangeTransfer {
@@ -6680,5 +6976,27 @@ mod tests {
                 crabka_gres_ranges::transport::RangeControlResp::Status { serving: true, .. }
             )
         ));
+    }
+
+    #[test]
+    fn durable_inspection_cursor_binds_digest_sample_and_exact_key() {
+        let key = crabka_pgkv::key::hash_row_key(50, 15, u64::MAX);
+        let cursor = encode_durable_cursor("digest-a", 42, &key);
+        assert_eq!(
+            decode_durable_cursor(&cursor, "digest-a").expect("cursor"),
+            (42, key)
+        );
+        assert!(decode_durable_cursor(&cursor, "digest-b").is_err());
+        assert!(decode_durable_cursor("digest-a:42:0", "digest-a").is_err());
+    }
+
+    #[test]
+    fn durable_inspection_rejects_malformed_timestamp_metadata() {
+        let start = crabka_pgkv::key::row_key(50, 0);
+        let end = crabka_pgkv::key::row_key(50, 10);
+        assert!(
+            timestamp_metadata_in_interval(b"\0\0\0\0meta/ts_intent/bad", b"", 50, &start, &end,)
+                .is_err()
+        );
     }
 }

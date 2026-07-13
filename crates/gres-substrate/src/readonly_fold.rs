@@ -9,7 +9,7 @@ use crate::{
     checkpoint::{CheckpointStore, Manifest, ManifestValidation, ckpt_prefix},
     follower::CommittedEndSampler,
     frame::BARRIER_SEQ,
-    recovery::CommittedWalReader,
+    recovery::{CommittedWalReader, LiveRecoveryConfig, live_committed_reader},
 };
 
 /// Read-only witness for the range WAL generation.
@@ -81,7 +81,15 @@ pub struct CommittedFoldSnapshot {
     pub sample_offset: i64,
     pub checkpoint: Option<FoldCheckpointIdentity>,
     pub records: Vec<(Vec<u8>, Vec<u8>)>,
+    /// Last durable source for each record, aligned with `records`.
+    pub record_sources: Vec<FoldRecordSource>,
     pub provenance: FoldProvenance,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FoldRecordSource {
+    pub offset: i64,
+    pub journal_seq: u64,
 }
 
 /// Dependencies and constraints for [`committed_fold_snapshot`].
@@ -111,6 +119,18 @@ pub async fn committed_fold_snapshot(
             let expected = identity.journal_seq;
             (Some(identity), pairs, start, expected)
         });
+    let mut record_sources = BTreeMap::new();
+    if let Some(identity) = &checkpoint {
+        for (key, _) in kv.scan_prefix(b"")? {
+            record_sources.insert(
+                key,
+                FoldRecordSource {
+                    offset: identity.covered_offset,
+                    journal_seq: identity.journal_seq,
+                },
+            );
+        }
+    }
     if checkpoint.is_none() && log_start > 0 {
         return Err(SubstrateError::PrunedHistory {
             log_start,
@@ -172,6 +192,22 @@ pub async fn committed_fold_snapshot(
             }
             let ops = projected_ops(&frame.ops, &request.projection);
             kv.write_batch(&ops)?;
+            for op in &ops {
+                match op {
+                    WriteOp::Put { key, .. } | WriteOp::ConditionalPut { key, .. } => {
+                        record_sources.insert(
+                            key.clone(),
+                            FoldRecordSource {
+                                offset: item.offset,
+                                journal_seq: frame.journal_seq,
+                            },
+                        );
+                    }
+                    WriteOp::Delete { key } => {
+                        record_sources.remove(key);
+                    }
+                }
+            }
             expected = expected
                 .checked_add(1)
                 .ok_or_else(|| SubstrateError::Frame("journal sequence exhausted".into()))?;
@@ -185,10 +221,19 @@ pub async fn committed_fold_snapshot(
         FoldProjection::Interval { start, end } => kv.scan_range(start, end)?,
     };
     enforce_limits(&records, request.limits)?;
+    let sources = records
+        .iter()
+        .map(|(key, _)| {
+            record_sources.get(key).copied().ok_or_else(|| {
+                SubstrateError::Unavailable("committed fold record has no durable source".into())
+            })
+        })
+        .collect::<Result<Vec<_>, _>>()?;
     Ok(CommittedFoldSnapshot {
         sample_offset: sample,
         checkpoint,
         records,
+        record_sources: sources,
         provenance: FoldProvenance {
             wal_generation: request.generation,
             replay_start_offset: replay_start,
@@ -196,6 +241,65 @@ pub async fn committed_fold_snapshot(
             checkpoint_pairs,
         },
     })
+}
+
+/// Build an authoritative fold from the live Kafka/checkpoint configuration.
+///
+/// The committed end is sampled exactly once and the private Kafka reader is
+/// bounded to that sample, so callers cannot accidentally combine identities
+/// from different durable instants.
+pub async fn committed_fold_snapshot_live(
+    config: &LiveRecoveryConfig,
+    generation_witness: &dyn GenerationWitness,
+    projection: FoldProjection,
+    limits: FoldLimits,
+) -> Result<CommittedFoldSnapshot, SubstrateError> {
+    let sampler = crate::LiveCommittedEndSampler::new(config.clone());
+    let sample = sampler.committed_end_after_call_begins().await?;
+    committed_fold_snapshot_live_at(config, sample, generation_witness, projection, limits).await
+}
+
+/// Build a live fold at an already selected committed snapshot offset.
+pub async fn committed_fold_snapshot_live_at(
+    config: &LiveRecoveryConfig,
+    sample: i64,
+    generation_witness: &dyn GenerationWitness,
+    projection: FoldProjection,
+    limits: FoldLimits,
+) -> Result<CommittedFoldSnapshot, SubstrateError> {
+    let current = crate::LiveCommittedEndSampler::new(config.clone())
+        .committed_end_after_call_begins()
+        .await?;
+    if sample > current {
+        return Err(SubstrateError::Unavailable(format!(
+            "requested fold snapshot {sample} is newer than committed end {current}"
+        )));
+    }
+    let wal = live_committed_reader(config, sample).await?;
+    let fixed = FixedEndSampler(sample);
+    committed_fold_snapshot(&FoldSnapshotRequest {
+        tenant: config.tenant.as_str(),
+        generation: config.wal_generation,
+        checkpoints: config
+            .checkpoints
+            .as_ref()
+            .map(|value| value.store.as_ref()),
+        wal: &wal,
+        sampler: &fixed,
+        generation_witness,
+        projection,
+        limits,
+    })
+    .await
+}
+
+struct FixedEndSampler(i64);
+
+#[async_trait::async_trait]
+impl CommittedEndSampler for FixedEndSampler {
+    async fn committed_end_after_call_begins(&self) -> Result<i64, SubstrateError> {
+        Ok(self.0)
+    }
 }
 
 async fn assert_generation(request: &FoldSnapshotRequest<'_>) -> Result<(), SubstrateError> {
@@ -393,6 +497,19 @@ mod tests {
             ]
         );
         assert_eq!(result.provenance.replayed_records, 2);
+        assert_eq!(
+            result.record_sources,
+            vec![
+                FoldRecordSource {
+                    offset: 1,
+                    journal_seq: 1
+                },
+                FoldRecordSource {
+                    offset: 2,
+                    journal_seq: 2
+                },
+            ]
+        );
         assert!(result.checkpoint.is_some());
     }
 

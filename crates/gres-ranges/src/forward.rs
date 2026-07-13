@@ -23,14 +23,15 @@ use crate::{
     RangeId,
     registry::{RangeRegistry, RegistryError},
     transport::{
-        ExplicitGateReq, ExplicitGateResp, FramedTcpClient, JoinRangeReq, JoinRangeResp,
-        JoinRangeRow, RangeRequest, RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq,
-        ScanCursorResp, ScanRangeReq, ScanRangeResp, ScanRangeRow, TransportError,
-        WireColumnPredicate, WireDatum, WireErrorKind, WireExecuteOutcome, WireGlobalStatus,
-        WireJoinKind, WireJoinStrategy, WireJoinTableInterval, WirePartialAggregateFunction,
-        WirePartialAggregateSpec, WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown,
-        WireQueryResult, WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot,
-        WireSqlResultChunk, WireTopKColumn, WireTopKSpec, write_frame,
+        ExplicitGateReq, ExplicitGateResp, FramedTcpClient, InspectDurableRecordsReq,
+        InspectDurableRecordsResp, JoinRangeReq, JoinRangeResp, JoinRangeRow, RangeRequest,
+        RangeResponse, RangeService, ResolveTxnResp, ScanCursorReq, ScanCursorResp, ScanRangeReq,
+        ScanRangeResp, ScanRangeRow, TransportError, WireColumnPredicate, WireDatum, WireErrorKind,
+        WireExecuteOutcome, WireGlobalStatus, WireJoinKind, WireJoinStrategy,
+        WireJoinTableInterval, WirePartialAggregateFunction, WirePartialAggregateSpec,
+        WirePredicateOp, WirePredicatePushdown, WireProjectionPushdown, WireQueryResult,
+        WireRowInterval, WireSessionOperation, WireSessionResult, WireSnapshot, WireSqlResultChunk,
+        WireTopKColumn, WireTopKSpec, write_frame,
     },
     tso::{GrantLease, TsoError, TsoRpc},
 };
@@ -70,6 +71,15 @@ pub struct HostedRangeService {
     sessions: tokio::sync::Mutex<BTreeMap<u64, HostedSession>>,
     explicit_gate: Arc<ExplicitGate>,
     range_control: Option<Arc<crate::control::GenerationFencedRangeControl>>,
+    durable_inspector: Option<Arc<dyn DurableRecordInspector>>,
+}
+
+#[async_trait]
+pub trait DurableRecordInspector: Send + Sync + 'static {
+    async fn inspect(
+        &self,
+        request: InspectDurableRecordsReq,
+    ) -> Result<InspectDurableRecordsResp, String>;
 }
 
 struct ExplicitGate {
@@ -113,7 +123,14 @@ impl HostedRangeService {
                 next_token: AtomicU64::new(1),
             }),
             range_control: None,
+            durable_inspector: None,
         }
+    }
+
+    #[must_use]
+    pub fn with_durable_inspector(mut self, inspector: Arc<dyn DurableRecordInspector>) -> Self {
+        self.durable_inspector = Some(inspector);
+        self
     }
 
     /// Attach authenticated split-orchestration control for this compute generation.
@@ -327,6 +344,31 @@ impl HostedRangeService {
 impl RangeService for HostedRangeService {
     async fn handle(&self, request: RangeRequest) -> RangeResponse {
         match request {
+            RangeRequest::InspectDurableRecords(request) => {
+                if request.max_records == 0
+                    || request.max_records > crate::transport::MAX_DURABLE_INSPECT_RECORDS
+                    || request.max_bytes == 0
+                    || request.max_bytes > crate::transport::MAX_DURABLE_INSPECT_BYTES
+                {
+                    return RangeResponse::Error {
+                        error: crate::transport::WireErrorKind::Failed,
+                        message: "durable inspection limits are outside the allowed bounds".into(),
+                    };
+                }
+                let Some(inspector) = &self.durable_inspector else {
+                    return RangeResponse::Error {
+                        error: crate::transport::WireErrorKind::Failed,
+                        message: "durable inspection is unavailable".into(),
+                    };
+                };
+                match inspector.inspect(request).await {
+                    Ok(response) => RangeResponse::InspectDurableRecords(response),
+                    Err(message) => RangeResponse::Error {
+                        error: crate::transport::WireErrorKind::Failed,
+                        message,
+                    },
+                }
+            }
             RangeRequest::Control(request) => {
                 let Some(control) = &self.range_control else {
                     return RangeResponse::Control(crate::transport::RangeControlResp::Rejected {
@@ -3916,6 +3958,7 @@ mod tests {
                 | RangeRequest::TimestampRecover(_)
                 | RangeRequest::TimestampPrimaryRecover(_)
                 | RangeRequest::TimestampPrimaryInspect(_)
+                | RangeRequest::InspectDurableRecords(_)
                 | RangeRequest::Control(_) => RangeResponse::Error {
                     error: WireErrorKind::Failed,
                     message: "wrong rpc".to_string(),
