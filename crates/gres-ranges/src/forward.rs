@@ -42,6 +42,7 @@ pub(crate) fn canonicalize_timestamp_operations(
         (
             operation.range_id,
             operation.table_id,
+            operation.bucket,
             operation.rowid,
             operation.delete,
         )
@@ -305,6 +306,7 @@ impl HostedRangeService {
                         .map(|operation| crabka_pgexec::TimestampTxnOperation {
                             range_id: operation.range_id,
                             table_id: operation.table_id,
+                            bucket: operation.bucket,
                             rowid: operation.rowid,
                             delete: operation.delete,
                         })
@@ -593,7 +595,7 @@ impl RangeService for HostedRangeService {
                 let writes = request
                     .writes
                     .into_iter()
-                    .map(decode_timestamp_write)
+                    .map(|write| decode_timestamp_write(engine, write))
                     .collect::<Result<Vec<_>, _>>();
                 let writes = match writes {
                     Ok(value) => value,
@@ -662,10 +664,21 @@ impl RangeService for HostedRangeService {
                     .map(|op| crabka_pgexec::TimestampTxnOperation {
                         range_id: op.range_id,
                         table_id: op.table_id,
+                        bucket: op.bucket,
                         rowid: op.rowid,
                         delete: op.delete,
                     })
                     .collect::<Vec<_>>();
+                if let Some(error) = operations.iter().find_map(|operation| {
+                    engine
+                        .validate_timestamp_bucket(operation.table_id, operation.bucket)
+                        .err()
+                }) {
+                    return RangeResponse::SqlError {
+                        code: "22023".into(),
+                        message: error.into_pg().message,
+                    };
+                }
                 let result = if request.add_participant {
                     engine
                         .add_timestamp_transaction_participant(
@@ -726,7 +739,7 @@ impl RangeService for HostedRangeService {
                 let writes = request
                     .writes
                     .into_iter()
-                    .map(decode_timestamp_write)
+                    .map(|write| decode_timestamp_write(engine, write))
                     .collect::<Result<Vec<_>, _>>();
                 let writes = match writes {
                     Ok(value) => value,
@@ -776,6 +789,7 @@ impl RangeService for HostedRangeService {
                         .map(|write| crabka_pgexec::TimestampTxnOperation {
                             range_id: request.range_id.as_u32(),
                             table_id: write.table_id,
+                            bucket: write.bucket,
                             rowid: write.rowid,
                             delete: write.delete,
                         })
@@ -861,10 +875,21 @@ impl RangeService for HostedRangeService {
                     .map(|op| crabka_pgexec::TimestampTxnOperation {
                         range_id: op.range_id,
                         table_id: op.table_id,
+                        bucket: op.bucket,
                         rowid: op.rowid,
                         delete: op.delete,
                     })
                     .collect::<Vec<_>>();
+                if let Some(error) = asserted_operations.iter().find_map(|operation| {
+                    engine
+                        .validate_timestamp_bucket(operation.table_id, operation.bucket)
+                        .err()
+                }) {
+                    return RangeResponse::SqlError {
+                        code: "22023".into(),
+                        message: error.into_pg().message,
+                    };
+                }
                 let (decision, primary_operations) =
                     match self.authenticated_primary_outcome(identity).await {
                         Ok(outcome) => outcome,
@@ -981,6 +1006,7 @@ impl RangeService for HostedRangeService {
                     .map(|operation| crate::transport::WireTimestampOperation {
                         range_id: operation.range_id,
                         table_id: operation.table_id,
+                        bucket: operation.bucket,
                         rowid: operation.rowid,
                         delete: operation.delete,
                     })
@@ -1059,6 +1085,7 @@ impl RangeService for HostedRangeService {
                         .map(|operation| crate::transport::WireTimestampOperation {
                             range_id: operation.range_id,
                             table_id: operation.table_id,
+                            bucket: operation.bucket,
                             rowid: operation.rowid,
                             delete: operation.delete,
                         })
@@ -1808,6 +1835,7 @@ impl RemoteRangeSession {
                         .map(|operation| crabka_pgexec::TimestampTxnOperation {
                             range_id: operation.range_id,
                             table_id: operation.table_id,
+                            bucket: operation.bucket,
                             rowid: operation.rowid,
                             delete: operation.delete,
                         })
@@ -1946,6 +1974,7 @@ impl RemoteRangeSession {
                 .map(|write| crate::transport::WireTimestampOperation {
                     range_id: participant_range.as_u32(),
                     table_id: write.table_id,
+                    bucket: write.bucket,
                     rowid: write.rowid,
                     delete: write.delete,
                 })
@@ -3542,10 +3571,15 @@ fn decode_timestamp_identity(
 }
 
 fn decode_timestamp_write(
+    engine: &crabka_pgexec::SqlEngine,
     write: crate::transport::WireTimestampWrite,
 ) -> Result<crabka_pgexec::TimestampWrite, String> {
+    engine
+        .validate_timestamp_bucket(write.table_id, write.bucket)
+        .map_err(|error| error.into_pg().message)?;
     Ok(crabka_pgexec::TimestampWrite {
         table_id: write.table_id,
+        bucket: write.bucket,
         rowid: write.rowid,
         row: write.row.into_iter().map(decode_datum).collect(),
         delete: write.delete,
@@ -3568,6 +3602,7 @@ fn encode_timestamp_write(
 ) -> Result<crate::transport::WireTimestampWrite, PgError> {
     Ok(crate::transport::WireTimestampWrite {
         table_id: write.table_id,
+        bucket: write.bucket,
         rowid: write.rowid,
         row: write
             .row
@@ -5379,6 +5414,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 2,
             row: vec![crabka_pgtypes::Datum::Int4(2)],
             delete: false,
@@ -5430,6 +5466,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 2,
             row: vec![crabka_pgtypes::Datum::Int4(2)],
             delete: false,
@@ -5485,6 +5522,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 2,
             row: vec![crabka_pgtypes::Datum::Int4(2)],
             delete: false,
@@ -5493,6 +5531,7 @@ mod tests {
         let operation = crabka_pgexec::TimestampTxnOperation {
             range_id: 2,
             table_id: write.table_id,
+            bucket: write.bucket,
             rowid: write.rowid,
             delete: false,
         };
@@ -5535,6 +5574,7 @@ mod tests {
                     operations: vec![crate::transport::WireTimestampOperation {
                         range_id: 2,
                         table_id: 10,
+                        bucket: None,
                         rowid: 999,
                         delete: true,
                     }],
@@ -5560,6 +5600,7 @@ mod tests {
         };
         let write = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: None,
             rowid: 2,
             row: vec![crabka_pgtypes::Datum::Int4(2)],
             delete: false,
@@ -5601,6 +5642,7 @@ mod tests {
                     operations: vec![crate::transport::WireTimestampOperation {
                         range_id: 2,
                         table_id: write.table_id,
+                        bucket: write.bucket,
                         rowid: 999,
                         delete: true,
                     }],
@@ -5621,7 +5663,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_secondary_resolves_valid_operations_in_descending_row_order() {
+    async fn remote_secondary_resolves_hash_bucket_operations_in_descending_row_order() {
         let primary = crabka_pgexec::SqlEngine::new();
         let secondary = crabka_pgexec::SqlEngine::new();
         let start_ts = crabka_pgexec::TimestampTransactionId::new(600).expect("start timestamp");
@@ -5632,12 +5674,14 @@ mod tests {
         };
         let low = crabka_pgexec::TimestampWrite {
             table_id: 10,
+            bucket: Some(0),
             rowid: 2,
             row: vec![crabka_pgtypes::Datum::Int4(2)],
             delete: false,
             global_index_intents: Vec::new(),
         };
         let high = crabka_pgexec::TimestampWrite {
+            bucket: Some(15),
             rowid: 3,
             row: vec![crabka_pgtypes::Datum::Int4(3)],
             ..low.clone()
@@ -5647,6 +5691,7 @@ mod tests {
             .map(|write| crabka_pgexec::TimestampTxnOperation {
                 range_id: 2,
                 table_id: write.table_id,
+                bucket: write.bucket,
                 rowid: write.rowid,
                 delete: write.delete,
             })
@@ -5739,8 +5784,19 @@ mod tests {
         write: &crabka_pgexec::TimestampWrite,
         start_ts: crabka_pgexec::TimestampTransactionId,
     ) -> crabka_pgmvcc::version::TsVersionState {
-        let key =
-            crabka_pgmvcc::version::version_key_ts(write.table_id, write.rowid, start_ts.get());
+        let key = match write.bucket {
+            Some(bucket) => crabka_pgmvcc::version::hash_version_key_ts(
+                write.table_id,
+                bucket,
+                write.rowid,
+                start_ts.get(),
+            ),
+            None => crabka_pgmvcc::version::version_key_ts(
+                write.table_id,
+                write.rowid,
+                start_ts.get(),
+            ),
+        };
         let bytes = engine
             .kv_handle()
             .get(&key)
@@ -5756,6 +5812,7 @@ mod tests {
         let operation = crabka_pgexec::TimestampTxnOperation {
             range_id: 2,
             table_id: 10,
+            bucket: None,
             rowid: 3,
             delete: false,
         };
