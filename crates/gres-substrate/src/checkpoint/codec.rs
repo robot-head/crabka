@@ -96,7 +96,11 @@ impl CheckpointFilter {
         let mut selected_operations = Vec::new();
         for mut operation in descriptor.operations {
             let logical = self.logical_table(operation.table_id)?;
-            if self.contains_range_key(RangeKey::new(logical, operation.rowid)) {
+            let key = operation.bucket.map_or_else(
+                || RangeKey::new(logical, operation.rowid),
+                |bucket| RangeKey::hash(logical, bucket, operation.rowid),
+            );
+            if self.contains_range_key(key) {
                 selected_source_ranges.insert(operation.range_id);
                 operation.range_id = target_range;
                 selected_operations.push(operation);
@@ -198,26 +202,43 @@ impl CheckpointFilter {
     ) -> Result<Option<RangeKey>, SubstrateError> {
         const INTENT: &[u8] = b"\0\0\0\0meta/ts_intent/";
         const PREWRITE: &[u8] = b"\0\0\0\0meta/ts_prewrite/";
-        let tail = if let Some(tail) = bytes.strip_prefix(INTENT) {
-            if tail.len() != 20 {
+        let (tail, suffix_len) = if let Some(tail) = bytes.strip_prefix(INTENT) {
+            if !matches!(tail.len(), 20 | 25) {
                 return Err(SubstrateError::Checkpoint(
                     "malformed timestamp intent metadata key".into(),
                 ));
             }
-            &tail[..12]
+            (tail, 8)
         } else if let Some(tail) = bytes.strip_prefix(PREWRITE) {
-            if tail.len() != 12 {
+            if !matches!(tail.len(), 12 | 17) {
                 return Err(SubstrateError::Checkpoint(
                     "malformed timestamp prewrite metadata key".into(),
                 ));
             }
-            tail
+            (tail, 0)
         } else {
             return Ok(None);
         };
         let physical = u32::from_be_bytes(tail[..4].try_into().expect("4-byte table id"));
-        let rowid = u64::from_be_bytes(tail[4..12].try_into().expect("8-byte row id"));
-        Ok(Some(RangeKey::new(self.logical_table(physical)?, rowid)))
+        let logical = self.logical_table(physical)?;
+        let row_tail = &tail[..tail.len() - suffix_len];
+        let key = match row_tail.len() {
+            12 => {
+                let rowid = u64::from_be_bytes(row_tail[4..12].try_into().expect("8-byte row id"));
+                RangeKey::new(logical, rowid)
+            }
+            17 if row_tail[4] == 1 => {
+                let bucket = u32::from_be_bytes(row_tail[5..9].try_into().expect("4-byte bucket"));
+                let rowid = u64::from_be_bytes(row_tail[9..17].try_into().expect("8-byte row id"));
+                RangeKey::hash(logical, bucket, rowid)
+            }
+            _ => {
+                return Err(SubstrateError::Checkpoint(
+                    "malformed timestamp metadata bucket tag".into(),
+                ));
+            }
+        };
+        Ok(Some(key))
     }
 
     fn timestamp_descriptor_belongs(
@@ -233,7 +254,11 @@ impl CheckpointFilter {
             .operations
             .into_iter()
             .try_fold(false, |owned, operation| {
-                let key = RangeKey::new(self.logical_table(operation.table_id)?, operation.rowid);
+                let logical = self.logical_table(operation.table_id)?;
+                let key = operation.bucket.map_or_else(
+                    || RangeKey::new(logical, operation.rowid),
+                    |bucket| RangeKey::hash(logical, bucket, operation.rowid),
+                );
                 Ok(owned || self.contains_range_key(key))
             })
     }
@@ -385,6 +410,7 @@ mod tests {
             .map(|(table_id, rowid)| crabka_pgexec::TimestampTxnOperation {
                 range_id: 1,
                 table_id: *table_id,
+                bucket: None,
                 rowid: *rowid,
                 delete: false,
             })
@@ -438,6 +464,44 @@ mod tests {
             .expect("right intent");
         assert_eq!(&rewritten[16..20], &3_u32.to_be_bytes());
         assert_eq!(&rewritten[20..24], &3_u32.to_be_bytes());
+    }
+
+    #[test]
+    fn hash_timestamp_metadata_routes_by_embedded_bucket_and_preserves_bucket_zero() {
+        let mapping = BTreeMap::from([(TableId::new(1), TableId::new(10))]);
+        let left = CheckpointFilter::new(
+            RangeKey::hash(TableId::new(10), 0, 0),
+            Some(RangeKey::hash(TableId::new(10), 8, 0)),
+        )
+        .unwrap()
+        .with_physical_to_logical(mapping.clone())
+        .with_target_range(crabka_gres_ranges::RangeId::new(2));
+        let right = CheckpointFilter::new(RangeKey::hash(TableId::new(10), 8, 0), None)
+            .unwrap()
+            .with_physical_to_logical(mapping)
+            .with_target_range(crabka_gres_ranges::RangeId::new(3));
+
+        let metadata_key = |prefix: &[u8], bucket: u32, start_ts: Option<u64>| {
+            let mut key = prefix.to_vec();
+            key.extend_from_slice(&1_u32.to_be_bytes());
+            key.push(1);
+            key.extend_from_slice(&bucket.to_be_bytes());
+            key.extend_from_slice(&7_u64.to_be_bytes());
+            if let Some(start_ts) = start_ts {
+                key.extend_from_slice(&start_ts.to_be_bytes());
+            }
+            key
+        };
+        let mut identity = vec![0; 24];
+        identity[16..20].copy_from_slice(&1_u32.to_be_bytes());
+        identity[20..24].copy_from_slice(&1_u32.to_be_bytes());
+        let bucket_zero = metadata_key(b"\0\0\0\0meta/ts_intent/", 0, Some(9));
+        let bucket_fifteen = metadata_key(b"\0\0\0\0meta/ts_prewrite/", 15, None);
+
+        assert!(left.contains_pair(&bucket_zero, Some(&identity)).unwrap());
+        assert!(!right.contains_pair(&bucket_zero, Some(&identity)).unwrap());
+        assert!(!left.contains_pair(&bucket_fifteen, Some(&[])).unwrap());
+        assert!(right.contains_pair(&bucket_fifteen, Some(&[])).unwrap());
     }
 
     #[test]

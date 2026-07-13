@@ -253,6 +253,7 @@ mod tests {
                 &[crabka_pgexec::TimestampTxnOperation {
                     range_id: 1,
                     table_id: 1,
+                    bucket: None,
                     rowid: 1,
                     delete: false,
                 }],
