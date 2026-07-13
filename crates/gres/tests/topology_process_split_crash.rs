@@ -567,6 +567,51 @@ enum Family {
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum SplitWorkload {
+    Ordinary,
+    Hash,
+}
+
+#[derive(Debug, Eq, PartialEq)]
+struct SplitWorkloadContract {
+    point: SplitKillPoint,
+    family: Family,
+    pause_bound_ms: u128,
+    operation_bound_ms: u128,
+    restart_hosted_ranges: &'static str,
+    split_args: Vec<&'static str>,
+    schema_version: u32,
+    physical_key_class: &'static str,
+}
+
+impl SplitWorkload {
+    fn parse(value: Option<&str>) -> Result<Self, String> {
+        match value {
+            None | Some("ordinary") => Ok(Self::Ordinary),
+            Some("hash") => Ok(Self::Hash),
+            Some(value) => Err(format!("unknown Split workload {value}")),
+        }
+    }
+
+    fn contract(self, point: SplitKillPoint) -> SplitWorkloadContract {
+        let (split_args, schema_version, physical_key_class) = match self {
+            Self::Ordinary => (vec!["51", "16"], 2, "primary_version"),
+            Self::Hash => (vec!["50", "0", "--bucket", "8"], 3, "hash_primary_version"),
+        };
+        SplitWorkloadContract {
+            point,
+            family: point.family(),
+            pause_bound_ms: point.pause_bound_ms(),
+            operation_bound_ms: point.operation_bound_ms(),
+            restart_hosted_ranges: point.restart_hosted_ranges(),
+            split_args,
+            schema_version,
+            physical_key_class,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum SplitKillPoint {
     InitiatedBeforeRunningCas,
     CheckpointReceiptBeforeJournalCas,
@@ -1456,23 +1501,56 @@ fn marker_rollback_accepts_only_the_post_publication_stale_session_rejection() {
     ));
 }
 
+#[test]
+fn ordinary_and_hash_workloads_share_kill_mapping_but_not_physical_contract() {
+    for point in SplitKillPoint::ALL {
+        let ordinary = SplitWorkload::Ordinary.contract(point);
+        let hash = SplitWorkload::Hash.contract(point);
+        assert_eq!(ordinary.point, hash.point);
+        assert_eq!(ordinary.family, hash.family);
+        assert_eq!(ordinary.pause_bound_ms, hash.pause_bound_ms);
+        assert_eq!(ordinary.operation_bound_ms, hash.operation_bound_ms);
+        assert_eq!(ordinary.restart_hosted_ranges, hash.restart_hosted_ranges);
+        assert_eq!(ordinary.split_args, ["51", "16"]);
+        assert_eq!(hash.split_args, ["50", "0", "--bucket", "8"]);
+        assert_ne!(ordinary.schema_version, hash.schema_version);
+        assert_eq!(ordinary.physical_key_class, "primary_version");
+        assert_eq!(hash.physical_key_class, "hash_primary_version");
+    }
+}
+
+#[test]
+fn split_workload_mode_is_explicit_and_fail_closed() {
+    assert_eq!(SplitWorkload::parse(None), Ok(SplitWorkload::Ordinary));
+    assert_eq!(
+        SplitWorkload::parse(Some("ordinary")),
+        Ok(SplitWorkload::Ordinary)
+    );
+    assert_eq!(SplitWorkload::parse(Some("hash")), Ok(SplitWorkload::Hash));
+    assert!(SplitWorkload::parse(Some("")).is_err());
+    assert!(SplitWorkload::parse(Some("HASH")).is_err());
+}
+
 fn cli_binary() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("../..")
         .join("target/debug/crabka")
 }
 
-async fn initiate_split(system: &ProcessHarness, operation_id: &str) {
+async fn initiate_split(system: &ProcessHarness, operation_id: &str, workload: SplitWorkload) {
     let [left, right] = system.split_successor_endpoints();
-    let output = tokio::process::Command::new(cli_binary())
+    let contract = workload.contract(SplitKillPoint::InitiatedBeforeRunningCas);
+    let mut command = tokio::process::Command::new(cli_binary());
+    command.args([
+        "gres",
+        "split",
+        "--bootstrap",
+        system.bootstrap(),
+        system.tenant(),
+    ]);
+    command.args(contract.split_args);
+    let output = command
         .args([
-            "gres",
-            "split",
-            "--bootstrap",
-            system.bootstrap(),
-            system.tenant(),
-            "51",
-            "16",
             "--operation-id",
             operation_id,
             "--left-range-id",
@@ -2553,7 +2631,7 @@ async fn reconcile_rpc_with_diagnostics(
     }
 }
 
-async fn run_real_split_crash_case(point: SplitKillPoint) {
+async fn run_real_split_crash_case(point: SplitKillPoint, workload_mode: SplitWorkload) {
     use std::os::unix::process::CommandExt as _;
 
     assert!(
@@ -2609,9 +2687,22 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
     for table in 1..50 {
         ddl.push_str(&format!("CREATE TABLE filler_{table} (id int4);"));
     }
-    ddl.push_str("CREATE TABLE live_ledger50 (id int4, seq int4, checksum text NOT NULL) SHARDED;");
-    ddl.push_str("CREATE TABLE live_ledger51 (id int4, seq int4, checksum text NOT NULL) SHARDED;");
-    ddl.push_str("CREATE TABLE split_marker52 (id int4, checksum text NOT NULL) SHARDED;");
+    match workload_mode {
+        SplitWorkload::Ordinary => {
+            ddl.push_str(
+                "CREATE TABLE live_ledger50 (id int4, seq int4, checksum text NOT NULL) SHARDED;",
+            );
+            ddl.push_str(
+                "CREATE TABLE live_ledger51 (id int4, seq int4, checksum text NOT NULL) SHARDED;",
+            );
+            ddl.push_str("CREATE TABLE split_marker52 (id int4, checksum text NOT NULL) SHARDED;");
+        }
+        SplitWorkload::Hash => {
+            ddl.push_str("CREATE TABLE live_ledger50 (id int4, seq int4, checksum text NOT NULL) SHARDED BY HASH (id) BUCKETS 16;");
+            ddl.push_str("CREATE TABLE live_ledger51 (id int4, seq int4, checksum text NOT NULL) SHARDED BY HASH (id) BUCKETS 16;");
+            ddl.push_str("CREATE TABLE split_marker52 (id int4, checksum text NOT NULL) SHARDED BY HASH (id) BUCKETS 16;");
+        }
+    }
     let sql = system.sql(0).await;
     sql.simple_query(&ddl)
         .await
@@ -2694,7 +2785,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
     assert_static_ids_match_physical_rows(&system, 50).await;
     assert_static_ids_match_physical_rows(&system, 51).await;
     assert_pre_split_seed_rows_on_predecessor(&system).await;
-    initiate_split(&system, &operation_id).await;
+    initiate_split(&system, &operation_id, workload_mode).await;
 
     let tenant_name = TenantName::try_from(system.tenant()).expect("tenant name");
     let mut registry = Registry::connect(system.bootstrap())
@@ -2914,10 +3005,7 @@ async fn run_real_split_crash_case(point: SplitKillPoint) {
                     retirement.operation_id == operation_id
                         && retirement.phase == RangeRetirementPhase::Parked
                 });
-                if should_yield_parked_observation(
-                    parked_observation_yielded,
-                    sidecar_parked,
-                ) {
+                if should_yield_parked_observation(parked_observation_yielded, sidecar_parked) {
                     parked_observation_yielded = true;
                     continue;
                 }
@@ -3001,5 +3089,7 @@ async fn real_process_split_crash_anywhere() {
         &std::env::var("CRABKA_G8_SPLIT_KILL_POINT").expect("Split kill point"),
     )
     .expect("known Split kill point");
-    run_real_split_crash_case(point).await;
+    let workload = SplitWorkload::parse(std::env::var("CRABKA_G8_SPLIT_WORKLOAD").ok().as_deref())
+        .expect("known Split workload");
+    run_real_split_crash_case(point, workload).await;
 }
