@@ -1841,6 +1841,10 @@ fn timestamp_intent_identity_key(
 ) -> Vec<u8> {
     let mut key = b"\0\0\0\0meta/ts_intent/".to_vec();
     key.extend_from_slice(&write.table_id.to_be_bytes());
+    if let Some(bucket) = write.bucket {
+        key.push(1);
+        key.extend_from_slice(&bucket.to_be_bytes());
+    }
     key.extend_from_slice(&write.rowid.to_be_bytes());
     key.extend_from_slice(&start_ts.get().to_be_bytes());
     key
@@ -1879,13 +1883,13 @@ fn scan_terminal_ops(
 }
 
 fn timestamp_prewrite_reservation_key(write: &TimestampWrite) -> Vec<u8> {
-    timestamp_prewrite_reservation_key_for(write.table_id, write.rowid)
-}
-
-fn timestamp_prewrite_reservation_key_for(table_id: u32, rowid: u64) -> Vec<u8> {
     let mut key = b"\0\0\0\0meta/ts_prewrite/".to_vec();
-    key.extend_from_slice(&table_id.to_be_bytes());
-    key.extend_from_slice(&rowid.to_be_bytes());
+    key.extend_from_slice(&write.table_id.to_be_bytes());
+    if let Some(bucket) = write.bucket {
+        key.push(1);
+        key.extend_from_slice(&bucket.to_be_bytes());
+    }
+    key.extend_from_slice(&write.rowid.to_be_bytes());
     key
 }
 

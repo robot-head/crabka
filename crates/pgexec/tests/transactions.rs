@@ -267,6 +267,71 @@ async fn hash_sharded_sql_insert_uses_bucket_leading_timestamp_version_key() {
 }
 
 #[tokio::test]
+async fn hash_sharded_update_moves_one_row_without_orphaning_old_bucket() {
+    let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+    let mut engine = SqlEngine::with_kv(Arc::clone(&kv)).expect("engine");
+    engine.init_gtm_coordinator().expect("gtm");
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE TABLE hmove (id int4, value text) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+    session
+        .simple_query("INSERT INTO hmove VALUES (42, 'before')")
+        .await
+        .expect("insert");
+    let old_bucket = crabka_pgkv::key::hash_bucket(&42_i32.to_be_bytes(), 16).expect("bucket");
+    let new_id = (43_i32..100)
+        .find(|id| crabka_pgkv::key::hash_bucket(&id.to_be_bytes(), 16) != Some(old_bucket))
+        .expect("different bucket id");
+
+    session
+        .simple_query(&format!(
+            "UPDATE hmove SET id = {new_id}, value = 'after' WHERE id = 42"
+        ))
+        .await
+        .expect("cross-bucket update");
+
+    let result = rows(&mut session, "SELECT id, value FROM hmove").await;
+    assert_eq!(result.len(), 1);
+    assert_eq!(text(result[0][0].as_ref()), Some(new_id.to_string()));
+    assert_eq!(text(result[0][1].as_ref()).as_deref(), Some("after"));
+    let table = crabka_pgcatalog::get_table(kv.as_ref(), "hmove").expect("table");
+    let keys = kv
+        .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+        .expect("physical rows");
+    assert!(keys.iter().all(|(key, _)| matches!(
+        crabka_pgkv::key::classify_key(key),
+        crabka_pgkv::key::KeyClass::HashPrimaryVersion { .. }
+    )));
+    assert!(keys.iter().any(|(key, value)| {
+        matches!(
+            crabka_pgkv::key::classify_key(key),
+            crabka_pgkv::key::KeyClass::HashPrimaryVersion { bucket, .. } if bucket == old_bucket
+        ) && matches!(
+            crabka_pgmvcc::version::decode_ts_tuple(value)
+                .expect("tuple")
+                .state,
+            crabka_pgmvcc::version::TsVersionState::Deleted { .. }
+        )
+    }));
+
+    session
+        .simple_query(&format!("DELETE FROM hmove WHERE id = {new_id}"))
+        .await
+        .expect("delete moved row");
+    assert!(rows(&mut session, "SELECT id FROM hmove").await.is_empty());
+    let new_bucket = crabka_pgkv::key::hash_bucket(&new_id.to_be_bytes(), 16).expect("bucket");
+    let versions = kv
+        .scan_prefix(&crabka_pgkv::key::hash_row_key(table.id, new_bucket, 1))
+        .expect("new bucket versions");
+    assert!(versions.iter().any(|(_, value)| matches!(
+        crabka_pgmvcc::version::decode_ts_tuple(value).expect("tuple").state,
+        crabka_pgmvcc::version::TsVersionState::Deleted { .. }
+    )));
+}
+
+#[tokio::test]
 async fn set_transaction_repeatable_read_fixes_timestamp_snapshot_before_first_read() {
     let mut engine = SqlEngine::new();
     engine.init_gtm_coordinator().expect("gtm");

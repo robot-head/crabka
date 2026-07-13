@@ -1818,9 +1818,20 @@ fn execute_timestamp_update(
             next[*index] = coerce(value, table.columns[*index].ty, ctx)?;
         }
         enforce_not_null(table, &next)?;
+        let old_bucket = hash_bucket_for_row(table, &row)?;
         let bucket = hash_bucket_for_row(table, &next)?;
         let global_index_intents =
             global_index_update_intents_for_row(table, global_indexes, rowid, &row, &next)?;
+        if old_bucket != bucket {
+            writes.push(TimestampWrite {
+                table_id: table.id,
+                bucket: old_bucket,
+                rowid,
+                global_index_intents: Vec::new(),
+                row: row.clone(),
+                delete: true,
+            });
+        }
         writes.push(TimestampWrite {
             table_id: table.id,
             bucket,
@@ -1831,7 +1842,10 @@ fn execute_timestamp_update(
         });
     }
     Ok(TimestampWritePlan {
-        result: command(&format!("UPDATE {}", writes.len())),
+        result: command(&format!(
+            "UPDATE {}",
+            writes.iter().filter(|write| !write.delete).count()
+        )),
         writes,
         commit_ops: Vec::new(),
     })
