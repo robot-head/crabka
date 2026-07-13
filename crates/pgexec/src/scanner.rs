@@ -127,6 +127,8 @@ pub enum ProjectionPushdown {
 pub struct PartialAggregateSpec {
     pub function: PartialAggregateFunction,
     pub column: Option<usize>,
+    /// Zero-based source columns forming the group key, in SQL key order.
+    pub group_by: Vec<usize>,
 }
 
 impl PartialAggregateSpec {
@@ -140,7 +142,17 @@ impl PartialAggregateSpec {
             "avg" => PartialAggregateFunction::AvgParts,
             _ => return None,
         };
-        Some(Self { function, column })
+        Some(Self {
+            function,
+            column,
+            group_by: Vec::new(),
+        })
+    }
+
+    #[must_use]
+    pub fn grouped_by(mut self, columns: Vec<usize>) -> Self {
+        self.group_by = columns;
+        self
     }
 }
 
@@ -594,7 +606,51 @@ fn apply_partial_aggregate_pushdown(
     }
     let rows = rows
         .into_iter()
-        .filter(|row| row_satisfies_predicate(&row.row, predicate));
+        .filter(|row| row_satisfies_predicate(&row.row, predicate))
+        .collect::<Vec<_>>();
+    if !spec.group_by.is_empty() {
+        let mut groups: Vec<(Vec<crabka_pgtypes::Datum>, Vec<ScannedRow>)> = Vec::new();
+        for row in rows {
+            let key = spec
+                .group_by
+                .iter()
+                .map(|&column| {
+                    row.row.get(column).cloned().ok_or_else(|| {
+                        ExecError::Unsupported(format!(
+                            "partial aggregate group column {column} is outside the scanned row"
+                        ))
+                    })
+                })
+                .collect::<Result<Vec<_>, _>>()?;
+            if let Some((_, members)) = groups
+                .iter_mut()
+                .find(|(candidate, _)| group_keys_equal(candidate, &key))
+            {
+                members.push(row);
+            } else {
+                groups.push((key, vec![row]));
+            }
+        }
+        let mut output = Vec::with_capacity(groups.len());
+        for (mut key, members) in groups {
+            let state = match spec.function {
+                PartialAggregateFunction::AvgParts => {
+                    compute_partial_avg_parts(members.into_iter(), spec.column)?
+                }
+                _ => vec![compute_partial_aggregate_value(members.into_iter(), spec)?],
+            };
+            key.extend(state);
+            output.push(ScannedRow {
+                rowid: 0,
+                xmin: 0,
+                row: key,
+            });
+        }
+        output
+            .sort_by(|left, right| compare_group_keys(&left.row, &right.row, spec.group_by.len()));
+        return Ok(output);
+    }
+    let rows = rows.into_iter();
     let row = match spec.function {
         PartialAggregateFunction::AvgParts => compute_partial_avg_parts(rows, spec.column)?,
         _ => vec![compute_partial_aggregate_value(rows, spec)?],
@@ -611,6 +667,56 @@ pub fn merge_partial_aggregate_rows(
     rows: Vec<ScannedRow>,
     spec: &PartialAggregateSpec,
 ) -> Result<Vec<ScannedRow>, ExecError> {
+    if !spec.group_by.is_empty() {
+        let key_len = spec.group_by.len();
+        let state_len = if spec.function == PartialAggregateFunction::AvgParts {
+            2
+        } else {
+            1
+        };
+        let mut groups: Vec<(Vec<crabka_pgtypes::Datum>, Vec<ScannedRow>)> = Vec::new();
+        for row in rows {
+            if row.row.len() != key_len + state_len {
+                return Err(ExecError::Unsupported(
+                    "remote grouped partial aggregate returned an invalid row shape".into(),
+                ));
+            }
+            let key = row.row[..key_len].to_vec();
+            let state = ScannedRow {
+                rowid: row.rowid,
+                xmin: row.xmin,
+                row: row.row[key_len..].to_vec(),
+            };
+            if let Some((_, partials)) = groups
+                .iter_mut()
+                .find(|(candidate, _)| group_keys_equal(candidate, &key))
+            {
+                partials.push(state);
+            } else {
+                groups.push((key, vec![state]));
+            }
+        }
+        let scalar_spec = PartialAggregateSpec {
+            function: spec.function,
+            column: Some(0),
+            group_by: Vec::new(),
+        };
+        let mut output = Vec::with_capacity(groups.len());
+        for (mut key, partials) in groups {
+            let merged_rows = merge_partial_aggregate_rows(partials, &scalar_spec)?;
+            let [merged] = merged_rows.as_slice() else {
+                unreachable!()
+            };
+            key.extend(merged.row.clone());
+            output.push(ScannedRow {
+                rowid: 0,
+                xmin: 0,
+                row: key,
+            });
+        }
+        output.sort_by(|left, right| compare_group_keys(&left.row, &right.row, key_len));
+        return Ok(output);
+    }
     if spec.function == PartialAggregateFunction::AvgParts {
         let parts = merge_partial_avg_parts(rows)?;
         return Ok(vec![ScannedRow {
@@ -645,6 +751,7 @@ pub fn merge_partial_aggregate_rows(
         | PartialAggregateFunction::Max => PartialAggregateSpec {
             function: spec.function,
             column: Some(0),
+            group_by: Vec::new(),
         },
         PartialAggregateFunction::AvgParts => unreachable!("AVG parts are handled above"),
     };
@@ -668,6 +775,21 @@ pub fn finalize_partial_aggregate_rows(
     if spec.function != PartialAggregateFunction::AvgParts {
         return Ok(merged);
     }
+    if !spec.group_by.is_empty() {
+        let key_len = spec.group_by.len();
+        return merged
+            .into_iter()
+            .map(|row| {
+                let mut output = row.row[..key_len].to_vec();
+                output.push(finalize_avg_parts(&row.row[key_len..])?);
+                Ok(ScannedRow {
+                    rowid: 0,
+                    xmin: 0,
+                    row: output,
+                })
+            })
+            .collect();
+    }
     let [row] = merged.as_slice() else {
         return Err(ExecError::Unsupported(
             "partial AVG pushdown returned no merged parts".into(),
@@ -678,6 +800,36 @@ pub fn finalize_partial_aggregate_rows(
         xmin: 0,
         row: vec![finalize_avg_parts(&row.row)?],
     }])
+}
+
+fn group_keys_equal(left: &[crabka_pgtypes::Datum], right: &[crabka_pgtypes::Datum]) -> bool {
+    left.len() == right.len()
+        && left.iter().zip(right).all(|(left, right)| {
+            (left.is_null() && right.is_null())
+                || crabka_pgtypes::ops::compare(left, right)
+                    .is_ok_and(|ordering| ordering == Some(Ordering::Equal))
+        })
+}
+
+fn compare_group_keys(
+    left: &[crabka_pgtypes::Datum],
+    right: &[crabka_pgtypes::Datum],
+    len: usize,
+) -> Ordering {
+    left.iter()
+        .take(len)
+        .zip(right.iter().take(len))
+        .map(|(left, right)| match (left.is_null(), right.is_null()) {
+            (true, true) => Ordering::Equal,
+            (true, false) => Ordering::Greater,
+            (false, true) => Ordering::Less,
+            (false, false) => crabka_pgtypes::ops::compare(left, right)
+                .ok()
+                .flatten()
+                .unwrap_or(Ordering::Equal),
+        })
+        .find(|ordering| *ordering != Ordering::Equal)
+        .unwrap_or(Ordering::Equal)
 }
 
 fn compute_partial_avg_parts(

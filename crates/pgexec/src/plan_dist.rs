@@ -61,7 +61,9 @@ pub struct PlannerConfig {
 
 impl Default for PlannerConfig {
     fn default() -> Self {
-        Self { broadcast_threshold_bytes: 64 * 1024 * 1024 }
+        Self {
+            broadcast_threshold_bytes: 64 * 1024 * 1024,
+        }
     }
 }
 
@@ -81,8 +83,14 @@ pub enum JoinStrategy {
 #[must_use]
 pub fn plan_join(stats: &dyn Stats, config: PlannerConfig, inputs: JoinInputs) -> JoinStrategy {
     let estimates = [
-        (inputs.left_table_id, stats.estimated_bytes(inputs.left_table_id)),
-        (inputs.right_table_id, stats.estimated_bytes(inputs.right_table_id)),
+        (
+            inputs.left_table_id,
+            stats.estimated_bytes(inputs.left_table_id),
+        ),
+        (
+            inputs.right_table_id,
+            stats.estimated_bytes(inputs.right_table_id),
+        ),
     ];
     if let Some((small_table_id, _)) = estimates
         .into_iter()
@@ -309,6 +317,37 @@ fn partial_aggregate_for_select_items(
     } else {
         None
     }
+}
+
+/// Recognize the narrow grouped-partial shape: group columns followed by one aggregate.
+pub fn grouped_partial_aggregate_for_select(
+    table: &Table,
+    projection: &[SelectItem],
+    group_by: &[Expr],
+) -> Option<PartialAggregateSpec> {
+    if group_by.is_empty() || projection.len() != group_by.len() + 1 {
+        return None;
+    }
+    let mut group_columns = Vec::with_capacity(group_by.len());
+    for (item, group) in projection.iter().zip(group_by) {
+        let Expr::Column { table: None, name } = group else {
+            return None;
+        };
+        let SelectItem::Expr { expr, .. } = item else {
+            return None;
+        };
+        if expr != group {
+            return None;
+        }
+        group_columns.push(
+            table
+                .columns
+                .iter()
+                .position(|column| column.name == *name)?,
+        );
+    }
+    let aggregate = partial_aggregate_for_select_items(table, &projection[group_by.len()..])?;
+    Some(aggregate.grouped_by(group_columns))
 }
 
 fn partial_aggregate_is_safe(table: &Table, spec: &PartialAggregateSpec) -> bool {

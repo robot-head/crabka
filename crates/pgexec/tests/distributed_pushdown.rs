@@ -34,12 +34,38 @@ impl Stats for FakeStats {
 
 #[test]
 fn join_strategy_golden_prefers_broadcast_then_copartitioned_then_gather() {
-    let config = PlannerConfig { broadcast_threshold_bytes: 64 };
-    let inputs = JoinInputs { left_table_id: 1, right_table_id: 2 };
+    let config = PlannerConfig {
+        broadcast_threshold_bytes: 64,
+    };
+    let inputs = JoinInputs {
+        left_table_id: 1,
+        right_table_id: 2,
+    };
     let cases = [
-        (FakeStats { left: 65, right: 12, co_partitioned: true }, JoinStrategy::Broadcast { small_table_id: 2 }),
-        (FakeStats { left: 100, right: 100, co_partitioned: true }, JoinStrategy::CoPartitioned),
-        (FakeStats { left: 100, right: 100, co_partitioned: false }, JoinStrategy::Gather),
+        (
+            FakeStats {
+                left: 65,
+                right: 12,
+                co_partitioned: true,
+            },
+            JoinStrategy::Broadcast { small_table_id: 2 },
+        ),
+        (
+            FakeStats {
+                left: 100,
+                right: 100,
+                co_partitioned: true,
+            },
+            JoinStrategy::CoPartitioned,
+        ),
+        (
+            FakeStats {
+                left: 100,
+                right: 100,
+                co_partitioned: false,
+            },
+            JoinStrategy::Gather,
+        ),
     ];
     for (stats, expected) in cases {
         assert_eq!(plan_join(&stats, config, inputs), expected);
@@ -167,6 +193,7 @@ fn partial_count_pushdown_matches_full_scan_count_after_predicate() {
         Some(&PartialAggregateSpec {
             function: PartialAggregateFunction::Count,
             column: None,
+            group_by: Vec::new(),
         }),
         None,
     )
@@ -392,7 +419,13 @@ fn top_k_pushdown_merges_uneven_range_local_results_lexicographically() {
 
 #[test]
 fn k_way_top_k_merge_matches_global_order_and_bounds_output_for_random_streams() {
-    let spec = TopKSpec { order_by: vec![TopKColumn { column: 0, asc: true }], limit: 7 };
+    let spec = TopKSpec {
+        order_by: vec![TopKColumn {
+            column: 0,
+            asc: true,
+        }],
+        limit: 7,
+    };
     for seed in 0_u64..64 {
         let mut streams = vec![Vec::new(), Vec::new(), Vec::new()];
         for index in 0_u64..31 {
@@ -546,6 +579,7 @@ fn partial_sum_count_column_min_max_preserve_null_semantics() {
             Some(&PartialAggregateSpec {
                 function,
                 column: Some(0),
+                group_by: Vec::new(),
             }),
             None,
         )
@@ -569,6 +603,7 @@ fn partial_sum_min_max_over_empty_input_return_null() {
             Some(&PartialAggregateSpec {
                 function,
                 column: Some(0),
+                group_by: Vec::new(),
             }),
             None,
         )
@@ -579,10 +614,134 @@ fn partial_sum_min_max_over_empty_input_return_null() {
 }
 
 #[test]
+fn grouped_partial_count_merges_range_groups_in_deterministic_key_order() {
+    let spec = PartialAggregateSpec {
+        function: PartialAggregateFunction::Count,
+        column: Some(0),
+        group_by: Vec::new(),
+    }
+    .grouped_by(vec![1]);
+    let ranges = vec![
+        vec![
+            ScannedRow {
+                rowid: 1,
+                xmin: 1,
+                row: vec![Datum::Int4(10), Datum::Text("b".into())],
+            },
+            ScannedRow {
+                rowid: 2,
+                xmin: 1,
+                row: vec![Datum::Null, Datum::Text("a".into())],
+            },
+        ],
+        vec![
+            ScannedRow {
+                rowid: 3,
+                xmin: 1,
+                row: vec![Datum::Int4(20), Datum::Text("a".into())],
+            },
+            ScannedRow {
+                rowid: 4,
+                xmin: 1,
+                row: vec![Datum::Int4(30), Datum::Null],
+            },
+        ],
+    ];
+
+    let partials = ranges
+        .into_iter()
+        .flat_map(|rows| {
+            apply_executable_scan_pushdown(
+                rows,
+                &PredicatePushdown::FullScan,
+                &ProjectionPushdown::All,
+                Some(&spec),
+                None,
+            )
+            .expect("grouped owner partial")
+        })
+        .collect();
+    let merged = finalize_partial_aggregate_rows(partials, &spec).expect("gateway merge");
+
+    assert_eq!(
+        merged.into_iter().map(|row| row.row).collect::<Vec<_>>(),
+        vec![
+            vec![Datum::Text("a".into()), Datum::Int8(1)],
+            vec![Datum::Text("b".into()), Datum::Int8(1)],
+            vec![Datum::Null, Datum::Int8(1)],
+        ]
+    );
+}
+
+#[test]
+fn grouped_partials_match_single_range_for_random_whole_values() {
+    for seed in 0_u64..64 {
+        let rows = (0_u64..47)
+            .map(|index| ScannedRow {
+                rowid: index,
+                xmin: 1,
+                row: vec![
+                    if (seed + index * 7).is_multiple_of(5) {
+                        Datum::Null
+                    } else {
+                        Datum::Int4(((seed * 19 + index * 11) % 31) as i32 - 15)
+                    },
+                    if (seed + index).is_multiple_of(9) {
+                        Datum::Null
+                    } else {
+                        Datum::Text(format!("g{}", (seed + index * 3) % 5))
+                    },
+                ],
+            })
+            .collect::<Vec<_>>();
+        for function in [
+            PartialAggregateFunction::Count,
+            PartialAggregateFunction::Sum,
+            PartialAggregateFunction::Min,
+            PartialAggregateFunction::Max,
+            PartialAggregateFunction::AvgParts,
+        ] {
+            let spec = PartialAggregateSpec {
+                function,
+                column: Some(0),
+                group_by: vec![1],
+            };
+            let expected = finalize_partial_aggregate_rows(
+                apply_executable_scan_pushdown(
+                    rows.clone(),
+                    &PredicatePushdown::FullScan,
+                    &ProjectionPushdown::All,
+                    Some(&spec),
+                    None,
+                )
+                .unwrap(),
+                &spec,
+            )
+            .unwrap();
+            let partials = (0..4)
+                .flat_map(|range| {
+                    apply_executable_scan_pushdown(
+                        rows.iter().skip(range).step_by(4).cloned().collect(),
+                        &PredicatePushdown::FullScan,
+                        &ProjectionPushdown::All,
+                        Some(&spec),
+                        None,
+                    )
+                    .unwrap()
+                })
+                .collect();
+            let actual = finalize_partial_aggregate_rows(partials, &spec).unwrap();
+            assert_eq!(actual, expected, "seed={seed}, function={function:?}");
+        }
+    }
+}
+
+#[test]
 fn partial_avg_merges_sum_count_across_uneven_ranges_and_preserves_null_semantics() {
     let spec = PartialAggregateSpec {
         function: PartialAggregateFunction::AvgParts,
         column: Some(0),
+        group_by: Vec::new(),
     };
     let predicate = PredicatePushdown::Conjunctive(vec![ColumnPredicate {
         column: 1,
@@ -1016,7 +1175,32 @@ async fn sql_simple_aggregates_request_partial_pushdown_and_match_full_scan() {
                 == Some(PartialAggregateSpec {
                     function,
                     column: Some(1),
+                    group_by: Vec::new(),
                 })
+        }));
+    }
+}
+
+#[tokio::test]
+async fn sql_grouped_aggregates_request_partial_pushdown_and_match_full_scan() {
+    for function in ["count", "sum", "min", "max", "avg"] {
+        let scanner = Arc::new(RecordingScanner::default());
+        let mut pushed_engine = SqlEngine::new();
+        pushed_engine.set_range_scanner(scanner.clone());
+        seed_sharded_metrics(&pushed_engine).await;
+        let sql =
+            format!("SELECT label, {function}(amount) FROM metrics GROUP BY label ORDER BY label");
+        let pushed = query_cells(pushed_engine, &sql).await;
+
+        let full_engine = SqlEngine::new();
+        seed_sharded_metrics(&full_engine).await;
+        let full = query_cells(full_engine, &sql).await;
+
+        assert_eq!(pushed, full, "{function}");
+        assert!(scanner.scans().iter().any(|scan| {
+            scan.partial_aggregate
+                .as_ref()
+                .is_some_and(|spec| spec.group_by == vec![2])
         }));
     }
 }
@@ -1042,6 +1226,7 @@ async fn sql_partial_sum_over_empty_input_matches_full_scan_null() {
             == Some(PartialAggregateSpec {
                 function: PartialAggregateFunction::Sum,
                 column: Some(1),
+                group_by: Vec::new(),
             })
     }));
 }
@@ -1066,6 +1251,7 @@ async fn sql_int4_avg_requests_sum_count_parts_and_matches_local_aggregate() {
             == Some(PartialAggregateSpec {
                 function: PartialAggregateFunction::AvgParts,
                 column: Some(1),
+                group_by: Vec::new(),
             })
     }));
 }
@@ -1093,6 +1279,7 @@ async fn int8_and_numeric_avg_pushdown_match_local_numeric_results() {
                 == Some(PartialAggregateSpec {
                     function: PartialAggregateFunction::AvgParts,
                     column: Some(column),
+                    group_by: Vec::new(),
                 })
         }));
     }
@@ -1202,6 +1389,7 @@ async fn sql_count_star_requests_partial_count_pushdown_and_matches_full_scan() 
         Some(PartialAggregateSpec {
             function: PartialAggregateFunction::Count,
             column: None,
+            group_by: Vec::new(),
         })
     );
     assert!(matches!(

@@ -3073,6 +3073,7 @@ fn encode_partial_aggregate(
             }
         },
         column: spec.column,
+        group_by: spec.group_by.clone(),
     }
 }
 
@@ -3090,6 +3091,7 @@ fn decode_partial_aggregate(
             }
         },
         column: spec.column,
+        group_by: spec.group_by.clone(),
     }
 }
 
@@ -4237,7 +4239,11 @@ mod tests {
             let (rows, requested_partial_aggregate) = scan_remote_partial_aggregate(
                 left_row,
                 right_row,
-                crabka_pgexec::PartialAggregateSpec { function, column },
+                crabka_pgexec::PartialAggregateSpec {
+                    function,
+                    column,
+                    group_by: Vec::new(),
+                },
             )
             .await;
 
@@ -4259,9 +4265,47 @@ mod tests {
                 Some(WirePartialAggregateSpec {
                     function: wire_function,
                     column,
+                    group_by: Vec::new(),
                 })
             );
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn registry_range_scanner_merges_remote_grouped_avg_parts() {
+        let spec = crabka_pgexec::PartialAggregateSpec {
+            function: crabka_pgexec::PartialAggregateFunction::AvgParts,
+            column: Some(0),
+            group_by: vec![1],
+        };
+        let (rows, requested) = scan_remote_partial_aggregate(
+            vec![
+                Datum::Text("a".into()),
+                Datum::Numeric(10.into()),
+                Datum::Int8(1),
+            ],
+            vec![
+                Datum::Text("a".into()),
+                Datum::Numeric(14.into()),
+                Datum::Int8(2),
+            ],
+            spec,
+        )
+        .await;
+
+        assert_eq!(
+            rows,
+            vec![crabka_pgexec::ScannedRow {
+                rowid: 0,
+                xmin: 0,
+                row: vec![
+                    Datum::Text("a".into()),
+                    Datum::Numeric(24.into()),
+                    Datum::Int8(3)
+                ],
+            }]
+        );
+        assert_eq!(requested.expect("grouped spec").group_by, vec![1]);
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -4447,6 +4491,7 @@ mod tests {
                 partial_aggregate: Some(WirePartialAggregateSpec {
                     function: WirePartialAggregateFunction::Count,
                     column: None,
+                    group_by: Vec::new(),
                 }),
                 top_k: None,
             }))

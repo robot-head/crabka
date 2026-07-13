@@ -616,6 +616,8 @@ pub enum WireProjectionPushdown {
 pub struct WirePartialAggregateSpec {
     pub function: WirePartialAggregateFunction,
     pub column: Option<usize>,
+    #[serde(default)]
+    pub group_by: Vec<usize>,
 }
 
 /// Serializable partial aggregate function.
@@ -2098,6 +2100,7 @@ mod tests {
                     partial_aggregate: Some(WirePartialAggregateSpec {
                         function: WirePartialAggregateFunction::Count,
                         column: None,
+                        group_by: vec![0],
                     }),
                     top_k: Some(WireTopKSpec {
                         order_by: vec![WireTopKColumn {

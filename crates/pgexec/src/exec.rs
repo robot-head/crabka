@@ -3004,9 +3004,12 @@ fn try_execute_partial_aggregate_pushdown(
     let Some((table, qualifier)) = single_sharded_base_table(catalog_kv, s, ctes)? else {
         return Ok(None);
     };
-    let Some(spec) =
+    let spec = if s.group_by.is_empty() {
         crate::plan_dist::plan_scan(&table, s.filter.as_ref(), &s.projection).partial_aggregate
-    else {
+    } else {
+        crate::plan_dist::grouped_partial_aggregate_for_select(&table, &s.projection, &s.group_by)
+    };
+    let Some(spec) = spec else {
         return Ok(None);
     };
     let predicate = match crate::plan_dist::strict_predicate_for_filter(&table, s.filter.as_ref()) {
@@ -3031,16 +3034,6 @@ fn try_execute_partial_aggregate_pushdown(
         top_k: None,
     })?;
     let rows = crate::scanner::finalize_partial_aggregate_rows(rows, &spec)?;
-    let [row] = rows.as_slice() else {
-        return Err(ExecError::Unsupported(
-            "partial aggregate pushdown returned no merged row".into(),
-        ));
-    };
-    let [value] = row.row.as_slice() else {
-        return Err(ExecError::Unsupported(
-            "partial aggregate pushdown returned an invalid row shape".into(),
-        ));
-    };
     let out_scope = Scope {
         columns: fields
             .iter()
@@ -3054,7 +3047,7 @@ fn try_execute_partial_aggregate_pushdown(
     };
     Ok(Some(Relation {
         scope: out_scope,
-        rows: vec![vec![value.clone()]],
+        rows: rows.into_iter().map(|row| row.row).collect(),
     }))
 }
 
@@ -3078,21 +3071,22 @@ fn single_sharded_base_table(
 }
 
 fn is_plain_partial_aggregate_select(s: &SelectStmt) -> bool {
-    if s.distinct
-        || !s.group_by.is_empty()
-        || s.having.is_some()
-        || !s.order_by.is_empty()
-        || s.limit.is_some()
-        || s.offset.is_some()
+    if s.distinct || s.having.is_some() || s.limit.is_some() || s.offset.is_some() {
+        return false;
+    }
+    if !s.order_by.is_empty()
+        && (s.order_by.len() != s.group_by.len()
+            || s.order_by
+                .iter()
+                .zip(&s.group_by)
+                .any(|(order, group)| !order.asc || order.expr != *group))
     {
         return false;
     }
-    let [
-        SelectItem::Expr {
-            expr: Expr::Func(call),
-            ..
-        },
-    ] = s.projection.as_slice()
+    let Some(SelectItem::Expr {
+        expr: Expr::Func(call),
+        ..
+    }) = s.projection.last()
     else {
         return false;
     };
@@ -4794,6 +4788,7 @@ mod tests {
                 partial_aggregate: Some(PartialAggregateSpec {
                     function: PartialAggregateFunction::Sum,
                     column: Some(0),
+                    group_by: Vec::new(),
                 }),
                 top_k: None,
             },
