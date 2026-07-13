@@ -235,6 +235,7 @@ async fn start_single_broker_sasl_plaintext_with_users(
 /// Create a topic via SASL/PLAIN as admin. Asserts success.
 async fn create_topic_as_admin(
     addr: SocketAddr,
+    password: &[u8],
     topic: &str,
     partitions: i32,
     replication_factor: i16,
@@ -254,7 +255,7 @@ async fn create_topic_as_admin(
         timeout_ms: 5_000,
         ..Default::default()
     };
-    let mut stream = sasl_plain_authenticate(addr, "admin", b"admin-secret")
+    let mut stream = sasl_plain_authenticate(addr, "admin", password)
         .await
         .expect("SASL authenticate for CreateTopics");
     let mut body = BytesMut::new();
@@ -473,13 +474,17 @@ async fn drive_produce_sasl_with_client_id(
     ProduceResponse::decode(&mut cur, VERSION).expect("decode ProduceResponse")
 }
 
-async fn await_authorized_produce(addr: SocketAddr, client_id: &str) -> ProduceResponse {
+async fn await_authorized_produce(
+    addr: SocketAddr,
+    password: &[u8],
+    client_id: &str,
+) -> ProduceResponse {
     let deadline = Instant::now() + Duration::from_secs(15);
     loop {
         let response = drive_produce_sasl_with_client_id(
             addr,
             "alice",
-            b"alice-secret",
+            password,
             client_id,
             "tuple-quota-topic",
             1024,
@@ -525,16 +530,21 @@ async fn await_authorized_produce(addr: SocketAddr, client_id: &str) -> ProduceR
 /// in the next CI run that includes T3.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn tuple_quota_throttles_only_matching_client_id() {
+    let admin_password = uuid::Uuid::new_v4().to_string();
+    let alice_password = uuid::Uuid::new_v4().to_string();
     let (handle, _dir, addr) = start_single_broker_sasl_plaintext_with_users(
         "admin",
-        &[("admin", "admin-secret"), ("alice", "alice-secret")],
+        &[
+            ("admin", admin_password.as_str()),
+            ("alice", alice_password.as_str()),
+        ],
     )
     .await;
 
     // Seed ACL entries so the authorizer engages (compat shim disabled) and
     // alice can Write to the topic.
     seed_compat_shim_disable_acl(&handle).await;
-    create_topic_as_admin(addr, "tuple-quota-topic", 1, 1).await;
+    create_topic_as_admin(addr, admin_password.as_bytes(), "tuple-quota-topic", 1, 1).await;
     wait_partition_exists(&handle, "tuple-quota-topic", 0).await;
     seed_alice_write_acl(&handle, "tuple-quota-topic").await;
 
@@ -545,7 +555,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     let alter_resp = drive_alter_client_quotas_sasl(
         addr,
         "admin",
-        "admin-secret",
+        &admin_password,
         vec![(
             vec![
                 ("user".into(), Some("alice".into())),
@@ -587,7 +597,7 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     //
     // Retry loop: TOPIC_AUTHORIZATION_FAILED (29) can fire if the alice Write
     // ACL hasn't propagated to the handler's image snapshot yet.
-    let matching_resp = await_authorized_produce(addr, "app-x").await;
+    let matching_resp = await_authorized_produce(addr, alice_password.as_bytes(), "app-x").await;
 
     let part = &matching_resp.responses[0].partition_responses[0];
     assert!(
@@ -608,7 +618,8 @@ async fn tuple_quota_throttles_only_matching_client_id() {
     // A fresh TCP connection means the token bucket starts from scratch, so
     // there is no residual debt from Case 1.  No (user=alice)-only quota exists,
     // so the produce must complete with throttle_time_ms == 0.
-    let non_matching_resp = await_authorized_produce(addr, "other").await;
+    let non_matching_resp =
+        await_authorized_produce(addr, alice_password.as_bytes(), "other").await;
 
     let part = &non_matching_resp.responses[0].partition_responses[0];
     assert!(

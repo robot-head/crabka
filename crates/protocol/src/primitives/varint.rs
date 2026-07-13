@@ -38,11 +38,14 @@ pub fn get_uvarint<B: Buf>(buf: &mut B) -> Result<u32, ProtocolError> {
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn uvarint_len(v: u32) -> usize {
-    if v == 0 {
-        return 1;
+    match v.leading_zeros() {
+        25..=32 => 1,
+        18..=24 => 2,
+        11..=17 => 3,
+        4..=10 => 4,
+        0..=3 => 5,
+        _ => unreachable!("u32::leading_zeros is at most 32"),
     }
-    let bits = 32 - usize::try_from(v.leading_zeros()).expect("leading zeros fit usize");
-    bits.div_ceil(7)
 }
 
 pub fn put_varint<B: BufMut>(buf: &mut B, v: i32) {
@@ -108,11 +111,19 @@ pub fn get_varlong<B: Buf>(buf: &mut B) -> Result<i64, ProtocolError> {
 /// # Panics
 /// Panics if a value previously validated by the protocol type no longer satisfies its encoded-length or field-range invariant.
 pub fn uvarlong_len(v: u64) -> usize {
-    if v == 0 {
-        return 1;
+    match v.leading_zeros() {
+        57..=64 => 1,
+        50..=56 => 2,
+        43..=49 => 3,
+        36..=42 => 4,
+        29..=35 => 5,
+        22..=28 => 6,
+        15..=21 => 7,
+        8..=14 => 8,
+        1..=7 => 9,
+        0 => 10,
+        _ => unreachable!("u64::leading_zeros is at most 64"),
     }
-    let bits = 64 - usize::try_from(v.leading_zeros()).expect("leading zeros fit usize");
-    bits.div_ceil(7)
 }
 
 #[must_use]
