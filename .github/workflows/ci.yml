@@ -328,10 +328,13 @@ jobs:
         if: matrix.os == 'ubuntu-latest'
       - uses: taiki-e/install-action@nextest
       # rustfmt runs on nightly so `format_code_in_doc_comments` (unstable, set in
-      # rustfmt.toml) formats the code inside rustdoc examples too. clippy/tests
-      # stay on the matrix toolchain.
+      # rustfmt.toml) formats the code inside rustdoc examples too. Run this once
+      # on Linux: `cargo fmt --all` can exceed Windows' process command-line limit
+      # in this workspace. clippy/tests stay on the matrix toolchain.
       - run: rustup toolchain install nightly --profile minimal --component rustfmt
+        if: matrix.os == 'ubuntu-latest'
       - run: cargo +nightly fmt --all -- --check
+        if: matrix.os == 'ubuntu-latest'
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - name: Diskless WAL shipping gates
         if: matrix.os == 'ubuntu-latest'
