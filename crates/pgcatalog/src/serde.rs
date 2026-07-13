@@ -24,6 +24,7 @@ use crate::{
 pub const SCHEMA_VERSION: u8 = 5;
 
 const TABLE_OPTION_SHARDED: u8 = 0b0000_0001;
+const SHARDING_VERSION: u8 = 1;
 const SHARDING_NONE: u8 = 0;
 const SHARDING_HASH: u8 = 1;
 const INDEX_VERSION: u8 = 2;
@@ -408,7 +409,7 @@ fn read_table_options(flags: u8) -> Result<TableOptions, KvError> {
 
 #[must_use]
 pub fn serialize_sharding(sharding: Option<&ShardingStrategy>) -> Vec<u8> {
-    let mut out = Vec::new();
+    let mut out = vec![SHARDING_VERSION];
     let Some(ShardingStrategy::Hash(hash)) = sharding else {
         out.push(SHARDING_NONE);
         return out;
@@ -436,8 +437,14 @@ pub fn serialize_sharding(sharding: Option<&ShardingStrategy>) -> Vec<u8> {
 
 pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, KvError> {
     let mut cur = bytes;
-    match take_u8(&mut cur)? {
-        SHARDING_NONE => Ok(None),
+    let version = take_u8(&mut cur)?;
+    if version != SHARDING_VERSION {
+        return Err(KvError::CorruptRow(format!(
+            "unsupported sharding metadata version {version}"
+        )));
+    }
+    let decoded = match take_u8(&mut cur)? {
+        SHARDING_NONE => None,
         SHARDING_HASH => {
             let column_count = usize::try_from(u32::from_be_bytes(
                 take_n(&mut cur, 4)?.try_into().expect("4"),
@@ -450,7 +457,13 @@ pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, Kv
             }
             let mut columns = Vec::with_capacity(column_count.min(16));
             for _ in 0..column_count {
-                columns.push(read_string(&mut cur)?);
+                let column = read_string(&mut cur)?;
+                if column.is_empty() {
+                    return Err(KvError::CorruptRow(
+                        "hash sharding column name must not be empty".into(),
+                    ));
+                }
+                columns.push(column);
             }
             let buckets = u32::from_be_bytes(take_n(&mut cur, 4)?.try_into().expect("4"));
             if buckets == 0 || !buckets.is_power_of_two() {
@@ -460,23 +473,39 @@ pub fn deserialize_sharding(bytes: &[u8]) -> Result<Option<ShardingStrategy>, Kv
             }
             let co_location_group = match take_u8(&mut cur)? {
                 0 => None,
-                1 => Some(read_string(&mut cur)?),
+                1 => {
+                    let group = read_string(&mut cur)?;
+                    if group.is_empty() {
+                        return Err(KvError::CorruptRow(
+                            "co-location group name must not be empty".into(),
+                        ));
+                    }
+                    Some(group)
+                }
                 flag => {
                     return Err(KvError::CorruptRow(format!(
                         "unknown co-location group flag {flag}"
                     )));
                 }
             };
-            Ok(Some(ShardingStrategy::Hash(HashSharding {
+            Some(ShardingStrategy::Hash(HashSharding {
                 columns,
                 buckets,
                 co_location_group,
-            })))
+            }))
         }
-        tag => Err(KvError::CorruptRow(format!(
-            "unknown sharding strategy tag {tag}"
-        ))),
+        tag => {
+            return Err(KvError::CorruptRow(format!(
+                "unknown sharding strategy tag {tag}"
+            )))
+        }
+    };
+    if !cur.is_empty() {
+        return Err(KvError::CorruptRow(
+            "trailing bytes in sharding metadata".into(),
+        ));
     }
+    Ok(decoded)
 }
 
 /// Serialize an index catalog record.
@@ -1040,6 +1069,33 @@ mod tests {
             deserialize_sharding(&bytes).expect("hash sharding decode"),
             Some(sharding)
         );
+    }
+
+    #[test]
+    fn hash_sharding_decode_rejects_trailing_bytes_and_empty_names() {
+        let valid = ShardingStrategy::Hash(HashSharding {
+            columns: vec!["id".into()],
+            buckets: 16,
+            co_location_group: None,
+        });
+        let mut trailing = serialize_sharding(Some(&valid));
+        trailing.push(0);
+        assert!(deserialize_sharding(&trailing).is_err());
+
+        for invalid in [
+            ShardingStrategy::Hash(HashSharding {
+                columns: vec![String::new()],
+                buckets: 16,
+                co_location_group: None,
+            }),
+            ShardingStrategy::Hash(HashSharding {
+                columns: vec!["id".into()],
+                buckets: 16,
+                co_location_group: Some(String::new()),
+            }),
+        ] {
+            assert!(deserialize_sharding(&serialize_sharding(Some(&invalid))).is_err());
+        }
     }
 
     #[test]
