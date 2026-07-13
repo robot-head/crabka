@@ -41,6 +41,7 @@ impl crabka_pgexec::Committer for InterleavingDescriptorCommitter {
 fn timestamp_write(table_id: u32, rowid: u64, value: i32) -> TimestampWrite {
     TimestampWrite {
         table_id,
+        bucket: None,
         rowid,
         row: vec![crabka_pgtypes::Datum::Int4(value)],
         delete: false,
@@ -55,6 +56,7 @@ fn timestamp_operation(
     crabka_pgexec::TimestampTxnOperation {
         range_id,
         table_id: write.table_id,
+        bucket: write.bucket,
         rowid: write.rowid,
         delete: write.delete,
     }
@@ -219,6 +221,52 @@ async fn sharded_autocommit_insert_uses_timestamp_metadata_not_global_xids() {
 }
 
 #[tokio::test]
+async fn hash_sharded_sql_insert_uses_bucket_leading_timestamp_version_key() {
+    let kv: Arc<dyn Kv> = Arc::new(MemKv::new());
+    let mut engine = SqlEngine::with_kv(Arc::clone(&kv)).expect("engine");
+    engine.init_gtm_coordinator().expect("gtm");
+    let mut session = engine.connect();
+    session
+        .simple_query("CREATE TABLE h (id int4, value text) SHARDED BY HASH (id) BUCKETS 16")
+        .await
+        .expect("create");
+
+    session
+        .simple_query("INSERT INTO h VALUES (42, 'physical')")
+        .await
+        .expect("insert");
+
+    let table = crabka_pgcatalog::get_table(kv.as_ref(), "h").expect("table");
+    let versions = kv
+        .scan_prefix(&crabka_pgkv::key::table_prefix(table.id))
+        .expect("scan physical table");
+    assert_eq!(versions.len(), 1);
+    assert!(matches!(
+        crabka_pgkv::key::classify_key(&versions[0].0),
+        crabka_pgkv::key::KeyClass::HashPrimaryVersion {
+            table_id,
+            bucket,
+            rowid: 1,
+            version: 1,
+        } if table_id == table.id
+            && bucket == crabka_pgkv::key::hash_bucket(&42_i32.to_be_bytes(), 16)
+                .expect("valid bucket count")
+    ));
+    assert_eq!(
+        crabka_pgmvcc::version::decode_ts_tuple(&versions[0].1)
+            .expect("timestamp tuple")
+            .state,
+        crabka_pgmvcc::version::TsVersionState::Committed { commit_ts: 2 }
+    );
+    assert_eq!(
+        timestamp_visible_rows(&engine, &table, ReadTimestamp::MAX).len(),
+        1,
+        "catalog-aware physical scan must reconstruct committed hash rows"
+    );
+    assert_eq!(rows(&mut session, "SELECT value FROM h").await.len(), 1);
+}
+
+#[tokio::test]
 async fn set_transaction_repeatable_read_fixes_timestamp_snapshot_before_first_read() {
     let mut engine = SqlEngine::new();
     engine.init_gtm_coordinator().expect("gtm");
@@ -272,6 +320,7 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
     };
     let put = TimestampWrite {
         table_id: 99,
+        bucket: None,
         rowid: 1,
         row: vec![crabka_pgtypes::Datum::Int4(1)],
         delete: false,
@@ -286,6 +335,7 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
     };
     let delete = TimestampWrite {
         table_id: 99,
+        bucket: None,
         rowid: 2,
         row: vec![crabka_pgtypes::Datum::Int4(2)],
         delete: true,
@@ -305,6 +355,7 @@ async fn committed_descriptor_recovery_resolves_put_delete_and_global_index_inte
         .map(|write| crabka_pgexec::TimestampTxnOperation {
             range_id: 1,
             table_id: write.table_id,
+            bucket: write.bucket,
             rowid: write.rowid,
             delete: write.delete,
         })
@@ -401,12 +452,14 @@ async fn timestamp_descriptor_commit_makes_unresolved_participants_visible_at_on
     let left_operations = [crabka_pgexec::TimestampTxnOperation {
         range_id: 1,
         table_id: left_write.table_id,
+        bucket: left_write.bucket,
         rowid: left_write.rowid,
         delete: left_write.delete,
     }];
     let right_operations = [crabka_pgexec::TimestampTxnOperation {
         range_id: 2,
         table_id: right_write.table_id,
+        bucket: right_write.bucket,
         rowid: right_write.rowid,
         delete: right_write.delete,
     }];
@@ -630,6 +683,7 @@ async fn timestamp_descriptor_transitions_are_fenced_across_separate_engine_hand
     let operation = crabka_pgexec::TimestampTxnOperation {
         range_id: 1,
         table_id: 10,
+        bucket: None,
         rowid: 11,
         delete: false,
     };
@@ -683,12 +737,14 @@ async fn concurrent_timestamp_acknowledgements_preserve_every_participant_operat
     let first_operation = crabka_pgexec::TimestampTxnOperation {
         range_id: 1,
         table_id: 10,
+        bucket: None,
         rowid: 11,
         delete: false,
     };
     let second_operation = crabka_pgexec::TimestampTxnOperation {
         range_id: 2,
         table_id: 20,
+        bucket: None,
         rowid: 21,
         delete: true,
     };

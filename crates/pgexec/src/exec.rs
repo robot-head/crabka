@@ -1766,8 +1766,10 @@ fn execute_timestamp_insert(
             ));
         }
         let full = build_insert_row(table, &target_idx, row_exprs, ctx)?;
+        let bucket = hash_bucket_for_row(table, &full)?;
         writes.push(TimestampWrite {
             table_id: table.id,
+            bucket,
             rowid,
             global_index_intents: global_index_intents_for_row(
                 table,
@@ -1816,10 +1818,12 @@ fn execute_timestamp_update(
             next[*index] = coerce(value, table.columns[*index].ty, ctx)?;
         }
         enforce_not_null(table, &next)?;
+        let bucket = hash_bucket_for_row(table, &next)?;
         let global_index_intents =
             global_index_update_intents_for_row(table, global_indexes, rowid, &row, &next)?;
         writes.push(TimestampWrite {
             table_id: table.id,
+            bucket,
             rowid,
             global_index_intents,
             row: next,
@@ -1849,8 +1853,10 @@ fn execute_timestamp_delete(
         }
         let global_index_intents =
             global_index_delete_intents_for_row(table, global_indexes, rowid, &row)?;
+        let bucket = hash_bucket_for_row(table, &row)?;
         writes.push(TimestampWrite {
             table_id: table.id,
+            bucket,
             rowid,
             row,
             delete: true,
@@ -1862,6 +1868,38 @@ fn execute_timestamp_delete(
         writes,
         commit_ops: Vec::new(),
     })
+}
+
+fn hash_bucket_for_row(table: &Table, row: &[Datum]) -> Result<Option<u32>, ExecError> {
+    let Some(crabka_pgcatalog::ShardingStrategy::Hash(hash)) = &table.sharding else {
+        return Ok(None);
+    };
+    let column = hash
+        .columns
+        .first()
+        .ok_or_else(|| ExecError::Unsupported("hash sharding catalog has no hash column".into()))?;
+    let index = table
+        .column_index(column)
+        .ok_or_else(|| ExecError::Unsupported("hash sharding catalog column mismatch".into()))?;
+    let bytes = match &row[index] {
+        Datum::Int4(value) => value.to_be_bytes().to_vec(),
+        Datum::Int8(value) => value.to_be_bytes().to_vec(),
+        Datum::Text(value) => value.as_bytes().to_vec(),
+        Datum::Bytea(value) => value.clone(),
+        Datum::Null => {
+            return Err(ExecError::Unsupported(
+                "hash shard key must not be NULL".into(),
+            ));
+        }
+        _ => {
+            return Err(ExecError::Unsupported(
+                "hash shard key type is not supported".into(),
+            ));
+        }
+    };
+    crabka_pgkv::key::hash_bucket(&bytes, hash.buckets)
+        .map(Some)
+        .ok_or_else(|| ExecError::Unsupported("invalid hash sharding bucket count".into()))
 }
 
 fn global_index_intents_for_row(
@@ -2226,12 +2264,12 @@ pub(crate) fn scan_live_interval(
     table: &crabka_pgcatalog::Table,
     interval: RowInterval,
 ) -> Result<Vec<ScannedRow>, ExecError> {
-    let scanned = scan_table_interval(kv, table.id, interval)?;
+    let scanned = scan_table_for_catalog_interval(kv, table, interval)?;
     let mut out: Vec<ScannedRow> = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
         let prefix = crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)?.to_vec();
-        let rowid = crabka_pgkv::key::rowid_of(table.id, &prefix)?;
+        let rowid = physical_rowid(table, &prefix)?;
         if !interval.contains(rowid) {
             while i < scanned.len()
                 && crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)? == prefix.as_slice()
@@ -2283,12 +2321,13 @@ pub(crate) fn scan_ts_live_interval(
     own_start_ts: Option<TimestampTransactionId>,
     interval: RowInterval,
 ) -> Result<Vec<ScannedRow>, ExecError> {
-    let scanned = scan_table_interval(kv, table.id, interval)?;
+    let scanned = scan_table_for_catalog_interval(kv, table, interval)?;
     let mut out = Vec::new();
     let mut i = 0;
     while i < scanned.len() {
         let prefix = crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)?.to_vec();
-        let rowid = crabka_pgkv::key::rowid_of(table.id, &prefix)?;
+        let rowid = physical_rowid(table, &prefix)?;
+        let bucket = physical_bucket(table, &prefix)?;
         if !interval.contains(rowid) {
             while i < scanned.len()
                 && crabka_pgmvcc::version::row_prefix_of(&scanned[i].0)? == prefix.as_slice()
@@ -2312,7 +2351,7 @@ pub(crate) fn scan_ts_live_interval(
                 crate::timestamp_txn::read_timestamp_txn_descriptor(primary_kv, start_ts)?;
             let verified_distributed_intent = match descriptor.as_ref() {
                 Some(descriptor) => crate::timestamp_txn::local_intent_matches_descriptor(
-                    kv, descriptor, table.id, rowid,
+                    kv, descriptor, table.id, bucket, rowid,
                 )?,
                 None => false,
             };
@@ -2377,6 +2416,42 @@ pub(crate) fn scan_ts_live_interval(
     }
     out.sort_by_key(|row| (row.rowid, row.xmin));
     Ok(out)
+}
+
+fn physical_rowid(table: &Table, row_prefix: &[u8]) -> Result<u64, ExecError> {
+    if matches!(
+        table.sharding,
+        Some(crabka_pgcatalog::ShardingStrategy::Hash(_))
+    ) {
+        return Ok(crabka_pgkv::key::bucket_rowid_of(table.id, row_prefix)?.1);
+    }
+    Ok(crabka_pgkv::key::rowid_of(table.id, row_prefix)?)
+}
+
+fn physical_bucket(table: &Table, row_prefix: &[u8]) -> Result<Option<u32>, ExecError> {
+    if matches!(
+        table.sharding,
+        Some(crabka_pgcatalog::ShardingStrategy::Hash(_))
+    ) {
+        return Ok(Some(
+            crabka_pgkv::key::bucket_rowid_of(table.id, row_prefix)?.0,
+        ));
+    }
+    Ok(None)
+}
+
+fn scan_table_for_catalog_interval(
+    kv: &dyn Kv,
+    table: &Table,
+    interval: RowInterval,
+) -> Result<crabka_pgkv::KvScan, ExecError> {
+    if matches!(
+        table.sharding,
+        Some(crabka_pgcatalog::ShardingStrategy::Hash(_))
+    ) {
+        return scan_table_interval(kv, table.id, RowInterval::ALL);
+    }
+    scan_table_interval(kv, table.id, interval)
 }
 
 pub(crate) fn scan_table_interval(
