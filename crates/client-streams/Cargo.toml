@@ -33,7 +33,7 @@ uuid = { workspace = true }
 tokio = { workspace = true, features = ["rt", "rt-multi-thread", "sync", "time", "macros"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-turso = "0.6"
+turso = "0.7"
 pollster = "0.4"
 
 # Columnar / dataframe support (opt-in via the `arrow`, `columnar`, and
