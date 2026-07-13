@@ -1803,6 +1803,7 @@ fn test_authorized_split_intent()
         range_id: 0,
         end_key: Some(RangeBoundary {
             table_id: 7,
+            bucket: None,
             rowid: 10,
         }),
         endpoint: "left:7443".into(),

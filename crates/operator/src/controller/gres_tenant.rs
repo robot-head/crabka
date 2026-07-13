@@ -1115,12 +1115,16 @@ fn reconcile_ranges(
 fn range_key_from_boundary(boundary: RangeBoundary) -> GresTenantRangeKey {
     GresTenantRangeKey {
         table_id: boundary.table_id,
+        bucket: boundary.bucket,
         rowid: boundary.rowid,
     }
 }
 
 fn boundary_from_range_key(key: GresTenantRangeKey) -> RangeBoundary {
-    RangeBoundary::new(key.table_id, key.rowid)
+    match key.bucket {
+        Some(bucket) => RangeBoundary::hash(key.table_id, bucket, key.rowid),
+        None => RangeBoundary::new(key.table_id, key.rowid),
+    }
 }
 
 fn requested_state(obj: &GresTenant) -> TenantState {
@@ -1825,6 +1829,7 @@ fn checkpoint_runtime_args(
 fn ranges_arg(ranges: &[GresTenantRangeSpec]) -> String {
     let mut starts = vec![GresTenantRangeKey {
         table_id: 0,
+        bucket: None,
         rowid: 0,
     }];
     starts.extend(ranges.iter().filter_map(|range| range.end_key));
@@ -2245,6 +2250,7 @@ mod tests {
                 range_id: 0,
                 end_key: Some(GresTenantRangeKey {
                     table_id: 10,
+                    bucket: None,
                     rowid: 0,
                 }),
             },
@@ -2287,6 +2293,34 @@ mod tests {
         assert!(
             args.windows(2)
                 .any(|pair| { pair == ["--range-allowed-principal", "CN=tenant-a-range"] })
+        );
+    }
+
+    #[test]
+    fn hash_range_key_serde_and_registry_conversion_preserve_bucket_zero() {
+        let boundary = RangeBoundary::hash(7, 0, 11);
+        let key = range_key_from_boundary(boundary);
+        assert_eq!(
+            key,
+            GresTenantRangeKey {
+                table_id: 7,
+                bucket: Some(0),
+                rowid: 11
+            }
+        );
+        assert_eq!(boundary_from_range_key(key), boundary);
+        assert_eq!(
+            serde_json::to_value(key).unwrap(),
+            serde_json::json!({"tableId": 7, "bucket": 0, "rowid": 11})
+        );
+        assert_eq!(
+            serde_json::to_value(GresTenantRangeKey {
+                table_id: 7,
+                bucket: None,
+                rowid: 11
+            })
+            .unwrap(),
+            serde_json::json!({"tableId": 7, "rowid": 11})
         );
     }
 

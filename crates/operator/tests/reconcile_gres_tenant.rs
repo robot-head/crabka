@@ -240,6 +240,7 @@ fn multi_range_tenant() -> GresTenant {
             range_id: 0,
             end_key: Some(GresTenantRangeKey {
                 table_id: 100,
+                bucket: None,
                 rowid: 0,
             }),
         },
@@ -247,6 +248,7 @@ fn multi_range_tenant() -> GresTenant {
             range_id: 1,
             end_key: Some(GresTenantRangeKey {
                 table_id: 200,
+                bucket: None,
                 rowid: 0,
             }),
         },

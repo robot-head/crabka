@@ -102,7 +102,7 @@ fn map_from_layout(
     for range in layout {
         let end = range
             .end_key
-            .map(|end| crate::RangeKey::new(crate::TableId::new(end.table_id), end.rowid));
+            .map(boundary_to_range_key);
         ranges.push(crate::RangeSpec::for_interval(
             crate::RangeId::new(range.range_id),
             start,
@@ -127,11 +127,11 @@ fn successor_from_layout(
         .checked_sub(1)
         .and_then(|prior| layout[prior].end_key)
         .map_or(crate::RangeKey::MIN, |start| {
-            crate::RangeKey::new(crate::TableId::new(start.table_id), start.rowid)
+            boundary_to_range_key(start)
         });
     let end = entry
         .end_key
-        .map(|end| crate::RangeKey::new(crate::TableId::new(end.table_id), end.rowid));
+        .map(boundary_to_range_key);
     Ok(crate::SuccessorDescriptor {
         range_id: crate::RangeId::new(entry.range_id),
         endpoint: entry.endpoint.clone(),
@@ -158,6 +158,7 @@ pub(crate) fn authorized_test_fixture() -> AuthorizedSplitIntent {
         range_id: 0,
         end_key: Some(RangeBoundary {
             table_id: 7,
+            bucket: None,
             rowid: 10,
         }),
         endpoint: "left:7443".into(),
@@ -963,11 +964,24 @@ fn map_matches_layout(
     map.ranges().len() == layout.len()
         && map.ranges().iter().zip(layout).all(|(range, expected)| {
             range.range_id.as_u32() == expected.range_id
-                && range.end.map(|end| crabka_gres_control::RangeBoundary {
-                    table_id: end.table_id.as_u64(),
-                    rowid: end.rowid,
+                && range.end.map(|key| match expected.end_key.and_then(|end| end.bucket) {
+                    Some(_) => crabka_gres_control::RangeBoundary::hash(
+                        key.table_id.as_u64(), key.bucket, key.rowid,
+                    ),
+                    None => crabka_gres_control::RangeBoundary::new(
+                        key.table_id.as_u64(), key.rowid,
+                    ),
                 }) == expected.end_key
         })
+}
+
+fn boundary_to_range_key(boundary: crabka_gres_control::RangeBoundary) -> crate::RangeKey {
+    match boundary.bucket {
+        Some(bucket) => crate::RangeKey::hash(
+            crate::TableId::new(boundary.table_id), bucket, boundary.rowid,
+        ),
+        None => crate::RangeKey::new(crate::TableId::new(boundary.table_id), boundary.rowid),
+    }
 }
 
 fn rejected(code: impl Into<String>, message: impl Into<String>) -> RangeControlResp {
@@ -1180,6 +1194,7 @@ mod tests {
             range_id: 0,
             end_key: Some(crabka_gres_control::RangeBoundary {
                 table_id: 7,
+                bucket: None,
                 rowid: 50,
             }),
             endpoint: "r0:7443".into(),

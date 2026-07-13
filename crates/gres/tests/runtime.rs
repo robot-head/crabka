@@ -840,6 +840,7 @@ fn control_layout_entry(descriptor: &SuccessorDescriptor) -> crabka_gres_control
             .end
             .map(|end| crabka_gres_control::RangeBoundary {
                 table_id: end.table_id.as_u64(),
+                bucket: None,
                 rowid: end.rowid,
             }),
         endpoint: descriptor.endpoint.clone(),
@@ -880,6 +881,7 @@ async fn seed_control_operation(
                     range_id: range.range_id.as_u32(),
                     end_key: range.end.map(|end| crabka_gres_control::RangeBoundary {
                         table_id: end.table_id.as_u64(),
+                        bucket: None,
                         rowid: end.rowid,
                     }),
                     endpoint: "127.0.0.1:7443".into(),

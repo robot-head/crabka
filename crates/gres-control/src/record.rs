@@ -503,7 +503,7 @@ const fn progress_rank(phase: SplitOperationPhase) -> Option<u8> {
 /// Prefix for the ACL-scoped per-tenant config topic read by the compute.
 pub const TENANT_CONFIG_TOPIC_PREFIX: &str = "__gres_cfg.";
 
-const REGISTRY_FORMAT_VERSION: u16 = 1;
+const REGISTRY_FORMAT_VERSION: u16 = 2;
 const REGISTRY_KEY_MAGIC: u8 = 1;
 const TENANT_KEY_TYPE: &str = "TENANT";
 
@@ -826,6 +826,9 @@ pub struct HashPlacement {
 pub struct RangeBoundary {
     /// Table identifier component of the range boundary.
     pub table_id: u64,
+    /// Hash bucket component. Absent for interval-sharded and unsharded tables.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bucket: Option<u32>,
     /// Row identifier component of the range boundary.
     pub rowid: u64,
 }
@@ -912,19 +915,34 @@ pub enum RangeLayoutMutation {
 impl RangeBoundary {
     const MIN: Self = Self {
         table_id: 0,
+        bucket: None,
         rowid: 0,
     };
 
     /// Build a boundary from table and row identifiers.
     #[must_use]
     pub const fn new(table_id: u64, rowid: u64) -> Self {
-        Self { table_id, rowid }
+        Self {
+            table_id,
+            bucket: None,
+            rowid,
+        }
+    }
+
+    /// Build a hash-sharded boundary in bucket-leading key order.
+    #[must_use]
+    pub const fn hash(table_id: u64, bucket: u32, rowid: u64) -> Self {
+        Self {
+            table_id,
+            bucket: Some(bucket),
+            rowid,
+        }
     }
 
     /// Build the first boundary for a table.
     #[must_use]
     pub const fn table_start(table_id: u64) -> Self {
-        Self { table_id, rowid: 0 }
+        Self::new(table_id, 0)
     }
 }
 
@@ -1042,6 +1060,7 @@ impl TenantRecord {
             }
         }
         ensure_hash_placements_valid(&self.hash_placements)?;
+        ensure_boundaries_match_hash_placements(&self.ranges, &self.hash_placements)?;
         if let Some(checkpoint) = &self.final_checkpoint {
             checkpoint.ensure_valid()?;
         }
@@ -1592,6 +1611,40 @@ fn ensure_hash_placements_valid(placements: &[HashPlacement]) -> Result<(), Cont
                     "co-located hash placements must use the same bucket count",
                 ));
             }
+        }
+    }
+    Ok(())
+}
+
+fn ensure_boundaries_match_hash_placements(
+    ranges: &[RangeLayoutEntry],
+    placements: &[HashPlacement],
+) -> Result<(), ControlError> {
+    for boundary in ranges.iter().filter_map(|range| range.end_key) {
+        let placement = placements
+            .iter()
+            .find(|placement| placement.table_id == boundary.table_id);
+        match (boundary.bucket, placement) {
+            (Some(bucket), Some(placement)) if bucket < placement.bucket_count => {}
+            (Some(_), Some(_)) => {
+                return Err(ControlError::invalid_field(
+                    "ranges.end_key.bucket",
+                    "must be less than the table hash bucket count",
+                ));
+            }
+            (Some(_), None) => {
+                return Err(ControlError::invalid_field(
+                    "ranges.end_key.bucket",
+                    "is only valid for a hash-sharded table",
+                ));
+            }
+            (None, Some(_)) => {
+                return Err(ControlError::invalid_field(
+                    "ranges.end_key.bucket",
+                    "is required for a hash-sharded table boundary",
+                ));
+            }
+            (None, None) => {}
         }
     }
     Ok(())
@@ -2179,6 +2232,82 @@ mod tests {
             },
         ]);
         assert!(invalid_group.is_err());
+    }
+
+    #[test]
+    fn hash_boundaries_roundtrip_and_fail_closed_on_invalid_table_shape() {
+        let placement = HashPlacement {
+            table_id: 7,
+            hash_columns: vec!["id".into()],
+            bucket_count: 8,
+            co_location_group: None,
+        };
+        let hashed = record(1)
+            .with_hash_placements(vec![placement])
+            .unwrap()
+            .with_range_layout(vec![
+                RangeLayoutEntry {
+                    range_id: 0,
+                    end_key: Some(RangeBoundary::hash(7, 3, 0)),
+                    endpoint: "r0".into(),
+                    wal_generation: 1,
+                    lifecycle: RangeLifecycle::Serving,
+                    retirement: None,
+                },
+                RangeLayoutEntry {
+                    range_id: 1,
+                    end_key: None,
+                    endpoint: "r1".into(),
+                    wal_generation: 1,
+                    lifecycle: RangeLifecycle::Serving,
+                    retirement: None,
+                },
+            ])
+            .unwrap();
+
+        let (_, encoded) = encode_registry_record(&hashed).unwrap();
+        assert_eq!(decode_registry_record(&encoded).unwrap(), hashed);
+        let mut legacy: serde_json::Value = serde_json::from_slice(&encoded).unwrap();
+        legacy["format_version"] = serde_json::json!(1);
+        assert!(decode_registry_record(&serde_json::to_vec(&legacy).unwrap()).is_err());
+
+        let legacy_hash_boundary = record(1)
+            .with_range_layout(vec![
+                RangeLayoutEntry {
+                    range_id: 0,
+                    end_key: Some(RangeBoundary::new(7, 0)),
+                    endpoint: "r0".into(),
+                    wal_generation: 1,
+                    lifecycle: RangeLifecycle::Serving,
+                    retirement: None,
+                },
+                RangeLayoutEntry {
+                    range_id: 1,
+                    end_key: None,
+                    endpoint: "r1".into(),
+                    wal_generation: 1,
+                    lifecycle: RangeLifecycle::Serving,
+                    retirement: None,
+                },
+            ])
+            .unwrap()
+            .with_hash_placements(vec![HashPlacement {
+                table_id: 7,
+                hash_columns: vec!["id".into()],
+                bucket_count: 8,
+                co_location_group: None,
+            }]);
+        assert!(legacy_hash_boundary.is_err());
+
+        let non_hash_bucket = record(1).with_range_layout(vec![RangeLayoutEntry {
+            range_id: 0,
+            end_key: Some(RangeBoundary::hash(9, 1, 0)),
+            endpoint: "r0".into(),
+            wal_generation: 1,
+            lifecycle: RangeLifecycle::Serving,
+            retirement: None,
+        }]);
+        assert!(non_hash_bucket.is_err());
     }
 
     #[test]
