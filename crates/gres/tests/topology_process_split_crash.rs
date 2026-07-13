@@ -1550,6 +1550,9 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
             .await
             .expect("insert pinned hash probe");
     }
+    sql.simple_query("INSERT INTO hash_probe50 VALUES (23), (31)")
+        .await
+        .expect("commit cross-boundary hash transaction");
     drop(sql);
 
     let start_key = crabka_pgkv::key::table_prefix(50);
@@ -1557,6 +1560,7 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
     *end_key.last_mut().expect("table prefix") += 1;
     let mut buckets = BTreeSet::new();
     let mut decoded_rows = Vec::new();
+    let mut cross_boundary_descriptor = None;
     for range_id in [0, 1] {
         let response = system
             .inspect_durable_records(crabka_gres_ranges::InspectDurableRecordsReq {
@@ -1582,13 +1586,33 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
                     table_id, bucket, ..
                 } => {
                     assert_eq!(table_id, 50);
-                    assert!(buckets.insert(bucket), "bucket duplicated across ranges");
-                    decoded_rows.push(
-                        decode_hash_physical_record(range_id, record)
-                            .expect("decode authoritative hash row"),
-                    );
+                    let row = decode_hash_physical_record(range_id, record)
+                        .expect("decode authoritative hash row");
+                    if (0..16).contains(&row.logical_id) {
+                        assert!(buckets.insert(bucket), "bucket duplicated across ranges");
+                    }
+                    decoded_rows.push(row);
                 }
-                crabka_pgkv::key::KeyClass::System => {}
+                crabka_pgkv::key::KeyClass::System => {
+                    if record.key.starts_with(b"\0\0\0\0meta/ts_txn/") {
+                        assert!(record.value.starts_with(b"TXD2"));
+                        let raw_start = u64::from_be_bytes(
+                            record.key[record.key.len() - 8..]
+                                .try_into()
+                                .expect("descriptor timestamp"),
+                        );
+                        let descriptor =
+                            crabka_pgexec::timestamp_txn::decode_timestamp_txn_descriptor_value(
+                                crabka_pgexec::TimestampTransactionId::new(raw_start)
+                                    .expect("descriptor timestamp id"),
+                                &record.value,
+                            )
+                            .expect("decode TXD2 descriptor");
+                        if descriptor.operations.len() == 2 {
+                            assert!(cross_boundary_descriptor.replace(descriptor).is_none());
+                        }
+                    }
+                }
                 class => {
                     panic!("hash durable inspection returned legacy/unexpected class {class:?}")
                 }
@@ -1596,6 +1620,21 @@ async fn real_child_hash_durable_inspection_covers_pinned_bucket_corpus() {
         }
     }
     assert_eq!(buckets, (0..16).collect());
+    let descriptor = cross_boundary_descriptor.expect("two-operation hash TXD2 descriptor");
+    assert_eq!(descriptor.participants, vec![0, 1]);
+    assert_eq!(
+        descriptor
+            .operations
+            .iter()
+            .map(|operation| operation.bucket.expect("hash descriptor bucket"))
+            .collect::<BTreeSet<_>>(),
+        BTreeSet::from([0, 8])
+    );
+    assert!(matches!(
+        descriptor.decision,
+        crabka_pgexec::PrimaryTxnDecision::Committed(_)
+    ));
+    decoded_rows.retain(|row| (0..16).contains(&row.logical_id));
     decoded_rows.sort();
     assert_eq!(
         decoded_rows
